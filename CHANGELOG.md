@@ -1078,7 +1078,8 @@ assigns it when the release is tagged.
   restart it waited three hours for a boundary the new chain reaches in
   three months). Once the head has stayed below the bridge for 5 minutes,
   over at least 5 polls in a row (one low read can be a lagging GraphQL
-  replica), it exits with
+  replica; a GraphQL answer with no blocks is no head at all and does not
+  count), it exits with
   `Acki Nacki chain head … is below the bridge's last verified block …:
   the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`
   and exit status 78 (every other failure exits with 1). Deploy a new bridge
@@ -1615,8 +1616,10 @@ assigns it when the release is tagged.
 ### Changed
 
 - **Relayer logs and errors name Ethereum endpoints by scheme and host
-  only.** reqwest put the full URL, API key included, into every transport
-  error the relayer logged.
+  only, at every log level.** reqwest put the full URL, API key included,
+  into every transport error the relayer logged, and alloy's HTTP transport
+  into a debug span on every request; the relayer no longer goes through
+  that transport.
 - **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
   set** (the EF DevOps endpoint otherwise, as before). Every tool that
   sources an `L*_config/env` — the relayer, the `cast` commands of the
@@ -1630,7 +1633,9 @@ assigns it when the release is tagged.
   restarting under `restart: unless-stopped` while the very transaction the
   daemon would replace held it back. Its chain checks go to the first of
   `RPC_URL` and `RPC_FAILOVER_URLS` that answers instead of `RPC_URL` alone,
-  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`.
+  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`. Its
+  output names endpoints by scheme and host only, without the path or any
+  `user:password@`.
 - **`bk_set.shellnet.json` holds the genesis committee of shellnet as
   restarted on 2026-10-14** (5 signers; Poseidon commitment
   `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,

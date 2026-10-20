@@ -35,7 +35,9 @@
 //!
 //! The URLs carry API keys in their path. Nothing here logs one: an endpoint
 //! is named by its scheme and host ([`endpoint_label`]), and URLs inside error
-//! messages are cut down the same way ([`redact_urls`]).
+//! messages are cut down the same way ([`redact_urls`]). Requests go out
+//! through [`Endpoint::post`], not alloy's `Http` transport, which opens a
+//! debug span with the full URL on every request.
 
 use std::{
     fmt,
@@ -54,10 +56,7 @@ use alloy::{
     },
     signers::{local::PrivateKeySigner, Signer},
     transports::{
-        http::{
-            reqwest::{self, Url},
-            Http,
-        },
+        http::reqwest::{self, Url},
         RpcError, TransportError, TransportErrorKind, TransportFut,
     },
 };
@@ -342,16 +341,14 @@ struct Endpoint {
     label: String,
     url: Url,
     client: reqwest::Client,
-    /// The same client and URL, for the transaction copies and the chain id
-    /// check, which need no HTTP status.
-    http: Http<reqwest::Client>,
     cooling_until: Mutex<Option<Instant>>,
 }
 
 impl Endpoint {
     /// One request to this endpoint, with the HTTP status of the reply.
     /// alloy's `Http` reads the body the same way, but hands back a JSON-RPC
-    /// error as the answer and drops the status it came with.
+    /// error as the answer and drops the status it came with, and it logs
+    /// the full URL, API key included, in a debug span.
     async fn post(
         &self,
         request: &RequestPacket,
@@ -429,7 +426,6 @@ impl FailoverTransport {
                 label: endpoint_label(url),
                 url: url.clone(),
                 client: client.clone(),
-                http: Http::with_client(client.clone(), url.clone()),
                 cooling_until: Mutex::new(None),
             })
             .collect();
@@ -530,27 +526,24 @@ impl FailoverTransport {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let others: Vec<(String, Http<reqwest::Client>)> = self
-            .endpoints
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != accepted)
-            .map(|(_, e)| (e.label.clone(), e.http.clone()))
-            .collect();
-        if others.is_empty() {
+        if self.endpoints.len() < 2 {
             return;
         }
+        let endpoints = self.endpoints.clone();
         let request = request.clone();
         runtime.spawn(async move {
-            for (label, mut http) in others {
-                match http.call(request.clone()).await {
+            for (i, endpoint) in endpoints.iter().enumerate() {
+                if i == accepted {
+                    continue;
+                }
+                match endpoint.post(&request).await.1 {
                     Ok(response) => debug!(
-                        endpoint = %label,
+                        endpoint = %endpoint.label,
                         accepted = response.is_success(),
                         "Ethereum RPC: copy of the transaction sent"
                     ),
                     Err(error) => debug!(
-                        endpoint = %label,
+                        endpoint = %endpoint.label,
                         error = %short(&redact_urls(&error.to_string())),
                         "Ethereum RPC: copy of the transaction not sent"
                     ),
@@ -564,8 +557,14 @@ impl FailoverTransport {
     /// since it may come back.
     pub async fn check_chain_ids(&self) -> anyhow::Result<u64> {
         let mut answers: Vec<(&str, u64)> = Vec::new();
-        for endpoint in self.endpoints.iter() {
-            let client = RpcClient::new(endpoint.http.clone(), false);
+        for (index, endpoint) in self.endpoints.iter().enumerate() {
+            let client = RpcClient::new(
+                OneEndpoint {
+                    endpoints: self.endpoints.clone(),
+                    index,
+                },
+                false,
+            );
             match client.request_noparams::<U64>("eth_chainId").await {
                 Ok(id) => answers.push((endpoint.label.as_str(), id.to::<u64>())),
                 Err(error) => warn!(
@@ -594,6 +593,32 @@ impl FailoverTransport {
             "Ethereum RPC endpoints, in order"
         );
         Ok(chain_id)
+    }
+}
+
+/// One endpoint of a [`FailoverTransport`] as a transport of its own, for
+/// the chain id check: requests go to it alone, through [`Endpoint::post`].
+#[derive(Clone)]
+struct OneEndpoint {
+    endpoints: Arc<[Endpoint]>,
+    index: usize,
+}
+
+impl Service<RequestPacket> for OneEndpoint {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: RequestPacket) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move {
+            let (_, result) = this.endpoints[this.index].post(&request).await;
+            result.map_err(redact_transport_error)
+        })
     }
 }
 
@@ -1165,6 +1190,70 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("the copy of the transaction never reached the other endpoint");
+    }
+
+    /// The log at any level, debug and trace included, while the transport
+    /// checks chain ids, fails over, sends a transaction and copies it.
+    /// alloy's `Http` opened a debug span with the full URL on every
+    /// request, so `RUST_LOG=debug` put the API key into the log.
+    #[tokio::test]
+    async fn no_log_line_holds_a_key_at_any_level() {
+        #[derive(Clone)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Captured(Default::default());
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (silent_one, _) = endpoint(silent()).await;
+        let (working, working_hits) = endpoint(by_method(vec![
+            ("eth_chainId", result(json!("0xaa36a7"))),
+            ("eth_blockNumber", result(json!("0x2a"))),
+            ("eth_sendRawTransaction", rpc_error(-32000, "already known")),
+        ]))
+        .await;
+        let (copy, copy_hits) = endpoint(by_method(vec![
+            ("eth_chainId", result(json!("0xaa36a7"))),
+            ("eth_sendRawTransaction", result(json!("0x00"))),
+        ]))
+        .await;
+        let http = rpc_http_client(Duration::from_millis(300)).unwrap();
+        let transport =
+            FailoverTransport::new(&[silent_one, working, copy], http, ENDPOINT_COOLDOWN).unwrap();
+        transport.check_chain_ids().await.unwrap();
+        let client = RpcClient::new(transport, true);
+        assert_eq!(block_number(&client).await.unwrap(), 42);
+        let _: B256 = client
+            .request("eth_sendRawTransaction", ("0x02f86c83aa36a782",))
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if copy_hits.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(working_hits.load(Ordering::SeqCst) >= 3);
+
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("127.0.0.1"),
+            "endpoints are named in the log:\n{text}"
+        );
+        assert!(!text.contains("SECRET-KEY"), "{text}");
     }
 
     #[tokio::test]

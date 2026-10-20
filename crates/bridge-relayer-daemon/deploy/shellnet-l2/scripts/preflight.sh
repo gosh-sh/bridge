@@ -204,7 +204,9 @@ export -n RELAYER_PRIVATE_KEY 2>/dev/null || true
 # to start otherwise. Endpoints are named by scheme and host only, since
 # their URLs can carry API keys.
 rpc_label() {
-  sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://[^/?]+).*#\1#' <<<"$1"
+  # scheme://authority, then without any user:password@ in the authority.
+  sed -E -e 's|^([A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*).*|\1\2|' \
+    -e 's|^([A-Za-z][A-Za-z0-9+.-]*://).*@|\1|' <<<"$1"
 }
 IFS=',' read -r -a rpc_failover <<<"${RPC_FAILOVER_URLS:-}"
 check_rpc=

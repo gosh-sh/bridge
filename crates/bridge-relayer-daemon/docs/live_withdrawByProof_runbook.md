@@ -1193,7 +1193,7 @@ cast call $BRIDGE 'totalEscrowed()(uint256)' --rpc-url $RPC 2>/dev/null || \
   echo "totalEscrowed getter not exposed on this deploy — check via ERC20.balanceOf on the escrow"
 
 # Relayer wallet
-cast balance 0xb586356D52eAee055Ca569Ff412DFeFFc5bB2307 --rpc-url $RPC --ether
+cast balance "$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")" --rpc-url $RPC --ether
 ```
 
 ---

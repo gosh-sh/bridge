@@ -12,7 +12,9 @@
 //! [`BEHIND_FOR_TO_STOP`] by the clock, over at least
 //! [`POLLS_BEHIND_TO_STOP`] polls in a row. Counting polls alone was not
 //! enough: they follow the daemon's backoff, 4, 8, 16 and 32 s apart after
-//! a start, so five of them took about a minute.
+//! a start, so five of them took about a minute. A GraphQL answer with no
+//! blocks, which the driver reads as head 0, is no head at all and does not
+//! count either way.
 
 use std::time::Duration;
 
@@ -50,12 +52,21 @@ impl ChainBehindGuard {
     /// the bridge's last verified block for [`BEHIND_FOR_TO_STOP`] and
     /// [`POLLS_BEHIND_TO_STOP`] polls in a row; a head at or above it starts
     /// both again.
+    ///
+    /// A head of 0 is the driver's reading of a GraphQL answer with no blocks
+    /// (`query_latest_blocks` returns an empty list, and its maximum falls
+    /// back to 0). No network the bridge follows has a head of 0, so the poll
+    /// is skipped: it neither counts toward the stop nor clears a run of
+    /// polls behind.
     pub fn observe_at(
         &mut self,
         now: Instant,
         chain_head: u64,
         last_verified: u64,
     ) -> Result<(), RelayerError> {
+        if chain_head == 0 {
+            return Ok(());
+        }
         if chain_head >= last_verified {
             *self = Self::default();
             return Ok(());
@@ -145,6 +156,36 @@ mod tests {
         }
         let last = BEHIND_FOR_TO_STOP * POLLS_BEHIND_TO_STOP;
         assert!(guard.observe_at(start + last, 90, 100).is_err());
+    }
+
+    /// The review's case: GraphQL answering with no blocks for a long time
+    /// is not a restarted network, and must not tell the operator to deploy
+    /// a new bridge.
+    #[test]
+    fn a_graphql_answer_with_no_blocks_never_stops_the_daemon() {
+        let start = Instant::now();
+        let mut guard = ChainBehindGuard::default();
+        for at in poll_times().take(40) {
+            guard.observe_at(start + at, 0, 24_018_944).unwrap();
+        }
+    }
+
+    /// Empty answers between polls behind are not polls behind, and do not
+    /// start the run again either: with every third poll reading a head,
+    /// the fifth of those comes 540 s after the first, and the stop with it.
+    #[test]
+    fn empty_answers_neither_count_nor_clear_a_run_behind() {
+        let start = Instant::now();
+        let mut guard = ChainBehindGuard::default();
+        let mut stopped_at = None;
+        for (i, at) in poll_times().take(20).enumerate() {
+            let head = if i % 3 == 0 { 42_630 } else { 0 };
+            if guard.observe_at(start + at, head, 24_018_944).is_err() {
+                stopped_at = Some(at);
+                break;
+            }
+        }
+        assert_eq!(stopped_at, Some(Duration::from_secs(540)));
     }
 
     /// A replica that lags for two minutes after a start and then catches

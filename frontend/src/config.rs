@@ -2,9 +2,50 @@
 //
 // Update these values after deploying contracts to Sepolia
 
-/// Bridge contract address on Sepolia
-/// Update this after running: forge script script/DeployTestBridge.s.sol:DeployTestBridge
-pub const BRIDGE_CONTRACT_ADDRESS: &str = "0x99c37fb75326ae6953ebbbdcd261ec331df4ce82";
+/// Address of a new bridge deployment, supplied when building the frontend.
+pub const BRIDGE_CONTRACT_ADDRESS: &str = match option_env!("BRIDGE_CONTRACT_ADDRESS") {
+    Some(value) => value,
+    None => "",
+};
+
+pub fn bridge_contract_address() -> Result<&'static str, String> {
+    validate_bridge_address(BRIDGE_CONTRACT_ADDRESS.trim())
+}
+
+fn validate_bridge_address(value: &str) -> Result<&str, String> {
+    let valid = value.strip_prefix("0x").is_some_and(|hex| {
+        hex.len() == 40
+            && hex.chars().all(|c| c.is_ascii_hexdigit())
+            && hex.chars().any(|c| c != '0')
+    });
+    if !valid {
+        return Err("Bridge deployment is not configured. Deposits are unavailable.".into());
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bridge_address;
+
+    #[test]
+    fn a_deployment_address_must_be_explicit_and_nonzero() {
+        for value in [
+            "",
+            "0x",
+            "0x1234",
+            "0x0000000000000000000000000000000000000000",
+        ] {
+            assert!(validate_bridge_address(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_configured_deployment_address_is_preserved() {
+        let address = "0x1234567890123456789012345678901234567890";
+        assert_eq!(validate_bridge_address(address).unwrap(), address);
+    }
+}
 
 /// USDC (ERC-20, 6 decimals) accepted for deposits.
 /// Sepolia testnet: the Aave V3 faucet USDC underlying.

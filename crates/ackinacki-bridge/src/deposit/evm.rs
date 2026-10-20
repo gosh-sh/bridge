@@ -202,7 +202,7 @@ pub trait EvmRead: Send + Sync {
     async fn fees(&self) -> anyhow::Result<Fees>;
 }
 
-/// The calldata of `deposit(amount, 0, account)`.
+/// The calldata of `deposit(amount, account)`.
 pub fn deposit_calldata(amount: u64, account: B256) -> Bytes {
     IDeposit::depositCall {
         amount: U256::from(amount),

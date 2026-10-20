@@ -149,7 +149,12 @@ assigns it when the release is tagged.
   verification key (code hash `774c9571…`), and use the updated clients
   and prover together. Proofs for the previous event format do not verify under
   this key. Withdrawal interfaces, DApp ID handling and the 12 deposit public-input
-  slots are unchanged.
+  slots are unchanged. The shipped CLI profile and relayer template no longer
+  pin an earlier EVM deployment: set `BRIDGE_ADDRESS` and its deployment block
+  (`BRIDGE_DEPLOY_BLOCK`, and `FROM_BLOCK` for the deposit relayer). Replace old
+  values in reused profiles explicitly. Build the frontend with
+  `BRIDGE_CONTRACT_ADDRESS` set to that same new EVM deployment; without it,
+  deposits and approvals are disabled before any wallet request.
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
@@ -166,8 +171,8 @@ assigns it when the release is tagged.
   burn is refused until `finalizeDeposit` brings minted up to burned.
   That is not the same as a fresh deploy.
 
-  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The ABI is unchanged. The withdraw CLI preflight checks
+  Included in the `eccUSDCBridge` 1.11.0 build described above. The withdrawal
+  ABI is unchanged. The withdraw CLI preflight checks
   `getTotalBridged` and refuses before the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per

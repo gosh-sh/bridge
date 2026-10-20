@@ -25,7 +25,7 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
    the leaf bound is `receipt_max_byte_len`).
 2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
 3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
-   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Six fields: the event carries the Acki Nacki destination.
+   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Five fields: the event carries the Acki Nacki destination.
 4. **Contract address** — the event was emitted by the expected bridge contract.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
    as public inputs.

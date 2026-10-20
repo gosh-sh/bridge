@@ -34,6 +34,7 @@ A beautiful, modern web interface for the Acki Nacki Bridge built with **Rust + 
 
 ```bash
 cd frontend
+export BRIDGE_CONTRACT_ADDRESS='0x<new-bridge-address>'
 trunk serve
 ```
 
@@ -100,6 +101,8 @@ destination. Nothing further is required from the user in this UI.
 
 ## Deployment
 
+Set `BRIDGE_CONTRACT_ADDRESS` as described under Configuration before building.
+
 ### Deploy to GitHub Pages
 
 ```bash
@@ -117,16 +120,25 @@ trunk build --release
 ### Deploy with Docker
 
 ```bash
-docker build -t acki-nacki-bridge-frontend .
+docker build --build-arg BRIDGE_CONTRACT_ADDRESS -t acki-nacki-bridge-frontend .
 docker run -p 8080:80 acki-nacki-bridge-frontend
 ```
 
 ## Configuration
 
-Edit `src/lib.rs` to configure:
-- Contract addresses
-- RPC endpoints
-- Network settings
+Set `BRIDGE_CONTRACT_ADDRESS` when building with Trunk. It must be a new
+Sepolia deployment exposing `deposit(uint256,bytes32)`, paired with an
+`eccUSDCBridge` 1.11.0 or newer that embeds this build's deposit key. The old
+workchain-bearing deployment addresses are incompatible.
+
+There is no default bridge address. Without a valid non-zero 20-byte address,
+the form disables deposits and the wallet helpers reject approval and deposit
+requests before contacting MetaMask. Rebuild the frontend after changing the
+address. Other network and token settings live in `src/config.rs`.
+
+The same EVM deployment must be configured as `BRIDGE_ADDRESS` in the CLI and
+deposit relayer; set their `BRIDGE_DEPLOY_BLOCK` / `FROM_BLOCK` to its deployment
+block.
 
 ## Browser Support
 

@@ -673,7 +673,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0x5c975abb` | `paused()` |
 
 (Computed from the signatures above; `0xc9630cb0` and `0xecb3dc88` cross-check against
-`frontend/src/web3.rs:274,414`.)
+`deposit_calldata` and `get_deposit_counter` in `frontend/src/web3.rs`.)
 
 ### 11.3 Custom errors
 

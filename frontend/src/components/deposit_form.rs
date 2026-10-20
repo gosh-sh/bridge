@@ -3,7 +3,7 @@ use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use crate::{
-    config::{SEPOLIA_CHAIN_ID_HEX, USDC_UNIT},
+    config::{bridge_contract_address, SEPOLIA_CHAIN_ID_HEX, USDC_UNIT},
     utils::validate_an_account,
     web3::{
         approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
@@ -24,6 +24,7 @@ pub struct DepositFormProps {
 
 #[function_component(DepositForm)]
 pub fn deposit_form(props: &DepositFormProps) -> Html {
+    let deployment_error = bridge_contract_address().err();
     let amount = use_state(String::new);
     let an_account = use_state(String::new);
     let deposit_id = use_state(|| None::<u128>);
@@ -92,6 +93,11 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
         Callback::from(move |e: SubmitEvent| {
             e.prevent_default();
+
+            if let Err(err) = bridge_contract_address() {
+                error_msg.set(Some(err));
+                return;
+            }
 
             if !wallet_connected {
                 error_msg.set(Some("Please connect your wallet first".to_string()));
@@ -265,7 +271,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 </div>
 
                 {
-                    if let Some(err) = (*error_msg).as_ref() {
+                    if let Some(err) = (*error_msg).as_ref().or(deployment_error.as_ref()) {
                         html! {
                             <div class="error-box">
                                 <div class="error-icon">{"⚠"}</div>
@@ -338,7 +344,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 <button
                     type="submit"
                     class="submit-button"
-                    disabled={!props.wallet_connected || *is_loading || (*amount).is_empty() || (*an_account).is_empty()}
+                    disabled={!props.wallet_connected || *is_loading || deployment_error.is_some() || (*amount).is_empty() || (*an_account).is_empty()}
                 >
                     {
                         if *is_loading {

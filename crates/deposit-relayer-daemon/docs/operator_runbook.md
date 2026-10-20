@@ -1,6 +1,7 @@
 # `deposit-relayer` operator runbook
 
-verified-against: `6f5de05c`
+verified-against: `6fbae6a0` (queue, anchor readiness, backoff and monitoring);
+remaining sections retain the original verification against `6f5de05c`.
 covers: `crates/deposit-relayer-daemon/src/`, `scripts/ursus/deposit-relayer.{service,env.example}`
 
 How to run the EVM → Acki Nacki deposit relayer so that it does not get stuck, does not

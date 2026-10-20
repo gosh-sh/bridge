@@ -309,14 +309,11 @@ contract AckiNackiBridge {
     /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
     ///         destination: it is carried as ZK public inputs and credited on the
     ///         AN side (the EVM `sender` is kept only for provenance, since a
-    ///         20-byte EVM address is not a valid AN recipient). `anWorkchain` is
-    ///         inert — see `deposit` — and is emitted only so the event shape
-    ///         stays stable for indexers.
+    ///         20-byte EVM address is not a valid AN recipient).
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
-        int8 anWorkchain,
         bytes32 anAccount,
         uint256 timestamp
     );
@@ -767,15 +764,6 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
-    /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
-    ///                    but Acki Nacki ignores it: the workchain concept is
-    ///                    retired there and `dappId` replaced it (2026-06-02),
-    ///                    so the recipient always lives in workchain 0. It is
-    ///                    not a public input of the deposit proof. Not
-    ///                    range-checked, because no supported set exists to
-    ///                    check against — a wrong value changes nothing.
-    ///                    The destination that
-    ///                    does matter is `anAccount` below.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -783,11 +771,7 @@ contract AckiNackiBridge {
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
     ///                    A wrong non-zero destination is one-way (no refund).
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
@@ -796,7 +780,7 @@ contract AckiNackiBridge {
         uint256 depositId = depositCounter++;
         treasuryBalance += credited;
 
-        emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp);
+        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp);
     }
 
     // ---------------------------------------------------------------------

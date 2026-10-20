@@ -5,10 +5,10 @@
 //! pipeline:
 //!
 //! 1. A [`DepositEvent`] — the parsed on-chain `Deposit(depositId, sender,
-//!    amount, anWorkchain, anAccount, timestamp)` log plus the receipt-locating
-//!    metadata the prover needs (`tx_hash`, `log_index`, `block_number`).
-//!    `anAccount` is the Acki Nacki destination account (an EVM address cannot
-//!    be an AN recipient).
+//!    amount, anAccount, timestamp)` log plus the receipt-locating metadata the
+//!    prover needs (`tx_hash`, `log_index`, `block_number`). `anAccount` is the
+//!    Acki Nacki destination account (an EVM address cannot be an AN
+//!    recipient).
 //! 2. A [`DepositProofBundle`] — the three operands the AN-side
 //!    `ZKHALO2VERIFYWITHVK` opcode consumes (`vk_blob`, `public_inputs`,
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
@@ -57,14 +57,14 @@ pub struct DepositEvent {
     pub sender: Address,
     /// Deposited amount (event data word 0).
     pub amount: U256,
-    /// Acki Nacki destination account (256-bit TVM address, event data word 2).
+    /// Acki Nacki destination account (256-bit TVM address, event data word 1).
     ///
     /// The EVM `sender` is not a valid AN recipient (different address system),
     /// so the destination is chosen by the depositor and carried here. The
     /// deposit circuit binds it as the `anAccountHigh`/`anAccountLow` public
     /// inputs (2026-06-02), so the AN side credits a proven account.
     pub an_account: B256,
-    /// Block timestamp recorded in the event (event data word 3).
+    /// Block timestamp recorded in the event (event data word 2).
     pub timestamp: U256,
     /// Hash of the transaction that emitted the event. Drives the prover's
     /// receipt + MPT witness fetch.

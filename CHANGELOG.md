@@ -140,6 +140,17 @@ assigns it when the release is tagged.
   A daemon started from an old unit refuses with the name of the missing
   flag.
 
+- **Deposits no longer have a workchain parameter.** For a fresh deployment,
+  use `deposit(uint256,bytes32)` and
+  `Deposit(uint256,address,uint256,bytes32,uint256)`; the event's non-indexed
+  data is now 96 bytes. The CLI, frontend, deposit relayer and prover use this
+  format, and witness JSON no longer includes `an_workchain`. Deploy the matching
+  Ethereum contract and `eccUSDCBridge` 1.11.0 with the regenerated deposit
+  verification key (code hash `774c9571…`), and use the updated clients
+  and prover together. Proofs for the previous event format do not verify under
+  this key. Withdrawal interfaces, DApp ID handling and the 12 deposit public-input
+  slots are unchanged.
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
@@ -1556,13 +1567,6 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- Decoded deposit records no longer carry the unused `an_workchain` field,
-  and the frontend's deposit helper accepts the destination account without a
-  workchain argument. The Ethereum `deposit(uint256,int8,bytes32)` ABI,
-  `Deposit` event and witness JSON stay compatible: `fetch_deposit_data` still
-  writes the legacy JSON field as 0 for existing proof tools. DApp IDs, proof
-  public inputs, verifying keys and contract artifacts are unchanged.
-
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation
@@ -1968,6 +1972,10 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- Frontend deposits use the validated Acki Nacki recipient entered in the form.
+  The connected Ethereum address is used for USDC allowance checks. Invalid AN
+  recipients are rejected before a deposit transaction is sent.
 
 - `deposit-relayer` kills a prover that runs past its timeout instead of
   leaving it running, writing the `data/` key cache beside the retry the

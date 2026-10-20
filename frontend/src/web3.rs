@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::window;
 
-use crate::config::*;
+use crate::{config::*, utils::validate_an_account};
 
 #[wasm_bindgen]
 extern "C" {
@@ -271,14 +271,13 @@ pub async fn approve_usdc(amount: u128) -> Result<String, String> {
     send_tx(USDC_CONTRACT_ADDRESS, &data).await
 }
 
-fn deposit_calldata(amount: u128, an_account: &str) -> String {
-    // deposit(uint256,int8,bytes32): the legacy int8 word stays zero.
-    format!(
-        "0xa41d0229{}{}{}",
+fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
+    let recipient = validate_an_account(an_account)?;
+    Ok(format!(
+        "0xc9630cb0{}{}",
         encode_uint256(amount),
-        encode_uint256(0),
-        encode_bytes32(an_account)
-    )
+        encode_bytes32(&recipient)
+    ))
 }
 
 #[cfg(test)]
@@ -286,20 +285,43 @@ mod deposit_tests {
     use super::deposit_calldata;
 
     #[test]
-    fn deposit_keeps_the_legacy_selector_and_zero_word() {
+    fn deposit_encodes_amount_and_account() {
         let account = "a3".repeat(32);
-        let data = deposit_calldata(12_500_000, &account);
-        assert_eq!(data.len(), 2 + 2 * 100);
-        assert_eq!(&data[..10], "0xa41d0229");
+        let data = deposit_calldata(12_500_000, &account).unwrap();
+        assert_eq!(data.len(), 2 + 2 * 68);
+        assert_eq!(&data[..10], "0xc9630cb0");
         assert_eq!(u128::from_str_radix(&data[10..74], 16).unwrap(), 12_500_000);
-        assert_eq!(&data[74..138], "0".repeat(64));
-        assert_eq!(&data[138..], account);
+        assert_eq!(&data[74..], account);
+    }
+
+    #[test]
+    fn deposit_normalises_the_recipient_before_encoding() {
+        let data = deposit_calldata(1, &format!("0x{}", "AB".repeat(32))).unwrap();
+        assert_eq!(&data[74..], "ab".repeat(32));
+    }
+
+    #[test]
+    fn an_ethereum_wallet_address_is_rejected_before_a_transaction_is_sent() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let mut call = std::pin::pin!(super::make_deposit(
+            12_500_000,
+            "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        match call.as_mut().poll(&mut context) {
+            Poll::Ready(Err(err)) => assert!(err.contains("exactly 64"), "{err}"),
+            _ => panic!("invalid recipients must be rejected before accessing the wallet"),
+        }
     }
 }
 
 /// Deposit USDC into the bridge for the specified Acki Nacki account.
 pub async fn make_deposit(amount: u128, an_account: &str) -> Result<String, String> {
-    let data = deposit_calldata(amount, an_account);
+    let data = deposit_calldata(amount, an_account)?;
     send_tx(BRIDGE_CONTRACT_ADDRESS, &data).await
 }
 

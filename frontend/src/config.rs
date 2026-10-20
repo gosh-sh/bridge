@@ -39,7 +39,6 @@ pub const BRIDGE_ABI: &str = r#"[
     {
         "inputs": [
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"internalType": "int8", "name": "anWorkchain", "type": "int8"},
             {"internalType": "bytes32", "name": "anAccount", "type": "bytes32"}
         ],
         "name": "deposit",
@@ -87,7 +86,6 @@ pub const BRIDGE_ABI: &str = r#"[
             {"indexed": true, "internalType": "uint256", "name": "depositId", "type": "uint256"},
             {"indexed": true, "internalType": "address", "name": "sender", "type": "address"},
             {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
-            {"indexed": false, "internalType": "int8", "name": "anWorkchain", "type": "int8"},
             {"indexed": false, "internalType": "bytes32", "name": "anAccount", "type": "bytes32"},
             {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"}
         ],
@@ -98,8 +96,8 @@ pub const BRIDGE_ABI: &str = r#"[
 
 /// Optional default Acki Nacki receiver account (build-time `AN_RECEIVER`).
 ///
-/// The bridge's `deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)`
-/// takes the AN account explicitly; the legacy `anWorkchain` word is always 0.
+/// The bridge's `deposit(uint256 amount, bytes32 anAccount)`
+/// takes the AN account explicitly.
 /// This constant is only a convenience default the UI may prefill; an empty
 /// value means "no prefill — the user types their AN account".
 pub const ACKI_NACKI_RECEIVER: &str = match option_env!("AN_RECEIVER") {

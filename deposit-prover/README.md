@@ -24,7 +24,7 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
    proof), with `max_key_byte_len: 3` (`impl ToMPTInput for ReceiptProof` in `src/circuit_v2.rs`;
    the leaf bound is `receipt_max_byte_len`).
 2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
-3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")`
+3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
    (`get_deposit_event_signature` in `src/circuit_v2.rs`). Six fields: the event carries the Acki Nacki destination.
 4. **Contract address** — the event was emitted by the expected bridge contract.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
@@ -64,7 +64,7 @@ the production rows below.
 
 ```rust
 // Receipt chip — production (baked into the VK / relayer defaults)
-PRODUCTION_MAX_DATA_BYTE_LEN: 2048  // two-signer SafeL2 MultiSend is ~1152 B
+PRODUCTION_MAX_DATA_BYTE_LEN: 2048  // two-signer SafeL2 MultiSend is ~1120 B
 PRODUCTION_MAX_ENCODED_LOG_LEN: 2211 // axiom-eth per-log bound; more data if fewer topics
 PRODUCTION_MAX_LOG_NUM: 20          // chip max; the keccak budget allows ~6 logs at 2048 B
 TOPIC_NUM_BOUNDS: (0, 4)
@@ -72,7 +72,7 @@ RECEIPT_PF_MAX_DEPTH: 10
 FIXED_KECCAK_CAPACITY: 128          // ~17 KB of preimages: a receipt up to ~13.5 KB
 
 // Enclosing tx chip — also baked into the VK
-MAX_TX_CALLDATA_BYTE_LEN: 2048      // 1-of-1 Safe execTransaction is 612 B
+MAX_TX_CALLDATA_BYTE_LEN: 2048      // 1-of-1 Safe execTransaction is 580 B
 MAX_TX_ACCESS_LIST_LEN: 512
 ENABLE_TX_TYPES: [false, true, true]  // type 1 and 2 only; every other type is refused
 ```

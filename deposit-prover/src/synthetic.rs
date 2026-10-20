@@ -39,7 +39,7 @@ impl SyntheticSpec {
     pub fn type2_direct() -> Self {
         Self {
             tx: EnclosingTx::Type2 {
-                data_len: 100,
+                data_len: 68,
             },
             extra_log_data: 0,
         }
@@ -48,7 +48,7 @@ impl SyntheticSpec {
     pub fn type1_with_access_list() -> Self {
         Self {
             tx: EnclosingTx::Type1WithAccessList {
-                data_len: 100,
+                data_len: 68,
             },
             extra_log_data: 0,
         }
@@ -177,9 +177,8 @@ fn deposit_log(event: &DepositEventData) -> Log {
     deposit_id[24..].copy_from_slice(&event.deposit_id.to_be_bytes());
     let mut sender = [0u8; 32];
     sender[12..].copy_from_slice(&event.sender);
-    let mut data = Vec::with_capacity(128);
+    let mut data = Vec::with_capacity(96);
     data.extend_from_slice(&event.amount);
-    data.extend_from_slice(&[0u8; 32]);
     data.extend_from_slice(&event.an_account);
     let mut timestamp = [0u8; 32];
     timestamp[24..].copy_from_slice(&event.timestamp.to_be_bytes());
@@ -272,7 +271,12 @@ fn sample_event() -> DepositEventData {
 
 /// Build a self-consistent [`DepositProofInput`] for `spec`.
 pub fn build(spec: SyntheticSpec) -> DepositProofInput {
-    let event = sample_event();
+    build_with_deposit_id(spec, 7)
+}
+
+pub fn build_with_deposit_id(spec: SyntheticSpec, deposit_id: u64) -> DepositProofInput {
+    let mut event = sample_event();
+    event.deposit_id = deposit_id;
     let tx_bytes = enclosing_tx_bytes(spec.tx, event.contract_address, event.chain_id);
     let key = encode_tx_index(0);
     let (transactions_root, tx_proof_nodes) =

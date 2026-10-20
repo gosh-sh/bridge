@@ -19,10 +19,10 @@ use crate::errors::{CliError, CliResult};
 alloy::sol! {
     /// The part of the EVM bridge a deposit uses.
     interface IDeposit {
-        function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount) external;
+        function deposit(uint256 amount, bytes32 anAccount) external;
         function usdc() external view returns (address);
         function paused() external view returns (bool);
-        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, int8 anWorkchain, bytes32 anAccount, uint256 timestamp);
+        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp);
         error BridgePaused();
     }
     /// The part of ERC-20 a deposit uses.
@@ -34,11 +34,11 @@ alloy::sol! {
     }
 }
 
-/// A deposit's calldata: the selector and three words.
-pub const DEPOSIT_CALLDATA_LEN: usize = 100;
+/// A deposit's calldata: the selector and two words.
+pub const DEPOSIT_CALLDATA_LEN: usize = 68;
 /// topic0 of the bridge's `Deposit` event.
 pub const DEPOSIT_TOPIC0: B256 =
-    alloy_primitives::b256!("8d5d060673b27fac84d56ee262fe8dccad60d198ae11766063f112a9be3d37ee");
+    alloy_primitives::b256!("6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe");
 
 /// Which block a read is made at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +206,6 @@ pub trait EvmRead: Send + Sync {
 pub fn deposit_calldata(amount: u64, account: B256) -> Bytes {
     IDeposit::depositCall {
         amount: U256::from(amount),
-        anWorkchain: 0,
         anAccount: account,
     }
     .abi_encode()
@@ -640,18 +639,17 @@ mod tests {
 
     use super::*;
 
-    /// The selector of `deposit(uint256,int8,bytes32)`.
-    const DEPOSIT_SELECTOR: [u8; 4] = [0xa4, 0x1d, 0x02, 0x29];
+    /// The selector of `deposit(uint256,bytes32)`.
+    const DEPOSIT_SELECTOR: [u8; 4] = [0xc9, 0x63, 0x0c, 0xb0];
 
     #[test]
-    fn deposit_calldata_is_the_selector_and_three_words() {
+    fn deposit_calldata_is_the_selector_and_two_words() {
         let acc = B256::repeat_byte(0xa3);
         let data = deposit_calldata(12_500_000, acc);
         assert_eq!(data.len(), DEPOSIT_CALLDATA_LEN);
         assert_eq!(&data[..4], &DEPOSIT_SELECTOR);
         assert_eq!(U256::from_be_slice(&data[4..36]), U256::from(12_500_000u64));
-        assert_eq!(&data[36..68], &[0u8; 32], "anWorkchain = 0");
-        assert_eq!(&data[68..100], acc.as_slice());
+        assert_eq!(&data[36..68], acc.as_slice());
     }
 
     #[test]
@@ -659,7 +657,7 @@ mod tests {
         assert_eq!(DEPOSIT_TOPIC0, IDeposit::Deposit::SIGNATURE_HASH);
         assert_eq!(
             format!("{DEPOSIT_TOPIC0:x}"),
-            "8d5d060673b27fac84d56ee262fe8dccad60d198ae11766063f112a9be3d37ee"
+            "6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe"
         );
     }
 
@@ -679,10 +677,13 @@ mod tests {
         assert_eq!(ev.sender, sender);
         assert_eq!(ev.amount, U256::from(12_500_000u64));
         assert_eq!(ev.an_account, B256::repeat_byte(0xa3));
-        let mut historical = log.data.to_vec();
-        historical[32..64].fill(0xff);
-        log.data = historical.into();
-        assert_eq!(parse_deposit_log(&log), Some(ev));
+        let mut wrong_recipient = log.data.to_vec();
+        wrong_recipient[32..64].fill(0xff);
+        log.data = wrong_recipient.into();
+        assert_eq!(
+            parse_deposit_log(&log).unwrap().an_account,
+            B256::repeat_byte(0xff)
+        );
     }
 
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");

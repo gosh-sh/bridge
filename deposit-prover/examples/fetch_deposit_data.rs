@@ -168,9 +168,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Save to file
     println!("Saving to {}...", args.output);
-    let mut wire = serde_json::to_value(&proof_input)?;
-    wire["event_data"]["an_workchain"] = serde_json::json!(0);
-    let json = serde_json::to_string_pretty(&wire)?;
+    let json = serde_json::to_string_pretty(&proof_input)?;
     std::fs::write(&args.output, json)?;
     println!("✓ Saved\n");
 

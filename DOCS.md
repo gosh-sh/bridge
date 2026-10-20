@@ -81,7 +81,7 @@ covering one genre for one audience. The archive exists so that step loses no kn
 **Known traps in the source material** — carry these into the rewrite, they are verified against the
 code and were wrong in the old docs:
 
-* Deposits take **USDC** via `transferFrom`, signature `deposit(uint256,int8,bytes32)`, cap
+* Deposits take **USDC** via `transferFrom`, signature `deposit(uint256,bytes32)`, cap
   `type(uint64).max`. Any archive text with `msg.value`, ETH deposits or a `100 ether` cap is dead.
   The contract has no `receive()`/`fallback()` — it cannot hold native ETH at all.
 * Verification is **SHPLONK aggregator Yul** for four circuits. 

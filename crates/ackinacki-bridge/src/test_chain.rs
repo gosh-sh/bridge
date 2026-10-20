@@ -1033,12 +1033,10 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.10.0. Any other compiler
-        // or a stale artefact moves this, and the 233 cap would ship as a
-        // different binary than CHANGELOG names.
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.11.0 with the current deposit VK.
         assert_eq!(
             &hash[..8],
-            "4b2a9600",
+            "774c9571",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

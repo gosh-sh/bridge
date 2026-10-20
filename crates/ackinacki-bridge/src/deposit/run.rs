@@ -2475,7 +2475,7 @@ mod tests {
         assert_eq!(j["deposit"]["tx_hash"], format!("{h:#x}"));
         assert_eq!(j["anchor"]["writer"], "owner");
         assert_eq!(j["tx"]["type"], 2);
-        assert_eq!(j["tx"]["calldata_len"], 100);
+        assert_eq!(j["tx"]["calldata_len"], 68);
         assert_eq!(j["confirmation"]["confirm_tx"], "btx");
         assert_eq!(j["confirmation"]["delivery_tx"], "rtx");
         assert_eq!(j["confirmation"]["via_events"], false);
@@ -4011,11 +4011,11 @@ mod tests {
             tx_hash: None,
         });
         let mut d = w.deps();
-        // Above the world's 1.7.0 so preflight refuses; equal to it the
+        // Above the world's 1.11.0 so preflight refuses; equal to it the
         // resume never ends (it waits for a refusal that does not come).
-        d.min_bridge = Some(crate::deposit::an_preflight::BridgeVersion(1, 8, 0));
+        d.min_bridge = Some(crate::deposit::an_preflight::BridgeVersion(1, 12, 0));
         let e = resume(&p, &d, &target, None).await.unwrap_err();
-        assert!(e.to_string().contains("1.8.0"), "{e}");
+        assert!(e.to_string().contains("1.12.0"), "{e}");
         assert_eq!(
             e.exit_code(),
             ExitCode::DepositOutcomeUnknown,

@@ -2,10 +2,13 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
-use crate::config::{SEPOLIA_CHAIN_ID_HEX, USDC_UNIT};
-use crate::web3::{
-    approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
-    make_deposit, mint_test_usdc, switch_to_sepolia, usdc_to_units, wait_for_receipt,
+use crate::{
+    config::{SEPOLIA_CHAIN_ID_HEX, USDC_UNIT},
+    utils::validate_an_account,
+    web3::{
+        approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
+        make_deposit, mint_test_usdc, switch_to_sepolia, usdc_to_units, wait_for_receipt,
+    },
 };
 
 /// Maximum deposit (100 USDC in base units), mirrors `MAX_DEPOSIT_AMOUNT`.
@@ -17,66 +20,6 @@ const FAUCET_USDC_UNITS: u128 = 100 * USDC_UNIT;
 #[derive(Properties, PartialEq)]
 pub struct DepositFormProps {
     pub wallet_connected: bool,
-}
-
-/// Validate an Acki Nacki account: hex (optionally `0x`-prefixed), exactly 64
-/// hex chars (a 256-bit account id), and non-zero. Returns the normalised hex.
-///
-/// Exactly 64, not "at most": `web3::deposit` left-pads what it is given, so a
-/// pasted Ethereum address (40 hex chars) would become a well-formed non-zero
-/// `bytes32`, pass the contract's `anAccount != 0`, be bound in-circuit, and
-/// credit an account nobody owns. Deposit is one-way, so the length is the only
-/// place that mistake can still be caught.
-fn validate_an_account(raw: &str) -> Result<String, String> {
-    let v = raw.trim().trim_start_matches("0x").to_lowercase();
-    if v.is_empty() {
-        return Err("Acki Nacki account is required".to_string());
-    }
-    if v.len() != 64 {
-        return Err(format!(
-            "Account must be exactly 64 hex chars (256 bits); got {}. An Ethereum address is 40 \
-             and is not a valid AN recipient.",
-            v.len()
-        ));
-    }
-    if !v.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("Account must be hex (0-9, a-f)".to_string());
-    }
-    if v.chars().all(|c| c == '0') {
-        return Err("Account must be non-zero".to_string());
-    }
-    Ok(v)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_an_account;
-
-    /// The mistake this guard exists for: a pasted Ethereum address is 40 hex
-    /// chars, non-zero, and all-hex, so every other check passes it.
-    #[test]
-    fn eth_address_is_rejected_for_length() {
-        let err = validate_an_account("0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7")
-            .expect_err("40 hex chars must not pass as an AN account");
-        assert!(err.contains("exactly 64"), "{err}");
-    }
-
-    #[test]
-    fn short_and_long_are_rejected() {
-        assert!(validate_an_account(&"a".repeat(63)).is_err());
-        assert!(validate_an_account(&"a".repeat(65)).is_err());
-    }
-
-    #[test]
-    fn full_width_account_is_accepted_and_normalised() {
-        let raw = format!("0x{}", "AB".repeat(32));
-        assert_eq!(validate_an_account(&raw).unwrap(), "ab".repeat(32));
-    }
-
-    #[test]
-    fn zero_account_is_rejected_even_at_full_width() {
-        assert!(validate_an_account(&"0".repeat(64)).is_err());
-    }
 }
 
 #[function_component(DepositForm)]
@@ -174,7 +117,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 return;
             }
 
-            let account = match validate_an_account(&an_account) {
+            let an_recipient = match validate_an_account(&an_account) {
                 Ok(a) => a,
                 Err(err) => {
                     error_msg.set(Some(err));
@@ -205,7 +148,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                     }
                 }
 
-                let account = match get_current_account() {
+                let evm_account = match get_current_account() {
                     Some(a) => a,
                     None => {
                         error_msg.set(Some("No account connected".to_string()));
@@ -216,7 +159,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
                 // Step 1: approve the bridge for `units` USDC if the current
                 // allowance is insufficient.
-                let allowance = get_allowance(&account).await.unwrap_or(0);
+                let allowance = get_allowance(&evm_account).await.unwrap_or(0);
                 if allowance < units {
                     status_msg.set(Some(
                         "Step 1/2 — approve USDC (confirm in wallet)…".to_string(),
@@ -240,7 +183,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
 
                 // Step 2: deposit to the Acki Nacki destination.
                 status_msg.set(Some("Step 2/2 — deposit (confirm in wallet)…".to_string()));
-                match make_deposit(units, &account).await {
+                match make_deposit(units, &an_recipient).await {
                     Ok(hash) => {
                         tx_hash.set(Some(hash.clone()));
                         status_msg.set(Some("Waiting for deposit to confirm…".to_string()));

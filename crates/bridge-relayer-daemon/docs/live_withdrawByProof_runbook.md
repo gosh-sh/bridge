@@ -363,11 +363,11 @@ cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC
 cast send $USDC 'approve(address,uint256)' $BRIDGE $AMOUNT \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
-# 3. bridge.deposit($AMOUNT, workchain=0, anAccount=0x11…11) — target contract is $BRIDGE
+# 3. bridge.deposit($AMOUNT, anAccount=0x11…11) — target contract is $BRIDGE
 #    (dummy AN destination is harmless on testnet — no AN listener will
 #    credit this phantom Deposit event)
-cast send $BRIDGE 'deposit(uint256,int8,bytes32)' \
-  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+cast send $BRIDGE 'deposit(uint256,bytes32)' \
+  $AMOUNT 0x1111111111111111111111111111111111111111111111111111111111111111 \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
 # 4. Verify
@@ -920,8 +920,8 @@ cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
 
 # 3. bridge.deposit(...) — target is $BRIDGE_ADDRESS
 #    (dummy AN destination — harmless on testnet)
-cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
-  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+cast send $BRIDGE_ADDRESS 'deposit(uint256,bytes32)' \
+  $AMOUNT 0x1111111111111111111111111111111111111111111111111111111111111111 \
   --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
 
 # 4. Confirm
@@ -934,7 +934,7 @@ despite a successful `approve`,** the wallet is holding balance of the
 `usdc()` check above and fund the correct token via Circle's faucet.
 
 **Why the dummy AN destination is safe on testnet.** `deposit()` emits a
-`Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, ts)` event
+`Deposit(depositId, msg.sender, amount, anAccount, ts)` event
 that a production AN-side listener would consume to credit the AN
 recipient. On shellnet demos there is no such listener wired for
 seed-only deposits, so the phantom event just sits in event history. Do

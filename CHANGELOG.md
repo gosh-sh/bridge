@@ -24,21 +24,11 @@ assigns it when the release is tagged.
 
 ### Documentation
 
-- **`README.md` opens with *The current deployment*.** Since the deposit ABI
-  change, no bridge address is pinned anywhere in the tree — the CLI, the
-  relayers and the web form all take theirs from configuration — so a person
-  with a checkout had nowhere to read them. The section carries the Sepolia
-  bridge and its deployment block, the USDC the bridge accepts, the deposit
-  selector and `Deposit` topic0, the shellnet `eccUSDCBridge` version and code
-  hash and its light client, the four settings to copy, and the note that this
-  deploy has no AAVE pool and cannot be given one. Every value was read back
-  from both chains on 2026-10-20.
-- The same section states how long a deposit takes and why: credit happens only
-  against a finalized Ethereum block, so the anchor frontier sits a normal
-  ~56 blocks (~13 min) behind the head, advancing in batches of 32 every
-  ~6.4 minutes with every block between two anchors covered. `finalizeDeposit`
-  refusals before the block is anchored are the wait, not a failure, and the
-  relayer retries through them.
+- **`README.md` opens with *The current deployment*.** No bridge address is
+  pinned in the tree any more, so a checkout had nowhere to read the live
+  ones. The section carries the Sepolia bridge and its deployment block, the
+  USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
+  client, and the four settings to copy. Read back from both chains.
 
 ### Documentation
 

@@ -39,11 +39,11 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 11, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
 /// The first bridge that embeds the deposit key this build's prover makes
 /// proofs for. An older bridge rejects every one of them at
 /// `finalizeDeposit`, after the USDC is in the EVM bridge.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 7, 0);
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
 
 /// Refuses a bridge older than the deposit key this build proves for.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
@@ -83,10 +83,32 @@ pub fn version_verdict(
         },
         Some(_) => {},
     }
+    // A bridge NEWER than this build knows is refused, not warned about.
+    //
+    // The floor above catches a bridge carrying the previous deposit key. The
+    // ceiling catches the mirror case: a bridge whose key was rotated after
+    // this CLI was built. The prover would produce a proof for the key this
+    // build knows, `finalizeDeposit` would reject it, and the USDC would
+    // already be in the EVM bridge with no refund path — the same loss, from
+    // the other direction.
+    //
+    // This used to be a warning, on the assumption that a newer bridge keeps
+    // the same key. It does not: 1.12.0 rotated it. A warning on the one
+    // check standing between a run and an unrecoverable deposit is not a
+    // check.
+    //
+    // A development build still passes, so a bridge can be upgraded ahead of
+    // the CLI while both are being worked on.
     if v > newest {
-        warnings.push(format!(
-            "the bridge is version {v}, newer than {newest} this CLI was checked against"
-        ));
+        if dev_unfixed {
+            warnings.push(format!(
+                "development build: bridge {v} is newer than {newest} this CLI was built for, and                  its deposit key may have been rotated; never ship this build"
+            ));
+        } else {
+            return Err(format!(
+                "the bridge is version {v}, newer than {newest} this CLI was built for. Its                  deposit key may have been rotated, and this CLI proves for the older one: the                  deposit would be refused at finalizeDeposit with the USDC already in the EVM                  bridge. Install a CLI built for {v}"
+            ));
+        }
     }
     Ok(warnings)
 }
@@ -391,12 +413,18 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "getAnchorConfig", vec![
             json!({ "lightClient": format!("0:{}", "20".repeat(32)), "ownerAnchorsEnabled": true }),
+        ]);
+        an.getter(BRIDGE, "getLightClient", vec![
+            json!({ "value0": format!("0:{}", "20".repeat(32)) }),
+        ]);
+        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
+            json!({ "value0": true }),
         ]);
         an.getter(
             BRIDGE,
@@ -427,14 +455,14 @@ mod tests {
         .await
     }
 
-    /// A bridge whose version says 1.9.0 but whose code has no
+    /// A bridge whose version says 1.12.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.9.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -480,7 +508,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.7.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -500,9 +528,15 @@ mod tests {
         .unwrap();
         assert_eq!(ui.warnings().len(), 2);
         // The version is not relaxed: a resend is only safe on a fixed bridge.
-        // Stay at the deposit key (1.7.0) so this hits `version_verdict`, not
-        // `key_verdict` (which refuses anything older than the key first).
-        let min = Some(BridgeVersion(1, 8, 0));
+        // One above the bridge this build ships, so the refusal is the point
+        // being tested rather than an accident of which version the mock
+        // reports. Written against the constant so a contract bump cannot
+        // quietly turn this into an equality and stop exercising anything.
+        let min = Some(BridgeVersion(
+            NEWEST_KNOWN_BRIDGE_VERSION.0,
+            NEWEST_KNOWN_BRIDGE_VERSION.1,
+            NEWEST_KNOWN_BRIDGE_VERSION.2 + 1,
+        ));
         assert!(
             run_with(&an, BRIDGE, 11_155_111, evm_bridge, &target, &ui, min, false, true)
                 .await
@@ -548,8 +582,15 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // Newer than this build knows is a refusal, not a warning: the key may
+        // have been rotated, and proving for the older one loses the deposit.
+        let ahead = version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), false)
+            .unwrap_err();
+        assert!(ahead.contains("newer than"), "{ahead}");
+        assert!(ahead.contains("finalizeDeposit"), "{ahead}");
+        // A development build may run ahead of the bridge, and is told so.
         assert_eq!(
-            version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), false)
+            version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), true)
                 .unwrap()
                 .len(),
             1
@@ -570,7 +611,47 @@ mod tests {
         let e = key_verdict(BridgeVersion(1, 6, 0), key).unwrap_err();
         assert!(e.contains("deposit key"), "{e}");
         assert!(key_verdict(key, key).is_ok());
-        assert!(key_verdict(BridgeVersion(1, 7, 1), key).is_ok());
+        assert!(key_verdict(BridgeVersion(key.0, key.1, key.2 + 1), key).is_ok());
+    }
+
+    /// `DEPOSIT_KEY_BRIDGE_VERSION` is the floor the CLI refuses below, and
+    /// getting it wrong costs a deposit: a bridge at the old version passes
+    /// the check, `finalizeDeposit` rejects the proof, and the USDC is
+    /// already in the EVM bridge with no refund path.
+    ///
+    /// Every other test here is relative — it compares the constant with
+    /// itself — so none of them notices when the constant is left behind by
+    /// a contract rebuild. This one reads the version out of the contract
+    /// source this build ships and demands they agree. It caught nothing on
+    /// the way in; it exists because a merge of two branches that both
+    /// called themselves 1.11.0 left this constant pointing at a bridge
+    /// carrying the previous key.
+    #[test]
+    fn the_deposit_key_floor_matches_the_contract_this_build_ships() {
+        let src = include_str!("../../../../contracts/an/exchange/eccUSDCBridge.sol");
+        let line = src
+            .lines()
+            .find(|l| l.trim_start().starts_with("string constant version"))
+            .expect("eccUSDCBridge.sol declares a version constant");
+        let shipped = line
+            .split('"')
+            .nth(1)
+            .expect("the version constant is a quoted string");
+
+        assert_eq!(
+            DEPOSIT_KEY_BRIDGE_VERSION.to_string(),
+            shipped,
+            "DEPOSIT_KEY_BRIDGE_VERSION is {}, but the eccUSDCBridge this build ships is {shipped}. \
+             A bridge below the floor is refused; a bridge at the floor is trusted to hold this \
+             build's deposit key. Bump the constant with the contract.",
+            DEPOSIT_KEY_BRIDGE_VERSION,
+        );
+        assert_eq!(
+            NEWEST_KNOWN_BRIDGE_VERSION.to_string(),
+            shipped,
+            "NEWEST_KNOWN_BRIDGE_VERSION is {}, the shipped contract is {shipped}",
+            NEWEST_KNOWN_BRIDGE_VERSION,
+        );
     }
 
     #[test]
@@ -618,22 +699,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_1_7_0_bridge_without_the_per_chain_getter_still_passes() {
+    async fn a_bridge_with_the_previous_event_key_is_refused() {
         let an = healthy();
-        an.failing_getters
-            .lock()
-            .unwrap()
-            .insert("isOwnerAnchorsEnabled".into());
-        let p = go(&an, [0; 32]).await.unwrap();
-        assert!(p.owner_anchors_enabled);
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.10.0", "value1": "eccUSDCBridge" }),
+        ]);
+        let err = go(&an, [0; 32]).await.unwrap_err();
+        assert!(err.to_string().contains("deposit key"), "{err}");
     }
 
     #[tokio::test]
-    async fn a_1_8_0_bridge_reads_the_per_chain_flag() {
+    async fn the_current_bridge_reads_the_per_chain_flag() {
         let an = healthy();
-        an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.8.0", "value1": "eccUSDCBridge" }),
-        ]);
         an.getter(BRIDGE, "getAnchorConfig", vec![
             json!({ "lightClient": format!("0:{}", "20".repeat(32)), "ownerAnchorsEnabled": true }),
         ]);

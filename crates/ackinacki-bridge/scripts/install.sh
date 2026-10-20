@@ -345,9 +345,10 @@ step "Profile"
 # ---------------------------------------------------------------------------
 # The release ships a profile whose paths are relative to a source checkout.
 # Rewrite exactly the path keys to point into the prefix, and leave the
-# endpoints, the bridge address and the pinned identity as published.
+# endpoints and identity as published. Deployment addresses are operator-supplied.
 if have_profile; then
   ok "$PROFILE"
+  note "existing profile kept; check BRIDGE_ADDRESS and BRIDGE_DEPLOY_BLOCK against the new paired deployment"
 elif [ -s "$PROFILE.release" ]; then
   mkdir -p "$PREFIX/work_dir" "$PREFIX/withdraw-state" "$PREFIX/deposit-state" "$PARAMS/pk_cache"
   # Records carry amounts and addresses, and the CLI warns on every run about
@@ -366,7 +367,7 @@ elif [ -s "$PROFILE.release" ]; then
     -e "s#^BRIDGE_DEPOSIT_STATE_DIR=.*#BRIDGE_DEPOSIT_STATE_DIR=$PREFIX/deposit-state#" \
     "$PROFILE.release" > "$PROFILE"
   ok "$PROFILE"
-  note "endpoints and the bridge address are the release's; only paths were rewritten"
+  note "release endpoints retained; set BRIDGE_ADDRESS and BRIDGE_DEPLOY_BLOCK for your paired deployment"
 else
   gap "$PROFILE"
 fi
@@ -431,7 +432,8 @@ fi
 
 if [ "$missing" -eq 0 ]; then
   cat <<EOF
-  This host can run a real withdrawal and a real deposit.
+  The tools are installed. Before a real withdrawal or deposit, configure
+  BRIDGE_ADDRESS and BRIDGE_DEPLOY_BLOCK for your paired deployment.
 
     export PATH="$BIN_DIR:\$PATH"
     export BRIDGE_CONFIG="$PROFILE"

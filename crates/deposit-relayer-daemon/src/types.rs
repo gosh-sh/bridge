@@ -5,10 +5,10 @@
 //! pipeline:
 //!
 //! 1. A [`DepositEvent`] — the parsed on-chain `Deposit(depositId, sender,
-//!    amount, anWorkchain, anAccount, timestamp)` log plus the receipt-locating
-//!    metadata the prover needs (`tx_hash`, `log_index`, `block_number`).
-//!    `anAccount` is the Acki Nacki destination account (an EVM address cannot
-//!    be an AN recipient).
+//!    amount, anAccount, timestamp)` log plus the receipt-locating metadata the
+//!    prover needs (`tx_hash`, `log_index`, `block_number`). `anAccount` is the
+//!    Acki Nacki destination account (an EVM address cannot be an AN
+//!    recipient).
 //! 2. A [`DepositProofBundle`] — the three operands the AN-side
 //!    `ZKHALO2VERIFYWITHVK` opcode consumes (`vk_blob`, `public_inputs`,
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
@@ -35,8 +35,7 @@ use crate::error::RelayerError;
 /// AN recipient). `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced
 /// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
 /// event data in-circuit. The AN bridge pins `dappId` to 0 and does not
-/// check the proven halves. The L1 event still emits `anWorkchain`; it is
-/// not a public input and AN always credits workchain 0 (QC-AN-J3).
+/// check the proven halves. AN always credits workchain 0.
 /// `eccUSDCBridge` allowlists trusted L1 bridges per chain
 /// (`_trustedL1Bridge[chainId][bridge]`).
 pub const NUM_PUBLIC_INPUTS: usize = 12;
@@ -59,19 +58,14 @@ pub struct DepositEvent {
     pub sender: Address,
     /// Deposited amount (event data word 0).
     pub amount: U256,
-    /// Acki Nacki destination workchain id (TVM `int8`, event data word 1).
-    /// Still emitted by the event; no longer bound in-circuit (the dappId tag
-    /// took its public-input slot on 2026-06-02). Kept for logging. AN never
-    /// sees this value: the recipient is `address.makeAddrStd(0, anAccount)`.
-    pub an_workchain: i8,
-    /// Acki Nacki destination account (256-bit TVM address, event data word 2).
+    /// Acki Nacki destination account (256-bit TVM address, event data word 1).
     ///
     /// The EVM `sender` is not a valid AN recipient (different address system),
     /// so the destination is chosen by the depositor and carried here. The
     /// deposit circuit binds it as the `anAccountHigh`/`anAccountLow` public
     /// inputs (2026-06-02), so the AN side credits a proven account.
     pub an_account: B256,
-    /// Block timestamp recorded in the event (event data word 3).
+    /// Block timestamp recorded in the event (event data word 2).
     pub timestamp: U256,
     /// Hash of the transaction that emitted the event. Drives the prover's
     /// receipt + MPT witness fetch.
@@ -409,7 +403,6 @@ mod tests {
             deposit_id: 3,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(5u64),
-            an_workchain: 0,
             an_account: B256::repeat_byte(0x55),
             timestamp: U256::ZERO,
             tx_hash: B256::ZERO,

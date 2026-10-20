@@ -24,10 +24,7 @@ pub fn uri(chain_id: u64, p: &TxPurpose) -> String {
             amount,
             account,
         } => {
-            format!(
-                "ethereum:{bridge:#x}@{chain_id}/deposit?uint256={amount}&int8=0&bytes32={account:\
-                 #x}"
-            )
+            format!("ethereum:{bridge:#x}@{chain_id}/deposit?uint256={amount}&bytes32={account:#x}")
         },
     }
 }
@@ -51,9 +48,8 @@ pub fn decoded(p: &TxPurpose) -> Vec<(String, String)> {
             account,
         } => vec![
             ("contract".into(), format!("{bridge:#x} (AckiNackiBridge)")),
-            ("function".into(), "deposit(uint256,int8,bytes32)".into()),
+            ("function".into(), "deposit(uint256,bytes32)".into()),
             ("amount".into(), format!("{amount} units")),
-            ("anWorkchain".into(), "0".into()),
             ("anAccount".into(), format!("{account:#x}")),
         ],
     }
@@ -137,9 +133,7 @@ mod tests {
                 amount: 12_500_000,
                 account: acc
             }),
-            format!(
-                "ethereum:{bridge:#x}@11155111/deposit?uint256=12500000&int8=0&bytes32={acc:#x}"
-            )
+            format!("ethereum:{bridge:#x}@11155111/deposit?uint256=12500000&bytes32={acc:#x}")
         );
     }
 

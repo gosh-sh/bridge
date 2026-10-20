@@ -22,6 +22,27 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`README.md` opens with *The current deployment*.** No bridge address is
+  pinned in the tree any more, so a checkout had nowhere to read the live
+  ones. The section carries the Sepolia bridge and its deployment block, the
+  USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
+  client, and the four settings to copy. Read back from both chains.
+
+### Documentation
+
+- New [`REFACTORING.md`](REFACTORING.md) at the repository root, registered in
+  `DOCS.md`: a backlog of changes that are not bugs. Six entries to start —
+  `num_active_layers` naming the opposite of what it means; the EVM deployment
+  address pinned separately by the CLI profile and the web form, which is how
+  the form spent a week on a retired bridge; the deposit and withdrawal sides
+  keeping separate chain lists that have already drifted over Arbitrum One; the
+  literal `vmshell` amounts on the `DepositVoucher` deploy and its
+  `confirmDeposit` callback; guard scripts wired into no pipeline; and the
+  unbounded owner mint. Entries carry `file:line` and the shape of the change,
+  and are deleted when done rather than ticked.
+
 ### Fixed
 
 - **The web deposit form explains what the wallet said instead of printing
@@ -56,18 +77,13 @@ assigns it when the release is tagged.
   `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
   exit 214. There is no extra product minimum besides `amount > 0`, and the
   100 USDC figure in older notes is not in the contracts. The deposit
-  form now uses that same `uint64` cap, deposits Circle Sepolia USDC
-  (`0x1c7D4B19…`) into the Sepolia bridge Acki Nacki currently credits
-  (`0x5384f162…`, 2026-10-15), and sends `anAccount` from the recipient
-  field. It used to refuse amounts above 100 USDC, approve the Aave
-  faucet token, send the connected MetaMask address as the AN recipient,
-  and target an earlier deploy (`0x99c37fb7…`) that AN no longer trusts.
-  Test USDC comes from Circle's faucet, not an in-form mint. The ursus
-  deposit-relayer and bridge-relayer env examples pin the same bridge
-  and deploy block 11921366, and the deposit-relayer example uses the
-  same full-history Sepolia RPC (`rpc.sepolia.ethpandaops.io`) — publicnode
-  keeps only about 10 000 blocks of logs, which no longer covers that
-  deploy.
+  form now uses that same `uint64` cap and Circle Sepolia USDC
+  (`0x1c7D4B19…`), with the bridge address supplied at build time as
+  described below. It used to refuse amounts above 100 USDC and approve
+  the Aave faucet token. Test USDC comes from Circle's faucet, not an
+  in-form mint. The ursus deposit-relayer example uses the same full-history
+  Sepolia RPC (`rpc.sepolia.ethpandaops.io`) as the bridge-relayer example;
+  it must retain logs back to the configured deployment block.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
   `state.json`, later ids going first while failed ids retry from
@@ -207,7 +223,46 @@ assigns it when the release is tagged.
   leave that window until the start of P+2, about 27 h. A proper fix would
   keep two previous committees.
 
-- **`eccUSDCBridge` 1.11.0 adds owner `mintAndSendBridged` for CLI exit 37.**
+- **`eccUSDCBridge` is 1.12.0, and neither 1.11.0 exists.** Two branches each
+  built a 1.11.0: one adding owner `mintAndSendBridged`, one carrying the
+  deposit ABI without `anWorkchain` and its regenerated key. They are now one
+  contract with both changes, rebuilt with sold 0.80.0, code hash
+  `a1fd7d19…`. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
+  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
+
+- **Deposits no longer have a workchain parameter.** For a fresh deployment,
+  use `deposit(uint256,bytes32)` and
+  `Deposit(uint256,address,uint256,bytes32,uint256)`; the event's non-indexed
+  data is now 96 bytes. The CLI, frontend, deposit relayer and prover use this
+  format, and witness JSON no longer includes `an_workchain`. Deploy the matching
+  Ethereum contract and `eccUSDCBridge` 1.12.0 with the regenerated deposit
+  verification key (code hash `a1fd7d19…`), and use the updated clients
+  and prover together. Proofs for the previous event format do not verify under
+  this key. Withdrawal interfaces, DApp ID handling and the 12 deposit public-input
+  slots are unchanged. The shipped CLI profile and relayer template no longer
+  pin an earlier EVM deployment: set `BRIDGE_ADDRESS` and its deployment block
+  (`BRIDGE_DEPLOY_BLOCK`, and `FROM_BLOCK` for the deposit relayer). Replace old
+  values in reused profiles explicitly. Build the frontend with
+  `BRIDGE_CONTRACT_ADDRESS` set to that same new EVM deployment; without it,
+  deposits and approvals are disabled before any wallet request.
+
+  This rollout assumes a fresh pair and provides no in-place migration of a
+  funded bridge. Before replacing an existing AN bridge's code, pause new
+  deposits on its old EVM bridge and finalize every pending old-format deposit
+  with the old AN bridge unpaused and its matching prover/relayer. Verify the corresponding
+  finalized AN credit for every old deposit ID below the paused EVM bridge's
+  `depositCounter` before replacing the AN code or removing those tools.
+  The 1.12.0 key cannot finalize 128-byte events,
+  and the old EVM contract has no deposit refund path. Custody and outstanding
+  withdrawals on an existing pair require a separate migration plan.
+
+  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.12.0
+  before requesting a transaction. For the new deployment, configure the
+  matching EVM/AN pair and its trust settings first, install the matching prover
+  and clients, then publish the new addresses and start deposits. Do not switch
+  clients alone against an earlier deployment. The installer preserves an
+  existing profile, so its deployment values must be updated by the operator.
+- **`eccUSDCBridge` 1.12.0 adds owner `mintAndSendBridged` for CLI exit 37.**
   After a voucher-consumed `confirmDeposit` abort the deposit cannot be
   finalized again, Ethereum already holds the USDC, and ordinary
   `mintAndSend` does not increment `getTotalBridged` — last withdrawers
@@ -238,17 +293,17 @@ assigns it when the release is tagged.
   had been flipped to light-client-only, call `disableOwnerAnchorsOn`
   again after `deployLightClient` — it turns the owner writer off and
   reverts 226 until a client exists. The ABI gains `mintAndSendBridged`.
-  `eccUSDCBridge` 1.11.0,
-  code hash `aeeadc7f…`, rebuilt with sold 0.80.0. The deposit CLI's
+  `eccUSDCBridge` 1.12.0,
+  code hash `a1fd7d19…`, rebuilt with sold 0.80.0. The deposit CLI's
   exit-37 message names the aborted deposit's `depositId`, amount, recipient,
   EVM bridge and chain, and tells the operator to call `mintAndSendBridged`.
-  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.11.0.
+  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
   Ordinary owner `mintAndSend` / `mintAndSendAccumulator` and TIP-3 mint
-  increment only `getTotalMinted` and add no headroom. 1.11.0's
+  increment only `getTotalMinted` and add no headroom. 1.12.0's
   `mintAndSendBridged` is the exception, for exit-37 recovery only. ECC[3]
   is fungible, so such ECC can still be withdrawn against headroom that
   deposits created: the cap limits total bridge payouts to total deposits,
@@ -261,8 +316,11 @@ assigns it when the release is tagged.
   burn is refused until `finalizeDeposit` brings minted up to burned.
   That is not the same as a fresh deploy.
 
+  Included in the `eccUSDCBridge` 1.12.0 build described above. The withdrawal
+  ABI is unchanged. The withdraw CLI preflight checks
+  `getTotalBridged` and refuses before the burn.
   `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The 1.10.0 ABI was unchanged; 1.11.0 above adds `mintAndSendBridged`.
+  The 1.10.0 ABI was unchanged; 1.12.0 above adds `mintAndSendBridged`.
   The withdraw CLI preflight checks `getTotalBridged` and refuses before
   the burn.
 
@@ -287,7 +345,7 @@ assigns it when the release is tagged.
   no longer refused. A bridge that reports 1.9.0 without the per-chain getter
   is answered once and falls back with a warning instead of being retried for
   ever. 1.9.0 was the newest version the CLI was checked against in that
-  change; 1.11.0 above is now `NEWEST_KNOWN_BRIDGE_VERSION`.
+  change; 1.12.0 above is now `NEWEST_KNOWN_BRIDGE_VERSION`.
 
 - **One light-client code, one client per source chain, addressed by code
   salt.** `setLightClientCode` now only stores the code. The address is
@@ -760,8 +818,8 @@ assigns it when the release is tagged.
   --examples`) on every relayer host and anywhere `ackinacki-bridge
   deposit` proves. Proofs made with the previous key (bridge 1.6.0) stop
   verifying, and a stale `target/release/examples/<name>` produces proofs
-  the new key rejects. `ackinacki-bridge deposit` refuses a bridge older
-  than 1.7.0.
+  the new key rejects. The current minimum AN bridge version for
+  `ackinacki-bridge deposit` is 1.12.0, as described above.
 
 - **The deposit-prover verification key is rotated, and the rotation
   closes two forgeries.** Under the previous key — and every earlier one
@@ -818,8 +876,8 @@ assigns it when the release is tagged.
   generates the new ~3.4 GB key and then deletes the old one, so
   `data/` briefly needs room for both. `ackinacki-bridge deposit`
   installs get the prover tools from a release (`install.sh`), so
-  they need a new release; this CLI refuses a bridge older than
-  1.7.0, whose key its proofs do not match.
+  they need a new release; the current CLI refuses an AN bridge older than
+  1.12.0, as described above.
 
   The prover now refuses a deposit it cannot prove before loading
   the SRS or the key. `fetch_deposit_data` exits 3 when the
@@ -2101,6 +2159,14 @@ assigns it when the release is tagged.
   lane whose `.sol` is missing.
 
 ### Fixed
+
+- `deposit-prover/scripts/recanonicalize_fixture_headers.py` skips fixtures
+  marked `fixture_kind: synthetic` in both check and write modes, so they do
+  not interrupt header checks and updates for real chain witnesses.
+
+- Frontend deposits use the validated Acki Nacki recipient entered in the form.
+  The connected Ethereum address is used for USDC allowance checks. Invalid AN
+  recipients are rejected before a deposit transaction is sent.
 
 - The withdraw relayer proved a block whose attestation carried a signer
   more than once with `block_seq_no = 0`: the fetcher wrote the height into

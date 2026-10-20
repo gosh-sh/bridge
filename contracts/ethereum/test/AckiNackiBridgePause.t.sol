@@ -200,7 +200,7 @@ contract AckiNackiBridgePauseTest is Test {
         vm.startPrank(funder);
         usdc.approve(address(bridge), 1 * UsdcTestLib.UNIT);
         vm.expectRevert(AckiNackiBridge.BridgePaused.selector);
-        bridge.deposit(1 * UsdcTestLib.UNIT, int8(0), bytes32(uint256(uint160(funder))));
+        bridge.deposit(1 * UsdcTestLib.UNIT, bytes32(uint256(uint160(funder))));
         vm.stopPrank();
     }
 

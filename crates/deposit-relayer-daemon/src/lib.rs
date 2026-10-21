@@ -5,9 +5,8 @@
 //! bridge:
 //!
 //! 1. **Listen** for `AckiNackiBridge.Deposit(depositId, sender, amount,
-//!    anWorkchain, anAccount, timestamp)` events on Ethereum, surfacing only
-//!    deposits buried under a configurable confirmation depth
-//!    ([`source::EthLogSource`]).
+//!    anAccount, timestamp)` events on Ethereum, surfacing only deposits buried
+//!    under a configurable confirmation depth ([`source::EthLogSource`]).
 //! 2. **Prove** that the deposit event was emitted — the `deposit-prover` Halo2
 //!    circuit (K=18, RLC) produces a Blake2b-transcript SHPLONK proof plus the
 //!    twelve public inputs `[depositId, sender, amount, contractAddress,

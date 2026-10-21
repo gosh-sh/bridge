@@ -589,7 +589,7 @@ mod tests {
         assert!(j["tx"]["deposit_calldata"]
             .as_str()
             .unwrap()
-            .starts_with("0xa41d0229"));
+            .starts_with("0xc9630cb0"));
         assert!(j["tx"]["approve_calldata"]
             .as_str()
             .unwrap()

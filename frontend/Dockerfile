@@ -15,6 +15,7 @@ COPY styles.css ./
 COPY Trunk.toml ./
 
 # Build the application
+ARG BRIDGE_CONTRACT_ADDRESS
 RUN trunk build --release
 
 # Production stage

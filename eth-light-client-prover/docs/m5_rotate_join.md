@@ -50,17 +50,21 @@ are **not disturbed**.
 > BLS cost is moot: rotate is memory-bound on the SSZ committee root regardless
 > (§Hardware blocker).
 
-## Public-input layout (3 × 32 B LE Fr)
+## Public-input layout (5 rotate PIs after 12 accumulator limbs)
+
+The outer instance column is 17 × 32 B LE Fr: 12 KZG accumulator limbs, then
 
 ```text
-[0] current_committee_commitment   — Poseidon commitment to the SIGNING committee
-[1] next_committee_commitment      — Poseidon commitment to the successor committee
-[2] period                         — sync-committee period the hand-off advances into
+[12] current_committee_commitment   — Poseidon commitment to the SIGNING committee
+[13] next_committee_commitment      — Poseidon commitment to the successor committee
+[14] period                         — attested_slot / 8192 + 1 (the period installed)
+[15] gloas_fork_slot                — picks next_sync_committee gindex 87 | 2946
+[16] attested_slot                  — signed header; period = attested_slot / 8192 + 1
 ```
 
 Decoded by `EthBeaconLightClient._parseRotatePublicInputs` (little-endian, same as
 the step / deposit decoders). Commitments are full-width Poseidon outputs;
-`period` is a `u64`.
+`period` and `attested_slot` are `u64`. `NUM_ROTATE_PUBLIC_INPUTS = 5`.
 
 ## Contract surface (`EthBeaconLightClient.sol`)
 
@@ -75,28 +79,22 @@ function getCommitteeState() external view returns (uint256, uint256, uint64, bo
 
 `submitRotate` logic:
 
-1. parse 3 PIs;
+1. parse 17 Fr (12 accumulator limbs + 5 rotate PIs);
 2. `require(_currentCommittee != 0)` (fail-closed) and
    `require(currentCommitteeCommitment == _currentCommittee)` — chain to trusted;
 3. `require(nextCommitteeCommitment != _currentCommittee)` (`ERR_SELF_ROTATION`,
    253) — a hand-off has to move the committee; the proof for `next == current`
    exists at every period boundary and would only evict `_prevCommittee`;
-4. `tvm.accept()` then `require(gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof))`;
-5. keep the replaced commitment in `_prevCommittee` with the head it left in
+4. `require(attestedSlot / 8192 + 1 == period)` (`ERR_BAD_PUBLIC_INPUTS`, 240).
+   There is no end-of-period window: a `/updates` best update is a valid
+   hand-off;
+5. `tvm.accept()` then `require(gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof))`;
+6. keep the replaced commitment in `_prevCommittee` with the head it left in
    `_prevCommitteeHeadSlot`, advance `_currentCommittee = next`, and store
-   `_committeePeriod = finalizedSlot / 8192 + 1`; emit `CommitteeRotated` with
-   that derived period.
+   `_committeePeriod = period`; emit `CommitteeRotated` with that period.
 
-There is **no test on the proof's `period`**. The circuit loads it as a free
-witness (`rotate_aggregation.rs`: `ctx.load_witness`), so it is a number the
-sender types: monotonicity over it let a genuine hand-off labelled
-`type(uint64).max` close the rotation path for good, and a ceiling tied to the
-head only shrinks the label that does it. Replay is prevented by the committee
-chain in step 2 — after a rotation the same proof no longer matches — so the
-label is kept out of the decision and out of storage. A hand-off submitted
-early is therefore accepted, which freezes the head until the chain reaches the
-new committee's period; binding the hand-off to a slot inside the circuit is
-what would fix that (gosh-sh/bridge-audit#118).
+The replaced committee may still advance the head for the period it served
+(`attestedSlot / 8192 + 1 == _committeePeriod`).
 
 The **trust-reduction switch** mirrors `USDCBridge`'s
 per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotationEnabled` the
@@ -141,7 +139,7 @@ Once emitted, wiring is a drop-in: add `examples/export_rotate_vk_blob.rs`
 
 | Piece | State |
 |-------|-------|
-| `submitRotate` + parse + monotonic period + committee chain | ✅ contract |
+| `submitRotate` + parse + attested-slot window + committee chain | ✅ contract |
 | `disableOwnerRotation()` trust-reduction switch + `getCommitteeState` | ✅ contract |
 | `reAnchorCommittee` WS hatch (after disable; no exec-hash write) | ✅ contract |
 | Bootstrap `setCommitteeCommitment(commitment, period)` gated by `_ownerRotationEnabled` | ✅ contract |

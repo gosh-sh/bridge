@@ -82,16 +82,19 @@ cargo run --release --example export_vk_blob -- \
 
 Then regenerate the matching proof + public inputs (`export_blake2b_proof`) and
 re-verify the triple (`verify_opcode_triple`). The degree / max-data-byte-len /
-max-log-num MUST match across keygen, prove, and verify. After regen, paste the
-new `deposit_vk_blob.bin` bytes into `TokenBridge.sol`'s `VK_BLOB` constant.
+max-log-num MUST match across keygen, prove, and verify. After regeneration, run
+`scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol`
+from the repository root to update the embedded key and its checksum.
 
 **Witness-independence (2026-06-25):** the VK no longer depends on the deposit's
 `contractAddress` or MPT proof depth — `prover.rs` pins keccak capacity
 (`FIXED_KECCAK_CAPACITY = 128`) and `circuit_v2.rs` no longer loads the address as a
 fixed-column constant (binding preserved via public input #3). Real deposits of
 different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
-the **byte-identical** production VkBlob. Current production VkBlob (12-PI, Hermez,
-13071 B) = **`117f4a65…ad612cc`** — rotated for Amsterdam 23-field headers
+the **byte-identical** production VkBlob. Current build VkBlob (12-PI, Hermez,
+13071 B) = **`0180ee5a…b1c3efa1`** — rotated for the five-field
+`Deposit(uint256,address,uint256,bytes32,uint256)` event with 96 data bytes.
+Previously `117f4a65…ad612cc`, rotated for Amsterdam 23-field headers
 (24-slot table, `MAX_BLOCK_HEADER_BYTES` 717 → 792); before that
 `83747b2e…74127a90`, rotated for type 1/2 enclosing transactions and
 2048-byte / 20-log receipts (Safe and ERC-4337 deposits), with the parsed `Deposit` log
@@ -105,28 +108,35 @@ fixes), `006cca5d…191dec05`, and the 11-PI chain-ceremony `20cf9018…` supers
 2026-07-23 when `chainId` was added + the SRS moved to
 Hermez. Note that only the constraint system moves — PI layout, count and shape are
 stable across the last three rotations. Regenerate the
-whole `deposit_10proofs` regression set in one shot with
-`cargo run --release --example export_deposit_proof_set -- --set-dir fixtures/deposit_10proofs --count 10 --degree 18 --max-data-byte-len 2048 --max-log-num 20`
+whole synthetic `deposit_10proofs` regression set from `deposit-prover/` with:
+
+```bash
+cargo run --release --example generate_deposit_fixtures -- \
+  --set-dir fixtures/deposit_10proofs --count 10
+cargo run --release --example export_deposit_proof_set -- \
+  --set-dir fixtures/deposit_10proofs --count 10 \
+  --degree 18 --max-data-byte-len 2048 --max-log-num 20
+```
+
+The synthetic headers are not canonical Ethereum blocks. Follow
+`deposit-prover/fixtures/deposit_10proofs/README.md` for fixture provenance;
 then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`).
 NB: `get_or_create_proving_key` now writes a **shape-fingerprinted** PK filename so a
 circuit-shape change can never silently load a stale PK.
 
-## Recompile TokenBridge
+## Recompile eccUSDCBridge
 
-TVM-Solidity-Compiler is at `/home/sergey/Pruvendo/gosh/TVM-Solidity-Compiler`.
-**The `gosh.zkhalo2VerifyWithVK` builtin only exists on branch `origin/halo2_verify`**
-(`c7725d64`, `sold 0.79.3`); the default branch's `sold` will fail with
-`Member "zkhalo2VerifyWithVK" not found`. Build that branch (C++ build needs a
-`compiler/commit_hash.txt` when building outside a git checkout) and compile from
-the `contracts/` root with the base path so relative imports resolve:
+Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.0 for
+`eccUSDCBridge`, sold 0.81.0 for the voucher and light client.
 
 ```bash
-sold --tvm-version gosh --base-path . exchange/USDCBridge.sol -o exchange/
+make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
 ```
 
-Validate the toolchain by recompiling the *unmodified* old source and confirming
-its code-hash matches the deployed `b38e934a…898e154` (it does), then trust the
-new `.tvc`.
+The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
+`contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` and check the ABI before
+deployment. This build's bridge version is 1.12.0 and its code hash starts with
+`774c9571`; the withdrawal ABI and voucher identity are unchanged.
 
 ## Build gotchas
 

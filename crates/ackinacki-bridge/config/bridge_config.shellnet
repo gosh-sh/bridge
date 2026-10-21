@@ -9,8 +9,8 @@
 #
 # Ships alongside `bridge_config.local` (devnet) and
 # `bridge_config.mainnet` (placeholder). `bridge_config` (no suffix) is
-# a symlink to this file — that's the pinned default for third-party
-# users of the shellnet reference deploy.
+# a symlink to this file. Fill the deployment target below before running
+# against a new bridge.
 #
 # HOW TO CONSUME
 # --------------
@@ -78,10 +78,10 @@ USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
 USDC_BRIDGE_KEY_PATH=../bridge-prover-libraries/python/contracts/USDCBridge.shellnet.keys.json
 
 # --- L2 anchor selection ------------------------------------------------------
-# The pinned shellnet deploy is L2-anchored (anchor_level=2); the CLI
-# refuses to talk to it without the anchor flag, and --i-know-the-wait
-# acknowledges the ~91 min per-bundle L2 cadence that stage 4b
-# (wait-for-coverage) may block on.
+# Defaults for an L2-anchored deployment (anchor_level=2). Confirm these
+# against your configured bridge; use layer 1 for an L1-anchored deployment.
+# --i-know-the-wait acknowledges the ~91 min per-bundle L2 cadence that
+# stage 4b (wait-for-coverage) may block on.
 BRIDGE_ANCHOR_LAYER=2
 BRIDGE_I_KNOW_THE_WAIT=true
 
@@ -125,65 +125,13 @@ BRIDGE_DEPOSIT_STATE_DIR=./deposit-state
 BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
-# Currently pinned to the shellnet team's L2-anchored reference deploy
-# on Sepolia, deployed 2026-10-15 at block 11921366 (genesis seq_no
-# 212992) for the shellnet network started on 2026-10-14. The
-# server-side bundle relayer that advances this contract runs L2 only.
-# See README.md Quick start for the default-user flow.
-#
-# Every earlier deploy was advanced from the previous shellnet network,
-# and nobody advances it now: `0xa1baf3f71eb9b146a3577c9d9d890f7a6932cb36`
-# (2026-10-02, deploy block 11828971),
-# `0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38` (2026-09-29, deploy block
-# 11807209) and `0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7`. They still
-# answer every getter. Preflight refuses `0x0F4F…` (an older verifier
-# stack) and, with the BRIDGE_DEPLOY_BLOCK below, the other two (their
-# anchors predate that block, so the window-heights read comes up short);
-# only a deploy block at or before the oldest anchor their windows still
-# hold (their own deploy block, for one) gets a burn that then times out
-# at stage 4b. Accounts from the previous network, such as a multisig
-# used as `--from`, do not exist on the current one.
-#
-# NODE-4011 moved this to `0x8545129b215B248944A3aE40f711F34CAb458644`
-# over a new AN-side eccUSDCBridge and rolled back the same day. That
-# deploy still exists and still answers every getter — which is exactly
-# why an address alone proves nothing. VERIFY BEFORE A RUN THAT COSTS
-# MONEY, because a bridge nobody advances takes the burn and then times
-# out at stage 4b:
-#
-#   cast call $BRIDGE_ADDRESS 'storedLastSeenBlockSeqNo()(uint64)' --rpc-url $RPC_URL
-#   TIP=$(cast block-number --rpc-url $RPC_URL)
-#   cast logs --address $BRIDGE_ADDRESS --from-block $((TIP - 10000)) \
-#     'BlockVerified(uint256,uint64,uint8,uint8)' --rpc-url $RPC_URL \
-#     | grep -E '^  blockNumber' | tail -3
-#
-# Bundles land ~437 Sepolia blocks apart (~87 min); a last event older
-# than that means this deploy is not the live one — check with the team
-# before blaming the daemon.
-#
-# Changing this line means changing USDC_BRIDGE_ACCOUNT_ID above with
-# it: a deploy is pinned to one AN-side bridge account, and the two are
-# checked against each other in preflight. A deploy also carries its own
-# treasury — `treasuryBalance` is a counter on the bridge itself, moved
-# only by `deposit`, so a plain USDC transfer to this address funds
-# nothing, and a switch does not bring the balance along. See README
-# Step 3.
-#
-# Advanced users who ran their own `deploy_bridge_bundle.sh` should
-# overwrite this with the `BRIDGE_ADDRESS` from their own
-# `L{1,2}_config/env` — see `docs/advanced_user_withdraw_runbook.md`
-# Step L1. L1 is testing-only; L2 is the production shape.
-#
-# Comment out to force the CLI to fail loudly ("missing required
-# argument BRIDGE_ADDRESS") instead of silently connecting to the wrong
-# bridge.
-BRIDGE_ADDRESS=0x5384f162aa1a80b7a03687e1a3188f67b1fffad5
-
-# Block the deploy above was created in: where the `LayerAnchorAppended`
-# scan the CLI runs (in preflight, then after coverage) stops when a window
-# is not covered yet. Unset means it may walk back to genesis. Changes
-# together with BRIDGE_ADDRESS; `--bridge-deploy-block` overrides it.
-BRIDGE_DEPLOY_BLOCK=11921366
+# Set both values for your fresh deployment. This build uses
+# deposit(uint256,bytes32) and requires eccUSDCBridge >= 1.11.0 for deposits;
+# earlier workchain-bearing EVM deployments cannot accept its deposit calls.
+# Keep USDC_BRIDGE_ACCOUNT_ID above paired with this EVM contract.
+# BRIDGE_ADDRESS=0x<new-AckiNackiBridge-address>
+# BRIDGE_DEPLOY_BLOCK=<new-bridge-deployment-block>
+# With no BRIDGE_ADDRESS, a fresh run refuses before requesting a transaction.
 # For a capped / rate-limited RPC (Alchemy's free tier: 10-block spans,
 # ~4 calls per second). The public default above needs neither, and it
 # serves the log history the read needs; see RPC_URL.

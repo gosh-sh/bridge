@@ -383,17 +383,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 let gloas_under_beacon = slot >= beacon_slot;
                 let gloas_under_contract = slot >= contract_slot;
                 if gloas_under_beacon || gloas_under_contract {
-                    let recovery = if self.state.owner_flip_done {
-                        format!(
-                            "Owner rotation is off, so setGloasForkSlot reverts 246. Recover with \
-                             updateCode(<current code>, abi.encode(uint64 {beacon_slot}))."
-                        )
-                    } else {
-                        format!(
-                            "Owner setGloasForkSlot to the beacon value {beacon_slot} before \
-                             proving."
-                        )
-                    };
+                    let recovery = format!(
+                        "Owner setGloasForkSlot to the beacon value {beacon_slot} (callable after \
+                         disableOwnerRotation)."
+                    );
                     return Err(TickOutcome::ProofFailed {
                         reason: format!(
                             "beacon Gloas slot {beacon_slot} != contract getGloasForkSlot \

@@ -14,20 +14,20 @@ pub const STEP_INSTANCE_LEN: usize = 11;
 pub const PUBLIC_INPUT_BYTES: usize = STEP_INSTANCE_LEN * 32;
 /// Index of `gloas_fork_slot` in the step public inputs.
 pub const STEP_GLOAS_FORK_SLOT_INDEX: usize = 10;
-/// Rotate PI: 12 accumulator limbs + current/next/period/gloas_fork_slot.
+/// Rotate PI: 12 accumulator limbs +
+/// current/next/period/gloas_fork_slot/attested_slot.
 pub const ROTATE_ACCUMULATOR_LIMBS: usize = 12;
-pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
+pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 5;
 /// Index of `period` in the rotate public inputs.
 pub const ROTATE_PERIOD_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 2;
 /// Index of `gloas_fork_slot` in the rotate public inputs.
 pub const ROTATE_GLOAS_FORK_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
+/// Index of `attested_slot` in the rotate public inputs.
+pub const ROTATE_ATTESTED_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
 /// `gloas_fork_slot` of a network that has not scheduled Gloas.
 pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 
 /// The contract holds a real Gloas slot, not "not scheduled" / unset.
-/// `disableOwnerRotation` while this is false and `isSet` is true freezes
-/// that pin: only `updateCode(<current code>, abi.encode(uint64 slot))`
-/// can change it. An unset slot can still be written once after the flip.
 pub fn gloas_is_scheduled(slot: u64, is_set: bool) -> bool {
     is_set && slot != GLOAS_NOT_SCHEDULED
 }
@@ -171,6 +171,7 @@ pub struct RotateProofBundle {
     pub public_inputs: Vec<u8>,
     pub proof: Vec<u8>,
     pub period: u64,
+    pub attested_slot: u64,
 }
 
 impl RotateProofBundle {
@@ -188,10 +189,17 @@ impl RotateProofBundle {
         }
         let off = ROTATE_PERIOD_INDEX * 32;
         let period = u64::from_le_bytes(public_inputs[off..off + 8].try_into().unwrap());
+        let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
+        let attested_slot = u64::from_le_bytes(
+            public_inputs[attested_off..attested_off + 8]
+                .try_into()
+                .unwrap(),
+        );
         Ok(Self {
             public_inputs,
             proof,
             period,
+            attested_slot,
         })
     }
 }
@@ -455,10 +463,13 @@ mod tests {
         let mut pi = vec![0u8; ROTATE_INSTANCE_LEN * 32];
         let off = ROTATE_PERIOD_INDEX * 32;
         pi[off..off + 8].copy_from_slice(&42u64.to_le_bytes());
+        let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
+        pi[attested_off..attested_off + 8].copy_from_slice(&16383u64.to_le_bytes());
         std::fs::write(dir.path().join("rotate_public_inputs.bin"), &pi).unwrap();
         std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0xCDu8; 4]).unwrap();
         let b = RotateProofBundle::from_dir(dir.path()).unwrap();
         assert_eq!(b.period, 42);
+        assert_eq!(b.attested_slot, 16383);
         assert_eq!(b.proof, vec![0xCD; 4]);
     }
 

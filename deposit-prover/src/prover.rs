@@ -914,7 +914,6 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         deposit_id: 0,
         sender: [0u8; 20],
         amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
-        an_workchain: 0,
         an_account: [0u8; 32],
         timestamp: 0,
         contract_address: [0u8; 20],
@@ -941,7 +940,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
     let mut log_buf = Vec::new();
     vec![0u8; 20].encode(&mut log_buf); // contract address
     log_buf.extend_from_slice(&topics_list); // topics (already has list header)
-    vec![0u8; 64].encode(&mut log_buf); // data (amount + timestamp)
+    vec![0u8; 96].encode(&mut log_buf); // data (amount + anAccount + timestamp)
     let mut log_list = Vec::new();
     alloy_rlp::Header {
         list: true,

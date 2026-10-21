@@ -148,7 +148,7 @@ contract CrossFnReentrantERC20 is MockERC20 {
     function _reenter() internal {
         if (target == CrossFnTarget.None) return;
         if (target == CrossFnTarget.Deposit) {
-            bridge.deposit(reenterAmount, int8(0), reenterAccount);
+            bridge.deposit(reenterAmount, reenterAccount);
         } else if (target == CrossFnTarget.VerifyBlock) {
             bridge.verifyBlock(
                 AckiNackiBridge.FinalizationType.Primary,

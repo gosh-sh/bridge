@@ -84,11 +84,10 @@ is never proved in-process: prove on n14 and `submit-rotate --state`
 anchor writer; L2s keep the owner path
 (`scripts/ursus/flip_deposit_to_light_client.md`). It needs
 `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`. Relayer keys must be the owner pubkey.
-It also refuses while `getGloasForkSlot` is unset or `u64::MAX`: after
-`disableOwnerRotation` only `updateCode` can change the slot. Pin the published
-slot with `set-gloas-fork-slot` first, or pass `--allow-unscheduled-gloas-flip`.
-`gloas-slot-user-cell --slot <n>` prints the `updateCode` user cell for that
-recovery (`docs/eth-light-client.md` §4.5).
+Pin the Gloas slot with `set-gloas-fork-slot` before proving (`256` until it
+is set). A later published date is the same call, including after the flip.
+`gloas-slot-user-cell --slot <n>` prints an `updateCode` user cell that
+carries the slot (`docs/eth-light-client.md` §4.5).
 
 Standalone crate (own `Cargo.lock`). Tests:
 `cd crates/eth-light-client-relayer && cargo test`.

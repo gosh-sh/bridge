@@ -185,7 +185,6 @@ impl FakeRpc {
             depositId: U256::from(id),
             sender: Address::repeat_byte(0x11),
             amount: U256::from(1_000 + id),
-            anWorkchain: 0,
             anAccount: B256::repeat_byte(0x33),
             timestamp: U256::from(1_700_000_000u64),
         };

@@ -139,14 +139,15 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 | `skipped` | parked after N failures | next deposit; manual finish (§3) | resets the count |
 | `error` | the tick itself failed (RPC down, state file unwritable) | retried with backoff | no |
 
-`an_pending` comes from three places:
+`an_pending` also covers temporary bridge and message refusals:
 
 - `finalizeDeposit` was not confirmed within the fixed 60-second confirm timeout
   (`AnSubmitConfig::confirm_timeout_secs`; no CLI flag);
 - it exited 0, but its voucher deploy and `confirmDeposit` were not both visible within
   that time (`AnInterfaceSubmitter::settle`);
-- the lane is paused, `ERR_PAUSED` (231). The daemon keeps retrying until the owner
-  unpauses.
+- the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235);
+- an external message was already recorded or expired (400 / 402). Observe the
+  voucher before retrying; this does not establish that its mint succeeded.
 
 Before proving, the daemon reads `isAcceptedBlockHash(chainId, blockHash)`
 on its configured AN token bridge. `--confirmations` controls Ethereum log
@@ -207,6 +208,10 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | 222 `ERR_UNSUPPORTED_SRC_CHAIN` | `finalizeDeposit` | `(chainId, source contract)` not allowlisted | owner: `setTrustedL1Bridge(chainId, l1Bridge, true)` |
 | 224 `ERR_UNKNOWN_BLOCK` | `finalizeDeposit` | the deposit's block hash is not an accepted anchor | confirm with `scripts/deposit_anchor_params.py --verify`, then admit it (`setAcceptedBlockHash` while owner anchors are on, otherwise the light client) |
 | 204 / 230 | `finalizeDeposit` | zero amount / zero recipient was proven | genuinely bad deposit; leave it parked |
+| 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | proven amount exceeds 50 USDC | contact the operator; old oversized transfers must settle before activating the new pair |
+| 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full | retried without counting a failed attempt; wait for withdrawals |
+| 400 / 402 | message header | identical recorded message / expired message | pending; observe the voucher before retrying |
+| 401 | message header | expiry is at least five minutes ahead of block time | use the matching client and check clock synchronization; this build caps finalization expiry at 240 seconds |
 | 9 | voucher deploy | the bridge's `_depositVoucherCode` predates the voucher ABI (the 2026-07-02 outage) | recompile and redeploy the bridge and voucher as a pair |
 | 51 | voucher deploy | already finalized | none; reported as `already_finalized` |
 

@@ -54,6 +54,9 @@ contract AckiNackiBridge {
     ///         global TVL limit (QC-A1-1 / QC-AN-J1).
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
+    uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
+    uint256 public constant MAX_BRIDGE_TVL = 10_000 * USDC_UNIT;
+
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -396,6 +399,8 @@ contract AckiNackiBridge {
     ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
     error TransferAmountMismatch();
     error DepositTooLarge();
+    error TransferTooLarge();
+    error TvlCapReached();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
@@ -774,7 +779,11 @@ contract AckiNackiBridge {
     function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+        if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
+        if (treasuryBalance > MAX_BRIDGE_TVL || amount > MAX_BRIDGE_TVL - treasuryBalance) {
+            revert TvlCapReached();
+        }
         uint256 credited = _pullExactUsdc(amount);
 
         uint256 depositId = depositCounter++;
@@ -1437,6 +1446,8 @@ contract AckiNackiBridge {
         if (address(bridgeWithdrawalVerifier) == address(0)) {
             revert WithdrawByProofDisabled();
         }
+
+        if (pub.amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {

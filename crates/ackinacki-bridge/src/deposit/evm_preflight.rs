@@ -5,7 +5,10 @@ use alloy_primitives::{Address, U256};
 use crate::{
     deposit::{
         args::Network,
-        evm::{read_allowance, read_balance, read_decimals, read_usdc, BlockTag, EvmRead},
+        evm::{
+            read_allowance, read_balance, read_decimals, read_usdc, read_volume_limits, BlockTag,
+            EvmRead,
+        },
     },
     errors::{CliError, CliResult},
 };
@@ -77,6 +80,32 @@ pub async fn run(
             None,
         ));
     }
+    let limits = read_volume_limits(evm, bridge).await.map_err(|e| {
+        refuse(
+            format!("{bridge}: required deposit volume-limit getters failed"),
+            Some(e),
+        )
+    })?;
+    let requested = U256::from(amount);
+    if requested > limits.max_transfer {
+        return Err(refuse(
+            format!(
+                "deposit amount {amount} micro-USDC exceeds MAX_TRANSFER_AMOUNT ({})",
+                limits.max_transfer
+            ),
+            None,
+        ));
+    }
+    if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
+        return Err(refuse(
+            format!(
+                "deposit would exceed MAX_BRIDGE_TVL ({} micro-USDC); outstanding is {}. Wait for \
+                 withdrawals and retry",
+                limits.max_tvl, limits.outstanding
+            ),
+            None,
+        ));
+    }
     let dec = read_decimals(evm, usdc)
         .await
         .map_err(|e| refuse(format!("{usdc}.decimals() failed"), Some(e)))?;
@@ -144,6 +173,7 @@ mod tests {
 
     fn healthy() -> FakeEvm {
         let f = FakeEvm::sepolia();
+        f.set_volume_limits(BRIDGE);
         f.codes
             .lock()
             .unwrap()
@@ -238,5 +268,70 @@ mod tests {
         run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transfer_ceiling_and_tvl_headroom_are_inclusive() {
+        let f = healthy();
+        f.set_call(
+            BRIDGE,
+            IDeposit::treasuryBalanceCall::SELECTOR,
+            U256::from(9_950_000_000u64).abi_encode().into(),
+        );
+        run(&f, Network::Sepolia, BRIDGE, 50_000_000, None)
+            .await
+            .unwrap();
+        let err = run(&f, Network::Sepolia, BRIDGE, 50_000_001, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("MAX_TRANSFER_AMOUNT"), "{err}");
+        f.set_call(
+            BRIDGE,
+            IDeposit::treasuryBalanceCall::SELECTOR,
+            U256::from(9_950_000_001u64).abi_encode().into(),
+        );
+        let err = run(&f, Network::Sepolia, BRIDGE, 50_000_000, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("MAX_BRIDGE_TVL"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn missing_or_malformed_limit_getters_refuse_before_wallet_use() {
+        for selector in [
+            IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR,
+            IDeposit::MAX_BRIDGE_TVLCall::SELECTOR,
+            IDeposit::treasuryBalanceCall::SELECTOR,
+        ] {
+            for malformed in [false, true] {
+                let f = healthy();
+                if malformed {
+                    f.set_call(BRIDGE, selector, Bytes::new());
+                } else {
+                    f.calls.lock().unwrap().remove(&(BRIDGE, selector));
+                }
+                let err = run(&f, Network::Sepolia, BRIDGE, 1, None)
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.exit_code(), crate::errors::ExitCode::PreflightRefused);
+                assert!(
+                    err.to_string().contains("volume-limit getters failed"),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_failure_while_reading_limits_never_skips_them() {
+        let f = healthy();
+        *f.calls_before_failing.lock().unwrap() = Some(1);
+        let err = run(&f, Network::Sepolia, BRIDGE, 1, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("volume-limit getters failed"),
+            "{err}"
+        );
     }
 }

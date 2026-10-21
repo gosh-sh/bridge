@@ -219,7 +219,7 @@ command itself:
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(uint256,bytes32)`
-   on EVM and `eccUSDCBridge` >= 1.12.0 with this build's deposit key on AN.
+   on EVM and `eccUSDCBridge` >= 1.13.0 with this build's deposit key on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -1551,7 +1551,7 @@ record.
   the operator can return the USDC.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
   The operator pays it out (`mintAndSendBridged`) once, for this deposit's
-  recipient and amount. That call credits bridged inventory the way
+  recipient, amount and source `chainId`. That call credits bridged inventory the way
   `confirmDeposit` would have; ordinary `mintAndSend` does not. The call
   is not bound to the deposit id, so a second recovery (or a mistyped
   amount) invents headroom the Ethereum treasury does not hold.
@@ -1710,7 +1710,7 @@ already. Independently of that minimum, preflight also refuses a bridge
 older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.12.0`) gets a warning.
+than the newest this build was checked against (`1.13.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

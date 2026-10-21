@@ -83,7 +83,7 @@ covering one genre for one audience. The archive exists so that step loses no kn
 code and were wrong in the old docs:
 
 * Deposits take **USDC** via `transferFrom`, signature `deposit(uint256,bytes32)`, cap
-  `type(uint64).max`. Any archive text with `msg.value`, ETH deposits or a `100 ether` cap is dead.
+  50 USDC (with `type(uint64).max` retained as a width guard). Any archive text with `msg.value`, ETH deposits or a `100 ether` cap is dead.
   The contract has no `receive()`/`fallback()` — it cannot hold native ETH at all.
 * Verification is **SHPLONK aggregator Yul** for four circuits. 
 * BK-set rotation **shipped** as `applyBkSetUpdate` (16-leaf, depth-4). Archive text calling it

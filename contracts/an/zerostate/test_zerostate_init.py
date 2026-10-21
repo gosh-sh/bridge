@@ -10,6 +10,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import zerostate_init  # noqa: E402
@@ -82,6 +83,9 @@ def context(run, encoder_tvc_path):
 
 class InitializeTest(unittest.TestCase):
     def setUp(self):
+        configured = patch.object(zerostate_init, "L1_BRIDGE", "0x" + "42" * 20)
+        configured.start()
+        self.addCleanup(configured.stop)
         fd, self.encoder_tvc = tempfile.mkstemp(suffix=".tvc")
         with os.fdopen(fd, "wb") as f:
             f.write(ENCODER_TVC_CONTENT)
@@ -99,6 +103,14 @@ class InitializeTest(unittest.TestCase):
         run = FakeRun()
         zerostate_init.initialize(self.context(run))
         return run.commands
+
+    def test_missing_or_invalid_l1_address_fails_before_writing_state(self):
+        for value in (None, "", "0x" + "00" * 20, "not-an-address"):
+            run = FakeRun()
+            with patch.object(zerostate_init, "L1_BRIDGE", value):
+                with self.assertRaisesRegex(SystemExit, "BRIDGE_ZS_L1_BRIDGE"):
+                    zerostate_init.initialize(self.context(run))
+            self.assertEqual(run.commands, [])
 
     def test_commands_run_in_order(self):
         commands = self.run_initialize()
@@ -199,19 +211,19 @@ class InitializeTest(unittest.TestCase):
         self.assertIn("/tmp/stub.tvc 1000000000000 0:" + "1a" * 32, add)
         self.assertIn("0x" + "00" * 32, add)
 
-    def test_l1_parameters_default_to_sepolia(self):
+    def test_chain_defaults_to_sepolia_and_address_is_explicit(self):
         params = params_argument(self.run_initialize()[2])
         self.assertEqual(params["chainId"], "11155111")
-        self.assertEqual(params["l1Bridge"], "0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb")
+        self.assertEqual(params["l1Bridge"], "0x" + "42" * 20)
 
     def test_l1_parameters_come_from_the_environment(self):
         os.environ["BRIDGE_ZS_L1_CHAIN_ID"] = "1"
-        os.environ["BRIDGE_ZS_L1_BRIDGE"] = "0xfeed"
+        os.environ["BRIDGE_ZS_L1_BRIDGE"] = "0x" + "fe" * 20
         try:
             reloaded = __import__("importlib").reload(zerostate_init)
             run = FakeRun()
             reloaded.initialize(self.context(run))
-            self.assertIn("0xfeed", run.commands[2])
+            self.assertIn("0x" + "fe" * 20, run.commands[2])
         finally:
             del os.environ["BRIDGE_ZS_L1_CHAIN_ID"], os.environ["BRIDGE_ZS_L1_BRIDGE"]
             __import__("importlib").reload(zerostate_init)

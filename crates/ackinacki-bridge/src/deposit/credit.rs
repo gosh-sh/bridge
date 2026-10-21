@@ -448,9 +448,9 @@ pub async fn confirm(
                          inventory the way confirmDeposit would have; ordinary mintAndSend does \
                          not. It is not bound to this deposit: paying twice or the wrong amount \
                          invents headroom the Ethereum treasury does not hold. Match the aborted \
-                         deposit's recipient and amount, once. Give them depositId {}, {} USDC \
-                         units to account {:#x}, EVM bridge {:#x}, chain {}, operation {op_id}, \
-                         Acki Nacki transaction {bridge_tx}",
+                         deposit's recipient, amount and source chainId, once. Give them \
+                         depositId {}, {} USDC units to account {:#x}, EVM bridge {:#x}, chain \
+                         {}, operation {op_id}, Acki Nacki transaction {bridge_tx}",
                         id.deposit_id,
                         id.amount,
                         B256::from(id.account),

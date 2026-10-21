@@ -74,7 +74,7 @@ def encoded_types(path: pathlib.Path) -> list[str]:
         tokens = part.split()
         if len(tokens) >= 2:
             types[tokens[-1]] = normalize(" ".join(tokens[:-1]))
-    for decl in re.finditer(r"^\s*(mapping\s*\([^)]*\)|TvmCell|uint\d*|int\d*|address|bool)\s+(\w+)\s*;",
+    for decl in re.finditer(r"^\s*(mapping\s*\([^;]*\)|TvmCell|uint\d*|int\d*|address|bool)\s+(\w+)\s*;",
                             src, flags=re.MULTILINE):
         types[decl.group(2)] = normalize(decl.group(1))
     encode = re.search(r"abi\.encode\s*\((.*?)\)\s*;", src, flags=re.DOTALL)

@@ -28,7 +28,10 @@ contract BridgeZerostateData {
         // passthrough, so onCodeUpgrade decodes one shape on both paths. Empty
         // here: the zerostate carries the voucher code in `depositVoucherCode`.
         TvmCell userCell;
+        mapping(uint256 => uint128) outstandingByChain;
+        mapping(uint32 => mapping(uint256 => bool)) messages;
         return abi.encode(pubkey, usdcWallet, totalMinted, mintNonce, mintAccumulatorNonce,
-                          totalMintedBridgeByToken, totalBurnedBridgeByToken, depositVoucherCode, userCell);
+                          totalMintedBridgeByToken, totalBurnedBridgeByToken, depositVoucherCode,
+                          userCell, outstandingByChain, messages);
     }
 }

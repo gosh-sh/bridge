@@ -132,7 +132,9 @@ There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface c
 | Constant | Value | Line | Meaning |
 |---|---|---:|---|
 | `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
-| `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | Per-tx deposit cap. Chosen so the amount fits the AN `USDCBridge` mint path (`fr[2]` as `uint64`), **not** as a TVL limit. |
+| `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | First deposit width guard (`DepositTooLarge`); the product limit below is lower. |
+| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 57 | 50 USDC per deposit or withdrawal (`TransferTooLarge`). |
+| `MAX_BRIDGE_TVL` | `10_000 * USDC_UNIT` | 58 | Per-contract cap on `treasuryBalance`, including Aave principal (`TvlCapReached`). |
 | `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
 | `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
 | `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
@@ -262,13 +264,15 @@ function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNo
 Sequence (`:774-785`):
 
 1. `amount != 0` else `InvalidAmount`.
-2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`.
+2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`, then
+   `amount <= MAX_TRANSFER_AMOUNT` else `TransferTooLarge`.
 3. `anAccount != 0` else `InvalidAnAccount` — an EVM address is not a valid AN recipient, so the
    256-bit TVM destination is supplied explicitly.
-4. `_pullExactUsdc(amount)` calls `usdc.transferFrom`; a `false` return ⇒ `TransferFromFailed`.
+4. `treasuryBalance + amount <= MAX_BRIDGE_TVL` else `TvlCapReached`, before any token call.
+5. `_pullExactUsdc(amount)` calls `usdc.transferFrom`; a `false` return ⇒ `TransferFromFailed`.
    The received balance delta must equal `amount`, else `TransferAmountMismatch` (`:1538-1547`).
-5. `depositId = depositCounter++`, `treasuryBalance += credited`.
-6. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp)`.
+6. `depositId = depositCounter++`, `treasuryBalance += credited`.
+7. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp)`.
 
 Notes that matter downstream:
 
@@ -296,6 +300,13 @@ Notes that matter downstream:
 ---
 
 ## 7. AN → ETH
+
+`withdrawByProof` also refuses `pub.amount > MAX_TRANSFER_AMOUNT` with
+`TransferTooLarge` before proof verification or nullifier consumption. The
+10,000 USDC cap applies to each funded L1 bridge separately. Pair it with AN
+1.13.0 chain accounting and complete old transfers before activating a fresh
+pair; see [the deployment procedure](../contracts/an/README.md#deployment).
+No EVM storage slots or deposit/withdrawal argument shapes change with these limits.
 
 ### 7.1 `verifyBlock` — advance the AN state commitment
 
@@ -693,6 +704,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 ### 11.3 Custom errors
 
 Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositTooLarge`,
+`TransferTooLarge`, `TvlCapReached`,
 `InvalidAnAccount`, `InsufficientTreasury`, `InvalidRecipient`, `InvalidOracle`,
 `InvalidAaveAddress`, `NotOwner`, `Reentrancy`, `AaveDisabled`, `ReserveBpsTooHigh`,
 `NothingToSupply`, `AaveWithdrawFailed`, `AaveSupplyFailed`, `NothingToWriteOff`,

@@ -2660,6 +2660,7 @@ mod withdraw_scan_tests {
     struct StubBridge {
         nullifier_used: bool,
         dry_run_reason: Option<String>,
+        fail_first_only: bool,
         submit_reason: Option<(String, bool)>,
         calls: Mutex<Calls>,
     }
@@ -2686,7 +2687,11 @@ mod withdraw_scan_tests {
             _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
         ) -> Result<DryRunOutcome, RelayerError> {
-            self.calls.lock().unwrap().dry_run += 1;
+            let mut calls = self.calls.lock().unwrap();
+            calls.dry_run += 1;
+            if self.fail_first_only && calls.dry_run > 1 {
+                return Ok(DryRunOutcome::WouldSucceed);
+            }
             match &self.dry_run_reason {
                 None => Ok(DryRunOutcome::WouldSucceed),
                 Some(reason) => Ok(DryRunOutcome::WouldRevert {
@@ -2700,7 +2705,13 @@ mod withdraw_scan_tests {
             _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
         ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-            self.calls.lock().unwrap().submit += 1;
+            let mut calls = self.calls.lock().unwrap();
+            calls.submit += 1;
+            if self.fail_first_only && calls.submit > 1 {
+                return Ok(WithdrawSubmitOutcome::Paid {
+                    tx_hash: alloy::primitives::B256::ZERO,
+                });
+            }
             match &self.submit_reason {
                 None => Ok(WithdrawSubmitOutcome::Paid {
                     tx_hash: alloy::primitives::B256::ZERO,
@@ -2746,6 +2757,34 @@ mod withdraw_scan_tests {
     fn permanent_selector_hex() -> String {
         let s = alloy::primitives::keccak256(b"WithdrawalProofRejected()");
         format!("0x{}", hex::encode(&s.0[..4]))
+    }
+
+    #[tokio::test]
+    async fn transfer_cap_revert_does_not_block_the_next_payout() {
+        let selector = alloy::primitives::keccak256("TransferTooLarge()");
+        let reason = format!("execution reverted: 0x{}", hex::encode(&selector[..4]));
+        let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
+        for dry_run in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let first = write_valid_proof_fixture(tmp.path(), 0);
+            let next = write_valid_proof_fixture(tmp.path(), 1);
+            let bridge = StubBridge {
+                dry_run_reason: Some(reason.clone()),
+                submit_reason: Some((reason.clone(), permanent)),
+                fail_first_only: true,
+                ..Default::default()
+            };
+            let mut state = WithdrawScanState::default();
+            assert!(
+                !withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(state.parked_permanent, 1);
+            assert!(state.done.contains(&first));
+            assert!(state.done.contains(&next));
+            assert_eq!(state.paid, if dry_run { 0 } else { 1 });
+        }
     }
 
     #[tokio::test]

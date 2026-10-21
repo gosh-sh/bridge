@@ -36,10 +36,15 @@ the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
    `submitUpdate` / `submitRotate` revert 256 until it is set:
    `eth-lc-relayer set-gloas-fork-slot --slot 11296768` on Sepolia,
    `--slot 18446744073709551615` on mainnet while Gloas is unscheduled.
-   The daemon does not call this itself.
+   The daemon does not call this itself. A later published date is the
+   same `set-gloas-fork-slot` call, including after `disableOwnerRotation`.
+   The daemon stalls with `ProofFailed` and names `setGloasForkSlot`
+   rather than proving into 255. `getGloasForkSlot()` returns
+   `(slot, isSet)`. Slot table: `docs/eth-light-client.md` §4.5.
 4. Set `AN_USDC_BRIDGE` + `AN_USDC_ABI_PATH` (slim ABI at
    `crates/eth-light-client-relayer/abi/USDCBridge.abi.json`). `--flip-owner`
-   refuses to start without them.
+   refuses to start without them. `--flip-owner` is not used in
+   production; the owner keys stay until the bridge is mature.
 5. Run `eth-lc-relayer daemon --flip-owner` (`--features live-submit`, no
    `--dry-run` / `--mock-prove` / `--no-rotate`). After the first accepted
    `submitUpdate` it calls, in order:
@@ -53,7 +58,8 @@ EthBeaconLightClient.disableOwnerRotation()
 ```
 
 If the bridge's client for the chain the light client reports does not match
-`AN_LIGHT_CLIENT`, or either getter fails, the flip sends nothing and the daemon retries after the next
+`AN_LIGHT_CLIENT`, or `getConfig` / `getLightClient` fails, the flip sends
+nothing and the daemon retries after the next
 accepted update. The state file records `owner_flip_done` so a restart does not
 resend. One-shot without waiting for a tick:
 

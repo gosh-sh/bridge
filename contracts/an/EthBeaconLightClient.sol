@@ -652,12 +652,11 @@ contract EthBeaconLightClient {
 
     /// @notice Sets the Gloas fork slot proofs must have been made for
     ///         (`GLOAS_FORK_EPOCH × SLOTS_PER_EPOCH`; `type(uint64).max` if the
-    ///         network has not scheduled Gloas).
-    /// @dev Allowed while unset or while owner rotation is still enabled, the
-    ///      window in which the owner key is trusted for the committee anyway.
-    ///      Afterwards only `updateCode` can change it.
+    ///         network has not scheduled Gloas). Owner-callable for the
+    ///         contract's lifetime, including after `disableOwnerRotation`.
+    /// @dev Freezing this field would not shrink the owner's power:
+    ///      `updateCode` stays `onlyOwnerPubkey` with no other gate.
     function setGloasForkSlot(uint64 gloasForkSlot) public onlyOwnerPubkey accept {
-        require(!_gloasForkSlotSet || _ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();
         _gloasForkSlot = gloasForkSlot;
         _gloasForkSlotSet = true;

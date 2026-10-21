@@ -6,13 +6,15 @@
 //! default (`--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
 //! Epoch ancestry: [`ancestry`]
 //! (off-chain) + [`header_rlp`] + `submitAncestry` (on-chain writer).
-//! `finalizeDeposit` flip, only with `--flip-owner`: after the first accepted
-//! update the daemon checks the bridge's `getLightClient(l1ChainId)` for the
-//! chain its own client reports against `AN_LIGHT_CLIENT`, then calls
-//! `disableOwnerAnchorsOn(l1ChainId)` + `disableOwnerRotation`. With `ETH_RPC_URL` each accepted tick then
-//! `rePushAnchor`s the checkpoint and runs `link_headers` locally on the span
-//! back to the previous checkpoint. On-chain `submitAncestry` is
-//! `--submit-ancestry` (default off).
+//! `finalizeDeposit` flip, only with `--flip-owner`. After the first
+//! accepted update it checks the bridge's `getLightClient(l1ChainId)` for
+//! the chain its own client reports against `AN_LIGHT_CLIENT`, then calls
+//! `disableOwnerAnchorsOn(l1ChainId)` + `disableOwnerRotation`. A Gloas
+//! pin of `u64::MAX` is a setting (`setGloasForkSlot`), not a flip gate.
+//! With
+//! `ETH_RPC_URL` each accepted tick then `rePushAnchor`s the checkpoint and
+//! runs `link_headers` locally on the span back to the previous checkpoint.
+//! On-chain `submitAncestry` is `--submit-ancestry` (default off).
 
 pub mod an_config;
 pub mod ancestry;
@@ -45,6 +47,7 @@ pub use submitter::{
     MockAnSubmitter, SubmitOutcome,
 };
 pub use types::{
-    pack_step_public_inputs, parse_finality_update, BeaconChainParams, FinalityUpdate,
-    RotateProofBundle, StepProofBundle, SLOTS_PER_SYNC_PERIOD, STEP_INSTANCE_LEN,
+    gloas_is_scheduled, pack_step_public_inputs, parse_finality_update, BeaconChainParams,
+    FinalityUpdate, RotateProofBundle, StepProofBundle, GLOAS_NOT_SCHEDULED, SLOTS_PER_SYNC_PERIOD,
+    STEP_INSTANCE_LEN,
 };

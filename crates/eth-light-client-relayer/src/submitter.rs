@@ -49,12 +49,13 @@ pub trait AnSubmitter: Send + Sync {
     /// [`anchor_key_hex`] re-packs it into the stored key at the ABI boundary.
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
-    /// Owner flip: take the chain id from the light client's own
-    /// `getConfig`, check the bridge's `getLightClient(l1ChainId)` against
+    /// Owner flip: take the chain id from the light client's own `getConfig`,
+    /// check the bridge's `getLightClient(l1ChainId)` against
     /// `AN_LIGHT_CLIENT`, then `disableOwnerAnchorsOn(chainId)` (USDCBridge)
     /// unless `isOwnerAnchorsEnabled(chainId)` is already false, then
     /// `disableOwnerRotation` (EthBeaconLightClient). Rejected without a
-    /// USDCBridge client. Idempotent.
+    /// USDCBridge client. Idempotent. Gloas is a setting
+    /// (`setGloasForkSlot`), not a flip precondition.
     async fn flip_owner(&self) -> Result<SubmitOutcome, RelayerError>;
 
     /// Owner `setCommitteeCommitment(commitment, period)`: the
@@ -68,9 +69,10 @@ pub trait AnSubmitter: Send + Sync {
         period: u64,
     ) -> Result<SubmitOutcome, RelayerError>;
 
-    /// Owner `setGloasForkSlot(slot)`. Required once after deploy / after
+    /// Owner `setGloasForkSlot(slot)`. Required after deploy / after
     /// `updateCode` with an empty user cell; until it runs, every
-    /// `submitUpdate` / `submitRotate` reverts 256.
+    /// `submitUpdate` / `submitRotate` reverts 256. Mainnet has to be pinned
+    /// again once Gloas is scheduled.
     async fn set_gloas_fork_slot(&self, slot: u64) -> Result<SubmitOutcome, RelayerError>;
 
     /// `(gloasForkSlot, isSet)` from `getGloasForkSlot`. The daemon proves
@@ -81,6 +83,9 @@ pub trait AnSubmitter: Send + Sync {
     /// `submit-rotate` the daemon reads this so the next tick submits a
     /// step instead of staying in `RotateRequired`.
     async fn get_committee_period(&self) -> Result<u64, RelayerError>;
+
+    /// `getHead().finalizedSlot`.
+    async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -135,6 +140,7 @@ struct MockInner {
     gloas_fork_slot: u64,
     gloas_fork_slot_set: bool,
     gloas_gets: u32,
+    gloas_get_fails_from: Option<u32>,
 }
 
 impl MockAnSubmitter {
@@ -160,6 +166,7 @@ impl MockAnSubmitter {
                 gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
                 gloas_fork_slot_set: true,
                 gloas_gets: 0,
+                gloas_get_fails_from: None,
             }),
         }
     }
@@ -175,6 +182,12 @@ impl MockAnSubmitter {
     /// manual `submit-rotate` already landed.
     pub fn set_committee_period(&self, period: u64) {
         self.inner.lock().expect("poisoned").period = Some(period);
+    }
+
+    /// `getGloasForkSlot` errors from the `n`-th call on (1-based). A tick
+    /// reads it once to pin the proof and once more before the owner flip.
+    pub fn fail_gloas_gets_from(&self, n: u32) {
+        self.inner.lock().expect("poisoned").gloas_get_fails_from = Some(n);
     }
 
     pub fn gloas_gets(&self) -> u32 {
@@ -431,11 +444,23 @@ impl AnSubmitter for MockAnSubmitter {
     async fn get_gloas_fork_slot(&self) -> Result<(u64, bool), RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.gloas_gets += 1;
+        if inner
+            .gloas_get_fails_from
+            .is_some_and(|n| inner.gloas_gets >= n)
+        {
+            return Err(RelayerError::AckiNacki(
+                "getGloasForkSlot: transport error".into(),
+            ));
+        }
         Ok((inner.gloas_fork_slot, inner.gloas_fork_slot_set))
     }
 
     async fn get_committee_period(&self) -> Result<u64, RelayerError> {
         Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
+    }
+
+    async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
+        Ok(self.inner.lock().expect("poisoned").head_slot.unwrap_or(0))
     }
 
     async fn set_committee_commitment(
@@ -529,6 +554,7 @@ mod set_committee_tests {
     #[tokio::test]
     async fn mock_set_committee_refused_after_flip() {
         let mock = MockAnSubmitter::accepting();
+        mock.set_gloas_fork(1, true);
         assert!(matches!(
             mock.set_committee_commitment([1; 32], 7).await.unwrap(),
             SubmitOutcome::Accepted { .. }
@@ -581,6 +607,7 @@ mod ancestry_submit_tests {
     #[tokio::test]
     async fn mock_flip_owner_drops_owner_writers() {
         let mock = MockAnSubmitter::accepting();
+        mock.set_gloas_fork(1, true);
         assert!(mock.owner_rotation_enabled());
         match mock.flip_owner().await.unwrap() {
             SubmitOutcome::Accepted {
@@ -932,6 +959,16 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .map_err(RelayerError::from)?;
         json_u64(v.get("committeePeriod"))
             .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))
+    }
+
+    async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getHead", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        json_u64(v.get("finalizedSlot"))
+            .ok_or_else(|| RelayerError::other("getHead: missing finalizedSlot"))
     }
 }
 
@@ -1357,6 +1394,10 @@ mod flip_owner_tests {
     /// whether the owner may still write there.
     fn script(client_of_chain: &str, owner_anchors_enabled: bool) -> RecordingClient {
         RecordingClient::new(Ok(json!({})))
+            .getter(
+                "getGloasForkSlot",
+                Ok(json!({ "gloasForkSlot": 11_296_768u64, "isSet": true })),
+            )
             .getter("getConfig", Ok(lc_config(CHAIN)))
             .getter(
                 "getLightClient",
@@ -1473,7 +1514,7 @@ mod flip_owner_tests {
             s.flip_owner().await.unwrap(),
             SubmitOutcome::Rejected { .. }
         ));
-        assert_eq!(client.calls(), vec![call(lc(), "getConfig")]);
+        assert_eq!(client.calls(), vec![call(lc(), "getConfig"),]);
     }
 
     #[tokio::test]
@@ -1559,6 +1600,29 @@ mod flip_owner_tests {
             call(lc(), "getConfig"),
             call(bridge(), "getLightClient"),
         ]);
+    }
+
+    #[tokio::test]
+    async fn unscheduled_gloas_still_flips() {
+        let (s, client) = submitter(
+            script(&lc(), true).getter(
+                "getGloasForkSlot",
+                Ok(json!({
+                    "gloasForkSlot": crate::types::GLOAS_NOT_SCHEDULED.to_string(),
+                    "isSet": true
+                })),
+            ),
+            true,
+        );
+        assert!(matches!(
+            s.flip_owner().await.unwrap(),
+            SubmitOutcome::Accepted { .. }
+        ));
+        assert!(
+            !client.calls().iter().any(|(_, f)| f == "getGloasForkSlot"),
+            "{:?}",
+            client.calls()
+        );
     }
 
     #[tokio::test]

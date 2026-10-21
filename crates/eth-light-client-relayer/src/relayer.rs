@@ -350,9 +350,13 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// `GLOAS_FORK_EPOCH` that the contract does not hold would otherwise
     /// spend a full step prove and come back 255. An update that is still
     /// Electra under both values proceeds with the contract slot.
-    async fn pin_gloas_fork_slot(&self, update: &mut FinalityUpdate) -> Result<(), TickOutcome> {
+    async fn pin_gloas_fork_slot(
+        &self,
+        update: &mut FinalityUpdate,
+    ) -> Result<Option<u64>, TickOutcome> {
+        let beacon_slot = update.chain.map(|c| c.gloas_fork_slot);
         if self.config.pin_fork_slot_from_beacon {
-            return Ok(());
+            return Ok(beacon_slot);
         }
         let (contract_slot, is_set) = match self.submitter.get_gloas_fork_slot().await {
             Ok(v) => v,
@@ -375,11 +379,15 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 let gloas_under_beacon = slot >= beacon_slot;
                 let gloas_under_contract = slot >= contract_slot;
                 if gloas_under_beacon || gloas_under_contract {
+                    let recovery = format!(
+                        "Owner setGloasForkSlot to the beacon value {beacon_slot} (callable after \
+                         disableOwnerRotation)."
+                    );
                     return Err(TickOutcome::ProofFailed {
                         reason: format!(
                             "beacon Gloas slot {beacon_slot} != contract getGloasForkSlot \
                              {contract_slot}; update slot {slot} would prove against the wrong \
-                             fork. Owner setGloasForkSlot to the beacon value before proving."
+                             fork. {recovery}"
                         ),
                     });
                 }
@@ -395,7 +403,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         if let Some(chain) = update.chain.as_mut() {
             chain.gloas_fork_slot = contract_slot;
         }
-        Ok(())
+        Ok(beacon_slot)
     }
 
     fn mark_rotate_in_flight(&mut self, period: u64) -> Result<(), RelayerError> {
@@ -976,6 +984,7 @@ mod tests {
         cfg.owner_hop = true;
         cfg.flip_owner = true;
         let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_gloas_fork(1, true);
         let p = SLOTS_PER_SYNC_PERIOD;
         let mut r = Relayer::new(
             cfg,
@@ -1061,6 +1070,7 @@ mod tests {
         cfg.enable_rotate = false;
         cfg.flip_owner = true;
         let mock = Arc::new(MockAnSubmitter::rejecting_flip());
+        mock.set_gloas_fork(1, true);
         let mut r = Relayer::new(
             cfg,
             Arc::new(InMemoryBeaconSource::new(vec![

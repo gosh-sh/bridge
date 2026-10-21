@@ -7,8 +7,11 @@
 //! - `submit-one` / `submit-rotate` / `flip-owner` — send to AN
 //! - `set-committee` — owner `setCommitteeCommitment` from a proven bundle
 //!   (weak-subjectivity bootstrap / manual hop while `--no-rotate`)
-//! - `set-gloas-fork-slot` — owner `setGloasForkSlot`; required once after
-//!   deploy or `submitUpdate` / `submitRotate` revert 256
+//! - `set-gloas-fork-slot` — owner `setGloasForkSlot`; required after deploy
+//!   (and again on mainnet once Gloas is scheduled) or `submitUpdate` /
+//!   `submitRotate` revert 256
+//! - `gloas-slot-user-cell` — print the `updateCode` user cell that pins the
+//!   Gloas fork slot, as the base64 BOC `tvm-cli callx` takes
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
@@ -135,6 +138,14 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
+    /// Print the `updateCode` user cell that sets the Gloas fork slot: one
+    /// cell holding `slot` as 64 bits, which `onCodeUpgrade` reads with
+    /// `load(uint64)`. Output is the base64 BOC `tvm-cli callx` takes for a
+    /// `cell` argument. Offline; sends nothing.
+    GloasSlotUserCell {
+        #[arg(long)]
+        slot: u64,
+    },
     /// Submit `submitRotate` from a `rotate_tree_n8` EMIT_VKBLOB directory.
     /// Records the period in `--state` so a stopped daemon resumes; a
     /// running daemon reads `getCommitteeState` on the next tick.
@@ -186,11 +197,11 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
-    /// Owner flip: check `getLightClient(l1ChainId)`, then
-    /// `disableOwnerAnchorsOn(chainId)` + `disableOwnerRotation`. Relayer keys
-    /// must be the owner pubkey. Afterwards the light client is the only
-    /// anchor writer, and it anchors one checkpoint block per epoch and no
-    /// L2.
+    /// Owner flip: `getLightClient(l1ChainId)`, then
+    /// `disableOwnerAnchorsOn(chainId)` + `disableOwnerRotation`. Relayer
+    /// keys must be the owner pubkey. Afterwards the light client is the
+    /// only anchor writer, and it anchors one checkpoint block per epoch
+    /// and no L2. Gloas is a setting (`set-gloas-fork-slot`), not a gate.
     FlipOwner {
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
@@ -385,6 +396,12 @@ async fn main() -> anyhow::Result<()> {
                 an_sender,
             )
             .await
+        },
+        Cmd::GloasSlotUserCell {
+            slot,
+        } => {
+            println!("{}", gloas_slot_user_cell(slot)?);
+            Ok(())
         },
         Cmd::SubmitRotate {
             bundle_dir,
@@ -631,6 +648,67 @@ async fn set_committee(
     st.save(&state)?;
     info!(state = %state.display(), period, "state file records the committee period");
     Ok(())
+}
+
+#[cfg(not(feature = "live-submit"))]
+fn gloas_slot_user_cell(_slot: u64) -> anyhow::Result<String> {
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+fn gloas_slot_user_cell(slot: u64) -> anyhow::Result<String> {
+    use tvm_client::{
+        boc::{encode_boc, BuilderOp, ParamsOfEncodeBoc},
+        ClientConfig, ClientContext,
+    };
+
+    let context = Arc::new(
+        ClientContext::new(ClientConfig::default())
+            .map_err(|e| anyhow::anyhow!("tvm client context: {e}"))?,
+    );
+    let encoded = encode_boc(context, ParamsOfEncodeBoc {
+        // A string: `serde_json::Value::from(u64)` above `i64::MAX` is not
+        // read as an integer by `encode_boc`.
+        builder: vec![BuilderOp::Integer {
+            size: 64,
+            value: serde_json::Value::from(slot.to_string()),
+        }],
+        boc_cache: None,
+    })
+    .map_err(|e| anyhow::anyhow!("encode user cell: {e}"))?;
+    Ok(encoded.boc)
+}
+
+#[cfg(all(test, feature = "live-submit"))]
+mod gloas_slot_user_cell_tests {
+    use super::*;
+
+    fn decoded_slot(boc: &str) -> u64 {
+        use tvm_client::{
+            abi::{decode_boc, AbiParam, ParamsOfDecodeBoc},
+            ClientConfig, ClientContext,
+        };
+
+        let context = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let decoded = decode_boc(context, ParamsOfDecodeBoc {
+            params: vec![AbiParam {
+                name: "slot".into(),
+                param_type: "uint64".into(),
+                ..Default::default()
+            }],
+            boc: boc.to_string(),
+            allow_partial: false,
+        })
+        .unwrap();
+        decoded.data["slot"].as_str().unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn user_cell_holds_exactly_the_slot() {
+        for slot in [0u64, 11_296_768, u64::MAX] {
+            assert_eq!(decoded_slot(&gloas_slot_user_cell(slot).unwrap()), slot);
+        }
+    }
 }
 
 #[cfg(not(feature = "live-submit"))]

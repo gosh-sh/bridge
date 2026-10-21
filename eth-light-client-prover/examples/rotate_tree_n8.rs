@@ -12,7 +12,7 @@
 //!        │  ROOT: RotateAggregationCircuit — fold 2 L2 + committee glue
 //!   1 ×  ▼  (8 subtree roots surface as prev[12..]; SHA top → merkle branch
 //!           gindex 87 | 2946 → Poseidon commit; emit [acc12, current, next, period,
-//!           gloas_fork_slot])
+//!           gloas_fork_slot, attested_slot])
 //! ```
 //!
 //! The 8 leaves are **distinct** (`shard_{0..7}_*` from `export_shard_snark`):
@@ -461,17 +461,22 @@ fn main() -> anyhow::Result<()> {
     fs::write(tree_out.join("root_instances.bin"), &inst_bytes)?;
     println!("saved root.snark ({} B) + root_instances.bin to {}\n", root.proof().len(), tree_out.display());
 
-    // rotate PIs sit after the 12 accumulator limbs: [current, next, period].
+    // rotate PIs sit after the 12 accumulator limbs:
+    // [current, next, period, gloas_fork_slot, attested_slot].
     let pis = &root.instances[0];
     let hexbe = |f: &Fr| hex::encode(f.to_bytes().iter().rev().copied().collect::<Vec<u8>>());
-    let (current, next, period) = (
+    let (current, next, period, gloas, attested) = (
         pis[NUM_ACCUMULATOR_INSTANCES],
         pis[NUM_ACCUMULATOR_INSTANCES + 1],
         pis[NUM_ACCUMULATOR_INSTANCES + 2],
+        pis[NUM_ACCUMULATOR_INSTANCES + 3],
+        pis[NUM_ACCUMULATOR_INSTANCES + 4],
     );
     println!("rotate PIs: current_commit = 0x{}", hexbe(&current));
     println!("            next_commit    = 0x{}", hexbe(&next));
     println!("            period         = 0x{}", hexbe(&period));
+    println!("            gloas_fork     = 0x{}", hexbe(&gloas));
+    println!("            attested_slot  = 0x{}", hexbe(&attested));
 
     // ---- EMIT (opcode): Blake2b outer proof + ROTATE_VK_BLOB ----------------
     if emit_vkblob {
@@ -547,7 +552,7 @@ fn main() -> anyhow::Result<()> {
         "Full N=8 committee proved via 2-to-1 tree at k={k} (8 shards → 4 L1 → 2 L2 → 1 root).\n\
          Root folded 2 accumulator-carrying L2 snarks{}, surfaced all 8 subtree roots,\n\
          ran committee glue (SHA top → merkle branch gindex 87|2946 → Poseidon commit), and\n\
-         emitted rotate PIs [current, next, period] after the 12 accumulator limbs\n\
+         emitted rotate PIs [current, next, period, gloas_fork_slot, attested_slot] after the 12 accumulator limbs\n\
          (root = {root_inst} inst). Peak RSS from `/usr/bin/time -v` — NOT the k=23 monolith.",
         if bound_current { " + 1 step snark (current_commit BOUND to its committee_commitment)" } else { "" }
     );

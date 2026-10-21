@@ -45,6 +45,15 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **The deposit relayer waits for the deposit block's AN anchor before
+  proving or submitting it.** Ethereum `--confirmations` can finish before
+  the light-client relayer delivers that block. Previously each retry built
+  a proof and called `finalizeDeposit` too early, producing exit 224 and
+  `an_rejected` alerts. A missing anchor now causes a healthy wait without
+  proving, submission, failed attempts or parking. Getter errors and actual
+  contract rejections remain visible. Upgrade the daemon; no contract
+  redeploy or VK change is needed.
+
 - **The web deposit form explains what the wallet said instead of printing
   the raw rejection.** Clicking *Connect Wallet* twice before answering
   MetaMask used to put the whole EIP-1193 error object — code, message and
@@ -127,6 +136,12 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `docs/eth-light-client.md` §3.5 records that the owner keys stay until
+  the bridge is mature: `disableOwnerRotation` / `--flip-owner` are not a
+  pending production step. §4.5 has the per-network Gloas slot table. A
+  pin that later needs a published date is corrected with
+  `set-gloas-fork-slot`; `updateCode` is not required for that field.
+
 - `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
   row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
   bridge has recorded. A window with `dataLen > 0` is never cleared, so
@@ -224,6 +239,28 @@ assigns it when the release is tagged.
   show where) and the unit files (`scripts/ursus/*.service`), then restart.
   A daemon started from an old unit refuses with the name of the missing
   flag.
+
+- **The rotate verification key is rotated and an early `/updates`
+  hand-off no longer freezes the head.** The rotate circuit now exposes
+  the attested slot as public input 16 (17 Fr in all: 12 accumulator
+  limbs then `[current, next, period, gloas_fork_slot, attested_slot]`).
+  `submitRotate` reverts 240 if `attestedSlot / 8192 + 1` is not the
+  proof's `period`. There is no end-of-period window: a beacon `/updates`
+  best update is a valid hand-off, and the replaced committee can still
+  advance the head for the period it served. Previous rotate proofs (16
+  public inputs) do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3`
+  (was `4dc3f0a7…71d4cf54`). `updateCode` in place keeps the head and
+  committee and clears `_prevCommittee`; a new deploy is a new address
+  (`getLightClient` / `AN_LIGHT_CLIENT` change). The new `eth-lc-relayer`
+  refuses old 512-byte rotate bundles. Light client `1.6.0`, code hash
+  `c4b63228…`. The ABI is unchanged.
+
+  Two early rotates in a row still cut the replaced committee's late-
+  registration time: rotate P→P+1 during P, then P+1→P+2 on the best
+  update of P+1 (about 20 min after the boundary) retires C_P, so
+  checkpoints it skipped in P can no longer be registered. Honest rotates
+  leave that window until the start of P+2, about 27 h. A proper fix would
+  keep two previous committees.
 
 - **Workchain removal and owner recovery were combined in 1.12.0.** Two branches each
   built a 1.11.0: one adding owner `mintAndSendBridged`, one carrying the
@@ -401,7 +438,8 @@ assigns it when the release is tagged.
   committee 87 → 2946, execution block hash 812 → 2856), so the circuits pick
   the index per header from its slot against a Gloas fork slot that is now a
   public input: the step proof has 11 inputs (`gloasForkSlot` at index 10) and
-  the rotate proof 16 (`gloasForkSlot` after `period`). Step and rotate proofs
+  the rotate proof 16 then (`gloasForkSlot` after `period`; 1.6.0 adds
+  `attested_slot` as a 17th). Step and rotate proofs
   made for the previous circuits no longer verify — regenerate them, and
   replace `EthBeaconLightClient` code (step VkBlob sha256 `581910a739788e1e4269c9cbf848c29f57a9e9a49e60f5e0178cc1ed67f397db`,
   rotate VkBlob sha256 `4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54`) with `updateCode`, passing
@@ -427,8 +465,10 @@ assigns it when the release is tagged.
   period the proven next committee serves) instead of loading it as a free
   witness, so a hand-off can no longer be submitted under a period of the
   sender's choosing. `submitRotate` stores it in `_committeePeriod` and emits
-  it in `CommitteeRotated`; nothing gates on it. This is part of the rotate
-  verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
+  it in `CommitteeRotated`. The 1.6.0 entry above now requires
+  `attestedSlot / 8192 + 1 == period` on `submitRotate` (240) and uses that
+  stored period as the replaced committee's signing bound. This is part of
+  the rotate verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
   rotate proofs made before it do not verify. `eth-lc-relayer` refuses a
   rotate proof whose period is not the one it is rotating into, and it
   does not start `rotate_tree_n8` for a live period that tree cannot
@@ -683,16 +723,10 @@ assigns it when the release is tagged.
 - **A checkpoint skipped near the end of a sync-committee period can still be
   registered after the rotation.** `submitUpdate` keeps the commitment a
   `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
-  for late registration only — never to move the head, which still needs the
-  committee in force. The replaced committee may sign only around
-  the head it left behind: the attested slot must be within one period either
-  side of the finalized slot recorded when the rotation landed. The slack on
-  the later side is what makes the feature work at all — that recorded slot is
-  the last head the leaving committee moved, not the end of its period, so the
-  checkpoint it skipped is attested *after* it and an upper bound at the
-  recorded slot itself would exclude exactly the skips this exists for. The
-  bound is a slot, read out of the signed header by the step circuit, not the
-  rotate proof's period label. The owner hatches
+  while `attestedSlot / 8192 + 1 == _committeePeriod` — the period that
+  committee served — including to move the head. An early `/updates` best
+  update is therefore a valid hand-off and does not freeze the rest of that
+  period. The owner hatches
   (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
   rather than carrying it: they replace a committee the owner is rejecting, or
   jump several periods, so neither is a hand-off. `getCommitteeState` returns
@@ -711,9 +745,9 @@ assigns it when the release is tagged.
   `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
   upgraded client therefore starts with no previous committee, which only
   means no catch-up across the rotation already behind it; the field fills on
-  the next rotation. The same goes for `_prevCommitteeHeadSlot`, the second new
-  field, a `uint64` next to it: also set to 0 on the upgrade, also filled by
-  the next rotation, and the late path stays closed until both are non-zero.
+  the next rotation. `_prevCommitteeHeadSlot` sits next to it in the layout
+  and is written on rotate, but nothing reads it: the previous-committee path
+  opens when `_prevCommittee` is filled.
 
   `getCommitteeState` gains a `prevCommittee` output and no other function or
   event changes. **Every caller of that getter has to take the new ABI**, not
@@ -730,12 +764,10 @@ assigns it when the release is tagged.
   rubbish from `_committeePeriod` onward: anything decoding this client's state
   off-chain needs the new ABI.
 
-  The window is slack around a proven slot, not a period boundary. When the
-  head is near the end of its period at the rotation it reaches into the next
-  one, and an early hand-off puts it wherever the sender put the head. Signing
-  there needs a supermajority of the retired committee's keys — the long-range
-  assumption this design already carries — but the contract does not
-  enforce "the committee of the attested slot's period".
+  The replaced committee is accepted for the period it served
+  (`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
+  head. `_prevCommitteeHeadSlot` is kept for the storage layout; nothing
+  reads it.
 
 - **`submitRotate` no longer decides anything by the period on the proof, and
   refuses a hand-off that does not change the committee.** The rotate circuit
@@ -756,9 +788,9 @@ assigns it when the release is tagged.
   committee is unique. So the period is now out of the decision entirely: the
   monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
   the owner's `reAnchorCommittee`. `_committeePeriod` and `CommitteeRotated`
-  carry the rotate proof's period, which the circuit now binds to the attested
-  slot (the rotate verification key entry above). It is a report for
-  operators, and nothing gates on it.
+  carry the rotate proof's period, which the circuit binds to the attested
+  slot. 1.6.0 additionally requires that equality on `submitRotate` (240) and
+  uses the stored period as the replaced committee's signing bound.
 
   `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
   (`ERR_SELF_ROTATION`, 253). A genuine proof with
@@ -768,15 +800,10 @@ assigns it when the release is tagged.
   overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
   every checkpoint the replaced committee had not registered yet.
 
-  **Still open, and not fixable here.** Nothing binds a committee to a period
-  except that free label, so a genuine hand-off submitted early — the next
-  committee is in the headers of the current period, so the proof exists from
-  its first slot — installs a committee that has signed nothing yet. The head
-  then cannot move until the chain reaches that committee's period (up to ~27
-  h), and the replaced committee's unregistered checkpoints are stranded. This
-  is permissionless, repeatable once per period, and true of the deployed
-  1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
-  circuit, which is not in this change.
+  An early hand-off used to freeze the head until the successor's period,
+  about 27 hours. 1.6.0 lets the replaced committee keep advancing the head
+  for the period it served, so a `/updates` best update is a valid rotate
+  and does not strand the rest of that period.
 
 - **A rotate whose confirmation is lost no longer stops the daemon for
   good.** `call_contract` broadcasts the message and waits for it in one
@@ -1185,6 +1212,29 @@ assigns it when the release is tagged.
   the switch-off.
 
 ### Added
+
+- `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
+  user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
+  as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
+  nothing; needs a build with `--features live-submit`. Use it when an
+  upgrade should set the pin in the same `updateCode` as the new code.
+- **Deposit anchor-wait diagnostics.** The relayer exports
+  `deposit_relayer_waiting_for_anchor`,
+  `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
+  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` outcome, and
+  `stage="is_block_accepted"` label in
+  `deposit_relayer_stage_duration_seconds`.
+  Outstanding entries in `state.json` gain optional
+  `anchor_wait_started_unix` and `anchor_wait_last_warned_unix` timestamps;
+  older state files remain readable. Missing anchors warn immediately by
+  default; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
+  default `0`) can delay the warning when coverage is monitored separately.
+  Warnings repeat at most every 15 minutes per deposit across restarts.
+  The logs identify the deposit, chain and block, distinguish the initial
+  wait from a delayed warning, and remain visible if saving state fails.
+  Before manual admission, compare the logged block number and hash using
+  `eth_getBlockByNumber` on an independent RPC for that chain; an expected
+  delivery delay alone is not a reason to admit a hash manually.
 
 - `deposit-relayer daemon --outstanding-backoff-secs` /
   `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
@@ -1723,6 +1773,40 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- **`setGloasForkSlot` stays owner-callable after `disableOwnerRotation`.**
+  Light client `1.6.1`: the `require` that reverted 246 once the pin was
+  set is gone from both sources and from the placed `0.81.0_compiled`
+  TVC. A `u64::MAX` pin is a setting: when mainnet publishes Gloas,
+  `set-gloas-fork-slot` updates it. `updateCode` already exceeds that
+  write, so freezing the field was not a security boundary. The daemon
+  still returns `ProofFailed` and names `setGloasForkSlot` when the
+  beacon spec slot disagrees with the pin, instead of proving into 255.
+  Slot table in `docs/eth-light-client.md` §4.5. A live 1.6.0 client
+  needs `updateCode` with this TVC to pick it up.
+
+- **Deposit retries alternate with new work.** Finite retry rounds prevent
+  incoming traffic from indefinitely delaying older deposits. A first anchor
+  wait resets the daemon polling delay to `--backoff-initial-secs`, including
+  after idle polls or errors. Repeat waits preserve active failure backoff;
+  with no failures, they reset idle backoff for responsive normal polling.
+  Progress or a new wait clears the failure streak. Per-deposit anchor
+  polling uses the larger of failure backoff and one quarter of wait age,
+  with the age component capped at 60 seconds. Setting
+  `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. Fresh waits retain
+  the short base interval.
+- **`deposit_relayer_outstanding_deposits` includes healthy anchor waits.**
+  Adjust alerts that treat any nonzero value as failure to distinguish
+  failed attempts and missing anchors using their age and coverage.
+  An uncovered block can require the anchor writer's intervention.
+- **The deposit daemon's `AN_BRIDGE_ABI_PATH` must include
+  `isAcceptedBlockHash(uint256,uint256) returns (bool)`.** Upgrade a custom
+  ABI alongside the daemon; a missing getter causes tick errors and stops
+  delivery. The full bridge ABI shipped in the repository includes it.
+- **The replaced committee may still advance the head** for the period it
+  served (`attestedSlot / 8192 + 1 == _committeePeriod`), not only
+  late-register a skipped checkpoint. An early rotate therefore does not
+  freeze the rest of that period.
 
 - The ETH→AN deposit relayer no longer stalls every later deposit behind one
   that cannot be finalised. Later ids are tried first; a failed id stays in
@@ -2695,11 +2779,6 @@ assigns it when the release is tagged.
   deposit whose block is older than a year by as much as one full rotation of
   the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
   is the light client's own `_isLive`, not the bridge's map.
-
-- **A genuine committee hand-off can be submitted early and freeze the head.**
-  Permissionless, repeatable once per period, and present in the deployed
-  1.4.1; see the `submitRotate` entry in Breaking Changes. The fix belongs in
-  the rotate circuit, which has to bind the hand-off to a slot.
 
 - **A deposit is only covered once both checkpoints bracketing its block are
   proven and within a span of each other.** Gas is no longer the obstacle —

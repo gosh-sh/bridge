@@ -118,7 +118,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!("root instances: {} (12 accumulator + {} rotate PIs)", inst.len(), inst.len() - 12);
     let rotate_pis = &inst[NUM_ACCUMULATOR_INSTANCES..];
-    println!("rotate PIs [current, next, period] = {rotate_pis:?}\n");
+    println!("rotate PIs [current, next, period, gloas_fork_slot, attested_slot] = {rotate_pis:?}\n");
 
     let params = load_srs(&outer_srs)?;
     let g2 = params.g2();

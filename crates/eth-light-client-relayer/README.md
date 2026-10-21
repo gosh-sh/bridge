@@ -51,7 +51,8 @@ eth-lc-relayer prove-one --beacon-url … \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle
 
-# 5. Pin the Gloas fork slot (required once; Sepolia 11296768, mainnet max)
+# 5. Pin the Gloas fork slot (after deploy, and again on mainnet once Gloas
+#    is scheduled; Sepolia 11296768, mainnet max until then)
 eth-lc-relayer set-gloas-fork-slot --slot 11296768 …
 
 # 6. Submit step / rotate
@@ -83,6 +84,10 @@ is never proved in-process: prove on n14 and `submit-rotate --state`
 anchor writer; L2s keep the owner path
 (`scripts/ursus/flip_deposit_to_light_client.md`). It needs
 `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`. Relayer keys must be the owner pubkey.
+Pin the Gloas slot with `set-gloas-fork-slot` before proving (`256` until it
+is set). A later published date is the same call, including after the flip.
+`gloas-slot-user-cell --slot <n>` prints an `updateCode` user cell that
+carries the slot (`docs/eth-light-client.md` §4.5).
 
 Standalone crate (own `Cargo.lock`). Tests:
 `cd crates/eth-light-client-relayer && cargo test`.

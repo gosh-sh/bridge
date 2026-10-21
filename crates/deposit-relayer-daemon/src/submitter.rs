@@ -79,6 +79,10 @@ pub enum SubmitOutcome {
 
 #[async_trait]
 pub trait AnSubmitter: Send + Sync {
+    /// Read the AN bridge's canonical-chain gate before starting the prover.
+    /// Errors must propagate: an unreadable gate is not permission to submit.
+    async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
+
     /// Cheap pre-check: has this deposit already been finalised on AN? Used
     /// to skip the expensive proof-generation step on replays. A backend that
     /// can't tell returns `Ok(false)` (the submit path is still safe — AN
@@ -236,6 +240,10 @@ impl MockAnSubmitter {
 
 #[async_trait]
 impl AnSubmitter for MockAnSubmitter {
+    async fn is_block_accepted(&self, _: &DepositEvent) -> Result<bool, RelayerError> {
+        Ok(true)
+    }
+
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         Ok(self
             .inner
@@ -690,8 +698,30 @@ fn parse_exit_code_loose(msg: &str) -> Option<i32> {
     None
 }
 
+fn accepted_block_hash_params(event: &DepositEvent) -> serde_json::Value {
+    json!({
+        "chainId": event.source_chain_id.to_string(),
+        "blockHash": format!("{:#x}", event.block_hash),
+    })
+}
+
 #[async_trait]
 impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
+    async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
+        let output = self
+            .client
+            .run_getter(
+                &self.config.token_bridge,
+                "isAcceptedBlockHash",
+                accepted_block_hash_params(event),
+            )
+            .await?;
+        output
+            .get("value0")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| RelayerError::other("isAcceptedBlockHash: expected a boolean value0"))
+    }
+
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         let Some(check) = &self.voucher_check else {
             return Ok(false);
@@ -726,6 +756,43 @@ mod tests {
 
     use super::*;
     use crate::{prover::MockProofGenerator, types::DepositEvent};
+
+    #[test]
+    fn anchor_getter_params_use_decimal_chain_and_ethereum_order_hex_hash() {
+        let mut deposit = event(0);
+        deposit.source_chain_id = 11_155_111;
+        deposit.block_hash = "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            accepted_block_hash_params(&deposit),
+            json!({
+                "chainId": "11155111",
+                "blockHash": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_getter_requires_a_boolean_and_propagates_read_errors() {
+        use acki_nacki_interface::MockAckiNacki;
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = AnInterfaceSubmitter::new(client.clone(), AnSubmitConfig {
+            from: "unused".into(),
+            token_bridge: "unused".into(),
+            confirm_timeout_secs: 1,
+        });
+        assert!(sub.is_block_accepted(&event(0)).await.is_err());
+        for value in [false, true] {
+            client.set_getter_response(json!({"value0": value}));
+            assert_eq!(sub.is_block_accepted(&event(0)).await.unwrap(), value);
+        }
+        for output in [json!({}), json!({"value0": "false"}), json!({"value0": 1})] {
+            client.set_getter_response(output);
+            assert!(sub.is_block_accepted(&event(0)).await.is_err());
+        }
+        assert_eq!(client.transaction_count(), 0);
+    }
 
     fn event(id: u64) -> DepositEvent {
         DepositEvent {

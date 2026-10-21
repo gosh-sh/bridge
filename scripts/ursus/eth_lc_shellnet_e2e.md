@@ -23,9 +23,10 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
 
 1. `eth-lc-relayer beacon-watch --beacon-url $BEACON_URL` — slots parse.
 2. `eth-lc-relayer set-gloas-fork-slot --slot 11296768` (Sepolia; mainnet
-   `18446744073709551615` while Gloas is unscheduled). Required once after
-   `deployLightClient`; `submitUpdate` and `submitRotate` revert 256 until
-   it runs. The daemon does not set it.
+   `18446744073709551615` while Gloas is unscheduled). Required after
+   `deployLightClient` (and again if the published slot later changes);
+   `submitUpdate` and `submitRotate` revert 256 until it runs. The daemon
+   does not set it.
 3. `eth-lc-relayer prove-one --beacon-url $BEACON_URL --step-prover-bin … --srs-path … --out-dir ./bundle`
    on **n14** (~k=19, tens of GB). `COMMITTEE_JSON_PATH` is filled by the
    relayer from `light_client/updates`. Synthetic OsRng committee is a bug.
@@ -46,9 +47,11 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    period — `rotate_tree_n8` is a committed fixture, and a mismatch
    returns `RotateRequired` without proving. The next tick reads
    `getCommitteeState` and continues; `--state` is for a restart.
-9. Owner flip, only on purpose: `eth-lc-relayer daemon --flip-owner` issues it
-   after step 4, or run `eth-lc-relayer flip-owner`. After it, deposits outside
-   checkpoint blocks and from L2s have no anchor writer; read
+9. Owner flip, only on purpose and not in production: `eth-lc-relayer
+   daemon --flip-owner` issues it after step 4, or run
+   `eth-lc-relayer flip-owner`. The Gloas pin is a setting, not a gate
+   (step 2). After it, deposits outside checkpoint blocks and from L2s
+   have no L1 owner writer; read
    `scripts/ursus/flip_deposit_to_light_client.md` first. Confirm
    `getLightClient(l1ChainId) != 0` for the chain under test and owner flags
    are off.

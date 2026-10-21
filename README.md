@@ -14,8 +14,7 @@ verifiers deployed as Yul bytecode.
 
 ## The current deployment
 
-Sepolia ↔ shellnet. The table below describes the deployed 1.12.0 pair. The 1.13.0 limits release
-requires a fresh matching pair; do not reuse these addresses with the new CLI.
+Sepolia ↔ shellnet, deployed from tag [`v0.4.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.4.0).
 The CLI, relayers and web form take their addresses from configuration.
 
 ### Ethereum (Sepolia, chain id 11155111)
@@ -54,8 +53,8 @@ RPC_URL=https://rpc.sepolia.ethpandaops.io
 the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
 (receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
 consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints.
-This release limits each transfer to 50 USDC and outstanding principal to
-10,000 USDC per L1 chain.
+Each transfer is capped at 50 USDC, and the outstanding principal at 10,000 USDC
+per L1 chain.
 
 **Acki Nacki → Ethereum (state attestation + payout).** Three permissionless entrypoints:
 

@@ -137,7 +137,7 @@ same BOC while valid.
 
 ### Deployment
 
-Deploy this release as a fresh pair with empty accounting. The AN 1.13.0
+Deploy the 1.13.0 bridge as a fresh pair with empty accounting. Its
 upgrade tuple adds chain balances and external-message hashes; the previous
 1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
 Normal upgrades within this format retain balances and unexpired replay hashes.
@@ -154,8 +154,8 @@ and check `paused() == true` before enabling its replacement. Never run two
 funded payout contracts for the same AN identity and destination chain. Moving
 custody and consumed withdrawal nullifiers is a separate migration: complete it
 before funding a replacement that accepts the same AN history, or use a fresh
-AN identity/history. This release does not implement that migration. Old
-amounts above 50 USDC must settle before switching to these contracts.
+AN identity/history. That migration is not implemented. Amounts above
+50 USDC must settle before switching to the capped contracts.
 
 ## Rebuilding
 

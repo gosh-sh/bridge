@@ -285,14 +285,19 @@ them after its first accepted `submitUpdate` only when started with `--flip-owne
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
 The relayer key must be the owner key of both contracts.
 
+**The owner keys stay.** Not until mainnet and not until a milestone: until
+the bridge is mature, which may be a year or two. Nobody will call
+`disableOwnerRotation` in that window, and `--flip-owner` is not used in
+production. The flip path stays in the contract (`reAnchorCommittee` is
+armed only after it) and in the relayer for later; it is not a pending
+ops step. Do not delete `disableOwnerRotation`.
+
 **Gloas fork slot.** `setGloasForkSlot` is owner-callable for the contract's
 lifetime, including after `disableOwnerRotation`. A `u64::MAX` pin is a
 setting: when a network publishes Gloas, `set-gloas-fork-slot` updates it.
 The daemon still returns `ProofFailed` (and names `setGloasForkSlot`) when
 the beacon spec slot disagrees with the pin, instead of proving into 255.
-Slot table in §4.5. The daemon's automatic `--flip-owner` waits until a
-scheduled pin matches the beacon spec and the head is past it; the
-`flip-owner` one-shot does not.
+Slot table in §4.5.
 
 ```mermaid
 stateDiagram-v2

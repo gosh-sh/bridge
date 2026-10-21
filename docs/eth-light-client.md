@@ -285,6 +285,20 @@ them after its first accepted `submitUpdate` only when started with `--flip-owne
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
 The relayer key must be the owner key of both contracts.
 
+**The owner keys stay.** Not until mainnet and not until a milestone: until
+the bridge is mature, which may be a year or two. Nobody will call
+`disableOwnerRotation` in that window, and `--flip-owner` is not used in
+production. The flip path stays in the contract (`reAnchorCommittee` is
+armed only after it) and in the relayer for later; it is not a pending
+ops step. Do not delete `disableOwnerRotation`.
+
+**Gloas fork slot.** `setGloasForkSlot` is owner-callable for the contract's
+lifetime, including after `disableOwnerRotation`. A `u64::MAX` pin is a
+setting: when a network publishes Gloas, `set-gloas-fork-slot` updates it.
+The daemon still returns `ProofFailed` (and names `setGloasForkSlot`) when
+the beacon spec slot disagrees with the pin, instead of proving into 255.
+Slot table in §4.5.
+
 ```mermaid
 stateDiagram-v2
   direction LR
@@ -442,18 +456,29 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
    (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
-5. Pin the Gloas fork slot **before** any proof: `eth-lc-relayer set-gloas-fork-slot --slot
-   11296768` on Sepolia, `--slot 18446744073709551615` on mainnet (Gloas not scheduled). Until
-   `getGloasForkSlot` reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
-   `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell instead.
+5. Pin the Gloas fork slot **before** any proof.
+   `eth-lc-relayer set-gloas-fork-slot --slot <n>`. Until `getGloasForkSlot`
+   reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
+   `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell
+   (`eth-lc-relayer gloas-slot-user-cell --slot <n>` prints that cell).
    The daemon reads that getter before every prove and uses it, not the beacon
    spec's `GLOAS_FORK_EPOCH`. A published epoch the contract does not hold
-   would otherwise spend a full step prove and come back 255.
+   would otherwise spend a full step prove and come back 255. After the flip
+   the same `set-gloas-fork-slot` call still works: the daemon returns
+   `ProofFailed` and names `setGloasForkSlot` instead of proving into 255.
+
+   | Network | `--slot` | `getGloasForkSlot()` |
+   |---|---|---|
+   | Sepolia (Gloas live 2026-10-06) | `11296768` | `(11296768, true)` |
+   | Ethereum mainnet, Gloas unscheduled | `18446744073709551615` (`u64::MAX`) | `(18446744073709551615, true)` — proofs work against that pin; when a real slot is published, `set-gloas-fork-slot` updates it, including after `disableOwnerRotation`. No on-chain proof with PI #10 = `u64::MAX` has been verified yet (the k=19 runs are `#[ignore]`d). |
+   | Fresh deploy, never set | — | `(0, false)` — every step/rotate reverts 256 |
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
-7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
-   flag, after the first accepted update the daemon checks `getLightClient(l1ChainId)`
-   against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and `disableOwnerRotation`; from
-   then on the bridge refuses `setAcceptedBlockHash` only for the light client's L1.
+7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`.
+   With the flag the daemon still starts. After
+   the first accepted update it checks `getLightClient(l1ChainId)` against
+   `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and
+   `disableOwnerRotation`; from then on the bridge refuses
+   `setAcceptedBlockHash` only for the light client's L1.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light
 client deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,

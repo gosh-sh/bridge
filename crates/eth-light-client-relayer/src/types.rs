@@ -27,6 +27,11 @@ pub const ROTATE_ATTESTED_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
 /// `gloas_fork_slot` of a network that has not scheduled Gloas.
 pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 
+/// The contract holds a real Gloas slot, not "not scheduled" / unset.
+pub fn gloas_is_scheduled(slot: u64, is_set: bool) -> bool {
+    is_set && slot != GLOAS_NOT_SCHEDULED
+}
+
 /// Signing-domain inputs the beacon source resolved for one update: the
 /// `fork_version` active at `signature_slot` (fork schedule from
 /// `/eth/v1/config/spec`) and the network `genesis_validators_root`
@@ -474,5 +479,13 @@ mod tests {
         std::fs::write(dir.path().join("rotate_public_inputs.bin"), [0u8; 8]).unwrap();
         std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0u8; 1]).unwrap();
         assert!(RotateProofBundle::from_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn gloas_is_scheduled_only_when_set_to_a_real_slot() {
+        assert!(gloas_is_scheduled(11_296_768, true));
+        assert!(!gloas_is_scheduled(GLOAS_NOT_SCHEDULED, true));
+        assert!(!gloas_is_scheduled(0, false));
+        assert!(!gloas_is_scheduled(11_296_768, false));
     }
 }

@@ -568,7 +568,8 @@ mod tests {
 
         // A checkpoint in the old period was never proven, and the committee
         // rotates before it is.
-        c.rotate(new_committee, 2, updates_best_attested(2)).unwrap();
+        c.rotate(new_committee, 2, updates_best_attested(2))
+            .unwrap();
         assert_eq!(c.committee, new_committee);
 
         // Attested inside the period the old committee served.
@@ -636,7 +637,8 @@ mod tests {
         assert_eq!(c.prev_committee, [0xC0; 32]);
 
         assert_eq!(
-            c.rotate([0xC1; 32], 3, updates_best_attested(3)).unwrap_err(),
+            c.rotate([0xC1; 32], 3, updates_best_attested(3))
+                .unwrap_err(),
             LcError::SelfRotation,
             "a hand-off onto the committee already in force must be refused"
         );
@@ -662,7 +664,8 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2, updates_best_attested(2)).unwrap();
+        c.rotate(new_committee, 2, updates_best_attested(2))
+            .unwrap();
 
         // Attested in period 3 after a rotate into period 2: outside the
         // period the replaced committee served.
@@ -695,7 +698,8 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2, updates_best_attested(2)).unwrap();
+        c.rotate(new_committee, 2, updates_best_attested(2))
+            .unwrap();
         c.submit_update_at(
             2 * SLOTS_PER_PERIOD,
             2 * SLOTS_PER_PERIOD,
@@ -727,7 +731,8 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 4, updates_best_attested(4)).unwrap();
+        c.rotate(new_committee, 4, updates_best_attested(4))
+            .unwrap();
 
         assert_eq!(
             c.submit_update_at(100, 100, [0xDD; 32], old_committee)

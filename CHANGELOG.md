@@ -143,6 +143,12 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `docs/eth-light-client.md` §3.5 records that the owner keys stay until
+  the bridge is mature: `disableOwnerRotation` / `--flip-owner` are not a
+  pending production step. §4.5 has the per-network Gloas slot table. A
+  pin that later needs a published date is corrected with
+  `set-gloas-fork-slot`; `updateCode` is not required for that field.
+
 - `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
   row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
   bridge has recorded. A window with `dataLen > 0` is never cleared, so
@@ -1324,6 +1330,11 @@ assigns it when the release is tagged.
   Nacki, trust the hub with `setTrustedL1Bridge(1, <hub bridge>, true)` and
   anchor mainnet blocks (`deployLightClient` for chain 1, or owner anchors
   until then).
+- `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
+  user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
+  as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
+  nothing; needs a build with `--features live-submit`. Use it when an
+  upgrade should set the pin in the same `updateCode` as the new code.
 - **Deposit anchor-wait diagnostics.** The relayer exports
   `deposit_relayer_waiting_for_anchor`,
   `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
@@ -1878,6 +1889,17 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- **`setGloasForkSlot` stays owner-callable after `disableOwnerRotation`.**
+  Light client `1.6.1`: the `require` that reverted 246 once the pin was
+  set is gone from both sources and from the placed `0.81.0_compiled`
+  TVC. A `u64::MAX` pin is a setting: when mainnet publishes Gloas,
+  `set-gloas-fork-slot` updates it. `updateCode` already exceeds that
+  write, so freezing the field was not a security boundary. The daemon
+  still returns `ProofFailed` and names `setGloasForkSlot` when the
+  beacon spec slot disagrees with the pin, instead of proving into 255.
+  Slot table in `docs/eth-light-client.md` §4.5. A live 1.6.0 client
+  needs `updateCode` with this TVC to pick it up.
 
 - **Deposit retries alternate with new work.** Finite retry rounds prevent
   incoming traffic from indefinitely delaying older deposits. A first anchor

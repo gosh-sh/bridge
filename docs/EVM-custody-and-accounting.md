@@ -9,8 +9,8 @@ page exists because those three are easy to conflate, and the labelled rules bel
 and operators quote at each other during an incident.
 
 **Scope: the EVM side only** — `AckiNackiBridge.sol` and the AAVE position it holds. The
-Acki Nacki side keeps its own accounting in `USDCBridge`, a TVM contract in another repository; only
-its ABI is bundled here, so nothing on this page describes it. Where the two meet is the deposit
+Acki Nacki side keeps per-chain accounting in `contracts/an/exchange/eccUSDCBridge.sol`;
+its limits and deployment requirements are described in `contracts/an/README.md`. Where the two meet is the deposit
 proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 
 ## The book number is not a balance
@@ -51,7 +51,9 @@ Fuzz-tested as `testFuzz_totalAssetsCoversTreasury`
 Actual order in `deposit` (`:578-593`):
 
 1. **Checks** — `amount != 0` (`InvalidAmount`), `amount <= MAX_DEPOSIT_AMOUNT` (`DepositTooLarge`),
-   `anAccount != 0` (`InvalidAnAccount`).
+   `amount <= MAX_TRANSFER_AMOUNT` (`TransferTooLarge`),
+   `anAccount != 0` (`InvalidAnAccount`), and
+   `treasuryBalance + amount <= MAX_BRIDGE_TVL` (`TvlCapReached`).
 2. **Interaction** — `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return reverts
    `TransferFromFailed` (`:585-587`).
 3. **Effects** — `depositCounter++`, then `treasuryBalance += amount` (`:588-590`).
@@ -66,10 +68,11 @@ State it this way rather than as "checks-effects-interactions", which this path 
 
 Two consequences worth naming:
 
-* `MAX_DEPOSIT_AMOUNT` is `type(uint64).max` (`:55`) — the same ceiling the AN mint path
-  enforces on proven `fr[2]` (exit 214). It is not a TVL cap and not a 100 USDC limit.
-  There is no extra product minimum besides `amount != 0`. The function is **not**
-  `payable`; the amount is a parameter.
+* `MAX_DEPOSIT_AMOUNT` is the first width guard, `type(uint64).max`.
+  `MAX_TRANSFER_AMOUNT` adds the lower 50 USDC ceiling on deposits and withdrawals;
+  `MAX_BRIDGE_TVL` caps `treasuryBalance` at 10,000 USDC per L1 bridge. Aave supply,
+  yield and donations do not reset that capacity. The amount remains a parameter;
+  deposits are not payable and have no minimum beyond `amount != 0`.
 * The booked figure is the **requested** `amount`, not an observed balance delta. Exact for USDC;
   it would understate custody for a fee-on-transfer token, which is why the token is fixed at
   construction.
@@ -122,7 +125,7 @@ Quote these, not their earlier versions.
 | | Rule |
 |---|---|
 | **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
-| **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`. The function is not `payable`. |
+| **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`; otherwise an amount above 50 USDC reverts `TransferTooLarge`, and principal above 10,000 USDC reverts `TvlCapReached`, before a token call. The function is not `payable`. |
 | **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. No other function in the contract increases `treasuryBalance`, and only `withdrawByProof` decreases it. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |
 | **CUST-1** | `treasuryBalance` is book value, not a balance. The solvency invariant is `totalAssets() ≥ treasuryBalance`, never equality. |

@@ -972,7 +972,37 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // Treasury + verifier rejection
     // ─────────────────────────────────────────────────────────────────────
 
+    function test_withdrawAboveTransferLimitDoesNotConsumeProof() public {
+        uint256 nullifier = 100;
+        withdrawalVerifier.setShouldAccept(false);
+        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(50 * UsdcTestLib.UNIT + 1, nullifier));
+        assertFalse(bridge.isNullifierUsed(nullifier));
+        assertEq(bridge.treasuryBalance(), 50 * UsdcTestLib.UNIT);
+        assertEq(usdc.balanceOf(RECIPIENT), 0);
+    }
+
+    function test_payoutReopensExactlyItsAmountOfDepositCapacity() public {
+        for (uint256 i; i < 199; ++i) {
+            UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
+        }
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(50 * UsdcTestLib.UNIT, 100));
+        assertEq(bridge.treasuryBalance(), 9_950 * UsdcTestLib.UNIT);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50 * UsdcTestLib.UNIT);
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        usdc.mint(funder, 1);
+        vm.startPrank(funder);
+        usdc.approve(address(bridge), 1);
+        vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
+        bridge.deposit(1, bytes32(uint256(1)));
+        vm.stopPrank();
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        assertTrue(bridge.isNullifierUsed(100));
+    }
+
     function test_withdrawByProof_treasuryShortfall_reverts() public {
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(1 * UsdcTestLib.UNIT, 101));
         uint256 huge = bridge.treasuryBalance() + 1 * UsdcTestLib.UNIT;
 
         vm.expectRevert(

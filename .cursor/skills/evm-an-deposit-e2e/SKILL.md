@@ -135,8 +135,8 @@ make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/
 
 The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
 `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` and check the ABI before
-deployment. This build's bridge version is 1.12.0 and its code hash starts with
-`774c9571`; the withdrawal ABI and voucher identity are unchanged.
+deployment. This build's bridge version is 1.13.0 and its code hash starts with
+`4525d927`; the withdrawal ABI and voucher identity are unchanged.
 
 ## Build gotchas
 

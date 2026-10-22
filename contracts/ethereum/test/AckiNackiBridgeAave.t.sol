@@ -518,8 +518,8 @@ contract AckiNackiBridgeAaveTest is Test {
     // -----------------------------------------------------------------
 
     function testFuzz_totalAssetsCoversTreasury(uint96 depositAmt, uint16 bps) public {
-        vm.assume(depositAmt > 0 && depositAmt <= 100 * UsdcTestLib.UNIT);
-        vm.assume(bps <= bridge.MAX_LIQUID_RESERVE_BPS());
+        depositAmt = uint96(bound(depositAmt, 1, bridge.MAX_TRANSFER_AMOUNT()));
+        bps = uint16(bound(bps, 0, bridge.MAX_LIQUID_RESERVE_BPS()));
 
         bridge.setLiquidReserveBps(bps);
         UsdcTestLib.depositUsdc(vm, usdc, bridge, user1, depositAmt);
@@ -531,5 +531,38 @@ contract AckiNackiBridgeAaveTest is Test {
         }
 
         assertGe(bridge.totalAssets(), bridge.treasuryBalance(), "solvent");
+    }
+
+    function testFuzz_depositAboveTransferLimitLeavesCustodyUnchanged(uint256 amount) public {
+        amount = bound(amount, 50 * UsdcTestLib.UNIT + 1, type(uint64).max);
+        usdc.mint(user1, amount);
+        vm.startPrank(user1);
+        usdc.approve(address(bridge), amount);
+        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
+        bridge.deposit(amount, bytes32(uint256(1)));
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(user1), amount);
+        assertEq(usdc.balanceOf(address(bridge)), 0);
+        assertEq(bridge.treasuryBalance(), 0);
+        assertEq(bridge.depositCounter(), 0);
+    }
+
+    function test_tvlCapIncludesPrincipalSuppliedToAave() public {
+        usdc.mint(user1, 10_000 * UsdcTestLib.UNIT + 1);
+        vm.startPrank(user1);
+        usdc.approve(address(bridge), type(uint256).max);
+        for (uint256 i; i < 200; ++i) {
+            bridge.deposit(50 * UsdcTestLib.UNIT, bytes32(uint256(1)));
+        }
+        vm.stopPrank();
+        bridge.supplyToAave(type(uint256).max);
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
+        assertGt(bridge.suppliedPrincipal(), 0);
+        vm.prank(user1);
+        vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
+        bridge.deposit(1, bytes32(uint256(1)));
+        assertEq(usdc.balanceOf(user1), 1);
+        assertEq(bridge.depositCounter(), 200);
+        assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
     }
 }

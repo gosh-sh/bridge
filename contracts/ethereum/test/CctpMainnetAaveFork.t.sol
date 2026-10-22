@@ -52,7 +52,7 @@ contract CctpMainnetAaveForkTest is Test {
     address constant ARB_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     uint256 constant ARBITRUM_CHAIN = 42_161;
 
-    uint256 constant AMOUNT = 1_000e6;
+    uint256 constant AMOUNT = 50e6;
     uint256 constant FAST_FEE = 130_000;
     uint256 constant BK_SET = 0xBE5E7;
     uint256 constant DAPP_FR = 0xD499F4CEC0FFEE01;
@@ -130,7 +130,7 @@ contract CctpMainnetAaveForkTest is Test {
         assertEq(usdc.balanceOf(address(bridge)), liquid);
         assertApproxEqAbs(bridge.aUsdcBalance(), AMOUNT - liquid, 2);
 
-        uint256 payout = liquid + 300e6;
+        uint256 payout = liquid + 10e6;
         _pay(payout, 1);
         assertEq(usdc.balanceOf(recipient), payout);
         assertEq(bridge.treasuryBalance(), AMOUNT - payout);

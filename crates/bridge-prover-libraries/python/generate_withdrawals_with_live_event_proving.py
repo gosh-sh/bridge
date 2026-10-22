@@ -29,6 +29,7 @@ Assumed running services (this script does NOT start them):
 
 Env vars (all optional, defaults are MODE-dependent):
   MODE                  local | shellnet  (default: local)
+  DST_CHAIN_ID          destination EIP-155 id (default: 11155111, Sepolia)
   PROVER_DIR            default: parent of this script
   NETWORK, GRAPHQL_URL, WORK_DIR
   USDC_BRIDGE_KEY_PATH  override path to the keypair file used to sign

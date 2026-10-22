@@ -81,18 +81,11 @@ assigns it when the release is tagged.
   both owners remain trusted after a flip. No contract behavior, ABI or
   deployment artifact changes.
 
-- Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
-  USDC base units. `AckiNackiBridge.deposit` reverts `DepositTooLarge` above it;
-  `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
-  exit 214. There is no extra product minimum besides `amount > 0`, and the
-  100 USDC figure in older notes is not in the contracts. The deposit
-  form now uses that same `uint64` cap and Circle Sepolia USDC
-  (`0x1c7D4B19…`), with the bridge address supplied at build time as
-  described below. It used to refuse amounts above 100 USDC and approve
-  the Aave faucet token. Test USDC comes from Circle's faucet, not an
-  in-form mint. The ursus deposit-relayer example uses the same full-history
-  Sepolia RPC (`rpc.sepolia.ethpandaops.io`) as the bridge-relayer example;
-  it must retain logs back to the configured deployment block.
+- The deposit form uses the 50 USDC transfer ceiling and Circle Sepolia USDC
+  (`0x1c7D4B19…`), with the bridge address supplied at build time as described
+  below. Test USDC comes from Circle's faucet. The ursus deposit-relayer
+  example uses `rpc.sepolia.ethpandaops.io` and requires logs back to the
+  configured deployment block.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
   `state.json`, later ids going first while failed ids retry from
@@ -162,6 +155,37 @@ assigns it when the release is tagged.
   workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
 
 ### Breaking Changes
+
+- The Python withdrawal E2E tools use Sepolia (`11155111`) by default.
+  Set `DST_CHAIN_ID` to the destination's actual EIP-155 id on other networks.
+  They check `getDepositLimits(chainId)` before sending ECC; inventory
+  belonging to another chain cannot cover the withdrawal.
+- Bridge transfers are limited to 50 USDC. Each L1 bridge caps deposited
+  principal minus completed payouts at 10,000 USDC, including Aave principal;
+  AN tracks that capacity separately per destination/source chain. Deposit and
+  withdrawal arguments, return values, events and proof formats are unchanged.
+  EVM adds `TransferTooLarge` and `TvlCapReached`; AN adds finalization errors
+  234 (oversized transfer) and 235 (capacity, retry after withdrawals), and
+  `getDepositLimits(chainId)`. Oversized or inventory-short AN withdrawals
+  return their ECC with at most `min(msg.value, 0.1 vmshell)` and emit no burn
+  event. CLI and UI check limits before approval, deposit or burn; failed
+  limit reads stop the operation. Deposit relayers wait for capacity, while
+  withdrawal relayers park oversized proofs.
+- Deploy the limits as a fresh pair. AN 1.13.0 adds chain balances and replay
+  hashes to its upgrade tuple; it cannot decode the 1.12.0 tuple. Drain pending
+  transfers, including old amounts above 50 USDC, before switching. Pause old
+  L1 contracts and verify the pause before activating replacements; never keep
+  two funded payout contracts for the same AN identity and chain. Custody and
+  consumed withdrawal nullifiers require a separate migration before funding
+  a replacement that accepts the same history. See `contracts/an/README.md`.
+- AN external-message replay protection now hashes the verified message body
+  and signer, preventing replay through changes to the unsigned external
+  envelope. Expiring hashes also prevent an unsigned finalization with a
+  future `time` from blocking owner calls.
+  `expire` must be later than block time and less than five minutes ahead
+  (402/401); a recorded duplicate returns 400. CLI and relayer finalizations
+  bound expiry to 240 seconds. The CLI resends its existing BOC after an
+  uncertain outcome until expiry; proof bytes are retained.
 
 - **Every prover the relayers start is a binary the operator names, checked
   at startup; the `cargo run` fallbacks are gone.** A daemon started with a
@@ -238,12 +262,12 @@ assigns it when the release is tagged.
   leave that window until the start of P+2, about 27 h. A proper fix would
   keep two previous committees.
 
-- **`eccUSDCBridge` is 1.12.0, and neither 1.11.0 exists.** Two branches each
+- **Workchain removal and owner recovery were combined in 1.12.0.** Two branches each
   built a 1.11.0: one adding owner `mintAndSendBridged`, one carrying the
   deposit ABI without `anWorkchain` and its regenerated key. They are now one
   contract with both changes, rebuilt with sold 0.80.0, code hash
-  `a1fd7d19…`. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
-  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
+  `a1fd7d19…`; the limits release supersedes it with 1.13.0. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
+  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.13.0 with limits.
 
 - **Deposits no longer have a workchain parameter.** For a fresh deployment,
   use `deposit(uint256,bytes32)` and
@@ -271,7 +295,7 @@ assigns it when the release is tagged.
   and the old EVM contract has no deposit refund path. Custody and outstanding
   withdrawals on an existing pair require a separate migration plan.
 
-  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.12.0
+  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.13.0
   before requesting a transaction. For the new deployment, configure the
   matching EVM/AN pair and its trust settings first, install the matching prover
   and clients, then publish the new addresses and start deposits. Do not switch
@@ -295,24 +319,14 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  Upgrade with `updateCode` and an empty `userCell` — the storage *layout*
-  is unchanged, but `onCodeUpgrade` still `resetStorage`s and restores
-  only pubkey, usdcWallet, `_totalMinted`, both mint nonces, the two
-  bridged maps and the voucher code. It wipes `_paused`,
-  `_trustedL1Bridge`, `_acceptedBlockHash`, `_lightClientCode`,
-  `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`.
-  After the call, re-run `setPaused` if the lane was paused,
-  `setTrustedL1Bridge`, and `setLightClientCode` / `deployLightClient`
-  before deposits work again (222/224 until then). Owner anchors come
-  back on for every chain (`_ownerAnchorsDisabled` is wiped). If a chain
-  had been flipped to light-client-only, call `disableOwnerAnchorsOn`
-  again after `deployLightClient` — it turns the owner writer off and
-  reverts 226 until a client exists. The ABI gains `mintAndSendBridged`.
-  `eccUSDCBridge` 1.12.0,
-  code hash `a1fd7d19…`, rebuilt with sold 0.80.0. The deposit CLI's
-  exit-37 message names the aborted deposit's `depositId`, amount, recipient,
-  EVM bridge and chain, and tells the operator to call `mintAndSendBridged`.
-  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
+  The limits release is 1.13.0, code hash `4525d927…`, rebuilt with sold
+  0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
+  described above; the old upgrade tuple cannot initialize this build.
+  `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the
+  aborted deposit's source chain and enforces the transfer and chain limits.
+  Pass the deposit's EIP-155 source chain id. Deposit and withdrawal
+  entrypoint arguments are unchanged. The CLI's supported deposit version
+  and `NEWEST_KNOWN_BRIDGE_VERSION` are 1.13.0.
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
@@ -1733,9 +1747,10 @@ assigns it when the release is tagged.
   light-client code and writes the account into the zerostate; acki-nacki
   places it with the contracts and calls it while generating one. A new setup
   call, a new parameter or a new storage field is now a change in this
-  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
-  the trusted L1 bridge a generated zerostate starts with, defaulting to
-  `11155111` and `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+  repository alone. `BRIDGE_ZS_L1_BRIDGE` must name the fresh paired L1
+  deployment: missing, zero or malformed addresses stop generation before
+  any account is changed. There is no default address.
+  `BRIDGE_ZS_L1_CHAIN_ID` defaults to Sepolia (`11155111`).
   `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
   the cell — never deployed, executed in `tvm-debugger` — and
   `scripts/check_zerostate_data_encoder.py`, wired into

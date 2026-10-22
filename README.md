@@ -14,8 +14,8 @@ verifiers deployed as Yul bytecode.
 
 ## The current deployment
 
-Sepolia ↔ shellnet. No address is pinned in the tree: the CLI, the relayers and
-the web form all take theirs from configuration.
+Sepolia ↔ shellnet, deployed from tag [`v0.4.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.4.0).
+The CLI, relayers and web form take their addresses from configuration.
 
 ### Ethereum (Sepolia, chain id 11155111)
 
@@ -52,9 +52,9 @@ RPC_URL=https://rpc.sepolia.ethpandaops.io
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
 the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
 (receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
-consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints. The
-per-transaction cap is `type(uint64).max` units — sized so the amount fits the AN mint path, not as a
-TVL limit.
+consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints.
+Each transfer is capped at 50 USDC, and the outstanding principal at 10,000 USDC
+per L1 chain.
 
 **Acki Nacki → Ethereum (state attestation + payout).** Three permissionless entrypoints:
 

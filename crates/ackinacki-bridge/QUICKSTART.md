@@ -231,10 +231,14 @@ export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 ```
 
+Transfers are limited to 50 USDC. Each L1 bridge caps deposited principal minus
+completed payouts at 10,000 USDC; AN tracks the same capacity separately per
+chain. Limit reads must succeed before an approval, deposit or burn is requested.
+
 Sepolia is the only network the interactive `deposit` CLI lists; Ethereum
 mainnet is the CCTP hub the deposit relayer proves, not a wallet option.
 The new EVM deployment must expose `deposit(uint256,bytes32)` and be paired
-with an AN bridge at version 1.12.0 or newer using this build's key. Older
+with an AN bridge at version 1.13.0 or newer using this build's key. Older
 deployment addresses are incompatible. Everything else — the RPC, the Acki
 Nacki endpoint, the bridge address, the prover directory, the state
 directory — comes from the profile. When reusing a profile, replace its
@@ -338,7 +342,7 @@ exit 30", has the details.
 **35 and 37: go to the operator.** The message says what to give them: the
 transaction hash, the `depositId`, the amount, the bridge address and the
 operation id. After exit 37 the operator pays it out once with
-`mintAndSendBridged`, matching this deposit's recipient and amount; that
+`mintAndSendBridged`, matching this deposit's recipient, amount and source `chainId`; that
 call credits `getTotalBridged` the way `confirmDeposit` would have.
 Ordinary `mintAndSend` does not. A second recovery invents headroom the
 Ethereum treasury does not hold.

@@ -39,21 +39,51 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
-/// The first bridge that embeds the deposit key this build's prover makes
-/// proofs for. An older bridge rejects every one of them at
-/// `finalizeDeposit`, after the USDC is in the EVM bridge.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 12, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
+/// The first supported bridge with this build's deposit key and mandatory
+/// per-chain limit getters. Refuse older deployments before USDC leaves L1.
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
 
-/// Refuses a bridge older than the deposit key this build proves for.
+/// Refuses a bridge older than this build's mandatory deposit interfaces.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
     if v < key_min {
         return Err(format!(
-            "the bridge is version {v}; this CLI's prover makes proofs for the deposit key of \
-             bridge {key_min} and newer, which an older bridge rejects"
+            "the bridge is version {v}; this CLI requires the deposit key and per-chain limit \
+             getters of bridge {key_min} and newer. Install the matching CLI and bridge pair"
         ));
     }
     Ok(())
+}
+
+/// Read mandatory AN limits without treating RPC or ABI errors as an absent
+/// cap.
+pub async fn read_volume_limits(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    chain_id: u64,
+) -> CliResult<crate::deposit::evm::VolumeLimits> {
+    let out = an
+        .run_getter(
+            bridge,
+            BRIDGE_ABI,
+            "getDepositLimits",
+            json!({"chainId": chain_id.to_string()}),
+        )
+        .await
+        .map_err(|e| refuse(format!("getDepositLimits failed: {e:#}")))?;
+    let field = |name: &str| -> CliResult<U256> {
+        let n = out[name]
+            .as_u64()
+            .map(u128::from)
+            .or_else(|| out[name].as_str().and_then(|v| v.parse::<u128>().ok()));
+        n.map(U256::from)
+            .ok_or_else(|| refuse(format!("getDepositLimits: invalid {name}: {out}")))
+    };
+    Ok(crate::deposit::evm::VolumeLimits {
+        max_transfer: field("maxTransfer")?,
+        max_tvl: field("maxTvl")?,
+        outstanding: field("outstanding")?,
+    })
 }
 
 /// Judges a bridge version: `Err` refuses, `Ok` carries the warnings.
@@ -101,9 +131,13 @@ pub fn version_verdict(
     // the CLI while both are being worked on.
     if v > newest {
         if dev_unfixed {
-            warnings.push(format!(
-                "development build: bridge {v} is newer than {newest} this CLI was built for, and                  its deposit key may have been rotated; never ship this build"
-            ));
+            warnings.push(
+                format!(
+                    "development build: bridge {v} is newer than {newest} this CLI was built for, \
+                     and                  its deposit key may have been rotated; never ship this \
+                     build"
+                ),
+            );
         } else {
             return Err(format!(
                 "the bridge is version {v}, newer than {newest} this CLI was built for. Its                  deposit key may have been rotated, and this CLI proves for the older one: the                  deposit would be refused at finalizeDeposit with the USDC already in the EVM                  bridge. Install a CLI built for {v}"
@@ -413,7 +447,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -455,14 +489,25 @@ mod tests {
         .await
     }
 
-    /// A bridge whose version says 1.12.0 but whose code has no
+    #[tokio::test]
+    async fn main_deployment_without_limits_is_refused_by_version() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
+        ]);
+        let error = go(&an, [0; 32]).await.unwrap_err();
+        assert!(error.to_string().contains("1.13.0"), "{error}");
+        assert!(error.to_string().contains("per-chain limit"), "{error}");
+    }
+
+    /// A bridge whose version says 1.13.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -508,7 +553,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -641,9 +686,9 @@ mod tests {
         assert_eq!(
             DEPOSIT_KEY_BRIDGE_VERSION.to_string(),
             shipped,
-            "DEPOSIT_KEY_BRIDGE_VERSION is {}, but the eccUSDCBridge this build ships is {shipped}. \
-             A bridge below the floor is refused; a bridge at the floor is trusted to hold this \
-             build's deposit key. Bump the constant with the contract.",
+            "DEPOSIT_KEY_BRIDGE_VERSION is {}, but the eccUSDCBridge this build ships is \
+             {shipped}. A bridge below the floor is refused; a bridge at the floor is trusted to \
+             hold this build's deposit key. Bump the constant with the contract.",
             DEPOSIT_KEY_BRIDGE_VERSION,
         );
         assert_eq!(

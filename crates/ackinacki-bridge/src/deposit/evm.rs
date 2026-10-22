@@ -22,6 +22,9 @@ alloy::sol! {
         function deposit(uint256 amount, bytes32 anAccount) external;
         function usdc() external view returns (address);
         function paused() external view returns (bool);
+        function MAX_TRANSFER_AMOUNT() external view returns (uint256);
+        function MAX_BRIDGE_TVL() external view returns (uint256);
+        function treasuryBalance() external view returns (uint256);
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp);
         error BridgePaused();
     }
@@ -255,6 +258,41 @@ pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Add
         .call(bridge, IDeposit::usdcCall {}.abi_encode().into())
         .await?;
     Ok(IDeposit::usdcCall::abi_decode_returns(&out)?)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The EVM bridge's transfer ceiling and principal capacity, in micro-USDC.
+pub struct VolumeLimits {
+    /// Maximum amount of one transfer.
+    pub max_transfer: U256,
+    /// Maximum outstanding principal on this chain.
+    pub max_tvl: U256,
+    /// Deposits minus completed payouts.
+    pub outstanding: U256,
+}
+
+/// Read every required limit; RPC and ABI errors are propagated.
+pub async fn read_volume_limits(
+    evm: &dyn EvmRead,
+    bridge: Address,
+) -> anyhow::Result<VolumeLimits> {
+    let transfer = evm
+        .call(
+            bridge,
+            IDeposit::MAX_TRANSFER_AMOUNTCall {}.abi_encode().into(),
+        )
+        .await?;
+    let tvl = evm
+        .call(bridge, IDeposit::MAX_BRIDGE_TVLCall {}.abi_encode().into())
+        .await?;
+    let outstanding = evm
+        .call(bridge, IDeposit::treasuryBalanceCall {}.abi_encode().into())
+        .await?;
+    Ok(VolumeLimits {
+        max_transfer: IDeposit::MAX_TRANSFER_AMOUNTCall::abi_decode_returns(&transfer)?,
+        max_tvl: IDeposit::MAX_BRIDGE_TVLCall::abi_decode_returns(&tvl)?,
+        outstanding: IDeposit::treasuryBalanceCall::abi_decode_returns(&outstanding)?,
+    })
 }
 
 /// The token's `decimals()`.

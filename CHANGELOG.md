@@ -104,6 +104,14 @@ assigns it when the release is tagged.
   ones. The section carries the Sepolia bridge and its deployment block, the
   USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
   client, and the four settings to copy. Read back from both chains.
+- ***The current deployment* in `README.md` follows the redeploy of the
+  limits.** The Sepolia `AckiNackiBridge` is now
+  `0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b`, deployed in block `11971217`
+  from `c7054529`; the previous `0x8413…d451` is paused. On shellnet
+  `eccUSDCBridge` reports `1.13.0`, code hash `66d15d49…`, and its Sepolia
+  light client is `0:9121fc37…8462`. Take `BRIDGE_ADDRESS`,
+  `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` from the section. Read back from
+  both chains.
 
 ### Documentation
 

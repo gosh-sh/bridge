@@ -8,10 +8,14 @@ WithdrawalInitiated event path works on the target cluster BEFORE running
 the heavy Circuit 4 pipeline. If this test fails, the full orchestrator
 cannot succeed either — this is the cheap fast-fail signal.
 
-`mintAndSend` does not add bridged inventory. The driver reads
-`getTotalBridged(3)` before the burn and sends with bounce, so a 233
-refusal returns the ECC. A fresh bridge with minted=0 refuses until a
-deposit has been finalized for at least `WITHDRAWAL_AMOUNT`.
+The driver reads `getTotalBridged(3)` before the burn and stops when the
+inventory cannot cover the amount (the contract would otherwise hand the
+ECC back without a burn event). In `local` mode the mint goes through
+`mintAndSendBridged` (eccUSDCBridge 1.13.0), which books the amount as
+bridged inventory for `DST_CHAIN_ID`, so a fresh network (zerostate
+minted=0) can withdraw. In `shellnet` mode the mint is `mintAndSend`, which
+adds no inventory: the withdrawal needs a deposit finalized for at least
+`WITHDRAWAL_AMOUNT` first.
 
 Modes (env `MODE`, default `local`):
   local     - local devnet cluster, keys auto-materialized from
@@ -72,6 +76,9 @@ PROVER_DIR  = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR    = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, DEFAULT_WORK))
 GRAPHQL_URL = os.environ.get("GRAPHQL_URL", DEFAULT_GRAPHQL)
 USDC_BRIDGE_KEY_PATH_OVERRIDE = os.environ.get("USDC_BRIDGE_KEY_PATH")
+# How long the bridge account may take to read as Active after the network
+# is handed over (see the precheck below).
+BRIDGE_READY_TIMEOUT_SECS = float(os.environ.get("BRIDGE_READY_TIMEOUT_SECS", "180"))
 USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEY_PATH_OVERRIDE or _DEFAULT_USDC_BRIDGE_KEY_PATH
 
 MSIG_KEY_PATH = os.path.join(WORK_DIR, "msig_withdrawals_e2e.keys.json")
@@ -124,8 +131,14 @@ def main():
     tracer.log(f"  GRAPHQL_URL: {GRAPHQL_URL}")
     tracer.log(f"  WORK_DIR:    {WORK_DIR}")
     tracer.log(f"  USDC_BRIDGE_KEY_PATH: {USDC_BRIDGE_KEY_PATH}")
-    assert common.is_account_active(USDC_BRIDGE_ADDRESS), \
-        f"USDCBridge not active at {USDC_BRIDGE_ADDRESS}"
+    # A local network hands over as soon as blocks finalize and one external
+    # message lands; the API node behind the endpoint can still be catching
+    # up on account state for a while after that (nodes restart during
+    # start-up), so the bridge is waited for, not asserted once.
+    if not common.wait_account_status(USDC_BRIDGE_ADDRESS, "Active",
+                                      timeout=BRIDGE_READY_TIMEOUT_SECS):
+        raise SystemExit(f"USDCBridge not active at {USDC_BRIDGE_ADDRESS} "
+                         f"after {BRIDGE_READY_TIMEOUT_SECS:.0f} s")
     tracer.log(f"  USDCBridge active at {USDC_BRIDGE_ADDRESS}")
 
     # bk_set: local devnet fetches from GraphQL AND falls back to bk_set.json.
@@ -148,6 +161,7 @@ def main():
         work_dir=WORK_DIR, msig_key_path=MSIG_KEY_PATH,
         usdc_bridge_key_path=USDC_BRIDGE_KEY_PATH,
         is_shellnet=IS_SHELLNET, verbose_faucet=True,
+        mint_bridged=not IS_SHELLNET,
     )
 
     tracer.log_phase("Dispatching initiateWithdrawal")

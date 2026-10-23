@@ -35,9 +35,33 @@ pub(crate) fn validate_an_account(raw: &str) -> Result<String, String> {
     Ok(v)
 }
 
+pub(crate) fn validate_an_target(raw: &str) -> Result<String, String> {
+    let (dapp, account) = raw
+        .trim()
+        .split_once("::")
+        .ok_or("Use dapp_id::account_id, with exactly 64 hex chars for each part")?;
+    let dapp = dapp.trim_start_matches("0x").to_lowercase();
+    if dapp.len() != 64 || !dapp.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("DApp ID must be exactly 64 hex chars".into());
+    }
+    Ok(format!("{dapp}::{}", validate_an_account(account)?))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_an_account;
+    use super::{validate_an_account, validate_an_target};
+
+    #[test]
+    fn a_target_requires_both_full_identifiers_and_a_nonzero_account() {
+        let account = "a3".repeat(32);
+        assert!(validate_an_target(&account).is_err());
+        for dapp in ["00".repeat(32), "ff".repeat(32)] {
+            let target = format!("{dapp}::{account}");
+            assert_eq!(validate_an_target(&target).unwrap(), target);
+        }
+        assert!(validate_an_target(&format!("1::{account}")).is_err());
+        assert!(validate_an_target(&format!("{}::{}", "ff".repeat(32), "00".repeat(32))).is_err());
+    }
 
     /// The mistake this guard exists for: a pasted Ethereum address is 40 hex
     /// chars, non-zero, and all-hex, so every other check passes it.

@@ -218,6 +218,7 @@ async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
                 bridge,
                 amount: 1_000_000,
                 account: acc,
+                dapp_id: [0; 32],
             },
             crate::deposit::evm::BlockTag::Latest,
         )

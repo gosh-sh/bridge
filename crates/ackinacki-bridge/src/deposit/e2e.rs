@@ -21,8 +21,8 @@
 //!
 //! The test runs in `crates/ackinacki-bridge`, which the profile's relative
 //! paths are written for. `E2E_AMOUNT` is in USDC and defaults to 0.01.
-//! Use a fresh paired deployment with `deposit(uint256,bytes32)` on EVM and
-//! AN bridge 1.13.0 or newer with this build's deposit key.
+//! Use a fresh paired deployment with `deposit(uint256,uint256,bytes32)` on EVM
+//! and AN bridge 1.14.0 or newer with this build's deposit key.
 //! `dev-unfixed-bridge` is needed while this build names no minimum bridge
 //! version. The operation is kept in the profile's state directory, so a run
 //! that stops continues with the CLI's own `--resume <op-id>`.

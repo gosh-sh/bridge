@@ -1,9 +1,10 @@
 # Deposit proof fixtures
 
 These ten witnesses are synthetic single-leaf transaction and receipt tries for
-`Deposit(uint256,address,uint256,bytes32,uint256)`. Their headers commit to those
+`Deposit(uint256,address,uint256,bytes32,uint256,uint256)`. Their headers commit to those
 tries; they are not canonical Sepolia blocks. The source chain ID is Sepolia
-(`11155111`), and deposit IDs run from 0 to 9.
+(`11155111`), and deposit IDs run from 0 to 9. DApp IDs include zero, the
+maximum UInt256, and nonzero values with both halves set.
 
 Regenerate from `deposit-prover/` with the production Hermez SRS in
 `data/kzg_params_18.srs`:

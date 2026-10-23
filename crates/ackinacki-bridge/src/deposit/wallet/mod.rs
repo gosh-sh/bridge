@@ -43,6 +43,8 @@ pub enum TxPurpose {
         amount: u64,
         /// The Acki Nacki account that is credited.
         account: B256,
+        /// Destination DApp ID committed by the deposit transaction.
+        dapp_id: [u8; 32],
     },
 }
 
@@ -82,7 +84,8 @@ impl TxRequest {
                 bridge,
                 amount,
                 account,
-            } => (*bridge, deposit_calldata(*amount, *account)),
+                dapp_id,
+            } => (*bridge, deposit_calldata(*amount, *account, *dapp_id)),
         };
         let estimate = evm.estimate_gas_at(from, to, data.clone(), at).await?;
         Ok(TxRequest {
@@ -187,6 +190,7 @@ mod tests {
                 bridge,
                 amount: 12_500_000,
                 account: B256::repeat_byte(0xa3),
+                dapp_id: [0xff; 32],
             },
             BlockTag::Latest,
         )
@@ -199,10 +203,11 @@ mod tests {
         assert!(j.get("gasPrice").is_none());
         assert!(j.get("accessList").is_none());
         assert_eq!(j["to"], format!("{bridge:#x}"));
+        assert_eq!(&j["data"].as_str().unwrap()[74..138], "ff".repeat(32));
         assert_eq!(
             j["data"].as_str().unwrap().len(),
-            2 + 136,
-            "68 bytes of calldata"
+            2 + 200,
+            "100 bytes of calldata"
         );
     }
 }

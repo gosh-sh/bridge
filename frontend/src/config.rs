@@ -78,6 +78,7 @@ pub const BRIDGE_ABI: &str = r#"[
     {
         "inputs": [
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
+            {"internalType": "uint256", "name": "dappId", "type": "uint256"},
             {"internalType": "bytes32", "name": "anAccount", "type": "bytes32"}
         ],
         "name": "deposit",
@@ -126,19 +127,20 @@ pub const BRIDGE_ABI: &str = r#"[
             {"indexed": true, "internalType": "address", "name": "sender", "type": "address"},
             {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
             {"indexed": false, "internalType": "bytes32", "name": "anAccount", "type": "bytes32"},
-            {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"}
+            {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"},
+            {"indexed": false, "internalType": "uint256", "name": "dappId", "type": "uint256"}
         ],
         "name": "Deposit",
         "type": "event"
     }
 ]"#;
 
-/// Optional default Acki Nacki receiver account (build-time `AN_RECEIVER`).
+/// Optional default Acki Nacki receiver address (build-time `AN_RECEIVER`).
 ///
-/// The bridge's `deposit(uint256 amount, bytes32 anAccount)`
-/// takes the AN account explicitly.
+/// The bridge's `deposit(uint256 amount, uint256 dappId, bytes32 anAccount)`
+/// takes both destination identifiers explicitly.
 /// This constant is only a convenience default the UI may prefill; an empty
-/// value means "no prefill — the user types their AN account".
+/// value means "no prefill — the user types dapp_id::account_id".
 pub const ACKI_NACKI_RECEIVER: &str = match option_env!("AN_RECEIVER") {
     Some(v) => v,
     None => "",

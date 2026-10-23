@@ -129,8 +129,8 @@ docker run -p 8080:80 acki-nacki-bridge-frontend
 ## Configuration
 
 Set `BRIDGE_CONTRACT_ADDRESS` when building with Trunk. It must be a new
-Sepolia deployment exposing `deposit(uint256,bytes32)`, paired with an
-`eccUSDCBridge` 1.13.0 or newer that embeds this build's deposit key. The old
+Sepolia deployment exposing `deposit(uint256,uint256,bytes32)`, paired with an
+`eccUSDCBridge` 1.14.0 or newer that embeds this build's deposit key. The old
 workchain-bearing deployment addresses are incompatible.
 
 There is no default bridge address. Without a valid non-zero 20-byte address,
@@ -165,3 +165,9 @@ MIT License - see LICENSE file for details
 Deposits are limited to 50 USDC. Before approval and deposit, the form reads
 `MAX_TRANSFER_AMOUNT`, `MAX_BRIDGE_TVL` and `treasuryBalance`; failed reads stop
 the request. The 10,000 USDC capacity includes principal supplied to Aave.
+
+The recipient field and optional `AN_RECEIVER` prefill use
+`dapp_id::account_id`, with 64 hexadecimal digits per identifier. The DApp ID
+may be zero or any UInt256 value; the account must be nonzero. The form commits
+both identifiers in the Ethereum transaction. Recipient DApp validation on AN
+is not added by this release.

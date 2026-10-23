@@ -251,13 +251,15 @@ pub mod tests_support {
         let header = bytes(&v["receipt_proof"]["block_header_rlp"]);
         let mut account = [0u8; 32];
         account.copy_from_slice(&bytes(&ev["an_account"]));
+        let mut dapp_id = [0u8; 32];
+        dapp_id.copy_from_slice(&bytes(&ev["dapp_id"]));
         ExpectedInputs {
             deposit_id: U256::from(ev["deposit_id"].as_u64().unwrap()),
             sender: Address::from_slice(&bytes(&ev["sender"])),
             amount: U256::from_be_slice(&bytes(&ev["amount"])).to::<u64>(),
             contract: Address::from_slice(&bytes(&ev["contract_address"])),
             chain_id: ev["chain_id"].as_u64().unwrap(),
-            dapp_id: [0u8; 32],
+            dapp_id,
             account_id: account,
             block_hash: keccak256(&header),
         }

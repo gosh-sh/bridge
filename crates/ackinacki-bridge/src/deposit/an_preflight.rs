@@ -39,10 +39,10 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
 /// The first supported bridge with this build's deposit key and mandatory
 /// per-chain limit getters. Refuse older deployments before USDC leaves L1.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
 
 /// Refuses a bridge older than this build's mandatory deposit interfaces.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
@@ -131,13 +131,11 @@ pub fn version_verdict(
     // the CLI while both are being worked on.
     if v > newest {
         if dev_unfixed {
-            warnings.push(
-                format!(
+            warnings.push(format!(
                     "development build: bridge {v} is newer than {newest} this CLI was built for, \
                      and                  its deposit key may have been rotated; never ship this \
                      build"
-                ),
-            );
+                ));
         } else {
             return Err(format!(
                 "the bridge is version {v}, newer than {newest} this CLI was built for. Its                  deposit key may have been rotated, and this CLI proves for the older one: the                  deposit would be refused at finalizeDeposit with the USDC already in the EVM                  bridge. Install a CLI built for {v}"
@@ -447,7 +445,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -496,18 +494,44 @@ mod tests {
             json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.13.0"), "{error}");
+        assert!(error.to_string().contains("1.14.0"), "{error}");
         assert!(error.to_string().contains("per-chain limit"), "{error}");
     }
 
-    /// A bridge whose version says 1.13.0 but whose code has no
+    #[tokio::test]
+    async fn the_old_1_13_deposit_key_is_refused_even_in_development_mode() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+        ]);
+        let target = AnTarget {
+            dapp_id: [0; 32],
+            account_id: ACC,
+        };
+        let error = run_with(
+            &an,
+            BRIDGE,
+            11_155_111,
+            address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
+            &target,
+            &RecordingUi::new(true),
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("1.14.0"), "{error}");
+    }
+
+    /// A bridge whose version says 1.14.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -553,7 +577,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![

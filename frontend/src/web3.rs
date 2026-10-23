@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::window;
 
-use crate::{config::*, utils::validate_an_account};
+use crate::{config::*, utils::validate_an_target};
 
 #[wasm_bindgen]
 extern "C" {
@@ -43,29 +43,24 @@ fn provider_error(context: &str, e: JsValue) -> String {
             // MetaMask does not raise its own window for this; the request
             // waits behind the toolbar icon, which is easy to miss on a
             // browser with many extensions. Say where to look.
-            "MetaMask already has a connection request waiting, and it does \
-             not open a window on its own.\n\nClick the extensions button \
-             (the puzzle piece, right of the address bar), pick MetaMask, and \
-             approve or reject the request there. The MetaMask icon shows a \
-             small badge while one is pending.\n\nIf nothing is waiting, the \
-             request is stale: in MetaMask open Settings and remove this site \
-             from its connected sites, then connect again."
+            "MetaMask already has a connection request waiting, and it does not open a window on \
+             its own.\n\nClick the extensions button (the puzzle piece, right of the address bar), \
+             pick MetaMask, and approve or reject the request there. The MetaMask icon shows a \
+             small badge while one is pending.\n\nIf nothing is waiting, the request is stale: in \
+             MetaMask open Settings and remove this site from its connected sites, then connect \
+             again."
                 .to_string()
         },
         // EIP-1193: the person pressed Reject. Not a failure worth shouting about.
         Some(4001) => format!("{context} was rejected in MetaMask."),
         // EIP-1193: the wallet is locked or the site is not authorised.
-        Some(4100) => {
-            "MetaMask has not authorised this site. Unlock the extension and \
-             connect again."
-                .to_string()
-        },
+        Some(4100) => "MetaMask has not authorised this site. Unlock the extension and connect \
+                       again."
+            .to_string(),
         // EIP-3085: the chain is unknown to the wallet and must be added first.
-        Some(4902) => {
-            "MetaMask does not know the Sepolia network yet. Approve the \
-             prompt that offers to add it."
-                .to_string()
-        },
+        Some(4902) => "MetaMask does not know the Sepolia network yet. Approve the prompt that \
+                       offers to add it."
+            .to_string(),
         _ => match message {
             Some(m) => format!("{context} failed: {m}"),
             None => format!("{context} failed: {e:?}"),
@@ -333,11 +328,13 @@ pub async fn approve_usdc(amount: u128) -> Result<String, String> {
 
 fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
     validate_transfer_amount(amount)?;
-    let recipient = validate_an_account(an_account)?;
+    let recipient = validate_an_target(an_account)?;
+    let (dapp, account) = recipient.split_once("::").unwrap();
     Ok(format!(
-        "0xc9630cb0{}{}",
+        "0x045434c4{}{}{}",
         encode_uint256(amount),
-        encode_bytes32(&recipient)
+        dapp,
+        encode_bytes32(account)
     ))
 }
 
@@ -375,20 +372,25 @@ async fn check_deposit_capacity(bridge: &str, amount: u128) -> Result<(), String
 mod deposit_tests {
     use super::deposit_calldata;
 
+    fn target(account: &str) -> String {
+        format!("{}::{account}", "f1".repeat(32))
+    }
+
     #[test]
     fn deposit_encodes_amount_and_account() {
         let account = "a3".repeat(32);
-        let data = deposit_calldata(12_500_000, &account).unwrap();
-        assert_eq!(data.len(), 2 + 2 * 68);
-        assert_eq!(&data[..10], "0xc9630cb0");
+        let data = deposit_calldata(12_500_000, &target(&account)).unwrap();
+        assert_eq!(data.len(), 2 + 2 * 100);
+        assert_eq!(&data[..10], "0x045434c4");
         assert_eq!(u128::from_str_radix(&data[10..74], 16).unwrap(), 12_500_000);
-        assert_eq!(&data[74..], account);
+        assert_eq!(&data[74..138], "f1".repeat(32));
+        assert_eq!(&data[138..], account);
     }
 
     #[test]
     fn deposit_normalises_the_recipient_before_encoding() {
-        let data = deposit_calldata(1, &format!("0x{}", "AB".repeat(32))).unwrap();
-        assert_eq!(&data[74..], "ab".repeat(32));
+        let data = deposit_calldata(1, &target(&format!("0x{}", "AB".repeat(32)))).unwrap();
+        assert_eq!(&data[138..], "ab".repeat(32));
     }
 
     fn rejects_before_wallet_access(
@@ -420,14 +422,20 @@ mod deposit_tests {
         }
         rejects_before_wallet_access(super::approve_usdc(1), "not configured");
         let recipient = "a3".repeat(32);
-        rejects_before_wallet_access(super::make_deposit(1, &recipient), "not configured");
+        rejects_before_wallet_access(
+            super::make_deposit(1, &target(&recipient)),
+            "not configured",
+        );
     }
 
     #[test]
     fn excessive_transfers_are_rejected_before_approval_or_deposit() {
         let recipient = "a3".repeat(32);
         rejects_before_wallet_access(super::approve_usdc(50_000_001), "50 USDC");
-        rejects_before_wallet_access(super::make_deposit(50_000_001, &recipient), "50 USDC");
+        rejects_before_wallet_access(
+            super::make_deposit(50_000_001, &target(&recipient)),
+            "50 USDC",
+        );
     }
 }
 

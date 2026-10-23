@@ -26,7 +26,7 @@ contract ReentrantERC20 is MockERC20 {
     {
         if (!entered && msg.sender == address(bridge) && to == address(bridge)) {
             entered = true;
-            bridge.deposit(amount, reenterAccount);
+            bridge.deposit(amount, 0, reenterAccount);
         }
 
         uint256 allowed = _allowances[from][msg.sender];

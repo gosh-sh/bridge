@@ -1045,11 +1045,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.13.0 with limits and replay
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.14.0 with limits and replay
         // protection.
         assert_eq!(
             &hash[..8],
-            "66d15d49",
+            "0f53fe4c",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

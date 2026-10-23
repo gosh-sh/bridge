@@ -177,12 +177,13 @@ fn deposit_log(event: &DepositEventData) -> Log {
     deposit_id[24..].copy_from_slice(&event.deposit_id.to_be_bytes());
     let mut sender = [0u8; 32];
     sender[12..].copy_from_slice(&event.sender);
-    let mut data = Vec::with_capacity(96);
+    let mut data = Vec::with_capacity(128);
     data.extend_from_slice(&event.amount);
     data.extend_from_slice(&event.an_account);
     let mut timestamp = [0u8; 32];
     timestamp[24..].copy_from_slice(&event.timestamp.to_be_bytes());
     data.extend_from_slice(&timestamp);
+    data.extend_from_slice(&event.dapp_id);
     Log {
         address: Address::from(event.contract_address),
         topics: vec![
@@ -262,6 +263,7 @@ fn sample_event() -> DepositEventData {
         deposit_id: 7,
         sender: [0x11; 20],
         amount,
+        dapp_id: [0u8; 32],
         an_account: [0x22; 32],
         timestamp: 1_700_000_000,
         contract_address: [0x33; 20],
@@ -275,8 +277,17 @@ pub fn build(spec: SyntheticSpec) -> DepositProofInput {
 }
 
 pub fn build_with_deposit_id(spec: SyntheticSpec, deposit_id: u64) -> DepositProofInput {
+    build_with_dapp_id(spec, deposit_id, [0u8; 32])
+}
+
+pub fn build_with_dapp_id(
+    spec: SyntheticSpec,
+    deposit_id: u64,
+    dapp_id: [u8; 32],
+) -> DepositProofInput {
     let mut event = sample_event();
     event.deposit_id = deposit_id;
+    event.dapp_id = dapp_id;
     let tx_bytes = enclosing_tx_bytes(spec.tx, event.contract_address, event.chain_id);
     let key = encode_tx_index(0);
     let (transactions_root, tx_proof_nodes) =
@@ -335,7 +346,6 @@ pub fn build_with_deposit_id(spec: SyntheticSpec, deposit_id: u64) -> DepositPro
             proof_nodes: tx_proof_nodes,
             transactions_root,
         },
-        dapp_id: [0u8; 32],
     }
 }
 

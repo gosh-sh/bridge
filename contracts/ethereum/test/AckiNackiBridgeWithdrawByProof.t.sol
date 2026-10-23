@@ -995,7 +995,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         vm.startPrank(funder);
         usdc.approve(address(bridge), 1);
         vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
-        bridge.deposit(1, bytes32(uint256(1)));
+        bridge.deposit(1, 0, bytes32(uint256(1)));
         vm.stopPrank();
         assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
         assertTrue(bridge.isNullifierUsed(100));

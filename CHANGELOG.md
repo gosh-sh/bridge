@@ -1288,6 +1288,24 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **Local acki-nacki network e2e in CI.** `.woodpecker/local-net-e2e.yaml` runs
+  for a pull request labelled `local-network` (or by hand): it bakes the PR's
+  `contracts/an/*` into a fresh acki-nacki zerostate, brings a whole network up on
+  one host (acki-nacki `tests/dexdo/up.sh` + `ansible/dexdo-e2e-*.yml`; the
+  network follows acki-nacki's `dev` branch: each run resolves that branch's
+  latest build and uses one build for the checkout, the zerostate helpers and
+  the nodes, which run by digest) and runs
+  `crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py` there,
+  then tears the network down. Paths, pins and the Woodpecker secrets it
+  needs (ssh key, host, user, the private inventory repository, a GitHub
+  token that reads acki-nacki and that repository) are listed in
+  `tests/e2e/local-net/README.md`; the host scripts (`gen-zerostate.sh`,
+  `host-lease.sh`, `run-test-on-host.sh`, `checkout-acki-on-host.sh`) live next
+  to it and work by hand with the same variables. `up.sh.patch` there makes
+  acki-nacki's `tests/dexdo/up.sh` start a node again when its first run dies
+  at once, and hand over only once node0 serves accounts; it is applied on the
+  host until acki-nacki carries the change.
+
 - `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
   user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
   as the base64 BOC `tvm-cli callx` takes. It only encodes and sends

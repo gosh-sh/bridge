@@ -24,10 +24,10 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
    proof), with `max_key_byte_len: 3` (`impl ToMPTInput for ReceiptProof` in `src/circuit_v2.rs`;
    the leaf bound is `receipt_max_byte_len`).
 2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
-3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
-   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Five fields: the event carries the Acki Nacki destination.
+3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256,uint256)")`
+   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Six fields: the event carries the destination account and DApp ID.
 4. **Contract address** — the event was emitted by the expected bridge contract.
-5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
+5. **Event data** — `depositId`, `sender`, `amount`, and both AN destination identifiers are extracted and exposed
    as public inputs.
 6. **Block hash binding** — the proof is tied to a specific Ethereum block hash.
 7. **Chain binding** — the source chain id is a public input, so a proof from one chain cannot be
@@ -174,3 +174,10 @@ Some tests reach an Ethereum RPC and will not run offline.
 - [axiom-eth](https://github.com/axiom-crypto/axiom-eth)
 - [Merkle-Patricia Trie](https://ethereum.org/en/developers/docs/data-structures-and-encoding/patricia-merkle-trie/)
 - `docs/EVM-contracts-spec.md` §6 — the `Deposit` event and the Ethereum-side deposit path
+
+The destination DApp ID is read from event data word 3 and bound as two
+128-bit public inputs. `fetch_deposit_data --dapp-id` is an optional equality
+check against that event, not a witness override. Changing either public half
+without changing the receipt makes the proof invalid. The AN bridge keeps its
+existing voucher identity and payout behavior; this key rotation does not add
+recipient DApp validation there.

@@ -186,6 +186,18 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
             log.data.len()
         ));
     };
+    if exp.calldata.len() != crate::deposit::evm::DEPOSIT_CALLDATA_LEN {
+        return Classified::Negative(Negative::Mismatch(format!(
+            "{DIFFERS}: the recorded calldata does not use the current deposit ABI"
+        )));
+    }
+    let expected_dapp = U256::from_be_slice(&exp.calldata[36..68]);
+    if ev.dapp_id != expected_dapp {
+        return Classified::Negative(Negative::Mismatch(format!(
+            "{DIFFERS}: event DApp ID {:#x} differs from requested {expected_dapp:#x}",
+            ev.dapp_id
+        )));
+    }
     if ev.sender != exp.from || ev.amount != U256::from(exp.amount) || ev.an_account != exp.account
     {
         return Classified::Negative(Negative::Mismatch(format!(
@@ -423,7 +435,7 @@ mod tests {
         Expect {
             bridge: BRIDGE,
             from: FROM,
-            calldata: deposit_calldata(12_500_000, ACC),
+            calldata: deposit_calldata(12_500_000, ACC, [0; 32]),
             amount: 12_500_000,
             account: ACC,
             confirmations: 12,
@@ -574,7 +586,7 @@ mod tests {
             true,
             other_amount,
             2,
-            deposit_calldata(1, ACC),
+            deposit_calldata(1, ACC, [0; 32]),
             111,
             Some(100),
         );
@@ -594,7 +606,7 @@ mod tests {
             true,
             other_account,
             2,
-            deposit_calldata(12_500_000, B256::repeat_byte(1)),
+            deposit_calldata(12_500_000, B256::repeat_byte(1), [0; 32]),
             111,
             Some(99),
         );
@@ -605,9 +617,37 @@ mod tests {
     }
 
     #[test]
+    fn a_deposit_to_another_dapp_is_not_the_requested_deposit() {
+        let mut logs = good_logs();
+        let log = logs.iter_mut().find(|log| log.address == BRIDGE).unwrap();
+        let mut data = log.data.to_vec();
+        data[96..128].fill(0xff);
+        log.data = data.into();
+        let observed = obs(true, logs.clone(), 2, exp().calldata, 111, Some(100));
+        assert!(matches!(
+            judge(&observed, Some(B256::repeat_byte(1)), &exp()),
+            Verdict::Final(Negative::Mismatch(_))
+        ));
+        let mut expected = exp();
+        expected.calldata = deposit_calldata(expected.amount, expected.account, [0xff; 32]);
+        let observed = obs(true, logs, 2, expected.calldata.clone(), 111, Some(100));
+        assert!(matches!(
+            judge(&observed, Some(B256::repeat_byte(1)), &expected),
+            Verdict::Confirmed(_)
+        ));
+    }
+
+    #[test]
     fn a_mismatch_names_what_was_broadcast_next_to_what_was_requested() {
         let logs = vec![deposit_log(BRIDGE, U256::from(5), FROM, 1, ACC, Some(41))];
-        let o = obs(true, logs, 2, deposit_calldata(1, ACC), 111, Some(100));
+        let o = obs(
+            true,
+            logs,
+            2,
+            deposit_calldata(1, ACC, [0; 32]),
+            111,
+            Some(100),
+        );
         let Verdict::Final(Negative::Mismatch(m)) = judge(&o, Some(B256::repeat_byte(1)), &exp())
         else {
             panic!()

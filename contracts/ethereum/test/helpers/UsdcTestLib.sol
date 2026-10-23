@@ -36,7 +36,7 @@ library UsdcTestLib {
         usdc.mint(user, amount);
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, anAccount);
+        bridge.deposit(amount, 0, anAccount);
         vm.stopPrank();
     }
 }

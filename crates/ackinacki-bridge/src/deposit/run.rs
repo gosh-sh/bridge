@@ -655,6 +655,7 @@ async fn request(
         bridge,
         units,
         ask.to.account_b256(),
+        ask.to.dapp_id,
         approved_at.map_or(BlockTag::Latest, BlockTag::Number),
     )
     .await?;
@@ -912,7 +913,11 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
                         .map(|q| q.calldata.clone())
                         .or_else(|| {
                             AnTarget::parse(&rec.params.to).ok().map(|t| {
-                                deposit_calldata(rec.params.amount_units, t.account_b256())
+                                deposit_calldata(
+                                    rec.params.amount_units,
+                                    t.account_b256(),
+                                    t.dapp_id,
+                                )
                             })
                         });
                     match call {
@@ -1109,7 +1114,9 @@ async fn walk(
             .request
             .as_ref()
             .map(|q| q.calldata.clone())
-            .unwrap_or_else(|| deposit_calldata(rec.params.amount_units, to.account_b256())),
+            .unwrap_or_else(|| {
+                deposit_calldata(rec.params.amount_units, to.account_b256(), to.dapp_id)
+            }),
         amount: rec.params.amount_units,
         account: to.account_b256(),
         confirmations: p.confirmations,
@@ -2417,7 +2424,11 @@ mod tests {
             rec.request = Some(RequestInfo {
                 nonce_before: 7,
                 from_block: 800,
-                calldata: crate::deposit::evm::deposit_calldata(W_AMOUNT, B256::from(W_ACC)),
+                calldata: crate::deposit::evm::deposit_calldata(
+                    W_AMOUNT,
+                    B256::from(W_ACC),
+                    [0; 32],
+                ),
                 wallet_hash: None,
             });
             rec.tx = Some(TxClaim {
@@ -2475,7 +2486,7 @@ mod tests {
         assert_eq!(j["deposit"]["tx_hash"], format!("{h:#x}"));
         assert_eq!(j["anchor"]["writer"], "owner");
         assert_eq!(j["tx"]["type"], 2);
-        assert_eq!(j["tx"]["calldata_len"], 68);
+        assert_eq!(j["tx"]["calldata_len"], 100);
         assert_eq!(j["confirmation"]["confirm_tx"], "btx");
         assert_eq!(j["confirmation"]["delivery_tx"], "rtx");
         assert_eq!(j["confirmation"]["via_events"], false);
@@ -4016,8 +4027,7 @@ mod tests {
         // come). Derived from the constant, not written out, so a contract
         // bump cannot turn this into an equality and stop testing anything.
         let newest = crate::deposit::an_preflight::NEWEST_KNOWN_BRIDGE_VERSION;
-        let too_new =
-            crate::deposit::an_preflight::BridgeVersion(newest.0, newest.1, newest.2 + 1);
+        let too_new = crate::deposit::an_preflight::BridgeVersion(newest.0, newest.1, newest.2 + 1);
         d.min_bridge = Some(too_new);
         let e = resume(&p, &d, &target, None).await.unwrap_err();
         assert!(e.to_string().contains(&too_new.to_string()), "{e}");
@@ -4583,7 +4593,7 @@ mod tests {
         let from = w.wallet.account;
         let replacement = w.mined_deposit_in_block(7, W_AMOUNT, BELOW_THE_HEAD, 0x95);
         let original = B256::repeat_byte(0x55);
-        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC));
+        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC), [0; 32]);
         w.evm.txs.lock().unwrap().insert(
             original,
             deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),
@@ -4691,7 +4701,7 @@ mod tests {
         let from = w.wallet.account;
         let replacement = w.mined_deposit_in_block(7, W_AMOUNT / 2, BELOW_THE_HEAD, 0x95);
         let original = B256::repeat_byte(0x55);
-        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC));
+        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC), [0; 32]);
         w.evm.txs.lock().unwrap().insert(
             original,
             deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),

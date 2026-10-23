@@ -544,6 +544,7 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         bridge: c.params.bridge,
         amount,
         account: to.account_b256(),
+        dapp_id: to.dapp_id,
     };
     // The anchor's writer as the summary names it, and whether the light
     // client can anchor the deposit.
@@ -564,7 +565,7 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         anchor: Some(json!({ "writer": writer, "light_client_ready": light_client_ready })),
         tx: Some(json!({
             "approve_calldata": format!("0x{}", hex::encode(approve_calldata(c.params.bridge, U256::from(amount)))),
-            "deposit_calldata": format!("0x{}", hex::encode(deposit_calldata(amount, to.account_b256()))),
+            "deposit_calldata": format!("0x{}", hex::encode(deposit_calldata(amount, to.account_b256(), to.dapp_id))),
             "eip681": [eip681::uri(net.chain_id(), &approve), eip681::uri(net.chain_id(), &deposit)],
             "walletconnect": "a pairing URI is generated when the deposit runs",
         })),
@@ -604,7 +605,7 @@ mod tests {
         assert!(j["tx"]["deposit_calldata"]
             .as_str()
             .unwrap()
-            .starts_with("0xc9630cb0"));
+            .starts_with("0x045434c4"));
         assert!(j["tx"]["approve_calldata"]
             .as_str()
             .unwrap()

@@ -19,13 +19,13 @@ use crate::errors::{CliError, CliResult};
 alloy::sol! {
     /// The part of the EVM bridge a deposit uses.
     interface IDeposit {
-        function deposit(uint256 amount, bytes32 anAccount) external;
+        function deposit(uint256 amount, uint256 dappId, bytes32 anAccount) external;
         function usdc() external view returns (address);
         function paused() external view returns (bool);
         function MAX_TRANSFER_AMOUNT() external view returns (uint256);
         function MAX_BRIDGE_TVL() external view returns (uint256);
         function treasuryBalance() external view returns (uint256);
-        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp);
+        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp, uint256 dappId);
         error BridgePaused();
     }
     /// The part of ERC-20 a deposit uses.
@@ -37,11 +37,11 @@ alloy::sol! {
     }
 }
 
-/// A deposit's calldata: the selector and two words.
-pub const DEPOSIT_CALLDATA_LEN: usize = 68;
+/// A deposit's calldata: the selector and three words.
+pub const DEPOSIT_CALLDATA_LEN: usize = 100;
 /// topic0 of the bridge's `Deposit` event.
 pub const DEPOSIT_TOPIC0: B256 =
-    alloy_primitives::b256!("6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe");
+    alloy_primitives::b256!("fa647be3c21bb35d3e9e53f50fa07d7385b76dcdf2608472a4c3cae986c655c9");
 
 /// Which block a read is made at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,10 +205,11 @@ pub trait EvmRead: Send + Sync {
     async fn fees(&self) -> anyhow::Result<Fees>;
 }
 
-/// The calldata of `deposit(amount, account)`.
-pub fn deposit_calldata(amount: u64, account: B256) -> Bytes {
+/// The calldata of `deposit(amount, dappId, account)`.
+pub fn deposit_calldata(amount: u64, account: B256, dapp_id: [u8; 32]) -> Bytes {
     IDeposit::depositCall {
         amount: U256::from(amount),
+        dappId: U256::from_be_bytes(dapp_id),
         anAccount: account,
     }
     .abi_encode()
@@ -234,6 +235,7 @@ pub struct DepositEvent {
     pub sender: Address,
     /// The amount, in USDC units.
     pub amount: U256,
+    pub dapp_id: U256,
     /// The Acki Nacki recipient account.
     pub an_account: B256,
 }
@@ -248,6 +250,7 @@ pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
         deposit_id: ev.depositId,
         sender: ev.sender,
         amount: ev.amount,
+        dapp_id: ev.dappId,
         an_account: ev.anAccount,
     })
 }
@@ -677,17 +680,18 @@ mod tests {
 
     use super::*;
 
-    /// The selector of `deposit(uint256,bytes32)`.
-    const DEPOSIT_SELECTOR: [u8; 4] = [0xc9, 0x63, 0x0c, 0xb0];
+    /// The selector of `deposit(uint256,uint256,bytes32)`.
+    const DEPOSIT_SELECTOR: [u8; 4] = [0x04, 0x54, 0x34, 0xc4];
 
     #[test]
-    fn deposit_calldata_is_the_selector_and_two_words() {
+    fn deposit_calldata_preserves_the_full_destination_dapp() {
         let acc = B256::repeat_byte(0xa3);
-        let data = deposit_calldata(12_500_000, acc);
+        let data = deposit_calldata(12_500_000, acc, [0xff; 32]);
         assert_eq!(data.len(), DEPOSIT_CALLDATA_LEN);
         assert_eq!(&data[..4], &DEPOSIT_SELECTOR);
         assert_eq!(U256::from_be_slice(&data[4..36]), U256::from(12_500_000u64));
-        assert_eq!(&data[36..68], acc.as_slice());
+        assert_eq!(&data[68..100], acc.as_slice());
+        assert_eq!(U256::from_be_slice(&data[36..68]), U256::MAX);
     }
 
     #[test]
@@ -695,7 +699,7 @@ mod tests {
         assert_eq!(DEPOSIT_TOPIC0, IDeposit::Deposit::SIGNATURE_HASH);
         assert_eq!(
             format!("{DEPOSIT_TOPIC0:x}"),
-            "6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe"
+            "fa647be3c21bb35d3e9e53f50fa07d7385b76dcdf2608472a4c3cae986c655c9"
         );
     }
 
@@ -906,7 +910,7 @@ mod tests {
     async fn a_revert_reason_is_only_what_the_node_calls_a_revert() {
         let (evm, rpc) = mocked();
         let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
-        let data = deposit_calldata(1, B256::repeat_byte(0xa3));
+        let data = deposit_calldata(1, B256::repeat_byte(0xa3), [0; 32]);
         rpc.push_success(&Bytes::new());
         assert_eq!(
             evm.revert_reason(from, BRIDGE, data.clone(), 9)
@@ -950,7 +954,7 @@ mod tests {
     async fn only_a_reverting_estimate_is_classified_as_a_revert() {
         let (evm, rpc) = mocked();
         let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
-        let data = deposit_calldata(1, B256::repeat_byte(0xa3));
+        let data = deposit_calldata(1, B256::repeat_byte(0xa3), [0; 32]);
         let paused = alloy::sol_types::SolError::abi_encode(&IDeposit::BridgePaused {});
         rpc_error(
             &rpc,

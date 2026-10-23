@@ -17,6 +17,12 @@ verifiers deployed as Yul bytecode.
 Sepolia ↔ shellnet, deployed from tag [`v0.4.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.4.0).
 The CLI, relayers and web form take their addresses from configuration.
 
+This deployment uses the previous deposit event and verification key. The
+unreleased DApp-binding change below requires a newly paired EVM deployment
+and the matching AN bridge key. Finish pending transfers with the old binaries
+and old key before switching; do not use these legacy addresses with the new
+deposit clients.
+
 ### Ethereum (Sepolia, chain id 11155111)
 
 | | |
@@ -48,7 +54,7 @@ RPC_URL=https://rpc.sepolia.ethpandaops.io
 ## The two directions
 
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
-`deposit(uint256 amount, bytes32 anAccount)`. The contract takes custody via
+`deposit(uint256 amount, uint256 dappId, bytes32 anAccount)`. The contract takes custody via
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
 the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
 (receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`

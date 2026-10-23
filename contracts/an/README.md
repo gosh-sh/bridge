@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.13.0, `DepositVoucher` at 1.4.0 and
+`exchange/` — `eccUSDCBridge` at version 1.14.0, `DepositVoucher` at 1.4.0 and
 `EthBeaconLightClient` at 1.6.1:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -143,6 +143,21 @@ expire; voucher identity remains the deposit double-mint protection. CLI and
 relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
 same BOC while valid.
 
+### Proven destination DApp ID
+
+The EVM deposit commits both destination identifiers. Its `dappId` is the
+fourth non-indexed event word and is proven in `dappIdHigh` / `dappIdLow`.
+The twelve public-input positions and the AN entrypoint ABI are unchanged,
+but the new event constraints require the matching embedded deposit key.
+
+This release changes the AN bridge key, TVC and version to 1.14.0.
+The CLI refuses earlier bridge versions before requesting a deposit. `_parsePublicInputs`
+still uses zero for the voucher identity's DApp component, preserving deposit
+replay protection. `makeAddrStd(0, anAccount)` uses workchain zero; it does not
+choose the recipient account's DApp. Checking that the proven DApp matches the
+account's actual DApp is a separate AN change. A future change must preserve
+the constant voucher identity or provide an explicit replay-safe migration.
+
 ### Restoring a chain's outstanding amount
 
 `setOutstandingByChain(chainId, amount)` writes one chain's outstanding amount
@@ -226,9 +241,9 @@ chain's outstanding amount.
 
 ### Deployment
 
-Deploy the 1.13.0 bridge as a fresh pair with empty accounting. Its
-upgrade tuple adds chain balances and external-message hashes; the previous
-1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
+Deploy the 1.14.0 bridge with its newly paired EVM deployment. Its
+eleven-field upgrade tuple is unchanged from 1.13.0, retaining chain balances
+and external-message hashes; the previous 1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
 Normal upgrades within this format retain balances and unexpired replay hashes.
 
 `mintAndSendBridged(recipient, value, nonce, chainId)` credits the aborted

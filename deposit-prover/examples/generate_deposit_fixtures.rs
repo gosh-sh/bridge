@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use clap::Parser;
-use deposit_prover::synthetic::{build_with_deposit_id, SyntheticSpec};
+use deposit_prover::synthetic::{build_with_dapp_id, SyntheticSpec};
 
 #[derive(Parser)]
 struct Args {
@@ -14,7 +14,12 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     for id in 0..args.count {
-        let input = build_with_deposit_id(SyntheticSpec::type2_direct(), id);
+        let dapp_id = match id {
+            0 => [0u8; 32],
+            1 => [0xffu8; 32],
+            _ => [id as u8; 32],
+        };
+        let input = build_with_dapp_id(SyntheticSpec::type2_direct(), id, dapp_id);
         let mut json = serde_json::to_value(input)?;
         json["fixture_kind"] = "synthetic".into();
         let dir = args.set_dir.join(format!("proof_{id:02}"));

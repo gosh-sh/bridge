@@ -14,7 +14,7 @@
 //!    `proof`), produced by [`crate::prover::ProofGenerator`].
 //! 3. The [`DepositPublicInputs`] — the twelve field elements the proof commits
 //!    to (including proven `chainId`, the Acki Nacki destination account, and
-//!    the config-supplied `dappId` tag), decoded from the `public_inputs`
+//!    the event-bound destination `dappId`), decoded from the `public_inputs`
 //!    operand so the submitter can build the `finalizeDeposit(...)` call
 //!    arguments.
 
@@ -32,10 +32,9 @@ use crate::error::RelayerError;
 /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559) bound via
 /// the enclosing tx MPT proof (not VK-baked). `anAccount{High,Low}` bind the
 /// Acki Nacki destination account into the proof (an EVM address is not a valid
-/// AN recipient). `dappId{High,Low}` (the UInt256 AN dApp identifier, replaced
-/// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
-/// event data in-circuit. The AN bridge pins `dappId` to 0 and does not
-/// check the proven halves. AN always credits workchain 0.
+/// AN recipient). `dappId{High,Low}` bind the UInt256 destination DApp to
+/// the same receipt event. The AN bridge still pins its voucher identity's
+/// dappId to zero; recipient DApp validation is a separate AN change.
 /// `eccUSDCBridge` allowlists trusted L1 bridges per chain
 /// (`_trustedL1Bridge[chainId][bridge]`).
 pub const NUM_PUBLIC_INPUTS: usize = 12;
@@ -58,6 +57,8 @@ pub struct DepositEvent {
     pub sender: Address,
     /// Deposited amount (event data word 0).
     pub amount: U256,
+    /// Destination DApp ID from the Ethereum event.
+    pub dapp_id: U256,
     /// Acki Nacki destination account (256-bit TVM address, event data word 1).
     ///
     /// The EVM `sender` is not a valid AN recipient (different address system),
@@ -92,7 +93,7 @@ pub struct DepositEvent {
 ///
 /// `chain_id` is the proven typed-tx `chainId` (EIP-2930 / EIP-1559).
 /// `dapp_id_high` / `dapp_id_low` are the high/low 16-byte halves of the
-/// 256-bit AN dApp identifier (config-supplied tag); `an_account_high` /
+/// 256-bit AN dApp identifier from the event; `an_account_high` /
 /// `an_account_low` are the high/low halves of the 256-bit AN account, matching
 /// the circuit's split. The AN bridge reassembles the account as
 /// `(fr[7] << 128) | fr[8]` and pins `dappId` to 0.
@@ -182,7 +183,7 @@ impl DepositPublicInputs {
     }
 }
 
-/// Parse and validate an `AN_DAPP_ID` hex string (optional `0x` prefix).
+/// Parse and normalize a UInt256 DApp ID (optional `0x` prefix).
 ///
 /// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
 /// `0x`-prefixed hex form used in proofs and `state.json`.
@@ -193,23 +194,23 @@ pub fn parse_and_validate_dapp_id(raw: &str) -> Result<String, RelayerError> {
     let s = raw.trim();
     if s.is_empty() {
         return Err(RelayerError::other(
-            "AN_DAPP_ID is empty; set --dapp-id / AN_DAPP_ID to a hex UInt256",
+            "DApp ID is empty; supply a hex UInt256",
         ));
     }
     let hex = s.strip_prefix("0x").unwrap_or(s);
     if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(RelayerError::other(format!(
-            "AN_DAPP_ID '{raw}' is not valid hex"
+            "DApp ID '{raw}' is not valid hex"
         )));
     }
     if hex.len() > 64 {
         return Err(RelayerError::other(format!(
-            "AN_DAPP_ID '{raw}' exceeds 32 bytes (got {} hex chars)",
+            "DApp ID '{raw}' exceeds 32 bytes (got {} hex chars)",
             hex.len()
         )));
     }
     let value = U256::from_str_radix(hex, 16)
-        .map_err(|e| RelayerError::other(format!("AN_DAPP_ID '{raw}' parse failed: {e}")))?;
+        .map_err(|e| RelayerError::other(format!("DApp ID '{raw}' parse failed: {e}")))?;
     Ok(format!("{value:#x}"))
 }
 
@@ -288,11 +289,16 @@ impl DepositProofBundle {
                 self.parsed.chain_id, event.source_chain_id
             )));
         }
-        // The AN destination account is bound in-circuit; it must match the
-        // event we read from chain. The 16-byte account halves are below the
-        // field modulus so they're exact. dappId is a config tag (not in the
-        // event), so it is not checked against the event here — the AN-side
-        // bridge pins `dappId` to 0 and does not verify the proven halves.
+        let dapp_bytes = event.dapp_id.to_be_bytes::<32>();
+        if self.parsed.dapp_id_high != U256::from_be_slice(&dapp_bytes[..16])
+            || self.parsed.dapp_id_low != U256::from_be_slice(&dapp_bytes[16..])
+        {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof dappId {:#x} != event dappId {:#x}",
+                self.parsed.dapp_id(),
+                event.dapp_id
+            )));
+        }
         let exp_acc_hi = U256::from_be_slice(&event.an_account.as_slice()[0..16]);
         let exp_acc_lo = U256::from_be_slice(&event.an_account.as_slice()[16..32]);
         if self.parsed.an_account_high != exp_acc_hi || self.parsed.an_account_low != exp_acc_lo {
@@ -404,6 +410,8 @@ mod tests {
             sender: Address::repeat_byte(0x11),
             amount: U256::from(5u64),
             an_account: B256::repeat_byte(0x55),
+            dapp_id: (U256::from_be_slice(&[0x77u8; 16]) << 128)
+                | U256::from_be_slice(&[0x88u8; 16]),
             timestamp: U256::ZERO,
             tx_hash: B256::ZERO,
             log_index: 0,
@@ -413,6 +421,12 @@ mod tests {
             source_chain_id: 11155111,
         };
         bundle.check_binds_to(&event).unwrap();
+
+        let mut wrong_dapp = event.clone();
+        wrong_dapp.dapp_id ^= U256::from(1);
+        assert!(bundle.check_binds_to(&wrong_dapp).is_err());
+        wrong_dapp.dapp_id = event.dapp_id ^ (U256::from(1) << 128);
+        assert!(bundle.check_binds_to(&wrong_dapp).is_err());
 
         let mut wrong = event.clone();
         wrong.deposit_id = 4;

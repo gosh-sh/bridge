@@ -75,7 +75,7 @@ contract AckiNackiBridgeAaveForkTest is Test {
     function _approveAndDeposit(address user, uint256 amount) internal {
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, bytes32(uint256(uint160(user))));
+        bridge.deposit(amount, 0, bytes32(uint256(uint160(user))));
         vm.stopPrank();
     }
 

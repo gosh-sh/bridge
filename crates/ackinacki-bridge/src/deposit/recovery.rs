@@ -299,7 +299,7 @@ mod tests {
         r.request = Some(RequestInfo {
             nonce_before,
             from_block: 90,
-            calldata: deposit_calldata(5, ACC),
+            calldata: deposit_calldata(5, ACC, [0; 32]),
             wallet_hash: None,
         });
         r.tx = tx;
@@ -317,7 +317,7 @@ mod tests {
         });
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, nonce, 2, deposit_calldata(5, ACC)),
+            deposit_tx(h, FROM, BRIDGE, nonce, 2, deposit_calldata(5, ACC, [0; 32])),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![log]))]);
     }
@@ -343,7 +343,7 @@ mod tests {
         }
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC)),
+            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC, [0; 32])),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![one, two]))]);
         let cands = candidates(&evm, &op(7, None), BRIDGE, 200).await.unwrap();
@@ -424,7 +424,7 @@ mod tests {
         // Reverted: there is no Deposit log for a log search to find.
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC)),
+            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC, [0; 32])),
         );
         let mut o = op(7, None);
         o.request.as_mut().unwrap().wallet_hash = Some(h);
@@ -463,7 +463,7 @@ mod tests {
         });
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(1, ACC)),
+            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(1, ACC, [0; 32])),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![log]))]);
         let tx = Some(TxClaim {
@@ -686,7 +686,7 @@ mod tests {
         let h = B256::repeat_byte(0x33);
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 8, 2, deposit_calldata(5, ACC)),
+            deposit_tx(h, FROM, BRIDGE, 8, 2, deposit_calldata(5, ACC, [0; 32])),
         );
         evm.fail_tx_reads
             .store(3, std::sync::atomic::Ordering::SeqCst);
@@ -787,7 +787,7 @@ mod tests {
             tx_hash: h,
             nonce: 7,
             from: FROM,
-            input: deposit_calldata(5, ACC),
+            input: deposit_calldata(5, ACC, [0; 32]),
             status_ok: true,
             has_bridge_deposit: true,
         }]);

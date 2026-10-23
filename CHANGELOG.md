@@ -231,6 +231,43 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **Deposits commit the destination DApp ID on Ethereum (bridge-audit #126).**
+  Call `deposit(uint256 amount, uint256 dappId, bytes32 anAccount)` (selector
+  `0x045434c4`, 100-byte calldata). Zero and the full UInt256 range are allowed
+  for `dappId`; `anAccount` must remain nonzero. The six-field `Deposit` event
+  appends `dappId` after `timestamp`, preserving the three existing data-word
+  offsets, and uses topic0
+  `0xfa647be3c21bb35d3e9e53f50fa07d7385b76dcdf2608472a4c3cae986c655c9`.
+  Update contract calls and log filters; the previous ABI is incompatible.
+
+  The circuit binds `dappIdHigh`/`dappIdLow` to this receipt field, replacing the
+  prover-selected tag. The twelve public-input positions are unchanged, but
+  the deposit verification key changes: old-key proofs no longer verify. Ship
+  the EVM deployment, prover, CLI, frontend, deposit relayer and embedded AN
+  bridge key together. The AN bridge reports 1.14.0 and the CLI rejects earlier
+  versions before requesting a deposit, including with development overrides.
+  This supersedes the 1.13.0 key and CLI compatibility notes below. The rebuilt
+  AN 1.14.0 code hash is `0f53fe4c…` (sold 0.80.0); its deposit VK SHA-256 is
+  `34fb7212aa5659a810e506ee0fa35829016234fc87f3061c7355d7bc19851875`.
+  Finish all pending old-key deposits using the old pair
+  before switching, following the fresh-pair cutover in `contracts/an/README.md`.
+  The 1.12.0 upgrade tuple remains unsupported. Withdrawal ABIs are unchanged.
+
+  The CLI commits the DApp ID from `--to dapp_id::account_id` and checks the
+  mined event against it. The web form and `AN_RECEIVER` prefill require the
+  same full address. Remove `AN_DAPP_ID` / `deposit-relayer --dapp-id` from
+  daemon configuration and service arguments: each event supplies its own ID.
+  The fetcher's optional `--dapp-id` only checks equality against the event.
+  Relayer state uses `event-bound` in the existing deployment `dapp_id` field;
+  migrate to a fresh state only after the old deployment's queue is settled.
+
+  AN payout logic, its public ABI and the constant-zero DApp component of the
+  voucher hash remain unchanged. Recipient DApp validation is outside this
+  change. A future AN change must preserve that voucher identity or provide an
+  explicit replay-safe migration; using the proven DApp in the hash can make
+  an already-paid deposit deploy a second voucher.
+
+
 - The Python withdrawal E2E tools use Sepolia (`11155111`) by default.
   Set `DST_CHAIN_ID` to the destination's actual EIP-155 id on other networks.
   They check `getDepositLimits(chainId)` before sending ECC; inventory

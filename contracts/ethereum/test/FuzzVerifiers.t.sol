@@ -173,7 +173,8 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         address indexed sender,
         uint256 amount,
         bytes32 anAccount,
-        uint256 timestamp
+        uint256 timestamp,
+        uint256 dappId
     );
 
     function setUp() public {
@@ -190,7 +191,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
     }
 
     /// @notice Any valid deposit amount should succeed and update state correctly
-    function testFuzz_DepositAmountInvariants(uint256 amount) public {
+    function testFuzz_DepositAmountInvariants(uint256 amount, uint256 dappId) public {
         amount = bound(amount, 1, bridge.MAX_TRANSFER_AMOUNT());
 
         address user = address(uint160(uint256(keccak256(abi.encodePacked(amount)))));
@@ -202,7 +203,11 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, bytes32(uint256(uint160(user))));
+        vm.expectEmit(true, true, false, true, address(bridge));
+        emit Deposit(
+            counterBefore, user, amount, bytes32(uint256(uint160(user))), block.timestamp, dappId
+        );
+        bridge.deposit(amount, dappId, bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
         assertEq(bridge.depositCounter(), counterBefore + 1, "Counter must increment by 1");
@@ -227,7 +232,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         } else {
             vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
         }
-        bridge.deposit(amount, bytes32(uint256(1)));
+        bridge.deposit(amount, 0, bytes32(uint256(1)));
         vm.stopPrank();
     }
 

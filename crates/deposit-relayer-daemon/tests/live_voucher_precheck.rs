@@ -52,6 +52,7 @@ async fn live_voucher_precheck_finds_a_finalized_deposit() {
 
     // Finalized on shellnet by bridge tx 4b722bbe… (voucher 0:ffd5c4e7…).
     let finalized = DepositEvent {
+        dapp_id: alloy::primitives::U256::ZERO,
         deposit_id: 1,
         sender: Default::default(),
         amount: Default::default(),

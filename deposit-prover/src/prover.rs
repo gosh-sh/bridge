@@ -681,7 +681,7 @@ pub fn generate_proof(
         input.event_data.deposit_id,
         input.event_data.sender,
         input.event_data.amount,
-        input.dapp_id,
+        input.event_data.dapp_id,
         input.event_data.an_account,
         input.event_data.contract_address,
         block_hash,
@@ -914,6 +914,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         deposit_id: 0,
         sender: [0u8; 20],
         amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
+        dapp_id: [0u8; 32],
         an_account: [0u8; 32],
         timestamp: 0,
         contract_address: [0u8; 20],
@@ -940,7 +941,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
     let mut log_buf = Vec::new();
     vec![0u8; 20].encode(&mut log_buf); // contract address
     log_buf.extend_from_slice(&topics_list); // topics (already has list header)
-    vec![0u8; 96].encode(&mut log_buf); // data (amount + anAccount + timestamp)
+    vec![0u8; 128].encode(&mut log_buf); // amount, dappId, anAccount, timestamp
     let mut log_list = Vec::new();
     alloy_rlp::Header {
         list: true,
@@ -1028,7 +1029,6 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         event_data,
         receipt_proof,
         tx_proof,
-        dapp_id: [0u8; 32],
     }
 }
 

@@ -8,8 +8,8 @@
 //!
 //! - [`MockProofGenerator`] — deterministic, no halo2. Derives the twelve
 //!   public inputs (including proven `chainId`, the AN destination account, and
-//!   the config dappId tag) straight from the event so the relayer + submitter
-//!   can be driven end-to-end in unit tests in microseconds.
+//!   the event-bound DApp ID) straight from the event so the relayer +
+//!   submitter can be driven end-to-end in unit tests in microseconds.
 //! - [`SubprocessProofGenerator`] — production. Invokes `deposit-prover`'s
 //!   `fetch_deposit_data` → `export_vk_blob` → `export_blake2b_proof` example
 //!   binaries out-of-process (mirroring how the AN→ETH relayer consumes the
@@ -47,9 +47,9 @@ pub trait ProofGenerator: Send + Sync {
 
 /// Deterministic proof generator for tests. Derives the twelve public inputs
 /// (proven `chainId` from `event.source_chain_id`, the AN destination account
-/// from the event the same way the real circuit binds it, plus the config
-/// dappId tag) so the submitter's `finalizeDeposit` args are realistic, and
-/// emits canned `vk_blob` / `proof` bytes.
+/// and DApp ID from the event the same way the real circuit binds them) so the
+/// submitter's `finalizeDeposit` args are realistic, and emits canned `vk_blob`
+/// / `proof` bytes.
 #[derive(Clone, Debug, Default)]
 pub struct MockProofGenerator {
     /// When set, `generate` fails for this `deposit_id` — lets tests
@@ -58,9 +58,6 @@ pub struct MockProofGenerator {
     /// When set, `generate` answers [`RelayerError::Unprovable`] for this
     /// `deposit_id`.
     pub unprovable_on: Option<u64>,
-    /// Config-supplied AN dApp identifier (UInt256) bound as the dappId public
-    /// inputs. Defaults to zero.
-    pub dapp_id: U256,
 }
 
 impl MockProofGenerator {
@@ -82,17 +79,7 @@ impl MockProofGenerator {
         }
     }
 
-    /// Build a mock generator that stamps a given config dappId into the proof.
-    pub fn with_dapp_id(dapp_id: U256) -> Self {
-        Self {
-            dapp_id,
-            ..Self::default()
-        }
-    }
-
-    /// The public inputs the real circuit would commit to for this event, given
-    /// the config-supplied `dapp_id` tag (not part of the event).
-    pub fn derive_public_inputs(event: &DepositEvent, dapp_id: U256) -> DepositPublicInputs {
+    pub fn derive_public_inputs(event: &DepositEvent) -> DepositPublicInputs {
         let addr_to_field = |bytes: &[u8]| {
             let mut buf = [0u8; 32];
             buf[12..].copy_from_slice(bytes);
@@ -103,7 +90,7 @@ impl MockProofGenerator {
             buf[32 - slice.len()..].copy_from_slice(slice);
             U256::from_be_bytes::<32>(buf)
         };
-        let dapp_be = dapp_id.to_be_bytes::<32>();
+        let dapp_be = event.dapp_id.to_be_bytes::<32>();
         DepositPublicInputs {
             deposit_id: U256::from(event.deposit_id),
             sender: addr_to_field(event.sender.as_slice()),
@@ -111,8 +98,7 @@ impl MockProofGenerator {
             contract_address: addr_to_field(event.source_contract.as_slice()),
             // Proven chainId mirrors RPC eth_chainId stamped on the event.
             chain_id: U256::from(event.source_chain_id),
-            // dappId is the config tag, split into 16-byte halves (not from the
-            // event). The AN account is bound from the event, split likewise.
+            // Both identifiers are event-bound UInt256 values, split into 128-bit halves.
             dapp_id_high: half(&dapp_be[0..16]),
             dapp_id_low: half(&dapp_be[16..32]),
             an_account_high: half(&event.an_account.as_slice()[0..16]),
@@ -139,7 +125,7 @@ impl ProofGenerator for MockProofGenerator {
                 event.deposit_id
             )));
         }
-        let parsed = Self::derive_public_inputs(event, self.dapp_id);
+        let parsed = Self::derive_public_inputs(event);
         Ok(DepositProofBundle {
             // Canned, non-empty operands — the relayer + submitter only care
             // about shape and the decoded public inputs in mock scenarios.
@@ -227,9 +213,6 @@ pub struct SubprocessProverConfig {
     pub max_data_byte_len: usize,
     /// `--max-log-num` upper bound on logs in the receipt.
     pub max_log_num: usize,
-    /// Config-supplied Acki Nacki dApp identifier (UInt256), hex string. Passed
-    /// to `fetch_deposit_data --dapp-id`; bound as the dappId public inputs.
-    pub dapp_id: String,
     /// Hard timeout for the whole three-step pipeline. Halo2 proving for a
     /// fresh proving key can take minutes, so default generously.
     pub timeout: Duration,
@@ -248,7 +231,6 @@ impl SubprocessProverConfig {
             degree: 18,
             max_data_byte_len: 2048,
             max_log_num: 20,
-            dapp_id: "0".to_string(),
             timeout: Duration::from_secs(900),
         }
     }
@@ -388,7 +370,7 @@ impl ProofGenerator for SubprocessProofGenerator {
             "--log-index".into(),
             log_index,
             "--dapp-id".into(),
-            self.config.dapp_id.clone(),
+            format!("{:#x}", event.dapp_id),
             "--output".into(),
             input_json.display().to_string(),
         ])
@@ -461,6 +443,7 @@ mod tests {
             sender: Address::repeat_byte(0x11),
             amount: U256::from(1_000_000u64),
             an_account: B256::repeat_byte(0x33),
+            dapp_id: U256::ZERO,
             timestamp: U256::from(1_700_000_000u64),
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 2,

@@ -41,11 +41,9 @@ struct Args {
     #[arg(long, default_value = "deposit_proof_input.json")]
     output: String,
 
-    /// Acki Nacki destination dApp identifier (UInt256), hex (with or without
-    /// 0x), big-endian. Config-supplied tag bound as the dappId public inputs
-    /// (not part of the Ethereum event). Defaults to zero.
-    #[arg(long, default_value = "0")]
-    dapp_id: String,
+    /// Expected destination DApp ID. When supplied, it must match the event.
+    #[arg(long)]
+    dapp_id: Option<String>,
 }
 
 /// Parse a UInt256 hex/decimal string into a 32-byte big-endian array.
@@ -102,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Fetch deposit proof
     println!("Fetching deposit proof...");
-    let mut proof_input = match fetcher
+    let proof_input = match fetcher
         .fetch_deposit_proof(tx_hash, contract, args.log_index)
         .await
     {
@@ -124,9 +122,16 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    // dappId is a config tag (not part of the event); set it from the CLI.
-    proof_input.dapp_id = parse_dapp_id(&args.dapp_id)?;
-    println!("  dappId: 0x{}", hex::encode(proof_input.dapp_id));
+    if let Some(expected) = args.dapp_id {
+        anyhow::ensure!(
+            parse_dapp_id(&expected)? == proof_input.event_data.dapp_id,
+            "--dapp-id differs from the Ethereum deposit event"
+        );
+    }
+    println!(
+        "  dappId: 0x{}",
+        hex::encode(proof_input.event_data.dapp_id)
+    );
 
     println!("\n✅ Deposit proof fetched successfully!\n");
     println!("Event Data:");

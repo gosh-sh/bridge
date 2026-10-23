@@ -92,9 +92,12 @@ from the repository root to update the embedded key and its checksum.
 fixed-column constant (binding preserved via public input #3). Real deposits of
 different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
 the **byte-identical** production VkBlob. Current build VkBlob (12-PI, Hermez,
-13071 B) = **`0180ee5a…b1c3efa1`** — rotated for the five-field
-`Deposit(uint256,address,uint256,bytes32,uint256)` event with 96 data bytes.
-Previously `117f4a65…ad612cc`, rotated for Amsterdam 23-field headers
+13071 B) = **`34fb7212…19851875`** — rotated for the six-field
+`Deposit(uint256,address,uint256,bytes32,uint256,uint256)` event with 128 data
+bytes, binding both DApp ID halves to the event. Previously
+`0180ee5a…b1c3efa1`, rotated for the five-field
+`Deposit(uint256,address,uint256,bytes32,uint256)` event with 96 data bytes;
+before that `117f4a65…ad612cc`, rotated for Amsterdam 23-field headers
 (24-slot table, `MAX_BLOCK_HEADER_BYTES` 717 → 792); before that
 `83747b2e…74127a90`, rotated for type 1/2 enclosing transactions and
 2048-byte / 20-log receipts (Safe and ERC-4337 deposits), with the parsed `Deposit` log

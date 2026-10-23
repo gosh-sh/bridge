@@ -22,14 +22,6 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
-### Documentation
-
-- ***The current deployment* in `README.md` names `v0.6.0`.** The contracts
-  and their addresses are unchanged: `v0.6.0` carries the same Ethereum and
-  Acki Nacki contract sources as the deployed `AckiNackiBridge`
-  `0x6957…4c9b` and `eccUSDCBridge` `1.13.0` (`66d15d49…`). The shellnet
-  `eccUSDCBridge` now trusts `0x6957…4c9b` for chain 11155111.
-
 ## [0.6.0] – 2026-10-23
 
 ### Breaking Changes

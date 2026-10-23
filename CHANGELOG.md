@@ -28,14 +28,26 @@ assigns it when the release is tagged.
   the principal the bridge accounts for on one destination chain.** That
   counter is both the ceiling `initiateWithdrawal` pays out to a chain and the
   room a credit to it has under the 10 000 USDC chain cap; `confirmDeposit`
-  raises it, a withdrawal spends it. A fresh deployment starts it empty and
-  `onCodeUpgrade` does not carry it, so on a bridge whose principal is already
-  locked on the source chain every withdrawal is refunded — silently, without
-  an event — until the owner states what is locked there. Read it back as the
-  third return value of `getDepositLimits(chainId)`. Capped at
-  `MAX_BRIDGE_TVL`; above it the call throws exit 235 (`ERR_TVL_CAP`). It adds
-  no authority the owner mints did not already carry, and unlike them it moves
-  the counter without minting ECC[3].
+  raises it, a withdrawal spends it, and `onCodeUpgrade` carries it. What
+  leaves it empty is a migration from a build that had no such field: 1.12.0
+  handed its successor nine fields, so a bridge coming from it starts with a
+  zero counter while its principal is still locked on the source chain, and
+  every withdrawal to that chain is refused until the owner states what is
+  locked there. Read it back as the third return value of
+  `getDepositLimits(chainId)`. Capped at `MAX_BRIDGE_TVL`; above it the call
+  throws exit 235 (`ERR_TVL_CAP`). It adds no authority the owner mints did
+  not already carry, and unlike them it moves the counter without minting
+  ECC[3].
+
+  **It moves that counter alone.** A withdrawal is still bounded by bridged
+  minted less bridged burned, which this does not touch. It therefore recovers
+  a bridge that carried its ECC[3] inventory across an upgrade but not its
+  per-chain counter — the 1.12.0 case above. It does **not** make a fresh
+  deployment pay out: there the inventory is zero as well, and a withdrawal is
+  refused with 233 (`ERR_BURN_EXCEEDS_BRIDGED`) however high the counter is
+  set. Re-pointing a chain's users at a freshly deployed bridge needs the
+  inventory migrated too, together with custody and the consumed withdrawal
+  nullifiers; that migration is not in this release.
 
 ### Added
 
@@ -355,7 +367,7 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  The limits release is 1.13.0, code hash `f8f95399…`, rebuilt with sold
+  The limits release is 1.13.0, code hash `66d15d49…`, rebuilt with sold
   0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
   described above; the old upgrade tuple cannot initialize this build.
   `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the

@@ -804,12 +804,20 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     /// @notice States how much of one chain's principal this bridge still
     ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
     ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
-    ///         credit to it. `confirmDeposit` raises the counter and a
-    ///         withdrawal spends it, but a fresh deployment starts it empty and
-    ///         `onCodeUpgrade` does not carry it, while the principal stays
-    ///         locked on the source chain: this is how the owner states what is
-    ///         locked there. It grants nothing new — the owner mints move the
-    ///         same counter — and unlike them it writes it without minting.
+    ///         credit to it. `confirmDeposit` raises the counter, a withdrawal
+    ///         spends it, and `onCodeUpgrade` carries it; what leaves it empty
+    ///         is a fresh deployment or a migration from a build that had no
+    ///         such field, while the principal stays locked on the source
+    ///         chain. This is how the owner states what is locked there.
+    ///
+    ///         It moves this counter alone. A withdrawal is still bounded by
+    ///         bridged minted less bridged burned, so where that inventory is
+    ///         empty too — a fresh deployment — this pays nothing out on its
+    ///         own: the withdrawal is refused with `ERR_BURN_EXCEEDS_BRIDGED`
+    ///         instead. It recovers a deployment that carried its inventory
+    ///         across an upgrade but not its per-chain counter. It grants
+    ///         nothing new — the owner mints move the same counter — and
+    ///         unlike them it writes it without minting.
     /// @param chainId — EIP-155 chain id of the destination L1/L2.
     /// @param amount  — principal outstanding to that chain, in token units,
     ///                  at most `MAX_BRIDGE_TVL`.

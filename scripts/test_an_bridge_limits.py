@@ -245,6 +245,25 @@ class BridgeLimits(unittest.TestCase):
         self.finalize(header={"expire": now + 600}, expect=401)
         self.finalize(header={"expire": now - 1}, expect=402)
 
+    def test_a_chain_balance_alone_does_not_pay_out_an_empty_inventory(self):
+        self.seed(0)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": str(TRANSFER)},
+                  signed=True)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
+        self.refund(self.withdraw(1_000_000, chain=1), 1_000_000, 1_000_000_000, 233)
+
+    def test_the_owner_restores_a_chain_balance_an_upgrade_left_empty(self):
+        self.seed(TRANSFER)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": "0"}, signed=True)
+        self.refund(self.withdraw(1_000_000, chain=1), 1_000_000, 1_000_000_000, 236)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": str(TRANSFER)},
+                  signed=True)
+        result = self.withdraw(1_000_000, chain=1)
+        self.assertTrue(result["vm_success"])
+        self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER - 1_000_000)
+        bridged = self.call("getTotalBridged", {"tokenId": 3})["response"]
+        self.assertEqual(int(bridged["burned"]), 1_000_000)
+
     def test_upgrade_preserves_both_networks(self):
         self.seed(TRANSFER, 2 * TRANSFER)
         self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)

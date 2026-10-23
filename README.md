@@ -14,12 +14,8 @@ verifiers deployed as Yul bytecode.
 
 ## The current deployment
 
-Sepolia ↔ shellnet. `AckiNackiBridge` is deployed from commit
-[`c7054529`](https://github.com/gosh-sh/bridge/commit/c7054529ae3bf33839dd0c45119540f4f1196c7a)
-([#101](https://github.com/gosh-sh/bridge/pull/101), the transfer and principal caps); the Ethereum
-contracts have not changed since. `eccUSDCBridge` runs the 1.13.0 build of
-[#129](https://github.com/gosh-sh/bridge/pull/129). The CLI, relayers and web form take their
-addresses from configuration.
+Sepolia ↔ shellnet, deployed from tag [`v0.5.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.5.0).
+The CLI, relayers and web form take their addresses from configuration.
 
 ### Ethereum (Sepolia, chain id 11155111)
 

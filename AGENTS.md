@@ -62,8 +62,13 @@ appear in the product.
 Leave out internal refactors, private renames, test-only changes and
 implementation detail. If nothing observable changed, there is nothing to write.
 
-Sections, most disruptive first: `Breaking Changes`, `Added`, `Changed`,
-`Fixed`, `Removed`.
+`CHANGELOG.md` is release notes, not a record of the work: one condensed line
+per change — what changed, its exact name, and what the reader has to do. No
+mechanism, history or rationale; those belong in the pull request.
+
+Sections, most disruptive first: `Breaking Changes`, `New / Improvements`,
+`Fixes`. A removal the reader has to act on is a breaking change. Released
+sections before `[0.2.1]` keep the groups they were written with.
 
 ### Versions are assigned late
 

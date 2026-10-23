@@ -805,24 +805,28 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
     ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
     ///         credit to it. `confirmDeposit` raises the counter, a withdrawal
-    ///         spends it, and `onCodeUpgrade` carries it; what leaves it empty
-    ///         is a fresh deployment or a migration from a build that had no
-    ///         such field, while the principal stays locked on the source
+    ///         spends it, and `onCodeUpgrade` carries it between builds that
+    ///         both have it. What leaves it empty is a migration from a build
+    ///         that had none, while the principal stays locked on the source
     ///         chain. This is how the owner states what is locked there.
+    ///
+    ///         The figure to write is the principal L1 actually holds. The
+    ///         counter is also the deposit room — `finalizeDeposit` and
+    ///         `confirmDeposit` both bound `outstanding + amount` by
+    ///         `MAX_BRIDGE_TVL` — so writing more than L1 holds buys
+    ///         withdrawal room by refusing deposits with `ERR_TVL_CAP`, and a
+    ///         deposit caught between finalization and confirmation aborts
+    ///         with its voucher already consumed.
     ///
     ///         It moves this counter alone. A withdrawal is still bounded by
     ///         bridged minted less bridged burned, so where that inventory is
     ///         empty too — a fresh deployment — this pays nothing out on its
     ///         own: the withdrawal is refused with `ERR_BURN_EXCEEDS_BRIDGED`
     ///         instead. It recovers a deployment that carried its inventory
-    ///         across an upgrade but not its per-chain counter.
-    ///
-    ///         `MAX_BRIDGE_TVL` bounds what stands at one moment, not what may
-    ///         pass through: the owner may set the counter again once
-    ///         withdrawals have drained it. That is no new authority —
-    ///         `mintAndSend` has no ceiling at all — and a call that writes a
-    ///         counter without minting is weaker than one that mints. See
-    ///         `contracts/an/README.md`, *Restoring a chain's outstanding
+    ///         across an upgrade but not its per-chain counter. It is no new
+    ///         authority: `mintAndSend` has no ceiling at all, and a call that
+    ///         writes a counter without minting is weaker than one that mints.
+    ///         See `contracts/an/README.md`, *Restoring a chain's outstanding
     ///         amount*.
     /// @param chainId — EIP-155 chain id of the destination L1/L2.
     /// @param amount  — principal outstanding to that chain, in token units,

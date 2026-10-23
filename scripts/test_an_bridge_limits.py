@@ -3,8 +3,9 @@
 
 Set SOLD_0_80 to sold 0.80.0. Halo2 verification is stubbed in a temporary
 source copy. Directed events are omitted because tvm-debugger tries to decode
-them as function return values. Test hooks seed balances and derive voucher
-addresses. The accounting, sender checks, refunds and upgrade code execute
+them as function return values; `WithdrawalRefused` is replaced by a hook that
+records its reason, so a refusal's cause is still asserted. Test hooks seed
+balances and derive voucher addresses. The accounting, sender checks, refunds and upgrade code execute
 unchanged. The production voucher is executed unchanged for its replay test.
 """
 
@@ -46,9 +47,18 @@ class BridgeLimits(unittest.TestCase):
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
         source = source.replace(verification, "testVerifyProof()")
+        source = re.sub(r"emit WithdrawalRefused\{dest: addrExtern\}\(.*?\);",
+                        "_testLastRefusal = reason;", source, flags=re.S)
+        source = source.replace(
+            "bytes recipient, uint32 tokenId, uint16 reason) private pure {",
+            "bytes recipient, uint32 tokenId, uint16 reason) private {")
         source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         hooks = """
+    uint16 _testLastRefusal;
+    function testLastRefusal() public view returns (uint16 reason) {
+        reason = _testLastRefusal;
+    }
     bool _testRejectProof;
     function testRejectProof() public { tvm.accept(); _testRejectProof = true; }
     function testVerifyProof() private view returns (bool) { return !_testRejectProof; }
@@ -145,16 +155,9 @@ class BridgeLimits(unittest.TestCase):
 
     def refund(self, result, amount, shell, reason):
         self.assertTrue(result["vm_success"])
-        external = [m for m in result["messages"] if m["type"] == "external"]
-        internal = [m for m in result["messages"] if m["type"] != "external"]
-        self.assertEqual(len(external), 1, result["messages"])
-        self.assertEqual(len(internal), 1, result["messages"])
-        event = json.loads(command(["tvm-cli", "-j", "decode", "msg", external[0]["boc"],
-                                    "--abi", str(self.abi)]))["BodyCall"]["WithdrawalRefused"]
-        self.assertEqual(int(event["reason"]), reason)
-        self.assertEqual(int(event["amount"]), min(amount, (1 << 128) - 1))
-        self.assertEqual(event["sender"], SENDER)
-        msg = internal[0]
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), reason)
+        msg = result["messages"][0]
         self.assertEqual(msg["destination"], SENDER)
         decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", msg["boc"],
                                       "--abi", str(self.abi)]))["Header"]

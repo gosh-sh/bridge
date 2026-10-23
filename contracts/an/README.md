@@ -115,7 +115,11 @@ For that pair,
 `L1 treasuryBalance = AN outstanding + unconfirmed deposits + unpaid burns`.
 Thus confirming a valid pending deposit cannot exceed the L1 cap; simultaneous
 finalizations need no reservation. Pause deposits and drain pending transfers
-before rotating the trusted L1 contract.
+before rotating the trusted L1 contract. That identity, and the conclusion drawn
+from it, hold while `confirmDeposit` and `initiateWithdrawal` are the only
+writers of the counter. `setOutstandingByChain` writes it directly with no tie
+to L1, so an owner who writes a figure other than the measured L1 principal
+breaks both — see *Restoring a chain's outstanding amount* below.
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
 with 235; the latter is retryable after withdrawals. Both checks precede proof
@@ -172,19 +176,36 @@ What it does not do:
   still does not credit the bridged counters. Owner-minted USDC is not
   withdrawable inventory, by design: nothing is locked on L1 behind it.
 
-The 10,000 USDC ceiling still means what it says. It bounds the amount standing
-at one moment, not the amount that may pass through over time: once withdrawals
-have drained the counter the owner can set it back to the ceiling, and
-withdrawals leave in 50 USDC slices, so a larger inventory can be released over
-several rounds. That grants no authority the owner did not already hold.
-`mintAndSend` has no ceiling at all — only a nonce and a `uint64` width guard —
-so an owner key can already create arbitrary ECC[3]; a function that writes a
-counter without minting is strictly weaker than one that mints. The ceiling
-exists to bound what a bug, a forged proof or a compromised L1 contract can
-extract, and it still does that: every path that is not owner-signed stays
-capped at 50 USDC per transfer and at the destination chain's outstanding
-amount. An owner key was unlimited before this function and is no more
-unlimited after it.
+**Set it to the principal L1 actually holds, and to nothing else.** The counter
+is shared between the two directions: it is the withdrawal allowance and it is
+the deposit room, since `finalizeDeposit` and `confirmDeposit` both require
+`outstanding + amount <= MAX_BRIDGE_TVL`. A counter above what L1 holds
+therefore buys withdrawal room by closing the door on deposits, and the damage
+is not symmetrical:
+
+- a new deposit fails `finalizeDeposit` with 235, which is retryable;
+- a deposit already between finalization and confirmation aborts in
+  `confirmDeposit` with 235 **after** its voucher's constructor has run, so
+  re-proving it deploys the same voucher and cannot confirm again. That USDC is
+  locked on L1 with nothing minted on AN until the owner lowers the counter;
+- `mintAndSendBridged`, the owner's recovery path for exactly that case, is
+  capped by the same check and throws 235 too.
+
+So raising the counter to the ceiling in order to release a larger inventory is
+not an operating procedure — it strands depositors. Release what L1 is actually
+short of, and lower the counter again before deposits resume.
+
+The ceiling itself still means what it says. It bounds the amount standing at
+one moment rather than the amount that may pass through over time, but that is
+a property of the accounting, not a budget to spend: the figure to write is
+always the measured L1 principal. And the function grants no authority the
+owner did not already hold — `mintAndSend` has no ceiling at all, only a nonce
+and a `uint64` width guard, so an owner key can already create arbitrary
+ECC[3], and a call that writes a counter without minting is strictly weaker
+than one that mints. The ceiling exists to bound what a bug, a forged proof or a
+compromised L1 contract can extract, and it still does that: every path that is
+not owner-signed stays capped at 50 USDC per transfer and at the destination
+chain's outstanding amount.
 
 ### Deployment
 

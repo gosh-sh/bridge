@@ -25,6 +25,14 @@ evaluates the label on the pull-request events it receives (open, new commits); 
 label before opening the PR, or push once after labelling, and the pipeline runs with
 the next push either way.
 
+Trust boundary: the label decides when a network is built, not who may build one. The
+pipeline YAML and the host scripts come from the pull request's own tree, so whoever can
+put code on a branch of this repository, or whose fork pipeline a maintainer approves, can
+run code with the `pull_request` secrets. The repository's Woodpecker setting is
+`require_approval: forks`: a fork's pipeline waits for that approval. The secrets give ssh
+as the CI user on one shared, disposable e2e VPS and a fine-grained GitHub token that only
+reads two repositories; the same pattern and setting serve the dexdo e2e this follows.
+
 ## Flow
 
 | step | where | what |
@@ -99,9 +107,11 @@ ssh USER@HOST "REGISTRY=docker.gosh.sh TAG=br_dev WORK_ROOT=\$HOME/bridge-e2e ba
 HELPERS_DIR=… ACKI_DIR=/path/to/acki-nacki-worktree BRIDGE_REPO=/path/to/bridge BRIDGE_SHA=$(git rev-parse HEAD) \
 BRIDGE_ZS_L1_BRIDGE=0x0000000000000000000000000000000000000001 DISABLE_BLACKLIST=true tests/e2e/local-net/gen-zerostate.sh
 ssh USER@HOST "bash -s -- acquire manual" < tests/e2e/local-net/host-lease.sh
-ACKI_REPO=https://github.com/gosh-sh/acki-nacki.git ACKI_BRANCH=<ACKI_SHA> GITHUB_TOKEN=… \
+# on the host: acki-nacki at ACKI_SHA with up.sh.patch applied (what CI does; the playbook's own clone stays off)
+scp tests/e2e/local-net/up.sh.patch USER@HOST:bridge-e2e/up.sh.patch
+ssh USER@HOST "ACKI_REPO=https://github.com/gosh-sh/acki-nacki.git ACKI_SHA=<ACKI_SHA> ACKI_DIR=/opt/acki-nacki-bridge GITHUB_TOKEN=… PATCH=\$HOME/bridge-e2e/up.sh.patch bash -s" < tests/e2e/local-net/checkout-acki-on-host.sh
 ansible-playbook -i /path/to/infrastructure/ansible/inventory/bridge/e2e/local-net.yml /path/to/acki-nacki/ansible/dexdo-e2e-up.yml \
-  -e target=bridge_e2e -e acki_dir=/opt/acki-nacki-bridge \
+  -e target=bridge_e2e -e acki_repo= -e acki_dir=/opt/acki-nacki-bridge \
   -e config_src=/path/to/acki-nacki-worktree/config -e env_src=/path/to/acki-nacki-worktree/docker/.env \
   -e dexdo_net_image_tag=br_dev -e dexdo_node_image=<NODE_IMG> -e dexdo_gql_image=<GQL_IMG> -e dexdo_bm_image=<BM_IMG> -e dex_test_notes_cnt=0
 ssh USER@HOST "PIPELINE_ID=manual BRIDGE_SHA=<sha> ACKI_DIR=/opt/acki-nacki-bridge bash -s" < tests/e2e/local-net/run-test-on-host.sh

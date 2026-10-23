@@ -39,10 +39,15 @@ case "$ID" in
   *[[:space:]]*) echo "FATAL: pipeline_id must not contain whitespace: '$ID'"; exit 64 ;;
 esac
 # TTL only guards against a DEAD pipeline (cancelled, timed out or killed
-# without releasing). A LIVE one never hits it: the net-up, dump-logs and
-# net-down steps call `assert` before touching the host, `assert` renews the
-# timestamp as it checks it (see do_assert below), and run-test-on-host.sh
-# renews every 300 s in the background while the test runs. 5400 s (90 min)
+# without releasing). A LIVE one never hits it: the net-up, run-test,
+# dump-logs and net-down steps call `assert` before touching the host,
+# `assert` renews the timestamp as it checks it (see do_assert below), and
+# run-test-on-host.sh renews every 300 s in the background while the test
+# runs. Two steps reach the host before lease-acquire and do not assert:
+# prepare-host (package install, docker group: idempotent) and resolve-acki
+# (`docker pull` of branch tags and `docker cp` into the CI user's home);
+# neither touches a stand, and both pipelines run their nodes by digest, so a
+# moved tag changes nothing for a network another run holds. 5400 s (90 min)
 # is dexdo's value, kept identical on purpose: both pipelines must agree on
 # when a lease is dead, or one could take over a lease the other still
 # considers live. A dead run blocks the host for that long at most.
@@ -117,11 +122,12 @@ do_renew() {
 do_assert() {
   _read
   [ "$L_ID" = "$ID" ] || { echo "FATAL: owner check failed ($L_ID != $ID)"; exit 72; }
-  # assert IS the heartbeat: every pipeline step that touches the host calls
-  # this before doing anything, and this write is what keeps the lease from
-  # aging past TTL while the pipeline that owns it is still alive and taking
-  # steps. Without this renew, a long step would let the lease go stale out
-  # from under a run that is still very much in progress.
+  # assert IS the heartbeat: every pipeline step that touches the stand calls
+  # this before doing anything (see the TTL note above for the two pre-lease
+  # steps that do not), and this write is what keeps the lease from aging past
+  # TTL while the pipeline that owns it is still alive and taking steps.
+  # Without this renew, a long step would let the lease go stale out from
+  # under a run that is still very much in progress.
   echo "$ID $(_now)" > "$LEASE"
 }
 

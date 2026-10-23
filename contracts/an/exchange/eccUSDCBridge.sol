@@ -810,13 +810,16 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         that had none, while the principal stays locked on the source
     ///         chain. This is how the owner states what is locked there.
     ///
-    ///         The figure to write is the principal L1 actually holds. The
-    ///         counter is also the deposit room — `finalizeDeposit` and
-    ///         `confirmDeposit` both bound `outstanding + amount` by
-    ///         `MAX_BRIDGE_TVL` — so writing more than L1 holds buys
-    ///         withdrawal room by refusing deposits with `ERR_TVL_CAP`, and a
-    ///         deposit caught between finalization and confirmation aborts
-    ///         with its voucher already consumed.
+    ///         The figure to write is the principal L1 holds less the deposits
+    ///         not yet credited here and the burns L1 has not yet paid out —
+    ///         not L1's balance, which still carries both. The counter is also
+    ///         the deposit room, since `finalizeDeposit` and `confirmDeposit`
+    ///         bound `outstanding + amount` by `MAX_BRIDGE_TVL`, so writing
+    ///         more than that figure buys withdrawal room by refusing deposits
+    ///         with `ERR_TVL_CAP`, and a deposit caught between finalization
+    ///         and confirmation aborts with its voucher already consumed.
+    ///         Writing less is the safe direction: it only refuses
+    ///         withdrawals, which return the ECC.
     ///
     ///         It moves this counter alone. A withdrawal is still bounded by
     ///         bridged minted less bridged burned, so where that inventory is

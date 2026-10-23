@@ -176,12 +176,19 @@ What it does not do:
   still does not credit the bridged counters. Owner-minted USDC is not
   withdrawable inventory, by design: nothing is locked on L1 behind it.
 
-**Set it to the principal L1 actually holds, and to nothing else.** The counter
-is shared between the two directions: it is the withdrawal allowance and it is
-the deposit room, since `finalizeDeposit` and `confirmDeposit` both require
-`outstanding + amount <= MAX_BRIDGE_TVL`. A counter above what L1 holds
-therefore buys withdrawal room by closing the door on deposits, and the damage
-is not symmetrical:
+**The figure to write is not L1's balance.** Rearranging the identity above,
+
+```
+outstanding = L1 treasuryBalance - unconfirmed deposits - unpaid burns
+```
+
+where unconfirmed deposits are those locked on L1 but not yet credited on AN,
+and unpaid burns are withdrawals burned on AN but not yet paid out on L1. The
+counter is shared between the two directions — it is the withdrawal allowance
+and it is the deposit room, since `finalizeDeposit` and `confirmDeposit` both
+require `outstanding + amount <= MAX_BRIDGE_TVL` — so a counter above that
+figure buys withdrawal room by closing the door on deposits, and the damage is
+not symmetrical:
 
 - a new deposit fails `finalizeDeposit` with 235, which is retryable;
 - a deposit already between finalization and confirmation aborts in
@@ -191,9 +198,19 @@ is not symmetrical:
 - `mintAndSendBridged`, the owner's recovery path for exactly that case, is
   capped by the same check and throws 235 too.
 
-So raising the counter to the ceiling in order to release a larger inventory is
-not an operating procedure — it strands depositors. Release what L1 is actually
-short of, and lower the counter again before deposits resume.
+Writing L1's balance while transfers are in flight is enough to cause this. With
+10,000 USDC on L1 of which 50 is a deposit not yet confirmed on AN, the counter
+belongs at 9,950; write 10,000 and that confirmation aborts with 235 and a spent
+voucher. So pause deposits, let the in-flight transfers on both sides settle,
+and only then measure and write — the same order this section's parent advises
+before rotating a trusted L1 contract.
+
+**If in doubt, write less rather than more.** An under-count only refuses
+withdrawals with 236, which return the ECC untouched and which the owner
+corrects by raising the counter. An over-count strands a depositor, and the
+depositor cannot correct it. For the same reason, raising the counter to the
+ceiling in order to release an inventory larger than the ceiling is not an
+operating procedure.
 
 The ceiling itself still means what it says. It bounds the amount standing at
 one moment rather than the amount that may pass through over time, but that is

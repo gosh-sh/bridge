@@ -53,16 +53,24 @@ assigns it when the release is tagged.
   inventory migrated too, together with custody and the consumed withdrawal
   nullifiers; that migration is not in this release.
 
-  **Write the principal L1 actually holds, and nothing else.** The counter is
-  also the deposit room: `finalizeDeposit` and `confirmDeposit` both bound
-  `outstanding + amount` by the 10 000 USDC ceiling. A counter above what L1
-  holds buys withdrawal room by refusing deposits with 235 — and a deposit
+  **The figure to write is not L1's balance.** It is that balance less the
+  deposits not yet credited on AN and the burns L1 has not yet paid out:
+  writing the balance itself while transfers are in flight already breaks
+  things, since with 10 000 USDC on L1 of which 50 is an unconfirmed deposit
+  the counter belongs at 9 950. The counter is also the deposit room:
+  `finalizeDeposit` and `confirmDeposit` both bound `outstanding + amount` by
+  the 10 000 USDC ceiling. A counter above the right figure buys withdrawal
+  room by refusing deposits with 235 — and a deposit
   caught between finalization and confirmation aborts with its voucher already
   consumed, so re-proving it cannot confirm again and that USDC sits on L1 with
   nothing minted on AN until the owner lowers the counter. `mintAndSendBridged`
-  is capped by the same check, so it cannot pay those users either. Raising the
-  counter to the ceiling to release a larger inventory is therefore not an
-  operating procedure. It is no new authority — `mintAndSend` has no ceiling at
+  is capped by the same check, so it cannot pay those users either. Pause
+  deposits and let the in-flight transfers settle before measuring, and if in
+  doubt write less rather than more: an under-count only refuses withdrawals
+  with 236, which return the ECC and which the owner corrects by raising the
+  counter, while an over-count strands a depositor who cannot correct it.
+  Raising the counter to the ceiling to release a larger inventory is therefore
+  not an operating procedure. It is no new authority — `mintAndSend` has no ceiling at
   all — and every path that is not owner-signed stays capped at 50 USDC per
   transfer and at the destination chain's outstanding amount. *Restoring a
   chain's outstanding amount* in

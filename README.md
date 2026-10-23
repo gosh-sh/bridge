@@ -14,32 +14,38 @@ verifiers deployed as Yul bytecode.
 
 ## The current deployment
 
-Sepolia ↔ shellnet, deployed from tag [`v0.4.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.4.0).
-The CLI, relayers and web form take their addresses from configuration.
+Sepolia ↔ shellnet. `AckiNackiBridge` is deployed from commit
+[`c7054529`](https://github.com/gosh-sh/bridge/commit/c7054529ae3bf33839dd0c45119540f4f1196c7a)
+([#101](https://github.com/gosh-sh/bridge/pull/101), the transfer and principal caps); the Ethereum
+contracts have not changed since. `eccUSDCBridge` runs the 1.13.0 build of
+[#129](https://github.com/gosh-sh/bridge/pull/129). The CLI, relayers and web form take their
+addresses from configuration.
 
 ### Ethereum (Sepolia, chain id 11155111)
 
 | | |
 |---|---|
-| `AckiNackiBridge` | `0x8413212869201d4e0d525e6067b605318029d451` |
-| deployment block | `11955698` |
+| `AckiNackiBridge` | `0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b` |
+| deployment block | `11971217` |
 | USDC | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+
+The previous bridge, `0x8413212869201d4e0d525e6067b605318029d451` (block `11955698`), is paused.
 
 ### Acki Nacki (shellnet)
 
 | | |
 |---|---|
 | `eccUSDCBridge` | `0:1a1a…1a1a` |
-| version | `1.12.0`, code hash `a1fd7d19…` |
-| beacon light client | `0:1afeaa0fdd997e8177d60d0c8dbbe44c5a5e008f56194240f5f40da250582967` |
+| version | `1.13.0`, code hash `66d15d49…` |
+| beacon light client | `0:9121fc37c8ac55a4fc42a73bccaf725cb0d87b9a8c7dfbc6dd2be7d1690d8462` |
 | GraphQL | `https://shellnet.ackinacki.org/graphql` |
 
 ### What to set
 
 ```bash
-BRIDGE_ADDRESS=0x8413212869201d4e0d525e6067b605318029d451
-BRIDGE_DEPLOY_BLOCK=11955698
-FROM_BLOCK=11955698
+BRIDGE_ADDRESS=0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b
+BRIDGE_DEPLOY_BLOCK=11971217
+FROM_BLOCK=11971217
 RPC_URL=https://rpc.sepolia.ethpandaops.io
 ```
 

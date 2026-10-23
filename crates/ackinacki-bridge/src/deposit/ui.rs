@@ -1424,6 +1424,7 @@ impl Ui for RecordingUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deposit::testkit::sepolia_sender;
 
     #[test]
     fn nine_steps_in_pipeline_order() {
@@ -1816,7 +1817,7 @@ mod tests {
     #[tokio::test]
     async fn json_with_yes_accepts_the_eip681_risk_and_without_yes_refuses_it() {
         use crate::deposit::wallet::{eip681::Eip681Wallet, Wallet, WalletError};
-        let from = alloy_primitives::address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let (_b, out) = capture();
         let yes = JsonEvents::new(out, true);
         assert_eq!(
@@ -1834,7 +1835,7 @@ mod tests {
     #[tokio::test]
     async fn the_human_renderers_take_yes_as_the_answer_to_the_eip681_risk() {
         use crate::deposit::wallet::{eip681::Eip681Wallet, Wallet, WalletError};
-        let from = alloy_primitives::address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let connect = |ui: Box<dyn Ui>| async move {
             Eip681Wallet::new(from, 11_155_111)
                 .connect(ui.as_ref())

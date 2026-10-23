@@ -115,14 +115,22 @@ For that pair,
 `L1 treasuryBalance = AN outstanding + unconfirmed deposits + unpaid burns`.
 Thus confirming a valid pending deposit cannot exceed the L1 cap; simultaneous
 finalizations need no reservation. Pause deposits and drain pending transfers
-before rotating the trusted L1 contract.
+before rotating the trusted L1 contract. That identity, and the conclusion drawn
+from it, hold while `confirmDeposit` and `initiateWithdrawal` are the only
+writers of the counter. `setOutstandingByChain` writes it directly with no tie
+to L1, so an owner who writes a figure other than the measured L1 principal
+breaks both — see *Restoring a chain's outstanding amount* below.
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
 with 235; the latter is retryable after withdrawals. Both checks precede proof
-verification and are repeated on confirmation. An oversized withdrawal or one
-without enough inventory on its destination chain returns the attached ECC
-without burning it or emitting `WithdrawalInitiated`. It calls `ensureBalance()`
-and sends back `min(msg.value, 0.1 vmshell)`; it uses no `rawReserve`.
+verification and are repeated on confirmation. A withdrawal that is oversized,
+that would burn more than bridged minted less bridged burned, or that exceeds
+its destination chain's outstanding amount returns the attached ECC without
+burning it and emits `WithdrawalRefused` instead of `WithdrawalInitiated`. That
+event carries the same fields plus `reason` — the error code the call would have
+thrown had the refusal thrown: 234, 233 and 236 for the three cases in that
+order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
+it uses no `rawReserve`.
 `ensureBalance()` is free. Dapp 0 contains only system contracts, and mainnet
 has an unlimited dapp configuration deployed for dapp 0. Withdrawal messages
 arrive from another dapp id, so SHELL sent back to that dapp is burned.
@@ -134,6 +142,87 @@ block time (errors 402 and 401); an identical recorded message is rejected with
 expire; voucher identity remains the deposit double-mint protection. CLI and
 relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
 same BOC while valid.
+
+### Restoring a chain's outstanding amount
+
+`setOutstandingByChain(chainId, amount)` writes one chain's outstanding amount
+under the owner key. It exists because that counter can legitimately be empty
+while the principal is still locked on L1. `onCodeUpgrade` does carry the field
+— `updateCode` hands it over as the tenth of eleven, and
+`test_upgrade_preserves_both_networks` covers it — but only between builds that
+both have it. 1.12.0 had nine fields and no such field to hand over.
+
+A 1.12.0 bridge therefore cannot reach this build in one `updateCode`:
+`onCodeUpgrade` decodes the eleven-field tuple only, and a direct attempt
+throws on the cell. It throws safely — `updateCode` commits before swapping the
+code, so the account keeps 1.12.0 and its state — but it does not arrive.
+Crossing that gap needs an intermediate build that decodes the old nine fields
+and hands over eleven, leaving the two new ones empty; the deployment procedure
+below is the supported alternative. A bridge that crossed it that way, or any
+bridge whose counter was never credited, holds a zero outstanding amount while
+its principal is still locked on L1, and refuses every withdrawal to that chain
+with 236. Nothing else repairs that: `mintAndSendBridged` raises the counter but
+mints as it goes, so repairing with it widens the gap between the copies on AN
+and the principal actually held on L1.
+
+What it does not do:
+
+- It moves that counter alone. A withdrawal is still bounded by bridged minted
+  less bridged burned. Where that inventory is zero too — a fresh deployment —
+  the withdrawal is refused with 233 however high the counter is set. Moving a
+  chain's users onto a freshly deployed bridge needs the inventory migrated as
+  well, alongside custody and the consumed withdrawal nullifiers.
+- It does not touch `_totalMinted` or the bridged counters, and `mintAndSend`
+  still does not credit the bridged counters. Owner-minted USDC is not
+  withdrawable inventory, by design: nothing is locked on L1 behind it.
+
+**The figure to write is not L1's balance.** Rearranging the identity above,
+
+```
+outstanding = L1 treasuryBalance - unconfirmed deposits - unpaid burns
+```
+
+where unconfirmed deposits are those locked on L1 but not yet credited on AN,
+and unpaid burns are withdrawals burned on AN but not yet paid out on L1. The
+counter is shared between the two directions — it is the withdrawal allowance
+and it is the deposit room, since `finalizeDeposit` and `confirmDeposit` both
+require `outstanding + amount <= MAX_BRIDGE_TVL` — so a counter above that
+figure buys withdrawal room by closing the door on deposits, and the damage is
+not symmetrical:
+
+- a new deposit fails `finalizeDeposit` with 235, which is retryable;
+- a deposit already between finalization and confirmation aborts in
+  `confirmDeposit` with 235 **after** its voucher's constructor has run, so
+  re-proving it deploys the same voucher and cannot confirm again. That USDC is
+  locked on L1 with nothing minted on AN until the owner lowers the counter;
+- `mintAndSendBridged`, the owner's recovery path for exactly that case, is
+  capped by the same check and throws 235 too.
+
+Writing L1's balance while transfers are in flight is enough to cause this. With
+10,000 USDC on L1 of which 50 is a deposit not yet confirmed on AN, the counter
+belongs at 9,950; write 10,000 and that confirmation aborts with 235 and a spent
+voucher. So pause deposits, let the in-flight transfers on both sides settle,
+and only then measure and write — the same order this section's parent advises
+before rotating a trusted L1 contract.
+
+**If in doubt, write less rather than more.** An under-count only refuses
+withdrawals with 236, which return the ECC untouched and which the owner
+corrects by raising the counter. An over-count strands a depositor, and the
+depositor cannot correct it. For the same reason, raising the counter to the
+ceiling in order to release an inventory larger than the ceiling is not an
+operating procedure.
+
+The ceiling itself still means what it says. It bounds the amount standing at
+one moment rather than the amount that may pass through over time, but that is
+a property of the accounting, not a budget to spend: the figure to write is
+always the measured L1 principal. And the function grants no authority the
+owner did not already hold — `mintAndSend` has no ceiling at all, only a nonce
+and a `uint64` width guard, so an owner key can already create arbitrary
+ECC[3], and a call that writes a counter without minting is strictly weaker
+than one that mints. The ceiling exists to bound what a bug, a forged proof or a
+compromised L1 contract can extract, and it still does that: every path that is
+not owner-signed stays capped at 50 USDC per transfer and at the destination
+chain's outstanding amount.
 
 ### Deployment
 

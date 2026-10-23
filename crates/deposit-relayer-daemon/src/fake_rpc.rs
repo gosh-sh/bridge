@@ -37,6 +37,7 @@ struct Chain {
     deposit_blocks: Vec<u64>,
     get_logs_ranges: Vec<(u64, u64)>,
     counter_blocks: Vec<u64>,
+    receipt_hashes: Vec<B256>,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,11 @@ impl FakeRpc {
     /// Blocks `depositCounter()` was read at since the last call.
     pub(crate) fn take_counter_blocks(&self) -> Vec<u64> {
         std::mem::take(&mut self.lock().counter_blocks)
+    }
+
+    /// Transaction receipts requested since the last call.
+    pub(crate) fn take_receipt_hashes(&self) -> Vec<B256> {
+        std::mem::take(&mut self.lock().receipt_hashes)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Chain> {
@@ -167,6 +173,9 @@ impl FakeRpc {
             },
             "eth_getTransactionReceipt" => {
                 let tx = params[0].as_str().expect("tx hash");
+                chain
+                    .receipt_hashes
+                    .push(tx.parse().expect("valid tx hash"));
                 let found = (0..chain.deposit_blocks.len() as u64)
                     .find(|&id| tx_hash(id).to_string() == tx.to_ascii_lowercase());
                 Ok(match found {
@@ -185,7 +194,6 @@ impl FakeRpc {
             depositId: U256::from(id),
             sender: Address::repeat_byte(0x11),
             amount: U256::from(1_000 + id),
-            anWorkchain: 0,
             anAccount: B256::repeat_byte(0x33),
             timestamp: U256::from(1_700_000_000u64),
         };

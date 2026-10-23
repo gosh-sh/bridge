@@ -75,7 +75,7 @@ contract AckiNackiBridgeAaveForkTest is Test {
     function _approveAndDeposit(address user, uint256 amount) internal {
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        bridge.deposit(amount, bytes32(uint256(uint160(user))));
         vm.stopPrank();
     }
 
@@ -137,7 +137,8 @@ contract AckiNackiBridgeAaveForkTest is Test {
     }
 
     function test_fork_yieldAccruesAfterTimeWarp() public {
-        _approveAndDeposit(user1, 100 * UsdcTestLib.UNIT);
+        _approveAndDeposit(user1, 50 * UsdcTestLib.UNIT);
+        _approveAndDeposit(user1, 50 * UsdcTestLib.UNIT);
         bridge.supplyToAave(type(uint256).max);
         uint256 principal = bridge.suppliedPrincipal();
         assertApproxEqAbs(principal, 90 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "principal ~= 90 USDC");

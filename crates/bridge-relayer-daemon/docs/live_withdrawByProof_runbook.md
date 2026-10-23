@@ -339,7 +339,7 @@ Quick version — fund the wallet from Circle's Sepolia faucet, then
 approve + deposit into the bridge:
 
 ```bash
-export BRIDGE=<new_address>
+export BRIDGE='<new_address>'
 # Confirm which USDC the fresh deploy wired (DeployShellnetE2EBridge.s.sol
 # pins Circle canonical Sepolia USDC; the older Pruvendo mock
 # 0x94a9D9…5e4C8 is retired):
@@ -349,6 +349,7 @@ cast call $BRIDGE 'usdc()(address)' --rpc-url $RPC
 export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238         # Circle canonical Sepolia USDC
 export WALLET=$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")   # relayer/deployer: your own EOA
 export AMOUNT=1000000                                          # 1.000000 USDC (6 decimals)
+: "${AN_RECIPIENT:?set AN_RECIPIENT to a 0x-prefixed 32-byte AN account ID you control}"
 
 # 1. Fund $WALLET from Circle's public faucet.
 #    Open https://faucet.circle.com, pick "Ethereum Sepolia",
@@ -361,17 +362,16 @@ cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC
 #   * bridge.deposit(amount, …)      — the actual bridge call
 # Only step 3 touches the bridge. Step 2 is a plain ERC20 approve on USDC;
 # it authorizes the `usdc.transferFrom(msg.sender, ...)` that deposit()
-# runs internally (AckiNackiBridge.sol:585).
+# runs internally (AckiNackiBridge._pullExactUsdc).
 
 # 2. USDC.approve(spender=$BRIDGE, value=$AMOUNT) — target contract is $USDC
 cast send $USDC 'approve(address,uint256)' $BRIDGE $AMOUNT \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
-# 3. bridge.deposit($AMOUNT, workchain=0, anAccount=0x11…11) — target contract is $BRIDGE
-#    (dummy AN destination is harmless on testnet — no AN listener will
-#    credit this phantom Deposit event)
-cast send $BRIDGE 'deposit(uint256,int8,bytes32)' \
-  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+# 3. bridge.deposit($AMOUNT, anAccount=$AN_RECIPIENT) — target is $BRIDGE.
+#    This is a real deposit; the relayer can credit the AN recipient.
+cast send $BRIDGE 'deposit(uint256,bytes32)' \
+  $AMOUNT "$AN_RECIPIENT" \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
 # 4. Verify
@@ -915,6 +915,7 @@ cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
 export USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238   # Circle canonical Sepolia USDC
 export WALLET=$(cast wallet address --private-key $RELAYER_PRIVATE_KEY)
 export AMOUNT=1000000    # cover at least one burn (1.000000 USDC)
+: "${AN_RECIPIENT:?set AN_RECIPIENT to a 0x-prefixed 32-byte AN account ID you control}"
 
 # 1. Fund $WALLET from Circle's faucet.
 #    Open https://faucet.circle.com, pick "Ethereum Sepolia",
@@ -926,16 +927,16 @@ cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC_URL   # sho
 #   * USDC.approve(bridge, amount)   — ERC20 allowance on the token contract
 #   * bridge.deposit(amount, …)      — the actual bridge call, which pulls
 #                                      via usdc.transferFrom(...) internally
-#                                      (AckiNackiBridge.sol:585)
+#                                      (AckiNackiBridge._pullExactUsdc)
 
 # 2. USDC.approve(spender=$BRIDGE_ADDRESS, value=$AMOUNT) — target is $USDC
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
 
 # 3. bridge.deposit(...) — target is $BRIDGE_ADDRESS
-#    (dummy AN destination — harmless on testnet)
-cast send $BRIDGE_ADDRESS 'deposit(uint256,int8,bytes32)' \
-  $AMOUNT 0 0x1111111111111111111111111111111111111111111111111111111111111111 \
+#    This is a real deposit; use an AN account you control.
+cast send $BRIDGE_ADDRESS 'deposit(uint256,bytes32)' \
+  $AMOUNT "$AN_RECIPIENT" \
   --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
 
 # 4. Confirm
@@ -947,14 +948,11 @@ despite a successful `approve`,** the wallet is holding balance of the
 *wrong* USDC contract (e.g. the retired Pruvendo mock). Re-run the
 `usdc()` check above and fund the correct token via Circle's faucet.
 
-**Why the dummy AN destination is safe on testnet.** `deposit()` emits a
-`Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, ts)` event
-that a production AN-side listener would consume to credit the AN
-recipient. On shellnet demos there is no such listener wired for
-seed-only deposits, so the phantom event just sits in event history. Do
-NOT do this on a bridge with a live AN-side indexer — pay to a real
-`anAccount` you control on that path, or drain via a legit withdraw
-after seeding.
+**The top-up credits a real AN destination.** `deposit()` emits a
+`Deposit(depositId, msg.sender, amount, anAccount, ts)` event
+that the deposit relayer can finalize, including on testnet. Set `AN_RECIPIENT`
+to a `0x`-prefixed 32-byte AN account ID you control. Treasury top-ups are not
+skipped by the relayer; a dummy destination can leave the credit inaccessible.
 
 **Re-run the withdraw.** After the deposit lands, re-run the same
 `withdraw-e2e` (or `replay_withdraw_shplonk.sh`) command. The proof is

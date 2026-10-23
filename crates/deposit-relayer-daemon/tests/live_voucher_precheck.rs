@@ -55,7 +55,6 @@ async fn live_voucher_precheck_finds_a_finalized_deposit() {
         deposit_id: 1,
         sender: Default::default(),
         amount: Default::default(),
-        an_workchain: 0,
         an_account: Default::default(),
         timestamp: Default::default(),
         tx_hash: Default::default(),

@@ -54,6 +54,9 @@ contract AckiNackiBridge {
     ///         global TVL limit (QC-A1-1 / QC-AN-J1).
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
+    uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
+    uint256 public constant MAX_BRIDGE_TVL = 10_000 * USDC_UNIT;
+
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -309,14 +312,11 @@ contract AckiNackiBridge {
     /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
     ///         destination: it is carried as ZK public inputs and credited on the
     ///         AN side (the EVM `sender` is kept only for provenance, since a
-    ///         20-byte EVM address is not a valid AN recipient). `anWorkchain` is
-    ///         inert — see `deposit` — and is emitted only so the event shape
-    ///         stays stable for indexers.
+    ///         20-byte EVM address is not a valid AN recipient).
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
-        int8 anWorkchain,
         bytes32 anAccount,
         uint256 timestamp
     );
@@ -399,6 +399,8 @@ contract AckiNackiBridge {
     ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
     error TransferAmountMismatch();
     error DepositTooLarge();
+    error TransferTooLarge();
+    error TvlCapReached();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
     error InvalidAnAccount();
@@ -767,15 +769,6 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
-    /// @param anWorkchain Inert. Kept in the ABI and the event for compatibility,
-    ///                    but Acki Nacki ignores it: the workchain concept is
-    ///                    retired there and `dappId` replaced it (2026-06-02),
-    ///                    so the recipient always lives in workchain 0. It is
-    ///                    not a public input of the deposit proof. Not
-    ///                    range-checked, because no supported set exists to
-    ///                    check against — a wrong value changes nothing.
-    ///                    The destination that
-    ///                    does matter is `anAccount` below.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -783,20 +776,20 @@ contract AckiNackiBridge {
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
     ///                    A wrong non-zero destination is one-way (no refund).
-    function deposit(uint256 amount, int8 anWorkchain, bytes32 anAccount)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+        if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
+        if (treasuryBalance > MAX_BRIDGE_TVL || amount > MAX_BRIDGE_TVL - treasuryBalance) {
+            revert TvlCapReached();
+        }
         uint256 credited = _pullExactUsdc(amount);
 
         uint256 depositId = depositCounter++;
         treasuryBalance += credited;
 
-        emit Deposit(depositId, msg.sender, amount, anWorkchain, anAccount, block.timestamp);
+        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp);
     }
 
     // ---------------------------------------------------------------------
@@ -1227,9 +1220,11 @@ contract AckiNackiBridge {
 
     /// @dev Highest 1-indexed layer that currently holds at least one hash, or
     ///      0 before any block is verified. Layers fill contiguously (layer L
-    ///      only materialises once layers 1..L-1 exist), so this equals the
-    ///      active-layer count `t` used by the partner prover's
-    ///      `BridgeState::num_active_layers`.
+    ///      only materialises once layers 1..L-1 exist). `dataLen` only grows
+    ///      and nothing clears a window, so `t` never decreases when later
+    ///      key blocks skip higher layers. The prover's
+    ///      `prev_max_level_layer_hash_for` must use the same `t`; any other
+    ///      pick reverts `PrevAnchorMismatch` before the proofs are checked.
     function _highestActiveLayer() internal view returns (uint8) {
         uint8 hi = 0;
         for (uint8 L = 1; L <= MAX_LAYER_HASHES; L++) {
@@ -1451,6 +1446,8 @@ contract AckiNackiBridge {
         if (address(bridgeWithdrawalVerifier) == address(0)) {
             revert WithdrawByProofDisabled();
         }
+
+        if (pub.amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {

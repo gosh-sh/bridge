@@ -253,6 +253,18 @@ fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
         if token.name == "_totalBurnedBridgeByToken" {
             token.value = u32_u128_map(burned);
         }
+        if token.name == "_outstandingByChain" {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert(
+                "11155111".to_string(),
+                tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(minted.saturating_sub(burned), 128)),
+            );
+            token.value = tvm_abi::TokenValue::Map(
+                tvm_abi::ParamType::Uint(256),
+                tvm_abi::ParamType::Uint(128),
+                map,
+            );
+        }
     }
     let builder = tvm_abi::TokenValue::pack_values_into_chain(
         &tokens,
@@ -1033,14 +1045,91 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.10.0. Any other compiler
-        // or a stale artefact moves this, and the 233 cap would ship as a
-        // different binary than CHANGELOG names.
+        // sold 0.80.0 rebuild of eccUSDCBridge 1.13.0 with limits and replay
+        // protection.
         assert_eq!(
             &hash[..8],
-            "4b2a9600",
+            "4525d927",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
+    }
+
+    /// A signed body cannot be replayed by changing unsigned envelope fields.
+    #[tokio::test]
+    async fn signed_owner_replay_rejects_changed_external_envelopes() {
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+        let (id, mut boc) = deployed_usdc_bridge(false).await;
+        let mut pause = String::new();
+        for paused in [true, false] {
+            let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+                abi: abi.clone(),
+                address: Some(format!("0:{id}")),
+                call_set: Some(CallSet {
+                    function_name: "setPaused".into(),
+                    input: Some(json!({"paused": paused})),
+                    ..Default::default()
+                }),
+                signer: Signer::Keys {
+                    keys: KeyPair {
+                        public: PAIR_PUBLIC.into(),
+                        secret: PAIR_SECRET.into(),
+                    },
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            if paused {
+                pause = encoded.message.clone();
+            }
+            boc = run_executor(ctx.clone(), ParamsOfRunExecutor {
+                message: encoded.message,
+                account: AccountForExecutor::Account {
+                    boc,
+                    unlimited_balance: Some(true),
+                },
+                return_updated_account: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .account;
+        }
+        let original = tvm_block::Message::construct_from_base64(&pause).unwrap();
+        for (fee, body_in_ref) in [(1u64, None), (2, Some(true))] {
+            let mut wrapped = original.clone();
+            wrapped.ext_in_header_mut().unwrap().import_fee = fee.into();
+            wrapped.set_serialization_params(body_in_ref, None);
+            assert_ne!(
+                wrapped.serialize().unwrap().repr_hash(),
+                original.serialize().unwrap().repr_hash()
+            );
+            assert_eq!(wrapped.body(), original.body());
+            let result = run_executor(ctx.clone(), ParamsOfRunExecutor {
+                message: tvm_types::base64_encode(wrapped.write_to_bytes().unwrap()),
+                account: AccountForExecutor::Account {
+                    boc: boc.clone(),
+                    unlimited_balance: Some(true),
+                },
+                skip_transaction_check: Some(true),
+                return_updated_account: Some(true),
+                ..Default::default()
+            })
+            .await;
+            let exit = match result {
+                Ok(run) => run
+                    .transaction
+                    .pointer("/compute/exit_code")
+                    .and_then(|v| v.as_i64()),
+                Err(error) => error.data().get("exit_code").and_then(|v| v.as_i64()),
+            };
+            assert_eq!(
+                exit,
+                Some(400),
+                "re-wrapped pause executed: fee={fee}, ref={body_in_ref:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -221,10 +221,24 @@ enum Cmd {
         #[arg(long)]
         force_state: bool,
         /// After this many consecutive failures on one deposit, park it in
-        /// `state.json` and advance the cursor (0 = disabled). Waiting for a
-        /// deposit that is not made yet is not a failure.
+        /// `state.json` and stop retrying it (0 = disabled). Waiting for a
+        /// deposit that is not made yet is not a failure. A failed deposit
+        /// otherwise stays outstanding and is retried with backoff; it does
+        /// not block later ids.
         #[arg(long, env = "SKIP_AFTER_ATTEMPTS", default_value_t = 0)]
         skip_after_attempts: u32,
+        /// Base delay in seconds before retrying a failed deposit. Doubled
+        /// on each later failure of that id, up to 64×. Anchor waits use the
+        /// larger of that failure delay and age / 4 seconds (age component
+        /// capped at 60). `0` disables both per-id delays.
+        #[arg(long, env = "OUTSTANDING_BACKOFF_SECS", default_value_t = 2)]
+        outstanding_backoff_secs: u64,
+        /// Warn after this many seconds waiting for an AN block anchor.
+        /// `0` warns immediately (default); repeats are limited to once per
+        /// 15 minutes per deposit. Set a delay only when block coverage is
+        /// monitored separately and anchor delivery latency is understood.
+        #[arg(long, env = "ANCHOR_WAIT_WARN_AFTER_SECS", default_value_t = 0)]
+        anchor_wait_warn_after_secs: u64,
         /// Allow non-HTTPS GraphQL endpoints for live submit (local dev only).
         #[arg(long)]
         allow_insecure_graphql: bool,
@@ -396,6 +410,8 @@ async fn main() -> anyhow::Result<()> {
             backoff_multiplier,
             force_state,
             skip_after_attempts,
+            outstanding_backoff_secs,
+            anchor_wait_warn_after_secs,
             allow_insecure_graphql,
             expect_chain_id,
             metrics_addr,
@@ -453,6 +469,8 @@ async fn main() -> anyhow::Result<()> {
                 backoff,
                 force_state,
                 skip_after_attempts,
+                outstanding_backoff_secs,
+                anchor_wait_warn_after_secs,
                 allow_insecure_graphql,
                 expect_chain_id,
             )
@@ -719,6 +737,8 @@ async fn run_daemon(
     backoff: BackoffConfig,
     force_state: bool,
     skip_after_attempts: u32,
+    outstanding_backoff_secs: u64,
+    anchor_wait_warn_after_secs: u64,
     allow_insecure_graphql: bool,
     expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -766,6 +786,8 @@ async fn run_daemon(
             deployment,
             force_state,
             skip_after,
+            outstanding_backoff_secs,
+            anchor_wait_warn_after_secs,
             scan_cursor,
             source,
             prover,
@@ -811,6 +833,8 @@ async fn run_daemon(
             deployment,
             force_state,
             skip_after,
+            outstanding_backoff_secs,
+            anchor_wait_warn_after_secs,
             scan_cursor,
             source,
             prover,
@@ -828,6 +852,8 @@ async fn run_daemon_loop<S, P, A>(
     deployment: DeploymentIdentity,
     force_state: bool,
     skip_after_attempts: Option<u32>,
+    outstanding_backoff_secs: u64,
+    anchor_wait_warn_after_secs: u64,
     scan_cursor: Arc<Mutex<Option<u64>>>,
     source: Arc<S>,
     prover: Arc<P>,
@@ -845,6 +871,8 @@ where
         deployment: Some(deployment),
         force_state,
         skip_after_attempts,
+        outstanding_backoff_secs,
+        anchor_wait_warn_after_secs,
         scan_cursor: Some(scan_cursor),
     };
     let mut relayer = Relayer::new(cfg, source, prover, submitter)?;

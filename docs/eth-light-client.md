@@ -42,7 +42,7 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. It has not taken the previous-committee window either: `submitUpdate` accepts only the committee in force, and `submitRotate` still requires a strictly later period, which is safe now that the rotate circuit binds the period to the attested slot. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is no longer a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale, so `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch` edit files the placing overwrites and no longer apply to anything. `scripts/check_eth_beacon_lc_sources.sh` does not look at the placed sources at all: it reads the two patch files and `contracts/an/EthKeccak.sol`, and asserts the patches touch only `contracts/exchange/` paths. Nothing checks the files `place.json` places. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client lets the replaced committee advance the head for the period it served, so an early `/updates` hand-off does not freeze it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is no longer a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale, so `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch` edit files the placing overwrites and no longer apply to anything. `scripts/check_eth_beacon_lc_sources.sh` does not look at the placed sources at all: it reads the two patch files and `contracts/an/EthKeccak.sol`, and asserts the patches touch only `contracts/exchange/` paths. Nothing checks the files `place.json` places. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
 | `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
@@ -189,11 +189,17 @@ flowchart TD
   beacon light client): the owner writes the commitment of a committee it believes is honest,
   `setCommitteeCommitment` (`EthBeaconLightClient.sol:458`). The relayer takes it from public
   input word 5 of a freshly proven bundle (`eth-lc-relayer set-committee`).
-- **Rotate** (`submitRotate`, `EthBeaconLightClient.sol:335`) proves that the next committee
-  is the one the current committee signed for, so the chain of committees becomes trustless. The
-  daemon does this by default on a period jump (`src/relayer.rs:152`). It needs the rotate
-  decider from tvm-sdk PR #284 in the node VM; on a network without it `submitRotate` is
-  unsound and must stay off (`--no-rotate`).
+- **Rotate** (`submitRotate`, `EthBeaconLightClient.sol`) proves that the next committee
+  is the one the current committee signed for, so the chain of committees becomes trustless.
+  The attested header's period is bound to `attestedSlot / 8192 + 1`; a beacon
+  `/updates` best update (start of the old period) is a valid hand-off. The
+  replaced committee can still advance the head for the period it served, so
+  an early rotate does not freeze the rest of that period. The daemon
+  auto-rotates only the committed fixture period; a live period jump
+  returns `RotateRequired` — prove `rotate_tree_n8` on n14 against the
+  `/updates` best update and `submit-rotate`. It needs the rotate
+  decider from tvm-sdk PR #284 in the node VM; on a network without it
+  `submitRotate` is unsound and must stay off (`--no-rotate`).
 - **Owner hop** (`--owner-hop`, `src/relayer.rs:215`) is the shadow substitute: prove a step of
   the new period, write its commitment with the owner key, submit the same bundle. It is refused
   once `disableOwnerRotation` has been called.
@@ -279,6 +285,20 @@ them after its first accepted `submitUpdate` only when started with `--flip-owne
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
 The relayer key must be the owner key of both contracts.
 
+**The owner keys stay.** Not until mainnet and not until a milestone: until
+the bridge is mature, which may be a year or two. Nobody will call
+`disableOwnerRotation` in that window, and `--flip-owner` is not used in
+production. The flip path stays in the contract (`reAnchorCommittee` is
+armed only after it) and in the relayer for later; it is not a pending
+ops step. Do not delete `disableOwnerRotation`.
+
+**Gloas fork slot.** `setGloasForkSlot` is owner-callable for the contract's
+lifetime, including after `disableOwnerRotation`. A `u64::MAX` pin is a
+setting: when a network publishes Gloas, `set-gloas-fork-slot` updates it.
+The daemon still returns `ProofFailed` (and names `setGloasForkSlot`) when
+the beacon spec slot disagrees with the pin, instead of proving into 255.
+Slot table in §4.5.
+
 ```mermaid
 stateDiagram-v2
   direction LR
@@ -326,9 +346,9 @@ hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and th
 ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
 that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
 nothing late-registers the skipped ones. A deposit from any of those uncovered blocks
-fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer`, which
-delivers deposits in order, stops at the first such deposit unless `--skip-after-attempts`
-is set. That is why the daemon does not flip unless told to.
+fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224). That is why the daemon does not
+flip unless told to. `deposit-relayer` walks past a failed id and retries it with
+backoff; `--skip-after-attempts` still parks one that keeps failing.
 
 ## 4. Deployment
 
@@ -436,18 +456,29 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
    (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).
 4. Build the relayer with `--features live-submit`; install the SRS; fill the env file.
-5. Pin the Gloas fork slot **before** any proof: `eth-lc-relayer set-gloas-fork-slot --slot
-   11296768` on Sepolia, `--slot 18446744073709551615` on mainnet (Gloas not scheduled). Until
-   `getGloasForkSlot` reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
-   `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell instead.
+5. Pin the Gloas fork slot **before** any proof.
+   `eth-lc-relayer set-gloas-fork-slot --slot <n>`. Until `getGloasForkSlot`
+   reports `isSet=true`, every `submitUpdate` and `submitRotate` reverts 256.
+   `updateCode` can pass `abi.encode(uint64 gloasForkSlot)` in the user cell
+   (`eth-lc-relayer gloas-slot-user-cell --slot <n>` prints that cell).
    The daemon reads that getter before every prove and uses it, not the beacon
    spec's `GLOAS_FORK_EPOCH`. A published epoch the contract does not hold
-   would otherwise spend a full step prove and come back 255.
+   would otherwise spend a full step prove and come back 255. After the flip
+   the same `set-gloas-fork-slot` call still works: the daemon returns
+   `ProofFailed` and names `setGloasForkSlot` instead of proving into 255.
+
+   | Network | `--slot` | `getGloasForkSlot()` |
+   |---|---|---|
+   | Sepolia (Gloas live 2026-10-06) | `11296768` | `(11296768, true)` |
+   | Ethereum mainnet, Gloas unscheduled | `18446744073709551615` (`u64::MAX`) | `(18446744073709551615, true)` — proofs work against that pin; when a real slot is published, `set-gloas-fork-slot` updates it, including after `disableOwnerRotation`. No on-chain proof with PI #10 = `u64::MAX` has been verified yet (the k=19 runs are `#[ignore]`d). |
+   | Fresh deploy, never set | — | `(0, false)` — every step/rotate reverts 256 |
 6. `prove-one` → `set-committee` (bootstrap) → `submit-one`; check `getHead`.
-7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`. With the
-   flag, after the first accepted update the daemon checks `getLightClient(l1ChainId)`
-   against `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and `disableOwnerRotation`; from
-   then on the bridge refuses `setAcceptedBlockHash` only for the light client's L1.
+7. Start the systemd unit. It does not flip; read §3.5 before adding `--flip-owner`.
+   With the flag the daemon still starts. After
+   the first accepted update it checks `getLightClient(l1ChainId)` against
+   `AN_LIGHT_CLIENT`, then calls `disableOwnerAnchorsOn(l1ChainId)` and
+   `disableOwnerRotation`; from then on the bridge refuses
+   `setAcceptedBlockHash` only for the light client's L1.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light
 client deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,

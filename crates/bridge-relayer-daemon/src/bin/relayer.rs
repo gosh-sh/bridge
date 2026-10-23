@@ -1820,9 +1820,12 @@ async fn run_withdraw_daemon(
 ///   2. one withdraw scan — `withdraw_scan_once` pays out every ready
 ///      `proof_event_*.json` (`withdrawByProof`).
 ///
-/// Running them sequentially in one task, sharing one provider, means there
-/// is never more than one in-flight transaction, so the shared EOA's nonces
-/// can't race (the failure mode a two-service split invites). A transient
+/// Running them sequentially in one task, sharing one provider, means the
+/// two legs never *send* at the same time. It does not mean one transaction
+/// in flight: a leg whose receipt wait times out leaves its transaction
+/// pending, and the other leg's next `prepare_send` reads `pending > latest`
+/// and replaces it at the same nonce (`nonce.rs`, `wait_for_receipt`'s doc).
+/// That replacement is the intended recovery, not a race. A transient
 /// failure in *either* leg trips the shared exponential backoff; a clean
 /// idle iteration resets it to the poll interval. Shutdown (SIGINT/SIGTERM)
 /// is honoured at the sleep boundary, so a `Verified` tick always flushes
@@ -1849,8 +1852,10 @@ async fn run_bridge_daemon(
     let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
 
-    // Withdraw leg: shares the SAME provider (one nonce source; the two
-    // legs run sequentially so there's only ever one in-flight tx).
+    // Withdraw leg: shares the SAME provider (one nonce source). The legs
+    // run sequentially, but a timed-out receipt wait leaves a tx pending
+    // that this leg's next send may replace at the same nonce — see the
+    // function doc above.
     let wd_bridge = EthBridgeClient::new(bridge_address, provider)
         .with_sender(sender)
         .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
@@ -2679,6 +2684,7 @@ mod withdraw_scan_tests {
     struct StubBridge {
         nullifier_used: bool,
         dry_run_reason: Option<String>,
+        fail_first_only: bool,
         submit_reason: Option<(String, bool)>,
         calls: Mutex<Calls>,
     }
@@ -2705,7 +2711,11 @@ mod withdraw_scan_tests {
             _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
         ) -> Result<DryRunOutcome, RelayerError> {
-            self.calls.lock().unwrap().dry_run += 1;
+            let mut calls = self.calls.lock().unwrap();
+            calls.dry_run += 1;
+            if self.fail_first_only && calls.dry_run > 1 {
+                return Ok(DryRunOutcome::WouldSucceed);
+            }
             match &self.dry_run_reason {
                 None => Ok(DryRunOutcome::WouldSucceed),
                 Some(reason) => Ok(DryRunOutcome::WouldRevert {
@@ -2719,7 +2729,13 @@ mod withdraw_scan_tests {
             _p: &alloy::primitives::Bytes,
             _pi: &WithdrawalPublicInputs,
         ) -> Result<WithdrawSubmitOutcome, RelayerError> {
-            self.calls.lock().unwrap().submit += 1;
+            let mut calls = self.calls.lock().unwrap();
+            calls.submit += 1;
+            if self.fail_first_only && calls.submit > 1 {
+                return Ok(WithdrawSubmitOutcome::Paid {
+                    tx_hash: alloy::primitives::B256::ZERO,
+                });
+            }
             match &self.submit_reason {
                 None => Ok(WithdrawSubmitOutcome::Paid {
                     tx_hash: alloy::primitives::B256::ZERO,
@@ -2765,6 +2781,34 @@ mod withdraw_scan_tests {
     fn permanent_selector_hex() -> String {
         let s = alloy::primitives::keccak256(b"WithdrawalProofRejected()");
         format!("0x{}", hex::encode(&s.0[..4]))
+    }
+
+    #[tokio::test]
+    async fn transfer_cap_revert_does_not_block_the_next_payout() {
+        let selector = alloy::primitives::keccak256("TransferTooLarge()");
+        let reason = format!("execution reverted: 0x{}", hex::encode(&selector[..4]));
+        let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
+        for dry_run in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let first = write_valid_proof_fixture(tmp.path(), 0);
+            let next = write_valid_proof_fixture(tmp.path(), 1);
+            let bridge = StubBridge {
+                dry_run_reason: Some(reason.clone()),
+                submit_reason: Some((reason.clone(), permanent)),
+                fail_first_only: true,
+                ..Default::default()
+            };
+            let mut state = WithdrawScanState::default();
+            assert!(
+                !withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(state.parked_permanent, 1);
+            assert!(state.done.contains(&first));
+            assert!(state.done.contains(&next));
+            assert_eq!(state.paid, if dry_run { 0 } else { 1 });
+        }
     }
 
     #[tokio::test]

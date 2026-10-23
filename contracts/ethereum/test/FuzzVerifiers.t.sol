@@ -172,7 +172,6 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
-        int8 anWorkchain,
         bytes32 anAccount,
         uint256 timestamp
     );
@@ -192,7 +191,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
     /// @notice Any valid deposit amount should succeed and update state correctly
     function testFuzz_DepositAmountInvariants(uint256 amount) public {
-        amount = bound(amount, 1, type(uint64).max);
+        amount = bound(amount, 1, bridge.MAX_TRANSFER_AMOUNT());
 
         address user = address(uint160(uint256(keccak256(abi.encodePacked(amount)))));
         usdc.mint(user, amount);
@@ -203,7 +202,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, int8(0), bytes32(uint256(uint160(user))));
+        bridge.deposit(amount, bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
         assertEq(bridge.depositCounter(), counterBefore + 1, "Counter must increment by 1");
@@ -228,7 +227,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         } else {
             vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
         }
-        bridge.deposit(amount, int8(0), bytes32(uint256(1)));
+        bridge.deposit(amount, bytes32(uint256(1)));
         vm.stopPrank();
     }
 

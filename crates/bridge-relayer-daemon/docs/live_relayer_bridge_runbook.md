@@ -465,7 +465,7 @@ cause before resetting counters:
 | Selector | Error | Lane | Cause |
 |---|---|---|---|
 | `0x87bf1c06` | `AttestationProofRejected()` | both | An attestation public input does not match. On `applyBkSetUpdate` the inputs are `(blockId, oldCommitmentL2, blockSeqNo, attestationLastSeen)`; the proof must be against the outgoing set. |
-| `0xe57f07c1` | `PrevAnchorMismatch(supplied, stored)` | verifyBlock | Local layer history diverged from `expectedPrevAnchor(numLayers)`. |
+| `0xe57f07c1` | `PrevAnchorMismatch(supplied, stored)` | verifyBlock | The bundle's Circuit 2 instance 13 does not match `expectedPrevAnchor(numLayers)`. Either local prover state diverged from the contract ([rebuild per §5.4](#54-new-machine-contract-already-advanced): move the state aside and startup picks `Resurrect`) or the contract moved between the pre-check and the send. Populated windows keep their last hash, so `t` does not fall when later key blocks skip higher layers. |
 | `0xc3438e78` | `BkSetCommitmentMismatch(supplied, stored)` | verifyBlock | The bundle was proven with the wrong set: a missed rotation, a premature switch to the incoming set, or a rotation applied by someone else. |
 | `0x33af5682` | `BlockSeqNoNotMonotonic(supplied, stored)` | verifyBlock | The block is at or below `storedLastSeenBlockSeqNo` — usually a state reset against an advanced contract. |
 | `0x703a55ba` | `StaleBkSetCommitment(supplied, stored)` | applyBkSetUpdate | The rotation's old set is not the contract's current set. The daemon pre-checks this and sends nothing (`off-chain old_commitment … != on-chain …`); on-chain it means someone else applied a rotation. |

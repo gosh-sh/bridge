@@ -37,24 +37,19 @@ import "./eccUSDCBridge.sol";
 ///           * that the signing committee is the *chain-anchored* one —
 ///             enforced by matching `committeeCommitment` to the commitment
 ///             this contract holds: the one in force, or the one a rotation
-///             replaced, and that one for late registration only, within a
-///             window of slots around the head it left (the rotate ↔ step
-///             join). Bootstrapped from a weak-subjectivity checkpoint;
-///             advanced by `submitRotate`. After `disableOwnerRotation`, the
-///             owner hatch is `reAnchorCommittee`.
+///             replaced, for the period that replaced committee served
+///             (`attestedSlot / 8192 + 1 == _committeePeriod`). The
+///             replaced committee may still move the head in that period,
+///             so an early `/updates` best-update hand-off does not freeze
+///             the remaining checkpoints of the old period. Bootstrapped
+///             from a weak-subjectivity checkpoint; advanced by
+///             `submitRotate`. After `disableOwnerRotation`, the owner
+///             hatch is `reAnchorCommittee`.
 ///
-///             It is NOT a binding to the attested slot's period. The rotate
-///             proof's period is bound in-circuit to its attested slot and
-///             stored as `_committeePeriod`, but no step check reads it: the
-///             window is slack around a proven slot, nothing more. Two
-///             consequences an operator should know:
-///             a genuine hand-off submitted early — the next committee is
-///             already in the headers of the current period — installs a
-///             committee that has signed nothing yet and freezes the head
-///             until the chain reaches its period, and the replaced
-///             committee's unregistered checkpoints are then stranded. Both
-///             are also true of the deployed 1.4.1; fixing them means gating
-///             the step on `_committeePeriod`, which this version does not.
+///             The rotate proof exposes the attested slot of that hand-off
+///             and binds `period` to `attestedSlot / 8192 + 1`. There is no
+///             end-of-period window: a beacon `/updates` best update (start
+///             of the old period) is a valid hand-off.
 ///
 ///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
 ///         hash (1/32). The head only moves forward, but a skipped checkpoint
@@ -73,7 +68,7 @@ import "./eccUSDCBridge.sol";
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "1.5.0";
+    string constant version = "1.6.1";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -191,7 +186,7 @@ contract EthBeaconLightClient {
     /// @notice The proven public inputs of the **rotate** circuit. The rotate
     ///         root is a recursive 2-to-1 aggregation over 8 committee shards +
     ///         a step snark (`eth-light-client-prover`, milestone M6), so its
-    ///         instance column is 16 little-endian 32-byte Fr:
+    ///         instance column is 17 little-endian 32-byte Fr:
     ///           [0..12)  KZG accumulator limbs (lhs/rhs G1, 3×88-bit per coord)
     ///           [12] current_committee_commitment  — 2-level Poseidon commitment
     ///               to the committee that SIGNED (must equal the trusted current
@@ -202,10 +197,12 @@ contract EthBeaconLightClient {
     ///           [14] period                        — the sync-committee period the
     ///               hand-off installs: the attested slot's period plus one,
     ///               bound in-circuit to the folded step's attested slot. Stored
-    ///               as `_committeePeriod`; nothing gates on it
+    ///               as `_committeePeriod`
     ///           [15] gloas_fork_slot               — picks the `next_sync_committee`
     ///               index (87 before Gloas, 2946 from it); bound to the folded
     ///               step's PI #10, must equal `_gloasForkSlot`
+    ///           [16] attested_slot                 — signed header of the rotate
+    ///               proof; `period` must equal `attestedSlot / 8192 + 1`
     ///
     ///         ⚠ The 12 accumulator limbs are the recursion's KZG accumulator.
     ///         `ZKHALO2VERIFYWITHVK` verifies the aggregation proof with a plain
@@ -218,6 +215,7 @@ contract EthBeaconLightClient {
         uint256 nextCommitteeCommitment;
         uint64  period;
         uint64  gloasForkSlot;
+        uint64  attestedSlot;
     }
 
     uint256 _ownerPubkey;
@@ -238,41 +236,27 @@ contract EthBeaconLightClient {
     uint64  _updatesApplied;
 
     // The trusted sync-committee Poseidon commitment for the current period.
-    // A step proof's committee_commitment (PI #5) must equal this, or — for a
-    // late registration only, inside the window below — the commitment this
-    // one replaced. That is the join that pins the aggregated signers to a
+    // A step proof's committee_commitment (PI #5) must equal this, or the
+    // commitment this one replaced (`_prevCommittee`) for the period that
+    // committee served. That is the join that pins the aggregated signers to a
     // chain-anchored committee.
     // Fail-closed: 0 rejects all updates until bootstrapped.
     uint256 _currentCommittee;
     // The commitment `_currentCommittee` replaced. A checkpoint skipped near
     // the end of a period would otherwise be lost the moment the committee
-    // rotates: its proof carries the old commitment, and late registration
-    // would reject it for ever. Accepted for late registration only, never to
-    // move the head forward. 0 before the first rotation.
+    // rotates: its proof carries the old commitment. Accepted for the period
+    // that committee served (`attestedSlot / 8192 + 1 == _committeePeriod`),
+    // including to move the head. 0 before the first rotation.
     uint256 _prevCommittee;
     // The finalized slot the head stood on when `_prevCommittee` left office.
-    // The window runs one period either side of it. The head is the last one
-    // the leaving committee moved, not the end of its period, so a checkpoint
-    // it skipped afterwards sits above this slot and needs the upper slack to
-    // be rescued at all — which is the whole point of the window. Both bounds
-    // are slack around a proven slot, not an exact period boundary.
-    // The window is measured from this and not from `_committeePeriod`; both
-    // are proven now (the rotate circuit binds its period to the attested
-    // slot), and moving the window onto the period is left for later.
-    //
-    // What this window does NOT do: keep the replaced committee off slots it
-    // never served. When the head is near the end of its period at the
-    // rotation, the window reaches into the next one; and a hand-off submitted
-    // early puts the window wherever the sender chose to put the head. Signing
-    // there still needs a supermajority of the retired committee's keys, which
-    // is the long-range assumption this design already carries for every
-    // committee it accepts — but it is slack, not a boundary.
+    // Nothing reads it; it is kept for the storage layout.
     uint64 _prevCommitteeHeadSlot;
 
-    // The sync-committee period `_currentCommittee` serves, as a report for
-    // operators: `submitRotate` stores the rotate proof's period, which the
-    // circuit binds to the attested slot (that slot's period plus one), and
-    // nothing gates on it. `reAnchorCommittee` compares its argument against
+    // The sync-committee period `_currentCommittee` serves. `submitRotate`
+    // stores the rotate proof's period, which the circuit binds to the
+    // attested slot (that slot's period plus one). The replaced committee
+    // may late-register or advance the head while its attested slot sits
+    // in that period. `reAnchorCommittee` compares its argument against
     // it. Bootstrapped with the weak-subjectivity checkpoint's period.
     uint64 _committeePeriod;
 
@@ -407,19 +391,14 @@ contract EthBeaconLightClient {
             require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
         // The signer is the committee in force, or the one a rotation
-        // replaced and that one for late registration only, inside a band of
-        // slots around the head it left. There is no test against the attested
-        // slot's period; gating the step on `_committeePeriod` is possible
-        // (see the header comment) and this version does not do it.
-        // The band is what keeps a replaced committee from signing anywhere in
-        // the one-year window; it is not a period boundary.
+        // replaced, in the period that replaced committee served
+        // (`attestedSlot / 8192 + 1` equals `_committeePeriod`). That
+        // path may advance the head, so an early rotate does not freeze
+        // the rest of the old period.
         bool currentSigner = pi.committeeCommitment == _currentCommittee;
-        bool prevSigner = late
-            && _prevCommittee != 0
+        bool prevSigner = _prevCommittee != 0
             && pi.committeeCommitment == _prevCommittee
-            && _prevCommitteeHeadSlot != 0
-            && pi.attestedSlot <= _prevCommitteeHeadSlot + SLOTS_PER_PERIOD
-            && pi.attestedSlot + SLOTS_PER_PERIOD >= _prevCommitteeHeadSlot;
+            && pi.attestedSlot / SLOTS_PER_PERIOD + 1 == _committeePeriod;
         require(currentSigner || prevSigner, ERR_WRONG_COMMITTEE);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
@@ -493,8 +472,9 @@ contract EthBeaconLightClient {
     ///
     ///         Permissionless: the proof is the authorization.
     /// @param proof        — SHPLONK proof bytes, the `proof_cell` operand.
-    /// @param publicInputs — 16 × 32-byte LE Fr: 12 accumulator limbs then
-    ///                       [current_commit, next_commit, period, gloas_fork_slot].
+    /// @param publicInputs — 17 × 32-byte LE Fr: 12 accumulator limbs then
+    ///                       [current_commit, next_commit, period, gloas_fork_slot,
+    ///                       attested_slot].
     function submitRotate(bytes proof, bytes publicInputs) public {
         RotatePI pi = _parseRotatePublicInputs(publicInputs);
         // Chain to the trusted committee; fail-closed until bootstrapped.
@@ -510,12 +490,12 @@ contract EthBeaconLightClient {
         // silently stranding every checkpoint the replaced committee had not
         // registered yet.
         require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
-        // No test on `pi.period`, deliberately. The circuit binds it to the
-        // attested slot, so it is exact, but every guard built on it has been
-        // a way to brick this call, and replay is already prevented by the
-        // committee chain above: after a rotation the same proof no longer
-        // matches `_currentCommittee`, and a hand-off out of a given committee
-        // is unique.
+        // The circuit binds `period` to `attestedSlot / 8192 + 1`. Repeat that
+        // equality here so a malformed instance is refused before accept.
+        // There is no end-of-period window: a `/updates` best update is a
+        // valid hand-off, and the replaced committee can still advance the
+        // head for the period it served.
+        require(pi.attestedSlot / SLOTS_PER_PERIOD + 1 == pi.period, ERR_BAD_PUBLIC_INPUTS);
         tvm.accept();
         require(
             gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof),
@@ -529,8 +509,8 @@ contract EthBeaconLightClient {
         _prevCommitteeHeadSlot = _finalizedSlot;
         _currentCommittee = pi.nextCommitteeCommitment;
         // The period the installed committee serves: the attested slot's
-        // period plus one, proven by the circuit. A report for operators and
-        // for `reAnchorCommittee`'s ordering; nothing gates on it.
+        // period plus one, proven by the circuit. Late registration of a
+        // skipped checkpoint by the replaced committee is this period.
         _committeePeriod = pi.period;
 
         address addrExtern = address.makeAddrExtern(CommitteeRotatedEmit, bitCntAddress);
@@ -770,12 +750,17 @@ contract EthBeaconLightClient {
 
     /// @notice Sets the Gloas fork slot proofs must have been made for
     ///         (`GLOAS_FORK_EPOCH × SLOTS_PER_EPOCH`; `type(uint64).max` if the
-    ///         network has not scheduled Gloas).
-    /// @dev Allowed while unset or while owner rotation is still enabled, the
-    ///      window in which the owner key is trusted for the committee anyway.
-    ///      Afterwards only `updateCode` can change it.
+    ///         network has not scheduled Gloas). Read back with
+    ///         `getGloasForkSlot()` → `(slot, isSet)`. Owner-callable for the
+    ///         contract's lifetime, including after `disableOwnerRotation`.
+    /// @dev Freezing this field would not shrink the owner's power:
+    ///      `updateCode` stays `onlyOwnerPubkey` with no other gate, so the
+    ///      same key can already replace the whole contract. A `u64::MAX` pin
+    ///      after the flip is therefore a setting, corrected by this call
+    ///      when a network publishes Gloas. The daemon refuses a prove whose
+    ///      beacon spec slot disagrees (`ProofFailed`) before any 255; 255 is
+    ///      only a manual `prove-one` + `submit-one` against the wrong pin.
     function setGloasForkSlot(uint64 gloasForkSlot) public onlyOwnerPubkey accept {
-        require(!_gloasForkSlotSet || _ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();
         _gloasForkSlot = gloasForkSlot;
         _gloasForkSlotSet = true;
@@ -1028,19 +1013,19 @@ contract EthBeaconLightClient {
         pi.gloasForkSlot        = uint64(fr[10]);
     }
 
-    /// @dev Reads the 16 rotate public inputs out of the PROVEN blob. Layout =
-    ///      16 × 32-byte LE Fr: 12 KZG accumulator limbs, then
+    /// @dev Reads the 17 rotate public inputs out of the PROVEN blob. Layout =
+    ///      17 × 32-byte LE Fr: 12 KZG accumulator limbs, then
     ///      [current_committee_commitment, next_committee_commitment, period,
-    ///      gloas_fork_slot].
+    ///      gloas_fork_slot, attested_slot].
     ///      Same little-endian Fr decoding as `_parsePublicInputs`; the two
     ///      commitments are full-width field elements (Poseidon outputs),
-    ///      `period` is a small u64. The 12 accumulator limbs are skipped here
-    ///      (they gate the recursion, not the committee hand-off) — see the
-    ///      soundness note on `submitRotate`.
+    ///      `period` and `attested_slot` are small u64s. The 12 accumulator
+    ///      limbs are skipped here (they gate the recursion, not the committee
+    ///      hand-off) — see the soundness note on `submitRotate`.
     function _parseRotatePublicInputs(bytes publicInputs) private pure returns (RotatePI pi) {
         TvmSlice s = publicInputs.toSlice();
         uint256[] fr;
-        for (uint k = 0; k < ROTATE_ACCUMULATOR_LIMBS + 4; k++) {
+        for (uint k = 0; k < ROTATE_ACCUMULATOR_LIMBS + 5; k++) {
             uint256 v = 0;
             for (uint i = 0; i < 32; i++) {
                 if (s.bits() < 8) { s = s.loadRef().toSlice(); }
@@ -1051,10 +1036,12 @@ contract EthBeaconLightClient {
         uint acc = ROTATE_ACCUMULATOR_LIMBS;
         require(fr[acc + 2] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
         require(fr[acc + 3] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
+        require(fr[acc + 4] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
         pi.currentCommitteeCommitment = fr[acc];
         pi.nextCommitteeCommitment    = fr[acc + 1];
         pi.period                     = uint64(fr[acc + 2]);
         pi.gloasForkSlot              = uint64(fr[acc + 3]);
+        pi.attestedSlot               = uint64(fr[acc + 4]);
     }
 
     // ZK verifying key (VkBlob) for the beacon light-client STEP circuit —
@@ -1282,8 +1269,8 @@ contract EthBeaconLightClient {
 
     // ZK verifying key (VkBlob) for the beacon light-client ROTATE circuit —
     // recursive 2-to-1 aggregation root over 8 committee shards + a step snark
-    // (16 public inputs: 12 KZG accumulator limbs + current_commit, next_commit,
-    // period, gloas_fork_slot). Base v1 (Blake2b transcript). Hermez SRS (outer k=21, shard
+    // (17 public inputs: 12 KZG accumulator limbs + current_commit, next_commit,
+    // period, gloas_fork_slot, attested_slot). Base v1 (Blake2b transcript). Hermez SRS (outer k=21, shard
     // inners k=20). Source:
     //   acki-nacki-bridge/eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin
     //
@@ -1300,7 +1287,7 @@ contract EthBeaconLightClient {
     // refresh the tvm-sdk opcode fixtures
     //   (acki-nacki-bridge/scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh).
     // Do NOT hand-edit the hex.
-    //   sha256 4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54
+    //   sha256 60c0af2af9e231b31325800ef260bad28a66261df7582dfb2e24bb4ce2df58d3
     bytes constant ROTATE_VK_BLOB =
         hex"564b424c4f4200000100000c000000007e0000007b226b223a32312c226e756d5f6164766963655f7065725f7068617365223a5b32315d2c226e756d"
         hex"5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f7065725f7068617365223a5b325d2c226c6f6f6b75705f62697473223a3230"
@@ -1338,8 +1325,8 @@ contract EthBeaconLightClient {
         hex"913b4f06b83af8f98e9de281c37d9a60efdb9117d9f8568b3684d376c571bc2e6e8d550bb4f9599ce5829b06ba75e0adb8f4b3a0b659d20c5bfae1bf"
         hex"1f6c1fbc40fae62de0355c60bbae1a291774a7f0cad116cd135f9cc8456f738d014f2ed52d13da187795dcc0d8149810464b4d6d39da7092831dd70d"
         hex"dda9b60b18fab5e70c0fed0dc4b5464ff8920b69758e7480d6b2a71122a0f02a7bb520e7ce00472f5943c71e4526c8deb7e80c0acf28c47f2935adab"
-        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f322674d099a572988d155cf8a54d"
-        hex"b5a5106cdf9cc9d0fe9ed924e9d4b5836c47181761081f5b98de7cd58c5901d13b72392cab066627455a268e79d0f225979bf702b052e04e333311e1"
+        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f3226cd697520b5f88564febefa98"
+        hex"faededf4243c0e6518e500776b7e82049f816024904fb0f5fa1a948e0f78bbc1d9afc3249054993bd107729f97c3b4fae73f0a0bb052e04e333311e1"
         hex"54012da7b05a0a9f5073d9b4e7f31002c029c124b1fc410f5b91c66c715d1dbb33a5c2f0911d50eedcc14b6c2d8bd786f2546b238b4a480c8d865bd8"
         hex"719730c4548d26d88b34024836b7b0ff0199ccb77e96f9a12af3cf0374993dad386f7d1454c43d8ad84020123fe51adb17b20e16755999f8335bcb00"
         hex"06efe595b621406f68fbabc21e9bf5a1d50c264ea052145f35330d43c4383e30660d105d6cf1198c00a099e718792b52c42362e4eca92ae6b25dc6ad"
@@ -1354,6 +1341,6 @@ contract EthBeaconLightClient {
         hex"6cb4171f3028d919e90cb5504ed5c03cd1bb111984343be7c41a7fbd9e998f6bafe0f9116ad7e277dd22e04762ac8321598c88629013cf928e5f83d9"
         hex"614b8f91722e45265a4b47d418e32ea1cffa40527f351b7d4988de72d35cc2d9d025a37b3106a10e9149cca6f75ac2653365cdd9b23a2974379e41d7"
         hex"a53fc7a2c7b9b6e422559612407dc6bf399b39c02a84f5154c69c83a595863646ace33b256e2bcf1a3ae641cd1f64e9b9efbf76c24e9dbda1723f08f"
-        hex"63e3d8a3d49836b2874fa6d39bd9f923aa8f52bc5b5f37aef032a65c8741d792e2a05932262a9c9e277dc0cb05be702a37480b5609269b9e96199c8e"
-        hex"51604660453d94344456271100be5ade1e7ad9040d65e819139ed0585349add8e893c304467d2926dc98147d77a2f8029104542b";
+        hex"63e3d8a3d49836b2874fa6d39bd9f923aa8f52bc5b5f37aef032a65c8741d792e2a05932262a9c9e277dc0cb05be702a7e5eb1722282aa644a0a425d"
+        hex"c7b840d910758c070140461426a966d217c38828b04f464b1a4f54cde2636aff77fe84e93f5f0efa567415f09390d981cb469a0b";
 }

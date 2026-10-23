@@ -53,7 +53,7 @@ impl EthereumFetcher {
     /// Parse a Deposit event from a transaction receipt
     ///
     /// Expected event signature: Deposit(uint256 indexed depositId, address
-    /// indexed sender, uint256 amount, int8 anWorkchain, bytes32 anAccount,
+    /// indexed sender, uint256 amount, bytes32 anAccount,
     /// uint256 timestamp)
     pub fn parse_deposit_event(
         &self,
@@ -105,12 +105,11 @@ impl EthereumFetcher {
         };
 
         // Parse non-indexed parameters from data.
-        // ABI layout (4 words):
-        // [amount(32)][anWorkchain(32)][anAccount(32)][timestamp(32)]
-        if log.data.len() < 128 {
+        // ABI layout (3 words):
+        // [amount(32)][anAccount(32)][timestamp(32)]
+        if log.data.len() != 96 {
             return Err(anyhow!(
-                "Log data too short. Expected 128 bytes (amount + anWorkchain + anAccount + \
-                 timestamp), got {}",
+                "Expected 96 bytes of Deposit data (amount + anAccount + timestamp), got {}",
                 log.data.len()
             ));
         }
@@ -123,21 +122,17 @@ impl EthereumFetcher {
             bytes
         };
 
-        // anWorkchain (word 1): int8 ABI-encoded as a 32-byte sign-extended word;
-        // the value lives in the last byte.
-        let an_workchain = log.data[63] as i8;
-
-        // anAccount (word 2): 256-bit TVM account address.
+        // anAccount (word 1): 256-bit TVM account address.
         let an_account = {
             let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&log.data[64..96]);
+            bytes.copy_from_slice(&log.data[32..64]);
             bytes
         };
 
-        // timestamp (word 3, low 8 bytes)
+        // timestamp (word 2, low 8 bytes)
         let timestamp = {
             let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&log.data[120..128]);
+            bytes.copy_from_slice(&log.data[88..96]);
             u64::from_be_bytes(bytes)
         };
 
@@ -151,7 +146,6 @@ impl EthereumFetcher {
             deposit_id,
             sender,
             amount,
-            an_workchain,
             an_account,
             timestamp,
             contract_address: contract_address.as_bytes().try_into().unwrap(),
@@ -234,14 +228,49 @@ impl EthereumFetcher {
 }
 
 /// Get the Deposit event signature
-/// keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
+/// keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
 pub fn get_deposit_event_signature() -> [u8; 32] {
-    keccak256("Deposit(uint256,address,uint256,int8,bytes32,uint256)")
+    keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposit_event_uses_three_data_words() {
+        use ethers::types::{Bytes, Log, U256, U64};
+
+        let bridge = H160::repeat_byte(0x33);
+        let account = [0xa3; 32];
+        let mut amount = [0u8; 32];
+        U256::from(12_500_000u64).to_big_endian(&mut amount);
+        let mut timestamp = [0u8; 32];
+        U256::from(1_700_000_000u64).to_big_endian(&mut timestamp);
+        let mut receipt = TransactionReceipt {
+            block_number: Some(U64::from(100)),
+            logs: vec![Log {
+                address: bridge,
+                topics: vec![
+                    H256::from(get_deposit_event_signature()),
+                    H256::from_low_u64_be(7),
+                    H256::from_low_u64_be(0x1234),
+                ],
+                data: Bytes::from([amount, account, timestamp].concat()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let fetcher = EthereumFetcher::new("http://localhost:8545").unwrap();
+        let event = fetcher.parse_deposit_event(&receipt, bridge, 0).unwrap();
+        assert_eq!(event.deposit_id, 7);
+        assert_eq!(event.amount, amount);
+        assert_eq!(event.an_account, account);
+        assert_eq!(event.timestamp, 1_700_000_000);
+
+        receipt.logs[0].data = Bytes::from([amount, [0u8; 32], account, timestamp].concat());
+        assert!(fetcher.parse_deposit_event(&receipt, bridge, 0).is_err());
+    }
 
     #[test]
     fn test_event_signature() {

@@ -1904,6 +1904,7 @@ name = "bridge-gql-fetcher"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "attestation-bls-checker-circuit",
  "bincode",
  "bridge-test-data-gen",
  "halo2-base",

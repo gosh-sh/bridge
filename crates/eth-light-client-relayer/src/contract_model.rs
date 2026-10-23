@@ -44,6 +44,7 @@ pub enum LcError {
     AncestryTooLong,
     WrongCommittee,
     SelfRotation,
+    BadPublicInputs,
 }
 
 impl LcError {
@@ -61,6 +62,7 @@ impl LcError {
             Self::AncestryTooLong => 251,
             Self::NotProven => 252,
             Self::SelfRotation => 253,
+            Self::BadPublicInputs => 240,
         }
     }
 }
@@ -70,13 +72,11 @@ pub struct LightClient {
     pub finalized_slot: u64,
     pub exec_hash: [u8; 32],
     pub committee: [u8; 32],
-    /// The commitment `committee` replaced; accepted for late registration
-    /// only, so a checkpoint skipped near a period boundary is not lost when
-    /// the rotation lands.
+    /// The commitment `committee` replaced; accepted for the period it
+    /// served, including to move the head.
     pub prev_committee: [u8; 32],
     /// The finalized slot the head stood on when `prev_committee` left
-    /// office. The window is measured from this, not from the period label,
-    /// which the rotate circuit does not constrain.
+    /// office. Nothing reads it; it is kept for the storage layout.
     pub prev_committee_head_slot: u64,
     pub period: u64,
     pub owner_rotation_enabled: bool,
@@ -202,12 +202,9 @@ impl LightClient {
         if late && !self.within_year(slot) {
             return Err(LcError::StaleUpdate);
         }
-        let prev_ok = late
-            && self.prev_committee != [0; 32]
+        let prev_ok = self.prev_committee != [0; 32]
             && committee == self.prev_committee
-            && self.prev_committee_head_slot != 0
-            && attested_slot <= self.prev_committee_head_slot + SLOTS_PER_PERIOD
-            && attested_slot + SLOTS_PER_PERIOD >= self.prev_committee_head_slot;
+            && attested_slot / SLOTS_PER_PERIOD + 1 == self.period;
         let signer_ok = committee == self.committee || prev_ok;
         if !signer_ok {
             return Err(LcError::WrongCommittee);
@@ -281,9 +278,15 @@ impl LightClient {
     }
 
     /// `submitRotate`: a proven hand-off. The committee leaving office is kept
-    /// as the previous one, which is the only path that grants it the
-    /// late-registration window.
-    pub fn rotate(&mut self, next: [u8; 32], period: u64) -> Result<(), LcError> {
+    /// as the previous one and may still advance the head for the period it
+    /// served. There is no end-of-period window: a `/updates` best update is
+    /// a valid hand-off.
+    pub fn rotate(
+        &mut self,
+        next: [u8; 32],
+        period: u64,
+        attested_slot: u64,
+    ) -> Result<(), LcError> {
         if self.committee == [0; 32] {
             return Err(LcError::CommitteeUnset);
         }
@@ -292,9 +295,9 @@ impl LightClient {
         if next == self.committee {
             return Err(LcError::SelfRotation);
         }
-        // No test on `period`. The circuit binds it to the attested slot, but
-        // the committee chain above is the replay guard and nothing gates on
-        // the label.
+        if attested_slot / SLOTS_PER_PERIOD + 1 != period {
+            return Err(LcError::BadPublicInputs);
+        }
         self.prev_committee = self.committee;
         self.prev_committee_head_slot = self.finalized_slot;
         self.committee = next;
@@ -374,6 +377,16 @@ mod tests {
 
     fn lc() -> LightClient {
         LightClient::bootstrap([0xC0; 32], 0)
+    }
+
+    /// Beacon `/updates` best-update attested slot for a rotate into
+    /// `period`: slot 64 of the previous period. The last slot of that
+    /// period is signed in the next one and is not a genuine hand-off.
+    fn updates_best_attested(period: u64) -> u64 {
+        period
+            .saturating_sub(1)
+            .saturating_mul(SLOTS_PER_PERIOD)
+            .saturating_add(64)
     }
 
     fn hex32(s: &str) -> [u8; 32] {
@@ -545,46 +558,70 @@ mod tests {
         let old_committee = [0xC0; 32];
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
-        c.submit_update(64, [0xAA; 32], old_committee).unwrap();
+        c.submit_update_at(
+            SLOTS_PER_PERIOD + 64,
+            SLOTS_PER_PERIOD,
+            [0xAA; 32],
+            old_committee,
+        )
+        .unwrap();
 
-        // Slot 32 was never proven, and the committee rotates before it is.
-        c.rotate(new_committee, 2).unwrap();
+        // A checkpoint in the old period was never proven, and the committee
+        // rotates before it is.
+        c.rotate(new_committee, 2, updates_best_attested(2))
+            .unwrap();
         assert_eq!(c.committee, new_committee);
 
         // Attested inside the period the old committee served.
-        c.submit_update_at(32, 64, [0xBB; 32], old_committee)
-            .expect("the skipped checkpoint must still be registrable");
+        c.submit_update_at(
+            SLOTS_PER_PERIOD + 32,
+            SLOTS_PER_PERIOD + 32,
+            [0xBB; 32],
+            old_committee,
+        )
+        .expect("the skipped checkpoint must still be registrable");
         assert!(c.is_live(&[0xBB; 32]));
         assert_eq!(
-            c.finalized_slot, 64,
+            c.finalized_slot,
+            SLOTS_PER_PERIOD + 64,
             "late registration must not move the head"
         );
     }
 
-    /// The rotate period is proven (the attested slot's period plus one) and
-    /// stored as it is, but nothing gates on it: a hand-off goes through
-    /// whatever its label, and the committee chain is the replay guard.
+    /// An early `/updates` best-update (start of the old period) is a valid
+    /// hand-off. The replaced committee can still advance the head.
     #[test]
-    fn the_rotate_label_is_stored_and_gates_nothing() {
-        let mut c = LightClient::bootstrap([0xC0; 32], 1);
-        c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
+    fn an_early_hand_off_installs_and_the_old_committee_can_still_advance() {
+        let old = [0xC0; 32];
+        let mut c = LightClient::bootstrap(old, 1);
+        c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], old)
             .unwrap();
 
-        c.rotate([0xC1; 32], 2).unwrap();
-        assert_eq!(c.period, 2, "the stored period is the proof's");
+        c.rotate([0xC1; 32], 2, updates_best_attested(2)).unwrap();
+        assert_eq!(c.period, 2);
         assert_eq!(c.committee, [0xC1; 32]);
 
         c.submit_update_at(
-            2 * SLOTS_PER_PERIOD,
-            2 * SLOTS_PER_PERIOD,
-            [0xAB; 32],
-            [0xC1; 32],
+            SLOTS_PER_PERIOD + 64,
+            SLOTS_PER_PERIOD + 64,
+            [0xCC; 32],
+            old,
         )
-        .unwrap();
-        c.rotate([0xC2; 32], 0)
-            .expect("the label must not block a genuine hand-off");
-        assert_eq!(c.committee, [0xC2; 32]);
-        assert_eq!(c.period, 0);
+        .expect("the replaced committee still serves this period");
+        assert_eq!(c.finalized_slot, SLOTS_PER_PERIOD + 64);
+        assert!(c.is_live(&[0xCC; 32]));
+    }
+
+    #[test]
+    fn an_attested_slot_that_does_not_match_the_period_is_refused() {
+        let mut c = LightClient::bootstrap([0xC0; 32], 1);
+        c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
+            .unwrap();
+        assert_eq!(
+            c.rotate([0xC1; 32], 2, 100).unwrap_err(),
+            LcError::BadPublicInputs
+        );
+        assert_eq!(LcError::BadPublicInputs.code(), 240);
     }
 
     /// Reachable for every period boundary: the last header of a period is
@@ -596,11 +633,12 @@ mod tests {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
-        c.rotate([0xC1; 32], 2).unwrap();
+        c.rotate([0xC1; 32], 2, updates_best_attested(2)).unwrap();
         assert_eq!(c.prev_committee, [0xC0; 32]);
 
         assert_eq!(
-            c.rotate([0xC1; 32], 3).unwrap_err(),
+            c.rotate([0xC1; 32], 3, updates_best_attested(3))
+                .unwrap_err(),
             LcError::SelfRotation,
             "a hand-off onto the committee already in force must be refused"
         );
@@ -610,7 +648,7 @@ mod tests {
         );
     }
 
-    /// The replaced committee may only sign around the head it left behind.
+    /// The replaced committee may only sign in the period it served.
     /// Without that bound it could sign any slot in the one-year window,
     /// including slots it never attested, and the hashes it wrote would back
     /// mints.
@@ -626,10 +664,11 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2, updates_best_attested(2))
+            .unwrap();
 
-        // The head it left was 2 periods in; more than one period past that
-        // is outside the window.
+        // Attested in period 3 after a rotate into period 2: outside the
+        // period the replaced committee served.
         assert_eq!(
             c.submit_update_at(
                 2 * SLOTS_PER_PERIOD - 1,
@@ -659,7 +698,8 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2, updates_best_attested(2))
+            .unwrap();
         c.submit_update_at(
             2 * SLOTS_PER_PERIOD,
             2 * SLOTS_PER_PERIOD,
@@ -691,7 +731,8 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 4).unwrap();
+        c.rotate(new_committee, 4, updates_best_attested(4))
+            .unwrap();
 
         assert_eq!(
             c.submit_update_at(100, 100, [0xDD; 32], old_committee)
@@ -720,21 +761,27 @@ mod tests {
         );
     }
 
-    /// The old committee is for catching up only: it must never move the head.
+    /// The replaced committee may advance the head while the attested slot is
+    /// still in the period it served. An attested slot outside that period
+    /// is still `WrongCommittee`.
     #[test]
-    fn the_previous_committee_cannot_advance_the_head() {
+    fn the_previous_committee_can_advance_the_head_in_the_period_it_served() {
         let old_committee = [0xC0; 32];
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
         c.submit_update(64, [0xAA; 32], old_committee).unwrap();
-        c.rotate(new_committee, 2).unwrap();
+        c.rotate(new_committee, 2, SLOTS_PER_PERIOD + 64).unwrap();
+
+        c.submit_update_at(96, SLOTS_PER_PERIOD + 80, [0xCC; 32], old_committee)
+            .expect("old committee still serves period 1");
+        assert_eq!(c.finalized_slot, 96);
+        assert!(c.is_live(&[0xCC; 32]));
 
         assert_eq!(
-            c.submit_update(96, [0xCC; 32], old_committee).unwrap_err(),
+            c.submit_update_at(128, 2 * SLOTS_PER_PERIOD, [0xDD; 32], old_committee)
+                .unwrap_err(),
             LcError::WrongCommittee
         );
-        assert_eq!(c.finalized_slot, 64);
-        assert!(!c.is_live(&[0xCC; 32]));
     }
 
     #[test]
@@ -890,7 +937,7 @@ mod tests {
     fn upgrade_clears_the_previous_committee_window() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update(64, [0xAA; 32], [0xC0; 32]).unwrap();
-        c.rotate([0xC1; 32], 2).unwrap();
+        c.rotate([0xC1; 32], 2, updates_best_attested(2)).unwrap();
         assert_ne!(c.prev_committee, [0; 32], "the rotation armed the window");
         assert_ne!(c.prev_committee_head_slot, 0);
 
@@ -904,10 +951,15 @@ mod tests {
         assert_eq!(
             restored
                 .clone()
-                .submit_update_at(32, 64, [0xBB; 32], [0xC0; 32])
+                .submit_update_at(
+                    SLOTS_PER_PERIOD + 32,
+                    SLOTS_PER_PERIOD + 32,
+                    [0xBB; 32],
+                    [0xC0; 32]
+                )
                 .unwrap_err(),
             LcError::WrongCommittee,
-            "no window after the upgrade"
+            "no previous committee after the upgrade"
         );
     }
 

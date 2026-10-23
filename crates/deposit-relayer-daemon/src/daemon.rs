@@ -2,9 +2,10 @@
 //!
 //! [`Relayer::run_until_shutdown`] drives `tick()` forever (until a passed-in
 //! shutdown future resolves), applying exponential backoff between
-//! non-success outcomes and resetting the backoff the moment a deposit is
-//! finalised. It exposes structured [`RelayerMetrics`] for an external scrape
-//! and is shutdown-aware via `tokio::select!`, so a SIGINT during a long
+//! idle polls or failures and resetting the delay on progress or a new
+//! anchor wait. Repeat waits preserve an active failure backoff and reset
+//! only idle backoff. It exposes structured [`RelayerMetrics`] for an external
+//! scrape and is shutdown-aware via `tokio::select!`, so a SIGINT during a long
 //! backoff sleep is honoured at the next tick boundary (never mid-`tick`, so a
 //! `Finalized` outcome is always followed by a flushed `state.json`).
 
@@ -35,9 +36,10 @@ use crate::{
 
 /// Backoff policy for the daemon loop.
 ///
-/// `current = min(initial * multiplier^consecutive_failures, max)`. On any
-/// [`TickOutcome::Finalized`] / [`TickOutcome::AlreadyFinalized`] the streak
-/// resets and `current` snaps back to `initial`.
+/// Idle polls and failures multiply the current delay up to `max`.
+/// Progress and a newly observed [`TickOutcome::WaitingForAnchor`] reset it
+/// to `initial`. Repeat waits hold active failure backoff; without failures,
+/// they reset idle backoff so normal anchor polling remains responsive.
 #[derive(Clone, Copy, Debug)]
 pub struct BackoffConfig {
     pub initial: Duration,
@@ -86,8 +88,8 @@ impl BackoffConfig {
 // ──────────────────────────────────────────────────────────────────────
 
 /// Atomic counters for one running daemon. All counters are monotonic except
-/// `current_backoff_secs` and `last_finalized_deposit_id`, which track the
-/// latest value.
+/// `current_backoff_secs`, which tracks the latest backoff, and
+/// `last_finalized_deposit_id`, which keeps the highest id finalized.
 #[derive(Debug, Default)]
 pub struct RelayerMetrics {
     pub ticks_total: AtomicU64,
@@ -159,6 +161,7 @@ pub enum LastOutcome {
     Finalized { deposit_id: u64 },
     AlreadyFinalized { deposit_id: u64 },
     NotYetAvailable { deposit_id: u64 },
+    WaitingForAnchor { deposit_id: u64 },
     ProofFailed { deposit_id: u64 },
     AnRejected { deposit_id: u64 },
     AnPending { deposit_id: u64 },
@@ -173,7 +176,9 @@ pub enum LastOutcome {
 
 impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     /// Drive `tick()` forever (or until `shutdown` resolves), applying
-    /// exponential backoff between non-success outcomes.
+    /// exponential backoff on idle polls and failures. A new anchor wait
+    /// resets the delay; repeated waits preserve failure backoff but reset
+    /// idle backoff when there have been no failures.
     pub async fn run_until_shutdown<F>(
         &mut self,
         backoff: BackoffConfig,
@@ -185,6 +190,15 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
     {
         let mut summary = DaemonRunSummary::default();
         let mut current_delay = backoff.initial;
+        // Keep errors latched across repeat waits. Only progress or a newly
+        // observed wait can reset their delay; normal idle polls are separate.
+        let mut failure_backoff_active = false;
+        if let Some(id) = self.state().last_finalized_deposit_id {
+            if let Some(m) = &metrics {
+                m.last_finalized_deposit_id.fetch_max(id, Ordering::Relaxed);
+            }
+            seed_finalized_id(id);
+        }
         if let Some(m) = &metrics {
             m.current_backoff_secs
                 .store(current_delay.as_secs(), Ordering::Relaxed);
@@ -203,16 +217,22 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
             prom::record_tick_outcome(outcome_label(&outcome_or_err));
 
-            let (success, last_tag) = match outcome_or_err {
+            failure_backoff_active |= matches!(
+                &outcome_or_err,
+                Err(_) | Ok(TickOutcome::ProofFailed { .. } | TickOutcome::AnRejected { .. })
+            );
+            let mut hold_backoff = false;
+
+            let (reset_backoff, last_tag) = match outcome_or_err {
                 Ok(TickOutcome::Finalized {
                     deposit_id, ..
                 }) => {
                     if let Some(m) = &metrics {
                         m.finalized_total.fetch_add(1, Ordering::Relaxed);
                         m.last_finalized_deposit_id
-                            .store(deposit_id, Ordering::Relaxed);
+                            .fetch_max(deposit_id, Ordering::Relaxed);
                     }
-                    mark_finalized(deposit_id);
+                    mark_finalized_high_water(deposit_id);
                     summary.finalized += 1;
                     info!(deposit_id, "daemon: finalized");
                     (true, LastOutcome::Finalized {
@@ -225,9 +245,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     if let Some(m) = &metrics {
                         m.already_finalized_total.fetch_add(1, Ordering::Relaxed);
                         m.last_finalized_deposit_id
-                            .store(deposit_id, Ordering::Relaxed);
+                            .fetch_max(deposit_id, Ordering::Relaxed);
                     }
-                    mark_finalized(deposit_id);
+                    mark_finalized_high_water(deposit_id);
                     summary.already_finalized += 1;
                     // A nullifier skip is "progress" — reset backoff.
                     (true, LastOutcome::AlreadyFinalized {
@@ -242,6 +262,23 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     }
                     summary.not_yet_available += 1;
                     (false, LastOutcome::NotYetAvailable {
+                        deposit_id,
+                    })
+                },
+                Ok(TickOutcome::WaitingForAnchor {
+                    deposit_id,
+                    first_wait,
+                }) => {
+                    if let Some(m) = &metrics {
+                        m.not_yet_available_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    summary.not_yet_available += 1;
+                    // Fresh work resets prior idle/error delay. Rechecking
+                    // an existing wait preserves an active error backoff;
+                    // with no errors, keep normal anchor polling responsive.
+                    let reset = first_wait || !failure_backoff_active;
+                    hold_backoff = !reset;
+                    (reset, LastOutcome::WaitingForAnchor {
                         deposit_id,
                     })
                 },
@@ -328,9 +365,10 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             };
             summary.last_outcome = Some(last_tag);
 
-            if success {
+            if reset_backoff {
                 current_delay = backoff.initial;
-            } else {
+                failure_backoff_active = false;
+            } else if !hold_backoff {
                 current_delay = backoff.bump(current_delay);
             }
             if let Some(m) = &metrics {
@@ -363,6 +401,9 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
         Ok(TickOutcome::NotYetAvailable {
             ..
         }) => "not_yet_available",
+        Ok(TickOutcome::WaitingForAnchor {
+            ..
+        }) => "waiting_for_anchor",
         Ok(TickOutcome::ProofFailed {
             ..
         }) => "proof_failed",
@@ -383,9 +424,20 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
 }
 
 /// Gauges that move when a deposit is (found) finalized on AN.
-fn mark_finalized(deposit_id: u64) {
-    gauge!(prom::LAST_FINALIZED_DEPOSIT_ID).set(deposit_id as f64);
+/// The id gauge is a high-water mark: a later retry of a lower id must not
+/// move it backwards. The timestamp is only set on a real outcome, never
+/// at startup, so a restart does not hide a stalled relayer.
+fn mark_finalized_high_water(deposit_id: u64) {
+    seed_finalized_id(deposit_id);
     gauge!(prom::LAST_FINALIZED_TIMESTAMP_SECONDS).set(prom::unix_now());
+}
+
+fn seed_finalized_id(deposit_id: u64) {
+    static HIGH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let high = HIGH
+        .fetch_max(deposit_id, std::sync::atomic::Ordering::Relaxed)
+        .max(deposit_id);
+    gauge!(prom::LAST_FINALIZED_DEPOSIT_ID).set(high as f64);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -416,7 +468,6 @@ mod tests {
             deposit_id: id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(id * 100 + 1),
-            an_workchain: 0,
             an_account: B256::repeat_byte(0x33),
             timestamp: U256::ZERO,
             tx_hash: B256::repeat_byte(0xaa),
@@ -440,6 +491,8 @@ mod tests {
             deployment: None,
             force_state: false,
             skip_after_attempts: None,
+            outstanding_backoff_secs: 0,
+            anchor_wait_warn_after_secs: 0,
             scan_cursor: None,
         };
         Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()

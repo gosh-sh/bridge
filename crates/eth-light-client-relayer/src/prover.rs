@@ -14,7 +14,8 @@ use crate::{
     error::RelayerError,
     types::{
         pack_step_public_inputs, FinalityUpdate, RotateProofBundle, StepProofBundle,
-        ROTATE_INSTANCE_LEN, ROTATE_PERIOD_INDEX,
+        ROTATE_ATTESTED_SLOT_INDEX, ROTATE_INSTANCE_LEN, ROTATE_PERIOD_INDEX,
+        SLOTS_PER_SYNC_PERIOD,
     },
 };
 
@@ -78,6 +79,12 @@ impl ProofGenerator for MockProofGenerator {
         let mut public_inputs = vec![0u8; ROTATE_INSTANCE_LEN * 32];
         let off = ROTATE_PERIOD_INDEX * 32;
         public_inputs[off..off + 8].copy_from_slice(&to_period.to_le_bytes());
+        let attested_slot = to_period
+            .saturating_sub(1)
+            .saturating_mul(SLOTS_PER_SYNC_PERIOD)
+            .saturating_add(64);
+        let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
+        public_inputs[attested_off..attested_off + 8].copy_from_slice(&attested_slot.to_le_bytes());
         if let Some(chain) = chain {
             let fork_off = crate::types::ROTATE_GLOAS_FORK_SLOT_INDEX * 32;
             public_inputs[fork_off..fork_off + 8]
@@ -87,6 +94,7 @@ impl ProofGenerator for MockProofGenerator {
             public_inputs,
             proof: vec![0xCD; 64],
             period: to_period,
+            attested_slot,
         })
     }
 }

@@ -213,13 +213,19 @@ check_rpc=
 for endpoint in "$RPC_URL" ${rpc_failover[@]+"${rpc_failover[@]}"}; do
   endpoint=${endpoint//[[:space:]]/}
   [[ -n "$endpoint" ]] || continue
+  # The daemon accepts only http(s) entries and exits at start on anything
+  # else (eth_rpc.rs: "is not an http(s) URL") — under restart: unless-stopped
+  # that repeats on every start. cast can answer a wss:// entry, so it must
+  # be refused here, before cast makes it look healthy.
+  [[ "$endpoint" =~ ^https?:// ]] ||
+    die "RPC $(rpc_label "$endpoint") is not an http(s) URL; the daemon refuses to start on it"
   if endpoint_chain=$(cast chain-id --rpc-timeout 20 --rpc-url "$endpoint" 2>/dev/null); then
     [[ "$endpoint_chain" == "$EXPECTED_EVM_CHAIN_ID" ]] ||
       die "RPC $(rpc_label "$endpoint") serves chain $endpoint_chain, expected $EXPECTED_EVM_CHAIN_ID"
     ok "RPC $(rpc_label "$endpoint") serves chain $endpoint_chain"
     [[ -n "$check_rpc" ]] || check_rpc=$endpoint
   else
-    warn "RPC $(rpc_label "$endpoint") is not answering; the daemon skips it until it recovers"
+    warn "RPC $(rpc_label "$endpoint") is not answering; the daemon starts without it and retries it after the cooldown"
   fi
 done
 [[ -n "$check_rpc" ]] ||

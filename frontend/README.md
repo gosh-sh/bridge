@@ -34,6 +34,7 @@ A beautiful, modern web interface for the Acki Nacki Bridge built with **Rust + 
 
 ```bash
 cd frontend
+export BRIDGE_CONTRACT_ADDRESS='0x<new-bridge-address>'
 trunk serve
 ```
 
@@ -78,10 +79,12 @@ user believe funds had been returned when nothing had happened. Verified 2026-08
 `withdraw` does not occur anywhere under `frontend/src/`.
 
 ### Deposit Flow
-1. Connect MetaMask wallet
-2. Approve USDC for the bridge contract
-3. Enter the amount and the Acki Nacki destination (workchain + account)
-4. Submit — the contract takes custody via `transferFrom` and emits a `Deposit` event
+1. Connect MetaMask wallet (Sepolia). The token is Circle Sepolia USDC
+   (`0x1c7D4B19…`); get it from https://faucet.circle.com/ if needed.
+2. Enter the amount and the Acki Nacki destination account (64 hex chars).
+   `AN_RECEIVER` at build time prefills that field.
+3. Submit — if the allowance is short the form sends `approve` first, then
+   the contract takes custody via `transferFrom` and emits a `Deposit` event.
 
 The proof of that event is produced off-chain and consumed on the Acki Nacki side, which mints to the
 destination. Nothing further is required from the user in this UI.
@@ -100,6 +103,8 @@ destination. Nothing further is required from the user in this UI.
 
 ## Deployment
 
+Set `BRIDGE_CONTRACT_ADDRESS` as described under Configuration before building.
+
 ### Deploy to GitHub Pages
 
 ```bash
@@ -117,16 +122,25 @@ trunk build --release
 ### Deploy with Docker
 
 ```bash
-docker build -t acki-nacki-bridge-frontend .
+docker build --build-arg BRIDGE_CONTRACT_ADDRESS -t acki-nacki-bridge-frontend .
 docker run -p 8080:80 acki-nacki-bridge-frontend
 ```
 
 ## Configuration
 
-Edit `src/lib.rs` to configure:
-- Contract addresses
-- RPC endpoints
-- Network settings
+Set `BRIDGE_CONTRACT_ADDRESS` when building with Trunk. It must be a new
+Sepolia deployment exposing `deposit(uint256,bytes32)`, paired with an
+`eccUSDCBridge` 1.13.0 or newer that embeds this build's deposit key. The old
+workchain-bearing deployment addresses are incompatible.
+
+There is no default bridge address. Without a valid non-zero 20-byte address,
+the form disables deposits and the wallet helpers reject approval and deposit
+requests before contacting MetaMask. Rebuild the frontend after changing the
+address. Other network and token settings live in `src/config.rs`.
+
+The same EVM deployment must be configured as `BRIDGE_ADDRESS` in the CLI and
+deposit relayer; set their `BRIDGE_DEPLOY_BLOCK` / `FROM_BLOCK` to its deployment
+block.
 
 ## Browser Support
 
@@ -147,3 +161,7 @@ Edit `src/lib.rs` to configure:
 
 MIT License - see LICENSE file for details
 
+
+Deposits are limited to 50 USDC. Before approval and deposit, the form reads
+`MAX_TRANSFER_AMOUNT`, `MAX_BRIDGE_TVL` and `treasuryBalance`; failed reads stop
+the request. The 10,000 USDC capacity includes principal supplied to Aave.

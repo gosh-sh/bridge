@@ -5,14 +5,18 @@
 //! plus a *retry log* so the relayer can resume near where it left off
 //! without re-proving everything from `depositId = 0`:
 //!
-//! - `last_processed_deposit_id` mirrors the highest `depositId` we observed
-//!   finalized on AN (either by our own submission or by `is_finalized`).
+//! - `last_processed_deposit_id` is the high-water mark of deposits that are
+//!   done (finalized, parked, or unprovable).
+//! - `outstanding_deposits` is the sparse set of ids waiting for an anchor, a
+//!   pending submission, or a retry after failure. Each entry has its own
+//!   attempt count and `retry_after_unix`. A stuck deposit stays there and
+//!   retries on its own schedule; it does not block a later id.
 //! - `last_attempt_deposit_id` records the most recent attempt regardless of
 //!   outcome.
-//! - `attempts_since_progress` increments on every failed attempt at the
-//!   current target and resets on a finalize; it caps the relayer's willingness
-//!   to spin on one deposit. Waiting for a deposit that is not made yet is not
-//!   an attempt, and neither is a submit still pending on AN.
+//! - `attempts_since_progress` mirrors the attempt count of the last failed
+//!   target (Prometheus / `--skip-after-attempts`). Waiting for a deposit that
+//!   is not made yet is not an attempt, and neither is a submit still pending
+//!   on AN.
 //!
 //! Concurrency note: like the AN→ETH relayer, this is a single-process
 //! daemon. The file is overwritten atomically (write-temp-then-rename + fsync).
@@ -24,6 +28,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use alloy::primitives::Address;
@@ -31,6 +36,14 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::RelayerError;
+
+/// Seconds since the Unix epoch. Used for per-id retry deadlines.
+pub fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Deployment identity stamped into `state.json` so a cursor cannot be reused
 /// after a bridge redeploy or dappId change.
@@ -51,6 +64,42 @@ impl DeploymentIdentity {
     }
 }
 
+/// A deposit waiting for an anchor, a pending submission, or a retry after
+/// failure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OutstandingDeposit {
+    pub deposit_id: u64,
+    pub attempts: u32,
+    pub retry_after_unix: u64,
+    /// First observed wait for this deposit's block anchor. Kept across retries
+    /// and restarts so monitoring can distinguish a long wait from a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_wait_started_unix: Option<u64>,
+    /// Last anchor-wait warning, persisted to limit repeated logs across
+    /// restarts. Cleared together with the wait when the anchor arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_wait_last_warned_unix: Option<u64>,
+    /// Ethereum block that holds this deposit's log, when known. A retry
+    /// can scan that one block if the tx hash is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
+    /// Deposit transaction hash (`0x…`). A retry uses the receipt instead of
+    /// walking `eth_getLogs` from the shared scan cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    /// Receipt-local log index, with `tx_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_index: Option<u64>,
+}
+
+/// Where an outstanding deposit's `Deposit` log sits on Ethereum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DepositLogRef {
+    pub block_number: u64,
+    pub tx_hash: alloy::primitives::B256,
+    pub log_index: u64,
+}
+
 /// Locally-persisted relayer progress.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RelayerState {
@@ -58,24 +107,36 @@ pub struct RelayerState {
     /// runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment: Option<DeploymentIdentity>,
-    /// Highest `depositId` known finalized on AN. `None` before the first
-    /// finalize of this relayer's lifetime.
+    /// Highest `depositId` known finalized, parked, or unprovable on AN.
+    /// `None` before the first such outcome of this relayer's lifetime.
     pub last_processed_deposit_id: Option<u64>,
+    /// Highest `depositId` this relayer has finalized (or found finalized)
+    /// on AN. Parked and unprovable ids do not move it. Used to seed the
+    /// `last_finalized` gauge across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_finalized_deposit_id: Option<u64>,
     /// Most recent `depositId` attempted (may be ahead of
     /// `last_processed_deposit_id` if the latest attempt failed).
     pub last_attempt_deposit_id: Option<u64>,
-    /// Consecutive failed attempts at the current target. Reset to 0 on
-    /// every finalized deposit.
+    /// Consecutive failed attempts at the last failed target. Reset to 0 on
+    /// every finalized deposit. Mirrors the matching
+    /// [`OutstandingDeposit::attempts`].
     pub attempts_since_progress: u32,
     /// No Ethereum block up to and including this one holds a deposit the
-    /// relayer still has to deliver, so the next `eth_getLogs` scan starts
-    /// after it. Set to the confirmed head while the next deposit is not made
-    /// yet, and to a finalized deposit's block minus one (a later `depositId`
-    /// can share that block). `None` = scan from `--from-block`.
+    /// relayer still has to *discover*, so the next `eth_getLogs` scan starts
+    /// after it. Outstanding ids with a stored tx or block are retried from
+    /// that, not from this cursor. An outstanding id that has none (a
+    /// `state.json` from an earlier relayer) is scanned from this cursor
+    /// plus one — that daemon left it at the deposit's block minus one —
+    /// not from `--from-block` and not to the live head.
+    /// Set to the confirmed head while the next deposit is not made yet, and
+    /// to a found deposit's block minus one (a later `depositId` can share
+    /// that block). `None` = scan from `--from-block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_done_through_block: Option<u64>,
-    /// Deposit ids the daemon advanced past after `--skip-after-attempts`.
-    /// Operators must finalise these manually via `finalize-one`.
+    /// Deposit ids the daemon abandoned after `--skip-after-attempts`.
+    /// Operators must finalise these manually via `finalize-one`. Parked ids
+    /// stay parked across restarts; they are not loaded back as outstanding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked_deposit_ids: Vec<u64>,
     /// Deposit ids the circuit cannot prove, advanced past at once.
@@ -83,6 +144,10 @@ pub struct RelayerState {
     /// return their funds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprovable_deposit_ids: Vec<u64>,
+    /// Deposits waiting for an anchor, a pending submission, or a retry after
+    /// failure. Bounded by unfinished ids, not by every deposit ever made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outstanding_deposits: Vec<OutstandingDeposit>,
 }
 
 impl RelayerState {
@@ -106,6 +171,17 @@ impl RelayerState {
         let mut state: Self = serde_json::from_value(raw)?;
         if written_by_older_daemon {
             state.attempts_since_progress = 0;
+        }
+        // A state.json from an earlier relayer has attempts on the last
+        // failed id but no outstanding set. Carry that count into the new
+        // per-id slot so --skip-after-attempts does not start over.
+        if state.outstanding_deposits.is_empty() && state.attempts_since_progress > 0 {
+            if let Some(id) = state.last_attempt_deposit_id {
+                if !state.is_skipped(id) {
+                    let attempts = state.attempts_since_progress;
+                    state.upsert_outstanding(id, attempts, 0, None);
+                }
+            }
         }
         Ok(state)
     }
@@ -168,42 +244,172 @@ impl RelayerState {
         Ok(())
     }
 
-    /// The next `depositId` the relayer should target.
-    ///
-    /// `last_processed + 1`, or `start` when nothing has been processed yet.
+    /// The next `depositId` the relayer should target, using wall-clock now.
     pub fn next_target(&self, start: u64) -> u64 {
-        match self.last_processed_deposit_id {
-            Some(last) => last.saturating_add(1),
-            None => start,
-        }
+        self.next_target_at(start, unix_now_secs())
     }
 
-    /// Mark a deposit as finalized. Resets the failure counter.
+    /// The next new `depositId` the relayer should try at `now`.
+    ///
+    /// Walks `last_processed + 1` (or `start`), skipping parked, unprovable,
+    /// and outstanding ids. The relayer alternates this walk with ready
+    /// outstanding retries so neither queue needs the other to become idle.
+    /// `_now` is unused: backoff is applied by
+    /// [`ready_outstanding_after`], not by this walk.
+    pub fn next_target_at(&self, start: u64, _now: u64) -> u64 {
+        let mut id = match self.last_processed_deposit_id {
+            Some(last) => last.saturating_add(1),
+            None => start,
+        };
+        while self.is_skipped(id) || self.outstanding_contains(id) {
+            let next = id.saturating_add(1);
+            if next == id {
+                break;
+            }
+            id = next;
+        }
+        id
+    }
+
+    /// Mark a deposit as finalized. Resets the failure counter and drops it
+    /// from the outstanding set. The high-water mark only moves forward.
     pub fn record_progress(&mut self, deposit_id: u64) {
-        self.last_processed_deposit_id = Some(deposit_id);
+        self.raise_last_processed(deposit_id);
+        self.last_finalized_deposit_id = Some(match self.last_finalized_deposit_id {
+            Some(last) => last.max(deposit_id),
+            None => deposit_id,
+        });
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = 0;
+        self.remove_outstanding(deposit_id);
     }
 
     /// Mark an attempt that failed the deposit (proof failure, AN rejection).
-    pub fn record_attempt(&mut self, deposit_id: u64) {
+    /// The id stays outstanding with a per-id backoff; the high-water mark
+    /// does not move, so a later id can be tried while this one waits.
+    pub fn record_attempt(&mut self, deposit_id: u64, now: u64, backoff_secs: u64) {
+        self.record_attempt_at(deposit_id, now, backoff_secs, None);
+    }
+
+    /// Like [`record_attempt`], and remembers the deposit's Ethereum log so a
+    /// later retry can load it without walking the shared scan cursor.
+    pub fn record_attempt_at(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        backoff_secs: u64,
+        log: Option<DepositLogRef>,
+    ) {
         self.last_attempt_deposit_id = Some(deposit_id);
-        self.attempts_since_progress = self.attempts_since_progress.saturating_add(1);
+        let attempts = self
+            .outstanding_deposits
+            .iter()
+            .find(|o| o.deposit_id == deposit_id)
+            .map(|o| o.attempts.saturating_add(1))
+            .unwrap_or(1);
+        self.attempts_since_progress = attempts;
+        self.upsert_outstanding(
+            deposit_id,
+            attempts,
+            now.saturating_add(retry_delay(attempts, backoff_secs)),
+            log,
+        );
     }
 
     /// Mark a submit whose outcome is not known yet (confirmation timed out,
-    /// or the lane is paused). It says nothing against the deposit, so it does
-    /// not count toward `--skip-after-attempts`.
-    pub fn record_pending(&mut self, deposit_id: u64) {
+    /// or the lane is paused). The id stays outstanding with backoff so later
+    /// deposits are not held behind it, and the attempt count is left alone
+    /// so it does not count toward `--skip-after-attempts`.
+    pub fn record_pending(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        backoff_secs: u64,
+        log: Option<DepositLogRef>,
+    ) {
         self.last_attempt_deposit_id = Some(deposit_id);
+        let attempts = self
+            .outstanding(deposit_id)
+            .map(|o| o.attempts)
+            .unwrap_or(0);
+        self.upsert_outstanding(
+            deposit_id,
+            attempts,
+            now.saturating_add(retry_delay(attempts, backoff_secs)),
+            log,
+        );
     }
 
-    /// Park a stuck deposit and advance the cursor past it. The id is recorded
-    /// in `parked_deposit_ids` for operator follow-up.
+    /// Wait for an anchor without counting a failed attempt or blocking later
+    /// ids. With nonzero backoff, the per-id delay also grows with wait age
+    /// (age / 4 seconds, capped at 60), without shortening failure backoff.
+    pub fn record_anchor_wait(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        backoff_secs: u64,
+        log: DepositLogRef,
+    ) {
+        self.record_pending(deposit_id, now, backoff_secs, Some(log));
+        if let Some(entry) = self
+            .outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)
+        {
+            let started = *entry.anchor_wait_started_unix.get_or_insert(now);
+            if backoff_secs > 0 {
+                let age_delay = (now.saturating_sub(started) / 4).min(60);
+                entry.retry_after_unix = entry.retry_after_unix.max(now.saturating_add(age_delay));
+            }
+        }
+    }
+
+    /// Record an anchor-wait warning when due, returning the wait age.
+    /// Both the age and repeat interval survive retries and restarts.
+    pub fn record_anchor_wait_warning(
+        &mut self,
+        deposit_id: u64,
+        now: u64,
+        warn_after_secs: u64,
+        repeat_secs: u64,
+    ) -> Option<u64> {
+        let entry = self
+            .outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)?;
+        let age = now.saturating_sub(entry.anchor_wait_started_unix?);
+        if age < warn_after_secs
+            || entry
+                .anchor_wait_last_warned_unix
+                .is_some_and(|last| now.saturating_sub(last) < repeat_secs)
+        {
+            return None;
+        }
+        entry.anchor_wait_last_warned_unix = Some(now);
+        Some(age)
+    }
+
+    /// The anchor is present; subsequent failures are no longer anchor waits.
+    pub fn clear_anchor_wait(&mut self, deposit_id: u64) -> bool {
+        self.outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)
+            .is_some_and(|o| {
+                let waiting = o.anchor_wait_started_unix.take().is_some();
+                o.anchor_wait_last_warned_unix = None;
+                waiting
+            })
+    }
+
+    /// Park a stuck deposit. The high-water mark only moves if this id is
+    /// above it. The id is recorded in `parked_deposit_ids` for operator
+    /// follow-up and dropped from outstanding so it is not retried
+    /// automatically.
     pub fn record_skip(&mut self, deposit_id: u64) {
         if !self.parked_deposit_ids.contains(&deposit_id) {
             self.parked_deposit_ids.push(deposit_id);
         }
+        self.remove_outstanding(deposit_id);
         self.advance_past(deposit_id);
     }
 
@@ -213,14 +419,121 @@ impl RelayerState {
         if !self.unprovable_deposit_ids.contains(&deposit_id) {
             self.unprovable_deposit_ids.push(deposit_id);
         }
+        self.remove_outstanding(deposit_id);
         self.advance_past(deposit_id);
     }
 
+    /// Attempt count stored for `deposit_id`, or `attempts_since_progress`
+    /// when it is not outstanding.
+    pub fn outstanding_attempts(&self, deposit_id: u64) -> u32 {
+        self.outstanding_deposits
+            .iter()
+            .find(|o| o.deposit_id == deposit_id)
+            .map(|o| o.attempts)
+            .unwrap_or(self.attempts_since_progress)
+    }
+
     fn advance_past(&mut self, deposit_id: u64) {
-        self.last_processed_deposit_id = Some(deposit_id);
+        self.raise_last_processed(deposit_id);
         self.last_attempt_deposit_id = Some(deposit_id);
         self.attempts_since_progress = 0;
     }
+
+    fn raise_last_processed(&mut self, deposit_id: u64) {
+        self.last_processed_deposit_id = Some(match self.last_processed_deposit_id {
+            Some(last) => last.max(deposit_id),
+            None => deposit_id,
+        });
+    }
+
+    fn upsert_outstanding(
+        &mut self,
+        deposit_id: u64,
+        attempts: u32,
+        retry_after_unix: u64,
+        log: Option<DepositLogRef>,
+    ) {
+        if let Some(existing) = self
+            .outstanding_deposits
+            .iter_mut()
+            .find(|o| o.deposit_id == deposit_id)
+        {
+            existing.attempts = attempts;
+            existing.retry_after_unix = retry_after_unix;
+            if let Some(log) = log {
+                existing.block_number = Some(log.block_number);
+                existing.tx_hash = Some(format!("{:#x}", log.tx_hash));
+                existing.log_index = Some(log.log_index);
+            }
+            return;
+        }
+        self.outstanding_deposits.push(OutstandingDeposit {
+            deposit_id,
+            attempts,
+            retry_after_unix,
+            anchor_wait_started_unix: None,
+            anchor_wait_last_warned_unix: None,
+            block_number: log.map(|l| l.block_number),
+            tx_hash: log.map(|l| format!("{:#x}", l.tx_hash)),
+            log_index: log.map(|l| l.log_index),
+        });
+        self.outstanding_deposits.sort_by_key(|o| o.deposit_id);
+    }
+
+    fn remove_outstanding(&mut self, deposit_id: u64) {
+        self.outstanding_deposits
+            .retain(|o| o.deposit_id != deposit_id);
+    }
+
+    fn outstanding_contains(&self, deposit_id: u64) -> bool {
+        self.outstanding_deposits
+            .iter()
+            .any(|o| o.deposit_id == deposit_id)
+    }
+
+    fn is_skipped(&self, deposit_id: u64) -> bool {
+        self.parked_deposit_ids.contains(&deposit_id)
+            || self.unprovable_deposit_ids.contains(&deposit_id)
+    }
+
+    pub fn ready_outstanding(&self, now: u64) -> Option<u64> {
+        self.ready_outstanding_after(now, None)
+    }
+
+    /// Next outstanding id that is due, walking past `after` so a stuck low
+    /// id does not take every idle tick.
+    pub fn ready_outstanding_after(&self, now: u64, after: Option<u64>) -> Option<u64> {
+        let mut ready: Vec<u64> = self
+            .outstanding_deposits
+            .iter()
+            .filter(|o| o.retry_after_unix <= now && !self.is_skipped(o.deposit_id))
+            .map(|o| o.deposit_id)
+            .collect();
+        ready.sort_unstable();
+        if ready.is_empty() {
+            return None;
+        }
+        match after {
+            Some(last) => ready
+                .iter()
+                .copied()
+                .find(|id| *id > last)
+                .or_else(|| ready.first().copied()),
+            None => ready.first().copied(),
+        }
+    }
+
+    /// The stored log of an outstanding id, if this relayer has seen it.
+    pub fn outstanding(&self, deposit_id: u64) -> Option<&OutstandingDeposit> {
+        self.outstanding_deposits
+            .iter()
+            .find(|o| o.deposit_id == deposit_id)
+    }
+}
+
+fn retry_delay(attempts: u32, backoff_secs: u64) -> u64 {
+    let shift = attempts.saturating_sub(1).min(6);
+    backoff_secs.saturating_mul(1u64 << shift)
 }
 
 /// Advisory exclusive lock for a single-writer daemon. Held for the process
@@ -282,6 +595,111 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn anchor_wait_preserves_its_first_timestamp_and_old_state_remains_readable() {
+        let mut s = RelayerState::default();
+        let log = DepositLogRef {
+            block_number: 42,
+            tx_hash: alloy::primitives::B256::repeat_byte(1),
+            log_index: 0,
+        };
+        s.record_anchor_wait(0, 10, 2, log);
+        s.record_anchor_wait(0, 20, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().anchor_wait_started_unix, Some(10));
+        assert_eq!(s.outstanding(0).unwrap().attempts, 0);
+        let mut encoded = serde_json::to_value(&s).unwrap();
+        encoded["outstanding_deposits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("anchor_wait_started_unix");
+        let old: RelayerState = serde_json::from_value(encoded).unwrap();
+        assert_eq!(old.outstanding(0).unwrap().anchor_wait_started_unix, None);
+        assert!(s.clear_anchor_wait(0));
+        assert!(!s.clear_anchor_wait(0));
+        s.record_anchor_wait(0, 30, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().anchor_wait_started_unix, Some(30));
+    }
+
+    #[test]
+    fn anchor_wait_polling_slows_with_age_without_failures_and_survives_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let log = DepositLogRef {
+            block_number: 42,
+            tx_hash: alloy::primitives::B256::repeat_byte(1),
+            log_index: 0,
+        };
+        let mut s = RelayerState::default();
+        for (now, expected_delay) in [(100, 2), (108, 2), (140, 10), (340, 60), (10_000, 60)] {
+            s.record_anchor_wait(0, now, 2, log);
+            assert_eq!(
+                s.outstanding(0).unwrap().retry_after_unix,
+                now + expected_delay
+            );
+            assert_eq!(s.outstanding(0).unwrap().attempts, 0);
+            assert_eq!(s.ready_outstanding(now + expected_delay - 1), None);
+            assert_eq!(s.ready_outstanding(now + expected_delay), Some(0));
+        }
+        s.save(&path).unwrap();
+        let mut s = RelayerState::load(&path).unwrap().unwrap();
+        s.record_anchor_wait(0, 10_100, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().retry_after_unix, 10_160);
+        // A fresh id gets its own short delay, regardless of the older wait.
+        s.record_anchor_wait(1, 10_100, 2, log);
+        assert_eq!(s.ready_outstanding(10_102), Some(1));
+        assert!(s.clear_anchor_wait(0));
+        s.record_anchor_wait(0, 10_200, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().retry_after_unix, 10_202);
+        // Failure backoff is not shortened by the capped age delay.
+        for _ in 0..8 {
+            s.record_attempt(0, 20_000, 2);
+        }
+        s.record_anchor_wait(0, 20_000, 2, log);
+        assert_eq!(s.outstanding(0).unwrap().retry_after_unix, 20_128);
+        assert_eq!(s.outstanding(0).unwrap().attempts, 8);
+    }
+
+    #[test]
+    fn prolonged_anchor_warnings_are_rate_limited_across_restarts_and_reset_on_readiness() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let log = DepositLogRef {
+            block_number: 42,
+            tx_hash: alloy::primitives::B256::repeat_byte(1),
+            log_index: 0,
+        };
+        let mut s = RelayerState::default();
+        s.record_anchor_wait(0, 100, 2, log);
+        assert_eq!(s.record_anchor_wait_warning(0, 3699, 3600, 900), None);
+        assert_eq!(s.record_anchor_wait_warning(0, 3700, 3600, 900), Some(3600));
+        s.save(&path).unwrap();
+        let mut s = RelayerState::load(&path).unwrap().unwrap();
+        s.record_anchor_wait(0, 3800, 2, log);
+        assert_eq!(s.record_anchor_wait_warning(0, 4599, 3600, 900), None);
+        assert_eq!(s.record_anchor_wait_warning(0, 4600, 3600, 900), Some(4500));
+        // A clock moving backwards must not produce repeated warnings.
+        assert_eq!(s.record_anchor_wait_warning(0, 4500, 3600, 900), None);
+        assert_eq!(s.outstanding(0).unwrap().attempts, 0);
+        assert!(s.clear_anchor_wait(0));
+        assert_eq!(s.outstanding(0).unwrap().anchor_wait_last_warned_unix, None);
+        s.record_anchor_wait(0, 5000, 2, log);
+        assert_eq!(s.record_anchor_wait_warning(0, 8599, 3600, 900), None);
+        assert_eq!(s.record_anchor_wait_warning(0, 8600, 3600, 900), Some(3600));
+
+        // State from before warning timestamps existed remains readable and
+        // produces a warning on the next poll of an already prolonged wait.
+        let mut encoded = serde_json::to_value(&s).unwrap();
+        encoded["outstanding_deposits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("anchor_wait_last_warned_unix");
+        let mut old: RelayerState = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            old.record_anchor_wait_warning(0, 8601, 3600, 900),
+            Some(3601)
+        );
+    }
+
     fn deployment(chain: u64) -> DeploymentIdentity {
         DeploymentIdentity::new(chain, Address::repeat_byte(0x99), "0x1a1a1a1a1a")
     }
@@ -295,13 +713,14 @@ mod tests {
 
         let mut s = RelayerState::default();
         s.ensure_deployment(&deployment(11155111), false).unwrap();
-        s.record_attempt(7);
+        s.record_attempt(7, 0, 0);
         s.record_progress(7);
         s.save(&path).unwrap();
 
         let loaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(loaded.last_processed_deposit_id, Some(7));
         assert_eq!(loaded.deployment, Some(deployment(11155111)));
+        assert!(loaded.outstanding_deposits.is_empty());
     }
 
     #[test]
@@ -339,38 +758,123 @@ mod tests {
     #[test]
     fn next_target_uses_start_then_increments() {
         let mut s = RelayerState::default();
-        assert_eq!(s.next_target(0), 0);
-        assert_eq!(s.next_target(5), 5);
+        assert_eq!(s.next_target_at(0, 0), 0);
+        assert_eq!(s.next_target_at(5, 0), 5);
         s.record_progress(5);
-        assert_eq!(s.next_target(0), 6);
+        assert_eq!(s.next_target_at(0, 0), 6);
     }
 
     #[test]
     fn record_skip_advances_and_parks() {
         let mut s = RelayerState::default();
-        s.record_attempt(3);
-        s.record_attempt(3);
+        s.record_attempt(3, 0, 0);
+        s.record_attempt(3, 0, 0);
         s.record_skip(3);
         assert_eq!(s.last_processed_deposit_id, Some(3));
-        assert_eq!(s.next_target(0), 4);
+        assert_eq!(s.next_target_at(0, 0), 4);
         assert_eq!(s.parked_deposit_ids, vec![3]);
         assert!(s.unprovable_deposit_ids.is_empty());
+        assert!(s.outstanding_deposits.is_empty());
         assert_eq!(s.attempts_since_progress, 0);
     }
 
     #[test]
     fn record_unprovable_advances_without_parking() {
         let mut s = RelayerState::default();
-        s.record_attempt(3);
+        s.record_attempt(3, 0, 0);
         s.record_unprovable(3);
-        assert_eq!(s.next_target(0), 4);
+        assert_eq!(s.next_target_at(0, 0), 4);
         assert_eq!(s.unprovable_deposit_ids, vec![3]);
         assert!(s.parked_deposit_ids.is_empty());
+        assert!(s.outstanding_deposits.is_empty());
         assert_eq!(s.attempts_since_progress, 0);
     }
 
     #[test]
-    fn a_file_with_only_parked_ids_still_loads() {
+    fn a_failed_id_does_not_block_the_next_one() {
+        let mut s = RelayerState::default();
+        s.record_progress(2);
+        s.record_attempt(3, 10, 5);
+        assert_eq!(s.last_processed_deposit_id, Some(2));
+        assert_eq!(s.outstanding_deposits.len(), 1);
+        assert_eq!(s.outstanding_deposits[0].deposit_id, 3);
+        assert_eq!(s.outstanding_deposits[0].retry_after_unix, 15);
+        // Walk past 3 whether or not its backoff has elapsed.
+        assert_eq!(s.next_target_at(0, 10), 4);
+        assert_eq!(s.next_target_at(0, 15), 4);
+        assert_eq!(s.ready_outstanding(10), None);
+        assert_eq!(s.ready_outstanding(15), Some(3));
+        s.record_progress(4);
+        assert_eq!(s.last_processed_deposit_id, Some(4));
+        assert_eq!(s.next_target_at(0, 10), 5);
+        assert_eq!(s.ready_outstanding(15), Some(3));
+        s.record_progress(3);
+        assert!(s.outstanding_deposits.is_empty());
+        assert_eq!(s.last_processed_deposit_id, Some(4));
+        assert_eq!(s.last_finalized_deposit_id, Some(4));
+        assert_eq!(s.next_target_at(0, 15), 5);
+    }
+
+    #[test]
+    fn idle_retries_walk_outstanding_round_robin() {
+        let mut s = RelayerState::default();
+        s.record_attempt(3, 0, 0);
+        s.record_attempt(5, 0, 0);
+        s.record_attempt(7, 0, 0);
+        assert_eq!(s.ready_outstanding_after(0, None), Some(3));
+        assert_eq!(s.ready_outstanding_after(0, Some(3)), Some(5));
+        assert_eq!(s.ready_outstanding_after(0, Some(5)), Some(7));
+        assert_eq!(s.ready_outstanding_after(0, Some(7)), Some(3));
+    }
+
+    #[test]
+    fn parking_does_not_move_last_finalized() {
+        let mut s = RelayerState::default();
+        s.record_progress(2);
+        s.record_skip(4);
+        assert_eq!(s.last_processed_deposit_id, Some(4));
+        assert_eq!(s.last_finalized_deposit_id, Some(2));
+    }
+
+    #[test]
+    fn a_state_file_from_an_earlier_relayer_carries_skip_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"last_processed_deposit_id":4,"last_attempt_deposit_id":5,
+                "attempts_since_progress":7}"#,
+        )
+        .unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.outstanding_attempts(5), 7);
+        assert_eq!(loaded.attempts_since_progress, 7);
+        assert_eq!(
+            loaded
+                .outstanding_deposits
+                .iter()
+                .map(|o| o.deposit_id)
+                .collect::<Vec<_>>(),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn record_pending_keeps_the_attempt_count() {
+        let mut s = RelayerState::default();
+        s.record_progress(2);
+        s.record_attempt(3, 10, 5);
+        assert_eq!(s.outstanding_attempts(3), 1);
+        s.record_pending(3, 10, 5, None);
+        assert_eq!(s.outstanding_attempts(3), 1);
+        assert_eq!(s.attempts_since_progress, 1);
+        assert_eq!(s.next_target_at(0, 10), 4);
+        assert_eq!(s.ready_outstanding(15), Some(3));
+    }
+
+    #[test]
+    fn parked_ids_stay_parked_on_load() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(
@@ -382,13 +886,36 @@ mod tests {
 
         let mut loaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(loaded.parked_deposit_ids, vec![4, 6]);
-        assert!(loaded.unprovable_deposit_ids.is_empty());
+        assert!(loaded.outstanding_deposits.is_empty());
+        assert_eq!(loaded.next_target_at(0, 0), 7);
 
         loaded.record_unprovable(7);
         loaded.save(&path).unwrap();
         let reloaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(reloaded.parked_deposit_ids, vec![4, 6]);
         assert_eq!(reloaded.unprovable_deposit_ids, vec![7]);
+        assert!(reloaded.outstanding_deposits.is_empty());
+    }
+
+    #[test]
+    fn a_current_file_keeps_parked_ids() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = RelayerState::default();
+        s.record_skip(4);
+        s.record_attempt(6, 0, 0);
+        s.save(&path).unwrap();
+
+        let loaded = RelayerState::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.parked_deposit_ids, vec![4]);
+        assert_eq!(
+            loaded
+                .outstanding_deposits
+                .iter()
+                .map(|o| o.deposit_id)
+                .collect::<Vec<_>>(),
+            vec![6]
+        );
     }
 
     #[test]
@@ -407,7 +934,7 @@ mod tests {
 
         let loaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(loaded.scan_done_through_block, None);
-        assert_eq!(loaded.next_target(0), 7);
+        assert_eq!(loaded.next_target_at(0, 0), 7);
         // Its attempt count included polls that found no deposit.
         assert_eq!(loaded.attempts_since_progress, 0);
 
@@ -425,12 +952,13 @@ mod tests {
             ..RelayerState::default()
         };
         for _ in 0..3 {
-            s.record_attempt(7);
+            s.record_attempt(7, 0, 0);
         }
         s.save(&path).unwrap();
 
         let loaded = RelayerState::load(&path).unwrap().unwrap();
         assert_eq!(loaded.attempts_since_progress, 3);
+        assert_eq!(loaded.outstanding_attempts(7), 3);
         assert_eq!(loaded.scan_done_through_block, Some(11800417));
     }
 

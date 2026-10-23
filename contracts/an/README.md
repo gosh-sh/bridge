@@ -1,22 +1,22 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.10.0, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.5.0:
+`exchange/` — `eccUSDCBridge` at version 1.13.0, `DepositVoucher` at 1.4.0 and
+`EthBeaconLightClient` at 1.6.1:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
-  USDC on `initiateWithdrawal`. A burn that would take bridged burned
-  above bridged minted for that token throws `ERR_BURN_EXCEEDS_BRIDGED`
-  (233). ECC is fungible: owner-minted and TIP-3-minted ECC can still
+  USDC on `initiateWithdrawal`. A withdrawal without enough bridged or destination-chain inventory
+  returns the attached ECC without a burn. ECC is fungible: owner-minted and TIP-3-minted ECC can still
   consume headroom that deposits created; the cap stops burned exceeding
   minted. An `updateCode` of a live bridge that already burned more than
-  it minted (`getTotalBridged` burned above minted) refuses every burn
+  it minted (`getTotalBridged` burned above minted) returns every withdrawal
   until deposits bring minted up to burned; a fresh zerostate starts both
   counters at 0. The owner can stop `finalizeDeposit` and `initiateWithdrawal`
   with `setPaused(true)`, which makes them throw `ERR_PAUSED` (231) until
-  it is lifted; `confirmDeposit`, owner mint and TIP-3 mint keep running.
+  it is lifted; `confirmDeposit`, owner mint (`mintAndSend`,
+  `mintAndSendBridged`, `mintAndSendAccumulator`) and TIP-3 mint keep running.
   That switch is independent of `AckiNackiBridge.pause()` on Ethereum and
   of a Circle freeze of USDC — see *Two pause domains* below.
 - `DepositVoucher` — deployed once per finalized deposit at an address derived
@@ -95,16 +95,67 @@ folders and `contracts/scripts/bridge_*.py`, never
 the one that does the placing. A change here reaches a network only after that
 pin is moved.
 
-## Deposit amounts
+## Transfer and network limits
 
-Ethereum `AckiNackiBridge.deposit` and Acki Nacki `finalizeDeposit` share one
-per-deposit ceiling: `type(uint64).max` USDC base units (6 decimals). The EVM
-side refuses anything larger with `DepositTooLarge` (`MAX_DEPOSIT_AMOUNT`);
-the AN side refuses a proven `fr[2]` that does not fit `uint64` with exit 214
-(`ERR_OVERFLOW`) before it mints. There is no extra product minimum: `amount
-> 0` is the floor on both sides (`InvalidAmount` on Ethereum, `ERR_ZERO_AMOUNT`
-(204) on Acki Nacki). Older notes that named a 100 USDC cap are describing a
-limit that is not in the contracts.
+Deposits and withdrawals are limited to **50 USDC** (50,000,000 base units).
+Each L1 bridge limits `treasuryBalance` (deposited principal minus completed
+payouts) to **10,000 USDC**, including principal supplied to Aave. Yield and
+direct token donations do not increase that counter or its capacity.
+`MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the first deposit width guard;
+the lower product ceiling is `MAX_TRANSFER_AMOUNT`.
+
+AN keeps the same 10,000 USDC ceiling separately for every EIP-155 chain id.
+`getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and `outstanding` in
+base units. `confirmDeposit` increases that chain's outstanding amount;
+a successful `initiateWithdrawal` decreases the destination chain's amount.
+There are no deposit reservations or permanent voucher registry. A repeated
+proof deploys the same voucher, whose consumed constructor prevents another
+confirmation. Trust only one funded L1 bridge per chain for this accounting.
+For that pair,
+`L1 treasuryBalance = AN outstanding + unconfirmed deposits + unpaid burns`.
+Thus confirming a valid pending deposit cannot exceed the L1 cap; simultaneous
+finalizations need no reservation. Pause deposits and drain pending transfers
+before rotating the trusted L1 contract.
+
+AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
+with 235; the latter is retryable after withdrawals. Both checks precede proof
+verification and are repeated on confirmation. An oversized withdrawal or one
+without enough inventory on its destination chain returns the attached ECC
+without burning it or emitting `WithdrawalInitiated`. It calls `ensureBalance()`
+and sends back `min(msg.value, 0.1 vmshell)`; it uses no `rawReserve`.
+`ensureBalance()` is free. Dapp 0 contains only system contracts, and mainnet
+has an unlimited dapp configuration deployed for dapp 0. Withdrawal messages
+arrive from another dapp id, so SHELL sent back to that dapp is burned.
+
+External messages use expiring message hashes instead of a shared increasing
+timestamp. `expire` must be in the future and less than five minutes ahead of
+block time (errors 402 and 401); an identical recorded message is rejected with
+400. Changing `time` cannot block another sender or the owner. These hashes
+expire; voucher identity remains the deposit double-mint protection. CLI and
+relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
+same BOC while valid.
+
+### Deployment
+
+Deploy the 1.13.0 bridge as a fresh pair with empty accounting. Its
+upgrade tuple adds chain balances and external-message hashes; the previous
+1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
+Normal upgrades within this format retain balances and unexpired replay hashes.
+
+`mintAndSendBridged(recipient, value, nonce, chainId)` credits the aborted
+deposit's source chain as well as the global bridged total. It enforces the
+50 USDC transfer and 10,000 USDC chain limits. Match the deposit's recipient,
+amount and EIP-155 chain id exactly, once; this owner call has no deposit-id
+deduplication.
+
+Before replacing a funded pair, stop new deposits, finish every pending deposit
+and withdrawal, and verify the old books are empty. Pause every old L1 bridge
+and check `paused() == true` before enabling its replacement. Never run two
+funded payout contracts for the same AN identity and destination chain. Moving
+custody and consumed withdrawal nullifiers is a separate migration: complete it
+before funding a replacement that accepts the same AN history, or use a fresh
+AN identity/history. That migration is not implemented. Amounts above
+50 USDC must settle before switching to the capped contracts.
 
 ## Rebuilding
 
@@ -192,9 +243,11 @@ it next to the contracts and calls `initialize(ctx)` while generating a
 zerostate, so a new setup call or a new storage field is a change in this
 repository alone.
 
-`BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override the trusted L1 bridge
-a generated zerostate starts with, defaulting to `11155111` and
-`0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+Set `BRIDGE_ZS_L1_BRIDGE` to the fresh paired L1 bridge's nonzero `0x` address
+before generating a zerostate. There is no default: missing or malformed values
+stop generation before any account is changed. `BRIDGE_ZS_L1_CHAIN_ID` defaults
+to Sepolia (`11155111`); set it to the deployment's EIP-155 chain id for another
+network.
 
     python3 contracts/an/zerostate/test_zerostate_init.py
     scripts/check_zerostate_data_encoder.py

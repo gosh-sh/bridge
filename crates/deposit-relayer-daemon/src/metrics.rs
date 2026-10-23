@@ -9,24 +9,27 @@
 //!
 //! | Metric | Type | Labels | Meaning |
 //! |---|---|---|---|
-//! | `deposit_relayer_ticks_total` | counter | `outcome` | One per `tick()`: `finalized`, `already_finalized`, `not_yet_available`, `proof_failed`, `an_rejected`, `an_pending`, `skipped`, `unprovable`, `error` |
-//! | `deposit_relayer_stage_duration_seconds` | histogram | `stage` | Wall time of `is_finalized`, `fetch_event`, `prove`, `submit`, and the whole `tick` |
+//! | `deposit_relayer_ticks_total` | counter | `outcome` | One per `tick()`: `finalized`, `already_finalized`, `not_yet_available`, `waiting_for_anchor`, `proof_failed`, `an_rejected`, `an_pending`, `skipped`, `unprovable`, `error` |
+//! | `deposit_relayer_stage_duration_seconds` | histogram | `stage` | Wall time of `is_finalized`, `is_block_accepted`, `fetch_event`, `prove`, `submit`, and the whole `tick` |
 //! | `deposit_relayer_prover_stage_duration_seconds` | histogram | `example` | Wall time of each `deposit-prover` subprocess (`fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`) |
 //! | `deposit_relayer_prover_stage_failures_total` | counter | `example` | Subprocess exits that were not 0 (spawn failure, timeout, non-zero status) |
 //! | `deposit_relayer_eth_get_logs_total` | counter | `outcome` | `eth_getLogs` calls: `ok`, `retry` (retryable error, retried), `error` (given up) |
 //! | `deposit_relayer_eth_scanned_blocks_total` | counter | | Blocks covered by `eth_getLogs` windows (the idle-scan cost) |
 //! | `deposit_relayer_eth_safe_head_block` | gauge | | `head - confirmations` at the last scan |
 //! | `deposit_relayer_eth_scan_from_block` | gauge | | First block of the last `eth_getLogs` scan (cursor + 1, or `--from-block`); a tick that finds no new deposit by `depositCounter()` makes no scan and leaves it |
-//! | `deposit_relayer_eth_deposit_counter` | gauge | | `AckiNackiBridge.depositCounter()` on Ethereum, polled by the daemon; `counter - (last_finalized + 1)` is the backlog |
+//! | `deposit_relayer_eth_deposit_counter` | gauge | | `AckiNackiBridge.depositCounter()` on Ethereum, polled by the daemon; `counter - (last_finalized + 1)` is the backlog of ids at or above the high-water mark (outstanding ids below it are extra). `last_finalized` is seeded from `state.json` `last_finalized_deposit_id` on start |
 //! | `deposit_relayer_target_deposit_id` | gauge | | The `depositId` the loop is working on |
-//! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN in this process |
-//! | `deposit_relayer_attempts_since_progress` | gauge | | Consecutive failed attempts at the current target (`state.json`); waiting for a deposit nobody made yet is not an attempt |
+//! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN; seeded from `state.json` `last_finalized_deposit_id` on start (parked/unprovable ids are not in that field) and never moves backwards when a lower outstanding id completes |
+//! | `deposit_relayer_attempts_since_progress` | gauge | | Attempt count of the last failed outstanding id (`state.json`); reset when any id finalizes. Waiting for a deposit nobody made yet is not an attempt |
 //! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` (`state.json` → `parked_deposit_ids`) |
 //! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits the circuit cannot prove; only the EVM bridge operator can return those funds (`state.json` → `unprovable_deposit_ids`) |
+//! | `deposit_relayer_outstanding_deposits` | gauge | | Deposits still to retry, including anchor waits (`state.json` → `outstanding_deposits`) |
+//! | `deposit_relayer_waiting_for_anchor` | gauge | | Outstanding deposits waiting for an AN block anchor |
+//! | `deposit_relayer_oldest_anchor_wait_timestamp_seconds` | gauge | | First observation of the oldest anchor wait (persisted); 0 when none |
 //! | `deposit_relayer_backoff_seconds` | gauge | | Sleep the daemon applies after the last tick |
 //! | `deposit_relayer_last_tick_timestamp_seconds` | gauge | | Unix time of the last completed tick |
 //! | `deposit_relayer_last_finalized_timestamp_seconds` | gauge | | Unix time of the last `finalized` / `already_finalized` outcome |
-//! | `deposit_relayer_scan_done_through_block` | gauge | | The log-scan cursor persisted in `state.json` (`scan_done_through_block`): no block up to it holds a deposit still to deliver |
+//! | `deposit_relayer_scan_done_through_block` | gauge | | The log-scan cursor persisted in `state.json` (`scan_done_through_block`): no block up to it holds a deposit still to *discover*. Outstanding ids with a stored tx are retried from that, not from this cursor |
 //! | `deposit_relayer_build_info` | gauge | `version` | Always 1; the crate version |
 //! | `deposit_relayer_start_timestamp_seconds` | gauge | | Unix time the daemon started |
 
@@ -50,6 +53,10 @@ pub const LAST_FINALIZED_DEPOSIT_ID: &str = "deposit_relayer_last_finalized_depo
 pub const ATTEMPTS_SINCE_PROGRESS: &str = "deposit_relayer_attempts_since_progress";
 pub const PARKED_DEPOSITS: &str = "deposit_relayer_parked_deposits";
 pub const UNPROVABLE_DEPOSITS: &str = "deposit_relayer_unprovable_deposits";
+pub const OUTSTANDING_DEPOSITS: &str = "deposit_relayer_outstanding_deposits";
+pub const WAITING_FOR_ANCHOR: &str = "deposit_relayer_waiting_for_anchor";
+pub const OLDEST_ANCHOR_WAIT_TIMESTAMP_SECONDS: &str =
+    "deposit_relayer_oldest_anchor_wait_timestamp_seconds";
 pub const BACKOFF_SECONDS: &str = "deposit_relayer_backoff_seconds";
 pub const LAST_TICK_TIMESTAMP_SECONDS: &str = "deposit_relayer_last_tick_timestamp_seconds";
 pub const LAST_FINALIZED_TIMESTAMP_SECONDS: &str =
@@ -61,12 +68,22 @@ pub const START_TIMESTAMP_SECONDS: &str = "deposit_relayer_start_timestamp_secon
 /// Register the help strings and units with the installed recorder. Call once
 /// after the exporter is installed; harmless without one.
 pub fn describe() {
+    describe_gauge!(
+        WAITING_FOR_ANCHOR,
+        "Deposits waiting for their Ethereum block anchor on AN."
+    );
+    describe_gauge!(
+        OLDEST_ANCHOR_WAIT_TIMESTAMP_SECONDS,
+        Unit::Seconds,
+        "Unix time of the oldest outstanding anchor wait; persisted across restarts, or 0 when \
+         none."
+    );
     describe_counter!(TICKS_TOTAL, "Relayer ticks by outcome (label `outcome`).");
     describe_histogram!(
         STAGE_DURATION_SECONDS,
         Unit::Seconds,
-        "Wall time of one tick stage (label `stage`: is_finalized, fetch_event, prove, submit, \
-         tick)."
+        "Wall time of one tick stage (label `stage`: is_finalized, is_block_accepted, \
+         fetch_event, prove, submit, tick)."
     );
     describe_histogram!(
         PROVER_STAGE_DURATION_SECONDS,
@@ -100,11 +117,12 @@ pub fn describe() {
     describe_gauge!(TARGET_DEPOSIT_ID, "depositId the loop is working on.");
     describe_gauge!(
         LAST_FINALIZED_DEPOSIT_ID,
-        "Highest depositId finalized on AN by this process."
+        "Highest depositId finalized on AN; seeded from last_finalized_deposit_id on start and \
+         never moves backwards."
     );
     describe_gauge!(
         ATTEMPTS_SINCE_PROGRESS,
-        "Consecutive non-success ticks on the current target."
+        "Attempt count of the last failed outstanding id; reset when any id finalizes."
     );
     describe_gauge!(
         PARKED_DEPOSITS,
@@ -113,6 +131,10 @@ pub fn describe() {
     describe_gauge!(
         UNPROVABLE_DEPOSITS,
         "Deposits the circuit cannot prove; only the EVM bridge operator can return those funds."
+    );
+    describe_gauge!(
+        OUTSTANDING_DEPOSITS,
+        "Deposits still to retry, including anchor waits (state.json outstanding_deposits)."
     );
     describe_gauge!(
         BACKOFF_SECONDS,
@@ -168,12 +190,14 @@ pub fn set_state_gauges(
     attempts_since_progress: u32,
     parked: usize,
     unprovable: usize,
+    outstanding: usize,
     scan_done_through_block: Option<u64>,
 ) {
     gauge!(TARGET_DEPOSIT_ID).set(target as f64);
     gauge!(ATTEMPTS_SINCE_PROGRESS).set(f64::from(attempts_since_progress));
     gauge!(PARKED_DEPOSITS).set(parked as f64);
     gauge!(UNPROVABLE_DEPOSITS).set(unprovable as f64);
+    gauge!(OUTSTANDING_DEPOSITS).set(outstanding as f64);
     if let Some(block) = scan_done_through_block {
         gauge!(SCAN_DONE_THROUGH_BLOCK).set(block as f64);
     }

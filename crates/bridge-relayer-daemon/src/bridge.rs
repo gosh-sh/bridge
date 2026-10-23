@@ -922,6 +922,7 @@ mod sol_bindings {
             /// `decode_withdraw_revert` can name them.
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
+            error TransferTooLarge();
             error NullifierAlreadyUsed(uint256 nullifier);
             error FieldElementOutOfRange(uint256 value);
             error DstChainIdMismatch(uint256 supplied, uint256 expected);
@@ -943,6 +944,7 @@ mod sol_bindings {
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
+            function MAX_TRANSFER_AMOUNT() external view returns (uint256);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
@@ -1407,9 +1409,10 @@ where
                 .confirm(pending, nonce, self.withdraw_receipt_timeout)
                 .await
             {
-                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
-                    tx_hash: receipt.transaction_hash(),
-                }),
+                Ok(receipt) => Ok(outcome_from_mined_withdraw(
+                    receipt.status(),
+                    receipt.transaction_hash(),
+                )),
                 Err(e) => {
                     // Post-send confirmation failures (RPC dropped, receipt
                     // wait timed out, transaction replaced) are transient by
@@ -1542,6 +1545,15 @@ where
     pub async fn treasury_balance(&self) -> Result<U256, RelayerError> {
         self.contract
             .treasuryBalance()
+            .call()
+            .await
+            .map_err(map_contract_err)
+    }
+
+    /// Maximum amount the bridge pays in one withdrawal, in micro-USDC.
+    pub async fn max_transfer_amount(&self) -> Result<U256, RelayerError> {
+        self.contract
+            .MAX_TRANSFER_AMOUNT()
             .call()
             .await
             .map_err(map_contract_err)
@@ -2093,6 +2105,38 @@ pub enum WithdrawSubmitOutcome {
     },
 }
 
+/// The outcome of a `withdrawByProof` that was mined, from its receipt.
+///
+/// A receipt proves inclusion, not success: `status == false` is a revert
+/// that happened on chain, after the gas estimate passed — state moved
+/// between the estimate and inclusion (the anchor was evicted, the treasury
+/// drained, the nullifier spent by another relayer). The receipt carries no
+/// revert reason, so the outcome is `Reverted` with `permanent = false`: the
+/// proof is retried with backoff rather than parked, and if the cause is
+/// intrinsic the next send fails at the estimate with a decoded reason that
+/// `classify_withdraw_revert` can park on.
+///
+/// Mapping every receipt to `Paid` was wrong in exactly one way that matters:
+/// the burn on Acki Nacki is already irreversible when this runs, so a revert
+/// here is a user who is not paid — and `withdraw_scan_once` would have put
+/// the proof in `done`, logged `PAID` and raised `st.paid`, with nothing left
+/// to prompt a retry.
+pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmitOutcome {
+    if status {
+        WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        }
+    } else {
+        WithdrawSubmitOutcome::Reverted {
+            reason: format!(
+                "withdrawByProof reverted on chain (tx {tx_hash:#x}); the receipt carries no \
+                 reason, the next send will report it"
+            ),
+            permanent: false,
+        }
+    }
+}
+
 /// Classify a `withdrawByProof` revert reason as permanent (proof-intrinsic;
 /// park the `proof_event_*.json`) or transient (retry with backoff).
 ///
@@ -2106,8 +2150,9 @@ pub enum WithdrawSubmitOutcome {
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 9] = [
+    let permanent_selectors: [[u8; 4]; 10] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
+        AckiNackiBridge::TransferTooLarge::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
         AckiNackiBridge::UnsupportedTokenId::SELECTOR,
@@ -2184,6 +2229,7 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
     let (name, args) = match e {
         E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
         E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
+        E::TransferTooLarge(_) => ("TransferTooLarge", String::new()),
         E::NullifierAlreadyUsed(x) => (
             "NullifierAlreadyUsed",
             format!("nullifier: {}", word(x.nullifier)),
@@ -2600,6 +2646,29 @@ mod tests {
     /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
     /// slower than the daemons' bound must not come back to the user as a
     /// failure. Only the daemons set a bound.
+    /// A mined `withdrawByProof` with status 0 must not read as paid: the
+    /// user's eccUSDC are already burned, so `Paid` would park an unpaid
+    /// withdrawal in `done` behind a `PAID` log line.
+    #[test]
+    fn a_mined_revert_is_reverted_not_paid() {
+        let hash = B256::repeat_byte(0x42);
+        match outcome_from_mined_withdraw(false, hash) {
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+                permanent,
+            } => {
+                assert!(!permanent, "a receipt carries no reason, so it cannot be parked on");
+                assert!(reason.contains("reverted on chain"), "{reason}");
+                assert!(reason.contains(&format!("{hash:#x}")), "{reason}");
+            },
+            WithdrawSubmitOutcome::Paid { .. } => panic!("status 0 reported as Paid"),
+        }
+        assert!(matches!(
+            outcome_from_mined_withdraw(true, hash),
+            WithdrawSubmitOutcome::Paid { tx_hash } if tx_hash == hash
+        ));
+    }
+
     #[test]
     fn only_the_daemons_stop_waiting_for_a_withdraw_receipt() {
         let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new_http(
@@ -2782,6 +2851,22 @@ mod tests {
         assert_eq!(
             classify_withdraw_revert(&reason),
             WithdrawRevertKind::Permanent,
+        );
+    }
+
+    #[test]
+    fn excessive_withdrawal_is_parked_and_names_the_limit() {
+        let reason = format!(
+            "execution reverted: {}",
+            selector_hex_of::<AckiNackiBridge::TransferTooLarge>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "TransferTooLarge()"
         );
     }
 

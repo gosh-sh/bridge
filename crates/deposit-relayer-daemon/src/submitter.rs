@@ -28,11 +28,10 @@
 //!   live AN node.
 //! - [`AnInterfaceSubmitter`] — wraps any [`acki_nacki_interface::IAckiNacki`]
 //!   client: it ABI-encodes the `finalizeDeposit` call into an
-//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. Today only
-//!   the mock `IAckiNacki` exists (the AN team will ship the live `tvm-sdk`
-//!   client), so the live delivery path is exercised against the mock; the
-//!   nullifier on the AN side guarantees a re-submission is rejected rather
-//!   than double-crediting.
+//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. The live
+//!   client is [`acki_nacki_interface::TvmAckiNacki`]. A second
+//!   `finalizeDeposit` for the same deposit fails in the voucher constructor
+//!   (exit 51), so re-submission is rejected rather than double-crediting.
 
 use std::{
     collections::HashSet,
@@ -80,6 +79,10 @@ pub enum SubmitOutcome {
 
 #[async_trait]
 pub trait AnSubmitter: Send + Sync {
+    /// Read the AN bridge's canonical-chain gate before starting the prover.
+    /// Errors must propagate: an unreadable gate is not permission to submit.
+    async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
+
     /// Cheap pre-check: has this deposit already been finalised on AN? Used
     /// to skip the expensive proof-generation step on replays. A backend that
     /// can't tell returns `Ok(false)` (the submit path is still safe — AN
@@ -237,6 +240,10 @@ impl MockAnSubmitter {
 
 #[async_trait]
 impl AnSubmitter for MockAnSubmitter {
+    async fn is_block_accepted(&self, _: &DepositEvent) -> Result<bool, RelayerError> {
+        Ok(true)
+    }
+
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         Ok(self
             .inner
@@ -502,6 +509,8 @@ const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 const EXIT_UNKNOWN_BLOCK: i32 = 224;
 const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
+const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
+const EXIT_TVL_CAP: i32 = 235;
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -526,6 +535,9 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
              owner anchors are enabled, otherwise the light client",
         ),
         EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
+        EXIT_TRANSFER_TOO_LARGE => {
+            Some("ERR_TRANSFER_TOO_LARGE — the proven deposit exceeds the per-transfer ceiling")
+        },
         _ => None,
     }
 }
@@ -571,6 +583,23 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
                  (exit_code={code}): {detail}"
             ),
         },
+        EXIT_TVL_CAP => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TVL_CAP — source-chain deposit capacity is full; waiting for withdrawals \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        400 | 402 => SubmitOutcome::Pending {
+            reason: format!(
+                "external message already seen or expired; observe the voucher before retrying \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        401 => rejected(
+            code,
+            "external message expiry exceeds the five-minute window",
+            detail,
+        ),
         code => rejected(code, context, detail),
     }
 }
@@ -669,8 +698,30 @@ fn parse_exit_code_loose(msg: &str) -> Option<i32> {
     None
 }
 
+fn accepted_block_hash_params(event: &DepositEvent) -> serde_json::Value {
+    json!({
+        "chainId": event.source_chain_id.to_string(),
+        "blockHash": format!("{:#x}", event.block_hash),
+    })
+}
+
 #[async_trait]
 impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
+    async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
+        let output = self
+            .client
+            .run_getter(
+                &self.config.token_bridge,
+                "isAcceptedBlockHash",
+                accepted_block_hash_params(event),
+            )
+            .await?;
+        output
+            .get("value0")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| RelayerError::other("isAcceptedBlockHash: expected a boolean value0"))
+    }
+
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
         let Some(check) = &self.voucher_check else {
             return Ok(false);
@@ -706,12 +757,48 @@ mod tests {
     use super::*;
     use crate::{prover::MockProofGenerator, types::DepositEvent};
 
+    #[test]
+    fn anchor_getter_params_use_decimal_chain_and_ethereum_order_hex_hash() {
+        let mut deposit = event(0);
+        deposit.source_chain_id = 11_155_111;
+        deposit.block_hash = "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            accepted_block_hash_params(&deposit),
+            json!({
+                "chainId": "11155111",
+                "blockHash": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_getter_requires_a_boolean_and_propagates_read_errors() {
+        use acki_nacki_interface::MockAckiNacki;
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = AnInterfaceSubmitter::new(client.clone(), AnSubmitConfig {
+            from: "unused".into(),
+            token_bridge: "unused".into(),
+            confirm_timeout_secs: 1,
+        });
+        assert!(sub.is_block_accepted(&event(0)).await.is_err());
+        for value in [false, true] {
+            client.set_getter_response(json!({"value0": value}));
+            assert_eq!(sub.is_block_accepted(&event(0)).await.unwrap(), value);
+        }
+        for output in [json!({}), json!({"value0": "false"}), json!({"value0": 1})] {
+            client.set_getter_response(output);
+            assert!(sub.is_block_accepted(&event(0)).await.is_err());
+        }
+        assert_eq!(client.transaction_count(), 0);
+    }
+
     fn event(id: u64) -> DepositEvent {
         DepositEvent {
             deposit_id: id,
             sender: Address::repeat_byte(0x11),
             amount: U256::from(42u64),
-            an_workchain: 0,
             an_account: B256::repeat_byte(0x77),
             timestamp: U256::ZERO,
             tx_hash: B256::repeat_byte(0xaa),
@@ -978,6 +1065,25 @@ mod tests {
             },
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capacity_and_message_retries_do_not_park_a_deposit() {
+        for code in [235, 400, 402] {
+            for result in [
+                classify_reverted(Some(code), "Reverted"),
+                classify_call_error(&format!("exit_code={code}")),
+            ] {
+                assert!(
+                    matches!(result, SubmitOutcome::Pending { .. }),
+                    "{code}: {result:?}"
+                );
+            }
+        }
+        assert!(matches!(
+            classify_reverted(Some(234), "Reverted"),
+            SubmitOutcome::Rejected { .. }
+        ));
     }
 
     /// The fail-closed config reverts must name the call that fixes them — an

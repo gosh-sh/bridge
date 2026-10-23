@@ -22,6 +22,70 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `withdrawByProof` that reverts on chain is no longer recorded as paid.**
+  `relayer daemon-withdraw` and `daemon-bridge` mapped every mined receipt to
+  `PAID`, read `st.paid` up and put the `proof_event_*.json` in `done`, with
+  the receipt's status never read. A revert after the gas estimate — anchor
+  evicted, treasury short, nullifier spent by another relayer — therefore
+  left a withdrawal unpaid while the log and counters said otherwise, and
+  nothing retried it until a restart; the eccUSDC is already burned by then.
+  A status-0 receipt is now a transient `Reverted`: the proof stays in the
+  scan and is retried with backoff, and the next send reports the decoded
+  reason at the estimate, where a proof-intrinsic one parks as before.
+- The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
+  entry that is not an http(s) URL, as the daemon does at start; `cast` could
+  answer a `wss://` entry and report it healthy while the daemon exited on it
+  under `restart: unless-stopped`.
+
+### Documentation
+
+- **`README.md` opens with *The current deployment*.** No bridge address is
+  pinned in the tree any more, so a checkout had nowhere to read the live
+  ones. The section carries the Sepolia bridge and its deployment block, the
+  USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
+  client, and the four settings to copy. Read back from both chains.
+
+### Documentation
+
+- New [`REFACTORING.md`](REFACTORING.md) at the repository root, registered in
+  `DOCS.md`: a backlog of changes that are not bugs. Six entries to start —
+  `num_active_layers` naming the opposite of what it means; the EVM deployment
+  address pinned separately by the CLI profile and the web form, which is how
+  the form spent a week on a retired bridge; the deposit and withdrawal sides
+  keeping separate chain lists that have already drifted over Arbitrum One; the
+  literal `vmshell` amounts on the `DepositVoucher` deploy and its
+  `confirmDeposit` callback; guard scripts wired into no pipeline; and the
+  unbounded owner mint. Entries carry `file:line` and the shape of the change,
+  and are deleted when done rather than ticked.
+
+### Fixed
+
+- **The deposit relayer waits for the deposit block's AN anchor before
+  proving or submitting it.** Ethereum `--confirmations` can finish before
+  the light-client relayer delivers that block. Previously each retry built
+  a proof and called `finalizeDeposit` too early, producing exit 224 and
+  `an_rejected` alerts. A missing anchor now causes a healthy wait without
+  proving, submission, failed attempts or parking. Getter errors and actual
+  contract rejections remain visible. Upgrade the daemon; no contract
+  redeploy or VK change is needed.
+
+- **The web deposit form explains what the wallet said instead of printing
+  the raw rejection.** Clicking *Connect Wallet* twice before answering
+  MetaMask used to put the whole EIP-1193 error object — code, message and
+  the extension's stack — into a browser `alert()`. The form now reads the
+  error's `code` and says what to do: `-32002` points at the extensions
+  button, because MetaMask keeps a pending connection request behind its
+  toolbar icon and never raises a window for it; `4001` reports a rejection
+  in one line; `4100` asks for the wallet to be unlocked; `4902` explains the
+  prompt that offers to add Sepolia. Anything else shows the provider's own
+  `message`. The untouched object still goes to the browser console.
+- **The web deposit form's *Connect Wallet* button no longer sends a second
+  request while the first is open.** It is disabled and reads *Check
+  MetaMask…* until the wallet answers, so a second click cannot produce the
+  `-32002` it used to.
+
 ### Documentation
 
 - Clarify the owner-anchor flip trust model (bridge-audit #57 / #106).
@@ -34,20 +98,25 @@ assigns it when the release is tagged.
   both owners remain trusted after a flip. No contract behavior, ABI or
   deployment artifact changes.
 
-- Ethereum and Acki Nacki share one per-deposit ceiling of `type(uint64).max`
-  USDC base units. `AckiNackiBridge.deposit` reverts `DepositTooLarge` above it;
-  `finalizeDeposit` refuses a proven amount that does not fit `uint64` with
-  exit 214. There is no extra product minimum besides `amount > 0`, and the
-  100 USDC figure in older notes is not in the contracts —
+- The deposit form uses the 50 USDC transfer ceiling and Circle Sepolia USDC
+  (`0x1c7D4B19…`), with the bridge address supplied at build time as described
+  below. Test USDC comes from Circle's faucet. The ursus deposit-relayer
+  example uses `rpc.sepolia.ethpandaops.io` and requires logs back to the
+  configured deployment block.
 - New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
   deposit relayer. It covers one daemon per AN bridge and backing up
-  `state.json`, the strict `depositId` queue, parking with
-  `--skip-after-attempts` and finishing parked deposits with
-  `prove-one` + `finalize-one`, which outcomes are retried automatically
-  (pending, paused lane) and which need a person, a fix for each exit code,
-  the `--force-state` checklist after a redeploy, alert rules over the
-  Prometheus metrics, and failing over to a cold standby (QC-OFF-01, -02, -08,
-  -11).
+  `state.json`, later ids going first while failed ids retry from
+  `outstanding_deposits`, parking with `--skip-after-attempts` and finishing
+  parked deposits with `prove-one` + `finalize-one`, which outcomes are retried
+  automatically (pending, paused lane) and which need a person, a fix for each
+  exit code, the `--force-state` checklist after a redeploy, alert rules over
+  the Prometheus metrics (`deposit_relayer_outstanding_deposits` for a stuck
+  id), and failing over to a cold standby by copying the full `state.json`
+  (QC-OFF-01, -02, -08, -11). A pending submit stays at the base outstanding
+  delay (it does not increment attempts). `--force-state` also drops
+  outstanding ids and logs them. An outstanding id with no stored log is
+  scanned from the persisted `scan_done_through_block` plus one, not from
+  `--from-block` and not to the live head.
 
 - `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
   row told operators to re-prove `applyBkSetUpdate` against the live
@@ -84,6 +153,23 @@ assigns it when the release is tagged.
   `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
   deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
   runs.
+- `docs/eth-light-client.md` §3.5 records that the owner keys stay until
+  the bridge is mature: `disableOwnerRotation` / `--flip-owner` are not a
+  pending production step. §4.5 has the per-network Gloas slot table. A
+  pin that later needs a published date is corrected with
+  `set-gloas-fork-slot`; `updateCode` is not required for that field.
+
+- `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
+  row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
+  bridge has recorded. A window with `dataLen > 0` is never cleared, so
+  that layer stays in `t` when later key blocks skip it.
+- `AckiNackiBridge.deposit`'s `anWorkchain` is telemetry. It is kept in
+  the ABI and the `Deposit` event so the log shape stays stable, but it
+  is not a deposit-proof public input and Acki Nacki always credits
+  workchain 0 (`eccUSDCBridge._parsePublicInputs` /
+  `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
+  That is the accepted product choice, not a gap to close by putting
+  workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
 - `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md` gains
   *Case 3e — Anchor eviction deadline*: how long a burned withdrawal can wait
   before its anchor leaves the 128-slot window. On an L1 deploy that is ~12 h
@@ -99,6 +185,37 @@ assigns it when the release is tagged.
   gains the same deploy-mode caveat.
 
 ### Breaking Changes
+
+- The Python withdrawal E2E tools use Sepolia (`11155111`) by default.
+  Set `DST_CHAIN_ID` to the destination's actual EIP-155 id on other networks.
+  They check `getDepositLimits(chainId)` before sending ECC; inventory
+  belonging to another chain cannot cover the withdrawal.
+- Bridge transfers are limited to 50 USDC. Each L1 bridge caps deposited
+  principal minus completed payouts at 10,000 USDC, including Aave principal;
+  AN tracks that capacity separately per destination/source chain. Deposit and
+  withdrawal arguments, return values, events and proof formats are unchanged.
+  EVM adds `TransferTooLarge` and `TvlCapReached`; AN adds finalization errors
+  234 (oversized transfer) and 235 (capacity, retry after withdrawals), and
+  `getDepositLimits(chainId)`. Oversized or inventory-short AN withdrawals
+  return their ECC with at most `min(msg.value, 0.1 vmshell)` and emit no burn
+  event. CLI and UI check limits before approval, deposit or burn; failed
+  limit reads stop the operation. Deposit relayers wait for capacity, while
+  withdrawal relayers park oversized proofs.
+- Deploy the limits as a fresh pair. AN 1.13.0 adds chain balances and replay
+  hashes to its upgrade tuple; it cannot decode the 1.12.0 tuple. Drain pending
+  transfers, including old amounts above 50 USDC, before switching. Pause old
+  L1 contracts and verify the pause before activating replacements; never keep
+  two funded payout contracts for the same AN identity and chain. Custody and
+  consumed withdrawal nullifiers require a separate migration before funding
+  a replacement that accepts the same history. See `contracts/an/README.md`.
+- AN external-message replay protection now hashes the verified message body
+  and signer, preventing replay through changes to the unsigned external
+  envelope. Expiring hashes also prevent an unsigned finalization with a
+  future `time` from blocking owner calls.
+  `expire` must be later than block time and less than five minutes ahead
+  (402/401); a recorded duplicate returns 400. CLI and relayer finalizations
+  bound expiry to 240 seconds. The CLI resends its existing BOC after an
+  uncertain outcome until expiry; proof bytes are retained.
 
 - **Every prover the relayers start is a binary the operator names, checked
   at startup; the `cargo run` fallbacks are gone.** A daemon started with a
@@ -153,13 +270,103 @@ assigns it when the release is tagged.
   A daemon started from an old unit refuses with the name of the missing
   flag.
 
+- **The rotate verification key is rotated and an early `/updates`
+  hand-off no longer freezes the head.** The rotate circuit now exposes
+  the attested slot as public input 16 (17 Fr in all: 12 accumulator
+  limbs then `[current, next, period, gloas_fork_slot, attested_slot]`).
+  `submitRotate` reverts 240 if `attestedSlot / 8192 + 1` is not the
+  proof's `period`. There is no end-of-period window: a beacon `/updates`
+  best update is a valid hand-off, and the replaced committee can still
+  advance the head for the period it served. Previous rotate proofs (16
+  public inputs) do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3`
+  (was `4dc3f0a7…71d4cf54`). `updateCode` in place keeps the head and
+  committee and clears `_prevCommittee`; a new deploy is a new address
+  (`getLightClient` / `AN_LIGHT_CLIENT` change). The new `eth-lc-relayer`
+  refuses old 512-byte rotate bundles. Light client `1.6.0`, code hash
+  `c4b63228…`. The ABI is unchanged.
+
+  Two early rotates in a row still cut the replaced committee's late-
+  registration time: rotate P→P+1 during P, then P+1→P+2 on the best
+  update of P+1 (about 20 min after the boundary) retires C_P, so
+  checkpoints it skipped in P can no longer be registered. Honest rotates
+  leave that window until the start of P+2, about 27 h. A proper fix would
+  keep two previous committees.
+
+- **Workchain removal and owner recovery were combined in 1.12.0.** Two branches each
+  built a 1.11.0: one adding owner `mintAndSendBridged`, one carrying the
+  deposit ABI without `anWorkchain` and its regenerated key. They are now one
+  contract with both changes, rebuilt with sold 0.80.0, code hash
+  `a1fd7d19…`; the limits release supersedes it with 1.13.0. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
+  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.13.0 with limits.
+
+- **Deposits no longer have a workchain parameter.** For a fresh deployment,
+  use `deposit(uint256,bytes32)` and
+  `Deposit(uint256,address,uint256,bytes32,uint256)`; the event's non-indexed
+  data is now 96 bytes. The CLI, frontend, deposit relayer and prover use this
+  format, and witness JSON no longer includes `an_workchain`. Deploy the matching
+  Ethereum contract and `eccUSDCBridge` 1.12.0 with the regenerated deposit
+  verification key (code hash `a1fd7d19…`), and use the updated clients
+  and prover together. Proofs for the previous event format do not verify under
+  this key. Withdrawal interfaces, DApp ID handling and the 12 deposit public-input
+  slots are unchanged. The shipped CLI profile and relayer template no longer
+  pin an earlier EVM deployment: set `BRIDGE_ADDRESS` and its deployment block
+  (`BRIDGE_DEPLOY_BLOCK`, and `FROM_BLOCK` for the deposit relayer). Replace old
+  values in reused profiles explicitly. Build the frontend with
+  `BRIDGE_CONTRACT_ADDRESS` set to that same new EVM deployment; without it,
+  deposits and approvals are disabled before any wallet request.
+
+  This rollout assumes a fresh pair and provides no in-place migration of a
+  funded bridge. Before replacing an existing AN bridge's code, pause new
+  deposits on its old EVM bridge and finalize every pending old-format deposit
+  with the old AN bridge unpaused and its matching prover/relayer. Verify the corresponding
+  finalized AN credit for every old deposit ID below the paused EVM bridge's
+  `depositCounter` before replacing the AN code or removing those tools.
+  The 1.12.0 key cannot finalize 128-byte events,
+  and the old EVM contract has no deposit refund path. Custody and outstanding
+  withdrawals on an existing pair require a separate migration plan.
+
+  `ackinacki-bridge deposit` now refuses an AN bridge older than 1.13.0
+  before requesting a transaction. For the new deployment, configure the
+  matching EVM/AN pair and its trust settings first, install the matching prover
+  and clients, then publish the new addresses and start deposits. Do not switch
+  clients alone against an earlier deployment. The installer preserves an
+  existing profile, so its deployment values must be updated by the operator.
+- **`eccUSDCBridge` 1.12.0 adds owner `mintAndSendBridged` for CLI exit 37.**
+  After a voucher-consumed `confirmDeposit` abort the deposit cannot be
+  finalized again, Ethereum already holds the USDC, and ordinary
+  `mintAndSend` does not increment `getTotalBridged` — last withdrawers
+  then hit 233. `mintAndSendBridged` matches `confirmDeposit`: it mints
+  ECC[3] and credits `_totalMintedBridgeByToken`. It shares `_mintNonce`
+  with `mintAndSend`. Do **not** use it for ordinary owner mint: that
+  would invent bridged inventory the Ethereum treasury does not hold.
+  `mintAndSend` / `mintAndSendAccumulator` / TIP-3 mint still increment
+  only `getTotalMinted`. `mintAndSendBridged` is not bound to a deposit
+  id: the operator must match the aborted deposit's recipient and amount,
+  once — a second call or a mistyped `value` adds inventory Ethereum does
+  not hold.
+
+  ECC[3] stays fungible: the cap is still an inventory check, not a
+  per-depositor reservation. That half of QC-AN-05 is the accepted
+  product choice.
+
+  The limits release is 1.13.0, code hash `4525d927…`, rebuilt with sold
+  0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
+  described above; the old upgrade tuple cannot initialize this build.
+  `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the
+  aborted deposit's source chain and enforces the transfer and chain limits.
+  Pass the deposit's EIP-155 source chain id. Deposit and withdrawal
+  entrypoint arguments are unchanged. The CLI's supported deposit version
+  and `NEWEST_KNOWN_BRIDGE_VERSION` are 1.13.0.
+
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
-  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
-  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
-  against headroom that deposits created: the cap limits total bridge
-  payouts to total deposits, not one depositor's own withdrawal.
+  Ordinary owner `mintAndSend` / `mintAndSendAccumulator` and TIP-3 mint
+  increment only `getTotalMinted` and add no headroom. 1.12.0's
+  `mintAndSendBridged` is the exception, for exit-37 recovery only. ECC[3]
+  is fungible, so such ECC can still be withdrawn against headroom that
+  deposits created: the cap limits total bridge payouts to total deposits,
+  not one depositor's own withdrawal.
 
   A fresh zerostate starts both counters at 0, so the cap holds from the
   first burn. `updateCode` copies the maps as they are. On a live bridge
@@ -168,9 +375,13 @@ assigns it when the release is tagged.
   burn is refused until `finalizeDeposit` brings minted up to burned.
   That is not the same as a fresh deploy.
 
-  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The ABI is unchanged. The withdraw CLI preflight checks
+  Included in the `eccUSDCBridge` 1.12.0 build described above. The withdrawal
+  ABI is unchanged. The withdraw CLI preflight checks
   `getTotalBridged` and refuses before the burn.
+  `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
+  The 1.10.0 ABI was unchanged; 1.12.0 above adds `mintAndSendBridged`.
+  The withdraw CLI preflight checks `getTotalBridged` and refuses before
+  the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
@@ -192,7 +403,8 @@ assigns it when the release is tagged.
   that, so a deposit on a chain whose client was not the last one deployed is
   no longer refused. A bridge that reports 1.9.0 without the per-chain getter
   is answered once and falls back with a warning instead of being retried for
-  ever. 1.9.0 is now the newest version the CLI was checked against.
+  ever. 1.9.0 was the newest version the CLI was checked against in that
+  change; 1.12.0 above is now `NEWEST_KNOWN_BRIDGE_VERSION`.
 
 - **One light-client code, one client per source chain, addressed by code
   salt.** `setLightClientCode` now only stores the code. The address is
@@ -256,7 +468,8 @@ assigns it when the release is tagged.
   committee 87 → 2946, execution block hash 812 → 2856), so the circuits pick
   the index per header from its slot against a Gloas fork slot that is now a
   public input: the step proof has 11 inputs (`gloasForkSlot` at index 10) and
-  the rotate proof 16 (`gloasForkSlot` after `period`). Step and rotate proofs
+  the rotate proof 16 then (`gloasForkSlot` after `period`; 1.6.0 adds
+  `attested_slot` as a 17th). Step and rotate proofs
   made for the previous circuits no longer verify — regenerate them, and
   replace `EthBeaconLightClient` code (step VkBlob sha256 `581910a739788e1e4269c9cbf848c29f57a9e9a49e60f5e0178cc1ed67f397db`,
   rotate VkBlob sha256 `4dc3f0a71a1b18775fb13e7ba96ec4eac78f7615b9e521e6bdf9d89b71d4cf54`) with `updateCode`, passing
@@ -282,8 +495,10 @@ assigns it when the release is tagged.
   period the proven next committee serves) instead of loading it as a free
   witness, so a hand-off can no longer be submitted under a period of the
   sender's choosing. `submitRotate` stores it in `_committeePeriod` and emits
-  it in `CommitteeRotated`; nothing gates on it. This is part of the rotate
-  verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
+  it in `CommitteeRotated`. The 1.6.0 entry above now requires
+  `attestedSlot / 8192 + 1 == period` on `submitRotate` (240) and uses that
+  stored period as the replaced committee's signing bound. This is part of
+  the rotate verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
   rotate proofs made before it do not verify. `eth-lc-relayer` refuses a
   rotate proof whose period is not the one it is rotating into, and it
   does not start `rotate_tree_n8` for a live period that tree cannot
@@ -538,16 +753,10 @@ assigns it when the release is tagged.
 - **A checkpoint skipped near the end of a sync-committee period can still be
   registered after the rotation.** `submitUpdate` keeps the commitment a
   `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
-  for late registration only — never to move the head, which still needs the
-  committee in force. The replaced committee may sign only around
-  the head it left behind: the attested slot must be within one period either
-  side of the finalized slot recorded when the rotation landed. The slack on
-  the later side is what makes the feature work at all — that recorded slot is
-  the last head the leaving committee moved, not the end of its period, so the
-  checkpoint it skipped is attested *after* it and an upper bound at the
-  recorded slot itself would exclude exactly the skips this exists for. The
-  bound is a slot, read out of the signed header by the step circuit, not the
-  rotate proof's period label. The owner hatches
+  while `attestedSlot / 8192 + 1 == _committeePeriod` — the period that
+  committee served — including to move the head. An early `/updates` best
+  update is therefore a valid hand-off and does not freeze the rest of that
+  period. The owner hatches
   (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
   rather than carrying it: they replace a committee the owner is rejecting, or
   jump several periods, so neither is a hand-off. `getCommitteeState` returns
@@ -566,9 +775,9 @@ assigns it when the release is tagged.
   `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
   upgraded client therefore starts with no previous committee, which only
   means no catch-up across the rotation already behind it; the field fills on
-  the next rotation. The same goes for `_prevCommitteeHeadSlot`, the second new
-  field, a `uint64` next to it: also set to 0 on the upgrade, also filled by
-  the next rotation, and the late path stays closed until both are non-zero.
+  the next rotation. `_prevCommitteeHeadSlot` sits next to it in the layout
+  and is written on rotate, but nothing reads it: the previous-committee path
+  opens when `_prevCommittee` is filled.
 
   `getCommitteeState` gains a `prevCommittee` output and no other function or
   event changes. **Every caller of that getter has to take the new ABI**, not
@@ -585,12 +794,10 @@ assigns it when the release is tagged.
   rubbish from `_committeePeriod` onward: anything decoding this client's state
   off-chain needs the new ABI.
 
-  The window is slack around a proven slot, not a period boundary. When the
-  head is near the end of its period at the rotation it reaches into the next
-  one, and an early hand-off puts it wherever the sender put the head. Signing
-  there needs a supermajority of the retired committee's keys — the long-range
-  assumption this design already carries — but the contract does not
-  enforce "the committee of the attested slot's period".
+  The replaced committee is accepted for the period it served
+  (`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
+  head. `_prevCommitteeHeadSlot` is kept for the storage layout; nothing
+  reads it.
 
 - **`submitRotate` no longer decides anything by the period on the proof, and
   refuses a hand-off that does not change the committee.** The rotate circuit
@@ -611,9 +818,9 @@ assigns it when the release is tagged.
   committee is unique. So the period is now out of the decision entirely: the
   monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
   the owner's `reAnchorCommittee`. `_committeePeriod` and `CommitteeRotated`
-  carry the rotate proof's period, which the circuit now binds to the attested
-  slot (the rotate verification key entry above). It is a report for
-  operators, and nothing gates on it.
+  carry the rotate proof's period, which the circuit binds to the attested
+  slot. 1.6.0 additionally requires that equality on `submitRotate` (240) and
+  uses the stored period as the replaced committee's signing bound.
 
   `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
   (`ERR_SELF_ROTATION`, 253). A genuine proof with
@@ -623,15 +830,10 @@ assigns it when the release is tagged.
   overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
   every checkpoint the replaced committee had not registered yet.
 
-  **Still open, and not fixable here.** Nothing binds a committee to a period
-  except that free label, so a genuine hand-off submitted early — the next
-  committee is in the headers of the current period, so the proof exists from
-  its first slot — installs a committee that has signed nothing yet. The head
-  then cannot move until the chain reaches that committee's period (up to ~27
-  h), and the replaced committee's unregistered checkpoints are stranded. This
-  is permissionless, repeatable once per period, and true of the deployed
-  1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
-  circuit, which is not in this change.
+  An early hand-off used to freeze the head until the successor's period,
+  about 27 hours. 1.6.0 lets the replaced committee keep advancing the head
+  for the period it served, so a `/updates` best update is a valid rotate
+  and does not strand the rest of that period.
 
 - **A rotate whose confirmation is lost no longer stops the daemon for
   good.** `call_contract` broadcasts the message and waits for it in one
@@ -675,8 +877,8 @@ assigns it when the release is tagged.
   --examples`) on every relayer host and anywhere `ackinacki-bridge
   deposit` proves. Proofs made with the previous key (bridge 1.6.0) stop
   verifying, and a stale `target/release/examples/<name>` produces proofs
-  the new key rejects. `ackinacki-bridge deposit` refuses a bridge older
-  than 1.7.0.
+  the new key rejects. The current minimum AN bridge version for
+  `ackinacki-bridge deposit` is 1.12.0, as described above.
 
 - **The deposit-prover verification key is rotated, and the rotation
   closes two forgeries.** Under the previous key — and every earlier one
@@ -733,8 +935,8 @@ assigns it when the release is tagged.
   generates the new ~3.4 GB key and then deletes the old one, so
   `data/` briefly needs room for both. `ackinacki-bridge deposit`
   installs get the prover tools from a release (`install.sh`), so
-  they need a new release; this CLI refuses a bridge older than
-  1.7.0, whose key its proofs do not match.
+  they need a new release; the current CLI refuses an AN bridge older than
+  1.12.0, as described above.
 
   The prover now refuses a deposit it cannot prove before loading
   the SRS or the key. `fetch_deposit_data` exits 3 when the
@@ -1052,6 +1254,37 @@ assigns it when the release is tagged.
 
 ### Added
 
+- `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
+  user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
+  as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
+  nothing; needs a build with `--features live-submit`. Use it when an
+  upgrade should set the pin in the same `updateCode` as the new code.
+- **Deposit anchor-wait diagnostics.** The relayer exports
+  `deposit_relayer_waiting_for_anchor`,
+  `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
+  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` outcome, and
+  `stage="is_block_accepted"` label in
+  `deposit_relayer_stage_duration_seconds`.
+  Outstanding entries in `state.json` gain optional
+  `anchor_wait_started_unix` and `anchor_wait_last_warned_unix` timestamps;
+  older state files remain readable. Missing anchors warn immediately by
+  default; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
+  default `0`) can delay the warning when coverage is monitored separately.
+  Warnings repeat at most every 15 minutes per deposit across restarts.
+  The logs identify the deposit, chain and block, distinguish the initial
+  wait from a delayed warning, and remain visible if saving state fails.
+  Before manual admission, compare the logged block number and hash using
+  `eth_getBlockByNumber` on an independent RPC for that chain; an expected
+  delivery delay alone is not a reason to admit a hash manually.
+
+- `deposit-relayer daemon --outstanding-backoff-secs` /
+  `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
+  is retried, doubled on each later failure of that id up to 64×. Gauge
+  `deposit_relayer_outstanding_deposits`. `state.json` gains
+  `outstanding_deposits` (per-id attempts, `retry_after_unix`, and the
+  Deposit tx / block / log index when known) and `last_finalized_deposit_id`
+  (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
+
 - **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
   primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
   `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
@@ -1141,8 +1374,9 @@ assigns it when the release is tagged.
   `AN_DAPP_ID=0`. The value has no effect on-chain, but it is part of the
   `state.json` deployment binding (`chain_id`, EVM bridge, `AN_DAPP_ID`).
   Changing it on an existing file fails start-up with a deployment
-  mismatch; `--force-state` then discards the cursor, parked ids and
-  unprovable ids even though no bridge changed (QC-OFF-09).
+  mismatch; `--force-state` then discards the cursor, parked ids,
+  outstanding ids, `last_finalized_deposit_id` and unprovable ids even
+  though no bridge changed (QC-OFF-09).
 
 - `deposit-relayer daemon` no longer re-scans Ethereum logs while it retries a
   deposit that AN keeps refusing. Once a deposit is found, retries reuse it
@@ -1458,9 +1692,10 @@ assigns it when the release is tagged.
   light-client code and writes the account into the zerostate; acki-nacki
   places it with the contracts and calls it while generating one. A new setup
   call, a new parameter or a new storage field is now a change in this
-  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
-  the trusted L1 bridge a generated zerostate starts with, defaulting to
-  `11155111` and `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
+  repository alone. `BRIDGE_ZS_L1_BRIDGE` must name the fresh paired L1
+  deployment: missing, zero or malformed addresses stop generation before
+  any account is changed. There is no default address.
+  `BRIDGE_ZS_L1_CHAIN_ID` defaults to Sepolia (`11155111`).
   `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
   the cell — never deployed, executed in `tvm-debugger` — and
   `scripts/check_zerostate_data_encoder.py`, wired into
@@ -1552,9 +1787,9 @@ assigns it when the release is tagged.
   `disableOwnerRotation`; one-shot: `eth-lc-relayer flip-owner`. Do not flip
   yet: afterwards deposits from the allowlisted L2s and from the 31
   non-checkpoint blocks of an epoch fail `finalizeDeposit` with
-  `ERR_UNKNOWN_BLOCK` (224), and `deposit-relayer` stops at the first of them
-  unless `--skip-after-attempts` is set
-  (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
+  `ERR_UNKNOWN_BLOCK` (224). `deposit-relayer` walks past a failed id and
+  retries it with backoff; `--skip-after-attempts` still parks one that
+  keeps failing (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
   changes nothing. Relayer keys must be the owner pubkey of both contracts. The
   slim ABIs in `crates/eth-light-client-relayer/abi/` follow the compiled
   contracts: `USDCBridge.abi.json` has `getAnchorConfig` and no
@@ -1614,6 +1849,68 @@ assigns it when the release is tagged.
   destination rule on its side; the manifest is followed, not trusted.
 
 ### Changed
+
+- **`setGloasForkSlot` stays owner-callable after `disableOwnerRotation`.**
+  Light client `1.6.1`: the `require` that reverted 246 once the pin was
+  set is gone from both sources and from the placed `0.81.0_compiled`
+  TVC. A `u64::MAX` pin is a setting: when mainnet publishes Gloas,
+  `set-gloas-fork-slot` updates it. `updateCode` already exceeds that
+  write, so freezing the field was not a security boundary. The daemon
+  still returns `ProofFailed` and names `setGloasForkSlot` when the
+  beacon spec slot disagrees with the pin, instead of proving into 255.
+  Slot table in `docs/eth-light-client.md` §4.5. A live 1.6.0 client
+  needs `updateCode` with this TVC to pick it up.
+
+- **Deposit retries alternate with new work.** Finite retry rounds prevent
+  incoming traffic from indefinitely delaying older deposits. A first anchor
+  wait resets the daemon polling delay to `--backoff-initial-secs`, including
+  after idle polls or errors. Repeat waits preserve active failure backoff;
+  with no failures, they reset idle backoff for responsive normal polling.
+  Progress or a new wait clears the failure streak. Per-deposit anchor
+  polling uses the larger of failure backoff and one quarter of wait age,
+  with the age component capped at 60 seconds. Setting
+  `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. Fresh waits retain
+  the short base interval.
+- **`deposit_relayer_outstanding_deposits` includes healthy anchor waits.**
+  Adjust alerts that treat any nonzero value as failure to distinguish
+  failed attempts and missing anchors using their age and coverage.
+  An uncovered block can require the anchor writer's intervention.
+- **The deposit daemon's `AN_BRIDGE_ABI_PATH` must include
+  `isAcceptedBlockHash(uint256,uint256) returns (bool)`.** Upgrade a custom
+  ABI alongside the daemon; a missing getter causes tick errors and stops
+  delivery. The full bridge ABI shipped in the repository includes it.
+- **The replaced committee may still advance the head** for the period it
+  served (`attestedSlot / 8192 + 1 == _committeePeriod`), not only
+  late-register a skipped checkpoint. An early rotate therefore does not
+  freeze the rest of that period.
+
+- The ETH→AN deposit relayer no longer stalls every later deposit behind one
+  that cannot be finalised. Later ids are tried first; a failed id stays in
+  `outstanding_deposits` and is retried with backoff on idle ticks,
+  round-robin, from its stored Deposit tx (or its block) so the log-scan
+  cursor can keep moving. A pending submit (`ERR_PAUSED`, a confirmation
+  timeout) goes into that set with backoff but does not count toward
+  `--skip-after-attempts`. Parked ids stay parked. A `state.json` written by
+  an earlier relayer that only has `attempts_since_progress` for the last
+  failed id carries that count into the new outstanding entry, so
+  `--skip-after-attempts` does not start over; that id has no stored tx, so
+  the first retry starts at the `scan_done_through_block` from that file
+  plus one (the earlier relayer left the cursor at the deposit's block
+  minus one), not at `--from-block` and not at the live head.
+  `finalize-one` is unchanged.
+
+  Gauges that used to mean "the one stuck head-of-line id" now mean something
+  else: `deposit_relayer_attempts_since_progress` follows the last failed
+  outstanding id and resets when any later id finalizes;
+  `deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` and
+  only goes up; `deposit_relayer_target_deposit_id` shows the retried id
+  during an idle retry, then the forward id again. Alert on
+  `deposit_relayer_outstanding_deposits`.
+
+  Before running an older binary, move every `outstanding_deposits[].deposit_id`
+  into `parked_deposit_ids`. An older binary ignores `outstanding_deposits`
+  (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
+  those ids, so it would neither retry nor park them.
 
 - **Relayer logs and errors name Ethereum endpoints by scheme and host
   only, at every log level.** reqwest put the full URL, API key included,
@@ -2055,6 +2352,29 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- `deposit-prover/scripts/recanonicalize_fixture_headers.py` skips fixtures
+  marked `fixture_kind: synthetic` in both check and write modes, so they do
+  not interrupt header checks and updates for real chain witnesses.
+
+- Frontend deposits use the validated Acki Nacki recipient entered in the form.
+  The connected Ethereum address is used for USDC allowance checks. Invalid AN
+  recipients are rejected before a deposit transaction is sent.
+
+- The withdraw relayer proved a block whose attestation carried a signer
+  more than once with `block_seq_no = 0`: the fetcher wrote the height into
+  the assembled attestation bytes at an offset computed from the sum of the
+  signer counts, while the layout, and the circuit, count entries (one per
+  distinct signer). `AckiNackiBridge` rejected the proof with
+  `AttestationProofRejected()`, the daemon aborted after three rejects and
+  was restarted into the same loop. Shellnet block 1239860 (2026-10-19,
+  three signers with count 3) stopped the relayer this way at
+  `applyBkSetUpdate`; a bundle block with a repeated signer would have done
+  the same at `verifyBlock`. The height is now written where the circuit
+  reads it, a block whose `seq_no` is not the requested height is refused,
+  and a proof whose height is not the block's is refused before it is sent.
+  Upgrade the relayer (for the shellnet-l2 kit, rebuild the image); nothing
+  on chain, in the keys or in the state changes, and the stuck block is
+  proved again on the next start.
 - **A lost or stuck transaction no longer stalls the relayer.** alloy's
   default nonce manager read the nonce once and counted locally, advancing
   before the broadcast: when the RPC lost a send, every later transaction
@@ -2357,9 +2677,10 @@ assigns it when the release is tagged.
   - while the next `depositId` is not made yet, the poll makes no
     `eth_getLogs` call and moves the cursor up to the confirmed head;
   - once it is made, the scan starts after the cursor and stops at the block
-    that holds the deposit. The cursor moves only after AN accepts the
-    deposit, and only to the block before it, so a retry finds the deposit
-    again and a later deposit in the same block is still found;
+    that holds the deposit. The cursor moves after AN accepts the deposit,
+    to the block before it, so a later deposit in the same block is still
+    found. A failed deposit is retried from its stored tx, not from this
+    cursor;
   - if `depositCounter()` says the deposit is made but no scanned block holds
     its log, the poll fails with an error naming the blocks it scanned: the
     RPC returned incomplete logs, or `--from-block` is above the deposit.
@@ -2606,11 +2927,6 @@ assigns it when the release is tagged.
   deposit whose block is older than a year by as much as one full rotation of
   the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
   is the light client's own `_isLive`, not the bridge's map.
-
-- **A genuine committee hand-off can be submitted early and freeze the head.**
-  Permissionless, repeatable once per period, and present in the deployed
-  1.4.1; see the `submitRotate` entry in Breaking Changes. The fix belongs in
-  the rotate circuit, which has to bind the hand-off to a slot.
 
 - **A deposit is only covered once both checkpoints bracketing its block are
   proven and within a span of each other.** Gas is no longer the obstacle —

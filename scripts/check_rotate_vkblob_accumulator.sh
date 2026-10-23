@@ -20,6 +20,8 @@
 #   6. Negative: a byte-11-cleared copy of the rotate blob must NOT pass (1)
 #   7. If ../tvm-sdk/tvm_vm/halo2_test_data/step_light_client/step_vk_blob.bin
 #      exists, it must equal the step fixture (the sync script's job)
+#   8. fixtures/rotate_vkblob/rotate_public_inputs.bin satisfies
+#      attestedSlot / 8192 + 1 == period (the 240 gate on submitRotate)
 #
 # Usage:
 #   ./scripts/check_rotate_vkblob_accumulator.sh
@@ -162,10 +164,26 @@ if sdk_step_path.is_file():
         )
     sdk_note = f"tvm-sdk step fixture matches ({step_hash[:16]}…)"
 
+pi_path = rotate_path.parent / "rotate_public_inputs.bin"
+if not pi_path.is_file():
+    fail(f"missing {pi_path}")
+pi = pi_path.read_bytes()
+want_pi = 17 * 32
+if len(pi) < want_pi:
+    fail(f"rotate_public_inputs.bin too short ({len(pi)} < {want_pi})")
+period = int.from_bytes(pi[14 * 32 : 14 * 32 + 8], "little")
+attested = int.from_bytes(pi[16 * 32 : 16 * 32 + 8], "little")
+if attested // 8192 + 1 != period:
+    fail(
+        f"fixture attested {attested} / 8192 + 1 != period {period} "
+        "(submitRotate 240)"
+    )
+
 print(
     f"OK: rotate accumulator_limbs=12 ({len(rotate)} B, sha256={rotate_hash[:16]}…); "
     f"step accumulator_limbs=0 ({len(step)} B, sha256={step_hash[:16]}…); "
     "contract ROTATE_VK_BLOB and VK_BLOB match fixtures; "
+    f"rotate PI period={period} attested={attested}; "
     f"byte-11-cleared probe rejected; {sdk_note}"
 )
 PY

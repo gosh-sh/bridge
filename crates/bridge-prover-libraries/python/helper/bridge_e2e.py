@@ -47,7 +47,7 @@ WITHDRAWAL_AMOUNT  = 1_000_000
 #   - ECC[3] USDC   → the only token USDCBridge.initiateWithdrawal accepts.
 ECC_ID_FOR_BURN    = 2   # Shell — gas bootstrap (giver has it at genesis)
 USDC_TOKEN_ID      = 3   # ECC[3] — token attached to initiateWithdrawal
-DST_CHAIN_ID       = 1
+DST_CHAIN_ID       = int(os.environ.get("DST_CHAIN_ID", "11155111"), 0)
 RECIPIENT_HEX      = "742d35cc6634c0532925a3b844bc454e4438f44e"
 
 # External-address dst for the WithdrawalInitiated event:
@@ -192,12 +192,17 @@ def encode_initiate_withdrawal_body(dst_chain_id: int, recipient_hex: str) -> st
     return json.loads(out)["Message"]
 
 
-def require_bridged_headroom(amount: int) -> None:
-    """Refuse locally if `initiateWithdrawal` would throw 233.
-
-    `mintAndSend` does not increment `getTotalBridged`. Without this check
-    a 233 revert with bounce=false leaves the minted ECC on the bridge.
-    """
+def require_bridged_headroom(amount: int, chain_id: int = DST_CHAIN_ID) -> None:
+    """Refuse before sending ECC when the destination chain has no inventory."""
+    limits = common.run_getter(
+        USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getDepositLimits", {"chainId": str(chain_id)},
+    )
+    try:
+        maximum, outstanding = int(limits["maxTransfer"]), int(limits["outstanding"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"getDepositLimits({chain_id}) failed: {limits!r}") from error
+    if amount > maximum or amount > outstanding:
+        raise RuntimeError(f"getDepositLimits({chain_id}): maxTransfer={maximum}, outstanding={outstanding}; finalize a deposit on this chain before withdrawing {amount}")
     raw = common.run_getter(
         USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getTotalBridged",
         {"tokenId": USDC_TOKEN_ID},
@@ -219,7 +224,7 @@ def require_bridged_headroom(amount: int) -> None:
 
 def call_initiate_withdrawal(msig_address: str, msig_abi: str, msig_key_path: str,
                              dst_chain_id: int, recipient_hex: str):
-    require_bridged_headroom(WITHDRAWAL_AMOUNT)
+    require_bridged_headroom(WITHDRAWAL_AMOUNT, dst_chain_id)
     payload = encode_initiate_withdrawal_body(dst_chain_id, recipient_hex)
     params = {
         "dest":    USDC_BRIDGE_ADDRESS_LEGACY,   # ABI `address` field — legacy form

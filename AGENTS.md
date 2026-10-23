@@ -62,8 +62,13 @@ appear in the product.
 Leave out internal refactors, private renames, test-only changes and
 implementation detail. If nothing observable changed, there is nothing to write.
 
-Sections, most disruptive first: `Breaking Changes`, `Added`, `Changed`,
-`Fixed`, `Removed`.
+`CHANGELOG.md` is release notes, not a record of the work: one condensed line
+per change — what changed, its exact name, and what the reader has to do. No
+mechanism, history or rationale; those belong in the pull request.
+
+Sections, most disruptive first: `Breaking Changes`, `New / Improvements`,
+`Fixes`. A removal the reader has to act on is a breaking change. Released
+sections before `[0.2.1]` keep the groups they were written with.
 
 ### Versions are assigned late
 
@@ -305,7 +310,9 @@ above, not a revision mismatch.
 `deposit::prover::tests::{the_prover_inherits_the_prover_lock_and_no_other_deposit_lock,
 a_tool_still_open_for_writing_is_started_once_it_is_closed,
 sigkill_to_the_cli_leaves_the_lock_with_the_running_prover}` read `/proc` or rely on Linux
-refusing to run a file open for writing (`ETXTBSY`), so they fail on macOS.
+refusing to run a file open for writing (`ETXTBSY`), so they fail on macOS. The same suite needs
+`SEPOLIA_TEST_SENDER` set to a Sepolia EVM address: the deposit tests send from it, no address is
+compiled in, and without it they fail with `set SEPOLIA_TEST_SENDER …`.
 
 `forge coverage` is there for two failure modes a plain `forge test` can miss. A fuzz test whose
 `vm.assume` rejects nearly every input trips Foundry's rejection cap depending on the seed — use

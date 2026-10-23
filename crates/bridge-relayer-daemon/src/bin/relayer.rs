@@ -26,32 +26,36 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use alloy::{
-    network::EthereumWallet,
     primitives::Address,
-    providers::{Provider, ProviderBuilder},
-    signers::{local::PrivateKeySigner, Signer},
+    providers::{Provider, RootProvider},
+    signers::local::PrivateKeySigner,
+    transports::http::reqwest::Url,
 };
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs,
-    require_executable, rpc_http_client, rpc_request_timeout_from_env, run_withdraw_e2e_once,
-    BackoffConfig, BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource,
-    BridgeClient, Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
+    check_chain_monotonicity_with_stride, classify_withdraw_revert, discover_event_proofs, eth_rpc,
+    require_executable, rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig,
+    BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
+    Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
     FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
     PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
     RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
     SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
     WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    GET_LOGS_CHUNK_BLOCKS,
+    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
+// `hide_env_values` on every flag whose variable can hold a credential:
+// clap otherwise prints `[env: NAME=value]` in `--help`. RPC and GraphQL
+// URLs carry API keys, and `RELAYER_PRIVATE_KEY` is the signing key.
+// `help_tests` holds every such flag to it.
 #[derive(Parser, Debug)]
 #[command(
     name = "relayer",
@@ -62,6 +66,19 @@ struct Args {
     /// subcommand; `sentry-watch` is stateless.
     #[arg(long, default_value = "./relayer-state.json")]
     state: PathBuf,
+
+    /// Fallback Ethereum RPC endpoints behind `--rpc-url`, comma-separated,
+    /// tried in order when the one before fails (see
+    /// `bridge_relayer_daemon::eth_rpc`). Their URLs may carry API keys:
+    /// logs name hosts only.
+    #[arg(
+        long,
+        env = "RPC_FAILOVER_URLS",
+        hide_env_values = true,
+        value_delimiter = ',',
+        global = true
+    )]
+    rpc_failover_urls: Vec<String>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -86,7 +103,7 @@ enum Cmd {
         #[arg(long)]
         bridge_address: Address,
         /// Hex-encoded private key of the relayer EOA.
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Maximum ticks to run before exiting (1 is enough for a
         /// canned fixture).
@@ -121,7 +138,7 @@ enum Cmd {
         #[arg(long)]
         bridge_address: Address,
         /// Hex-encoded private key of the relayer EOA.
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Initial backoff sleep on the first non-success outcome.
         #[arg(long, default_value_t = 2)]
@@ -182,11 +199,11 @@ enum Cmd {
         proofs_dir: PathBuf,
         #[arg(long)]
         block_seq_no: u64,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long)]
         dry_run: bool,
@@ -197,7 +214,7 @@ enum Cmd {
         proofs_dir: PathBuf,
         #[arg(long)]
         block_seq_no: u64,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
@@ -280,11 +297,11 @@ enum Cmd {
         /// Directory containing `proof_event_*.json` bundles.
         #[arg(long, env = "PROVER_PROOFS_DIR")]
         proofs_dir: PathBuf,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Seconds to sleep between directory scans when idle.
         #[arg(long, default_value_t = 15)]
@@ -321,11 +338,11 @@ enum Cmd {
         /// `proof_event_*.json` bundles.
         #[arg(long, env = "PROVER_PROOFS_DIR")]
         proofs_dir: PathBuf,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Seconds to sleep between iterations when idle (no work / all done).
         #[arg(long, default_value_t = 15)]
@@ -353,14 +370,14 @@ enum Cmd {
     /// Requires SRS/PKs under `--params-dir`, shellnet (or local) GQL, and a
     /// BK-set JSON fallback. Prover state lives under `--prover-state-dir`.
     DaemonLive {
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Acki Nacki GraphQL endpoint (same as partner `BRIDGE_GQL_ENDPOINT`).
-        #[arg(long, env = "BRIDGE_GQL_ENDPOINT")]
+        #[arg(long, env = "BRIDGE_GQL_ENDPOINT", hide_env_values = true)]
         gql_endpoint: String,
         /// Comma-separated failover GraphQL endpoints, tried in order after
         /// `--gql-endpoint` exhausts its retries. Every request starts from
@@ -370,7 +387,7 @@ enum Cmd {
         /// `BRIDGE_GQL_REQUEST_TIMEOUT_SECS` (30),
         /// `BRIDGE_GQL_CONNECT_TIMEOUT_SECS` (10), `BRIDGE_GQL_MAX_ROUNDS`
         /// (unset = loop forever).
-        #[arg(long, env = "BRIDGE_GQL_FAILOVER_ENDPOINTS")]
+        #[arg(long, env = "BRIDGE_GQL_FAILOVER_ENDPOINTS", hide_env_values = true)]
         gql_failover_endpoints: Option<String>,
         /// Bind address for the Prometheus text exporter (`GET /metrics`),
         /// e.g. `0.0.0.0:9464`. Unset = no exporter.
@@ -441,11 +458,11 @@ enum Cmd {
     SubmitWithdraw {
         #[arg(long)]
         proof_event: PathBuf,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long)]
         dry_run: bool,
@@ -456,11 +473,11 @@ enum Cmd {
         proofs_dir: PathBuf,
         #[arg(long)]
         block_seq_no: u64,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long)]
         accept_halo2_proofs: bool,
@@ -476,7 +493,7 @@ enum Cmd {
     /// only logs the produced proof metadata.
     WithdrawE2E {
         /// GraphQL endpoint (e.g. `https://shellnet.ackinacki.org/bk/v2/graphql`).
-        #[arg(long, env = "GQL_ENDPOINT")]
+        #[arg(long, env = "GQL_ENDPOINT", hide_env_values = true)]
         gql_endpoint: String,
         /// Path to the `prover_state.json` snapshot the enricher reads.
         #[arg(long, env = "PROVER_STATE_PATH")]
@@ -553,11 +570,11 @@ enum Cmd {
         prover_seq_no: u32,
         /// If set together with `--bridge-address` + `--private-key`,
         /// also drive `withdrawByProof` on Ethereum after proving.
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: Option<String>,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Option<Address>,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: Option<String>,
         /// If the submit trio is supplied, do only an `eth_call`
         /// dry-run (no signed tx).
@@ -581,10 +598,27 @@ enum Cmd {
     Status,
 }
 
+/// Exit status of `daemon-live` when it stops because the Acki Nacki chain
+/// is behind the bridge ([`RelayerError::AnChainBehindBridge`]): `EX_CONFIG`
+/// from `sysexits.h`. Every other failure exits with 1. No restart can help
+/// here, so a supervisor must not restart on it: the shellnet-l2 container
+/// entrypoint keeps the container up with the daemon stopped.
+const EXIT_AN_CHAIN_BEHIND_BRIDGE: i32 = 78;
+
+/// The exit status `err` asks for, when it is not the default 1.
+fn exit_status(err: &anyhow::Error) -> Option<i32> {
+    matches!(
+        err.downcast_ref::<RelayerError>(),
+        Some(RelayerError::AnChainBehindBridge { .. })
+    )
+    .then_some(EXIT_AN_CHAIN_BEHIND_BRIDGE)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let args = Args::parse();
+    let _ = RPC_FAILOVER_URLS.set(args.rpc_failover_urls.clone());
 
     match args.cmd {
         Cmd::Status => {
@@ -882,6 +916,10 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| {
                 error!(?e, "daemon-live failed");
+                if let Some(status) = exit_status(&e) {
+                    eprintln!("Error: {e:?}");
+                    std::process::exit(status);
+                }
                 e
             })
         },
@@ -976,11 +1014,35 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// HTTP client for `--rpc-url`: each request fails after
-/// `BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60) instead of waiting on a
-/// connection that went silent.
-fn rpc_http() -> anyhow::Result<alloy::transports::http::reqwest::Client> {
-    rpc_http_client(rpc_request_timeout_from_env()?)
+/// `--rpc-failover-urls` / `RPC_FAILOVER_URLS`, set once in `main`.
+static RPC_FAILOVER_URLS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// `rpc_url` followed by the failover endpoints.
+fn rpc_endpoints(rpc_url: &str) -> anyhow::Result<Vec<Url>> {
+    eth_rpc::endpoint_urls(
+        rpc_url,
+        RPC_FAILOVER_URLS
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    )
+}
+
+/// A read-only provider over `rpc_url` and the failover endpoints.
+async fn read_provider(rpc_url: &str) -> anyhow::Result<RootProvider> {
+    Ok(eth_rpc::read_provider(&rpc_endpoints(rpc_url)?).await?.0)
+}
+
+/// A provider that signs with `private_key`, over `rpc_url` and the
+/// failover endpoints, and the address it sends from.
+async fn wallet_provider(
+    rpc_url: &str,
+    private_key: &str,
+) -> anyhow::Result<(impl Provider + Clone + 'static, Address)> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let sender = signer.address();
+    let provider = eth_rpc::wallet_provider(&rpc_endpoints(rpc_url)?, signer).await?;
+    Ok((provider, sender))
 }
 
 /// The bundle stride `smoke-fixture`, `daemon` and `daemon-bridge` run at:
@@ -1024,20 +1086,9 @@ async fn smoke_fixture(
     max_ticks: usize,
     anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
-    // alloy migration (2026-05-17): `Provider<Http>::try_from(url)` +
-    // `LocalWallet` + `SignerMiddleware` is replaced by a builder-style
-    // chain that yields a wallet-filled provider in a single call. The
-    // signer's chain ID is derived from the RPC endpoint to mirror the
-    // ethers behaviour (which called `get_chainid` before `with_chain_id`).
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe_provider.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
 
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider).with_sender(sender));
     let source = Arc::new(FixturesBlockSource::open(
         &fixtures_dir,
         verifiers_dir.as_deref(),
@@ -1067,15 +1118,9 @@ async fn run_daemon(
     backoff: BackoffConfig,
     anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe_provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe_provider.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
 
-    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider));
+    let bridge = Arc::new(EthBridgeClient::new(bridge_address, provider).with_sender(sender));
     let source = Arc::new(FixturesBlockSource::open(
         &fixtures_dir,
         verifiers_dir.as_deref(),
@@ -1143,7 +1188,7 @@ async fn verify_fixture(
     bridge_address: Address,
     simulate: bool,
 ) -> anyhow::Result<()> {
-    let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let provider = read_provider(&rpc_url).await?;
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let source = FixturesBlockSource::open(&fixtures_dir, verifiers_dir.as_deref())?;
 
@@ -1309,7 +1354,7 @@ async fn submit_verify_block(
         .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
 
     if dry_run {
-        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+        let provider = read_provider(&rpc_url).await?;
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_block(&block).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: verifyBlock would succeed"),
@@ -1322,14 +1367,8 @@ async fn submit_verify_block(
         return Ok(());
     }
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_block(&block).await? {
         bridge_relayer_daemon::SubmitOutcome::Verified {
@@ -1361,7 +1400,7 @@ async fn verify_prover_proof(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no proof bundle for seq_no={block_seq_no}"))?;
 
-    let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let provider = read_provider(&rpc_url).await?;
     let bridge = EthBridgeClient::new(bridge_address, provider);
     let on_chain = bridge.read_state().await?;
 
@@ -1728,14 +1767,10 @@ async fn run_withdraw_daemon(
     backoff: BackoffConfig,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider)
+        .with_sender(sender)
+        .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -1795,9 +1830,12 @@ async fn run_withdraw_daemon(
 ///   2. one withdraw scan — `withdraw_scan_once` pays out every ready
 ///      `proof_event_*.json` (`withdrawByProof`).
 ///
-/// Running them sequentially in one task, sharing one provider, means there
-/// is never more than one in-flight transaction, so the shared EOA's nonces
-/// can't race (the failure mode a two-service split invites). A transient
+/// Running them sequentially in one task, sharing one provider, means the
+/// two legs never *send* at the same time. It does not mean one transaction
+/// in flight: a leg whose receipt wait times out leaves its transaction
+/// pending, and the other leg's next `prepare_send` reads `pending > latest`
+/// and replaces it at the same nonce (`nonce.rs`, `wait_for_receipt`'s doc).
+/// That replacement is the intended recovery, not a race. A transient
 /// failure in *either* leg trips the shared exponential backoff; a clean
 /// idle iteration resets it to the poll interval. Shutdown (SIGINT/SIGTERM)
 /// is honoured at the sleep boundary, so a `Verified` tick always flushes
@@ -1814,24 +1852,23 @@ async fn run_bridge_daemon(
     dry_run: bool,
     anchor_level: Option<u8>,
 ) -> anyhow::Result<()> {
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
 
     // Prover leg: cursor-driven `Relayer` over the partner proof bundles.
     let source = Arc::new(ProverProofsBlockSource::new(&proofs_dir));
-    let prover_bridge = Arc::new(EthBridgeClient::new(bridge_address, provider.clone()));
+    let prover_bridge =
+        Arc::new(EthBridgeClient::new(bridge_address, provider.clone()).with_sender(sender));
     let stride = submitting_stride(&prover_bridge, bridge_address, anchor_level).await?;
     let cfg = RelayerConfig::new(state_path, stride);
     let mut relayer = Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), prover_bridge)?;
 
-    // Withdraw leg: shares the SAME provider (one nonce source; the two
-    // legs run sequentially so there's only ever one in-flight tx).
-    let wd_bridge = EthBridgeClient::new(bridge_address, provider);
+    // Withdraw leg: shares the SAME provider (one nonce source). The legs
+    // run sequentially, but a timed-out receipt wait leaves a tx pending
+    // that this leg's next send may replace at the same nonce — see the
+    // function doc above.
+    let wd_bridge = EthBridgeClient::new(bridge_address, provider)
+        .with_sender(sender)
+        .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
     let mut wd_state = WithdrawScanState::default();
 
     let shutdown = shutdown_signal();
@@ -1952,7 +1989,7 @@ async fn submit_withdraw(
     let pub_inputs = bundle.public_inputs()?;
 
     if dry_run {
-        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+        let provider = read_provider(&rpc_url).await?;
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
@@ -1965,14 +2002,8 @@ async fn submit_withdraw(
         return Ok(());
     }
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_withdraw(&proof, &pub_inputs).await? {
         WithdrawSubmitOutcome::Paid {
@@ -2078,7 +2109,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
     let pub_inputs = summary.proof.public_inputs()?;
 
     if args.dry_run {
-        let provider = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
+        let provider = read_provider(&rpc_url).await?;
         let bridge = EthBridgeClient::new(bridge_address, provider);
         match bridge.dry_run_withdraw(&proof_bytes, &pub_inputs).await? {
             DryRunOutcome::WouldSucceed => info!("dry-run: withdrawByProof would succeed"),
@@ -2089,14 +2120,8 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_withdraw(&proof_bytes, &pub_inputs).await? {
         WithdrawSubmitOutcome::Paid {
@@ -2143,14 +2168,8 @@ async fn submit_bk_update(
         .await?
         .ok_or_else(|| anyhow::anyhow!("no bkupd bundle for seq_no={block_seq_no}"))?;
 
-    let signer: PrivateKeySigner = private_key.parse()?;
-    let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let chain_id = probe.get_chain_id().await?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-    let bridge = EthBridgeClient::new(bridge_address, provider);
+    let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+    let bridge = EthBridgeClient::new(bridge_address, provider).with_sender(sender);
 
     match bridge.submit_bk_set_update(&update).await? {
         BkSetUpdateSubmitOutcome::Applied {
@@ -2315,14 +2334,8 @@ async fn run_daemon_live(
         "daemon-live: Ethereum RPC",
     );
     let bridge_probe = {
-        let signer: PrivateKeySigner = private_key.parse()?;
-        let probe = ProviderBuilder::new().connect_reqwest(rpc_http()?, rpc_url.parse()?);
-        let chain_id = probe.get_chain_id().await?;
-        let wallet = EthereumWallet::from(signer.with_chain_id(Some(chain_id)));
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_reqwest(rpc_http()?, rpc_url.parse()?);
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
+        let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan).with_sender(sender)
     };
     let chain_full = bridge_probe
         .read_full_state()
@@ -2631,6 +2644,27 @@ fn init_tracing() {
 }
 
 #[cfg(test)]
+mod exit_status_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_chain_behind_the_bridge_exits_with_ex_config() {
+        let behind = anyhow::Error::from(RelayerError::AnChainBehindBridge {
+            chain_head: 42_630,
+            last_verified: 24_018_944,
+        });
+        assert_eq!(exit_status(&behind), Some(EXIT_AN_CHAIN_BEHIND_BRIDGE));
+        let stuck = anyhow::Error::from(RelayerError::Stuck {
+            seq_no: 1,
+            attempts: 3,
+            reason: "bridge reverted".to_string(),
+        });
+        assert_eq!(exit_status(&stuck), None);
+        assert_eq!(exit_status(&anyhow::anyhow!("anything else")), None);
+    }
+}
+
+#[cfg(test)]
 mod withdraw_scan_tests {
     //! Park-arm coverage for [`withdraw_scan_once`]. The classifier + counter
     //! split shipped with the SF-2 change is otherwise only exercised
@@ -2889,5 +2923,41 @@ mod withdraw_scan_tests {
             calls.dry_run, 0,
             "already-used proof must short-circuit before dry-run"
         );
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    /// A variable named like a key, a URL or an endpoint can hold a
+    /// credential, so `--help` must not print its value.
+    fn may_hold_a_credential(env: &str) -> bool {
+        ["KEY", "URL", "ENDPOINT", "SECRET", "TOKEN"]
+            .iter()
+            .any(|word| env.contains(word))
+    }
+
+    fn assert_hidden(cmd: &clap::Command, path: &str) {
+        for arg in cmd.get_arguments() {
+            let Some(env) = arg.get_env().map(|e| e.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            assert!(
+                !may_hold_a_credential(&env) || arg.is_hide_env_values_set(),
+                "`{path} --help` prints the value of {env} (--{})",
+                arg.get_id()
+            );
+        }
+        for sub in cmd.get_subcommands() {
+            assert_hidden(sub, &format!("{path} {}", sub.get_name()));
+        }
+    }
+
+    #[test]
+    fn help_prints_no_credential_from_the_environment() {
+        assert_hidden(&Args::command(), "relayer");
     }
 }

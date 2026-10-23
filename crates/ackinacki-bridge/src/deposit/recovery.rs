@@ -269,12 +269,11 @@ mod tests {
     use crate::deposit::{
         evm::{deposit_calldata, DepositLogRef},
         store::{OpParams, OpRecord, OpStage, RequestInfo, TxClaim},
-        testkit::*,
+        testkit::{sepolia_sender, *},
         ui::RecordingUi,
     };
 
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
-    const FROM: Address = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
     const ACC: B256 = B256::repeat_byte(0xa3);
 
     fn op(nonce_before: u64, tx: Option<TxClaim>) -> OpRecord {
@@ -290,7 +289,7 @@ mod tests {
             },
             "bd44".into(),
         );
-        r.from = Some(FROM);
+        r.from = Some(sepolia_sender());
         r.stage = if tx.is_some() {
             OpStage::Signed
         } else {
@@ -308,7 +307,7 @@ mod tests {
 
     fn put_deposit(evm: &FakeEvm, h: B256, nonce: u64, block: u64) {
         let b = header(block, block as u8);
-        let log = deposit_log(BRIDGE, U256::from(1), FROM, 5, ACC, Some(0));
+        let log = deposit_log(BRIDGE, U256::from(1), sepolia_sender(), 5, ACC, Some(0));
         evm.logs.lock().unwrap().push(DepositLogRef {
             tx_hash: h,
             block_number: block,
@@ -317,7 +316,14 @@ mod tests {
         });
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, nonce, 2, deposit_calldata(5, ACC, [0; 32])),
+            deposit_tx(
+                h,
+                sepolia_sender(),
+                BRIDGE,
+                nonce,
+                2,
+                deposit_calldata(5, ACC, [0; 32]),
+            ),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![log]))]);
     }
@@ -331,8 +337,8 @@ mod tests {
         evm.latest.set([header(200, 1)]);
         let h = B256::repeat_byte(0x45);
         let b = header(150, 0x15);
-        let one = deposit_log(BRIDGE, U256::from(1), FROM, 5, ACC, Some(0));
-        let two = deposit_log(BRIDGE, U256::from(2), FROM, 5, ACC, Some(1));
+        let one = deposit_log(BRIDGE, U256::from(1), sepolia_sender(), 5, ACC, Some(0));
+        let two = deposit_log(BRIDGE, U256::from(2), sepolia_sender(), 5, ACC, Some(1));
         for log in [&one, &two] {
             evm.logs.lock().unwrap().push(DepositLogRef {
                 tx_hash: h,
@@ -343,7 +349,14 @@ mod tests {
         }
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC, [0; 32])),
+            deposit_tx(
+                h,
+                sepolia_sender(),
+                BRIDGE,
+                7,
+                2,
+                deposit_calldata(5, ACC, [0; 32]),
+            ),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![one, two]))]);
         let cands = candidates(&evm, &op(7, None), BRIDGE, 200).await.unwrap();
@@ -383,7 +396,10 @@ mod tests {
     async fn a_transaction_executed_after_the_window_is_found_on_resume() {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(100, 1)]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 7);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 7);
         let ui = RecordingUi::new(true);
         let first = search(
             &evm,
@@ -424,7 +440,14 @@ mod tests {
         // Reverted: there is no Deposit log for a log search to find.
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(5, ACC, [0; 32])),
+            deposit_tx(
+                h,
+                sepolia_sender(),
+                BRIDGE,
+                7,
+                2,
+                deposit_calldata(5, ACC, [0; 32]),
+            ),
         );
         let mut o = op(7, None);
         o.request.as_mut().unwrap().wallet_hash = Some(h);
@@ -450,11 +473,17 @@ mod tests {
     async fn a_replacement_that_deposited_another_amount_is_bound_not_nonce_consumed() {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 8);
         let h = B256::repeat_byte(0x44);
         let b = header(150, 0x15);
-        let log = deposit_log(BRIDGE, U256::from(1), FROM, 1, ACC, Some(0));
+        let log = deposit_log(BRIDGE, U256::from(1), sepolia_sender(), 1, ACC, Some(0));
         evm.logs.lock().unwrap().push(DepositLogRef {
             tx_hash: h,
             block_number: 150,
@@ -463,7 +492,14 @@ mod tests {
         });
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 7, 2, deposit_calldata(1, ACC, [0; 32])),
+            deposit_tx(
+                h,
+                sepolia_sender(),
+                BRIDGE,
+                7,
+                2,
+                deposit_calldata(1, ACC, [0; 32]),
+            ),
         );
         evm.script_receipt(h, vec![Some(deposit_receipt(h, &b, true, vec![log]))]);
         let tx = Some(TxClaim {
@@ -500,8 +536,14 @@ mod tests {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
         evm.finalized.set([Some(header(190, 3))]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 6);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 6);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 6);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 6);
         put_deposit(&evm, B256::repeat_byte(4), 5, 150);
         let tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(1),
@@ -530,8 +572,14 @@ mod tests {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
         evm.finalized.set([Some(header(190, 3))]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 8);
         let ui = RecordingUi::new(true);
         let tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(1),
@@ -559,8 +607,14 @@ mod tests {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
         evm.finalized.set([Some(header(260, 2))]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 8);
         put_deposit(&evm, B256::repeat_byte(4), 7, 250);
         let tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(1),
@@ -592,8 +646,14 @@ mod tests {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
         evm.finalized.set([Some(header(190, 3))]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 8);
         put_deposit(&evm, B256::repeat_byte(0x44), 7, 150);
         evm.miss_tx_reads
             .store(2, std::sync::atomic::Ordering::SeqCst);
@@ -623,8 +683,14 @@ mod tests {
     async fn a_finalized_count_without_the_finalized_block_decides_nothing() {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 8);
         let tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(1),
             tx_nonce: 7,
@@ -686,7 +752,14 @@ mod tests {
         let h = B256::repeat_byte(0x33);
         evm.txs.lock().unwrap().insert(
             h,
-            deposit_tx(h, FROM, BRIDGE, 8, 2, deposit_calldata(5, ACC, [0; 32])),
+            deposit_tx(
+                h,
+                sepolia_sender(),
+                BRIDGE,
+                8,
+                2,
+                deposit_calldata(5, ACC, [0; 32]),
+            ),
         );
         evm.fail_tx_reads
             .store(3, std::sync::atomic::Ordering::SeqCst);
@@ -743,8 +816,14 @@ mod tests {
         let evm = FakeEvm::sepolia();
         evm.latest.set([header(200, 1)]);
         evm.finalized.set([Some(header(190, 3))]);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 7);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 7);
         let ui = RecordingUi::new(true);
         let tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(1),
@@ -773,7 +852,7 @@ mod tests {
         let evm = FakeEvm::sepolia();
         let h = B256::repeat_byte(0x44);
         put_deposit(&evm, h, 7, 150);
-        let log = deposit_log(BRIDGE, U256::from(1), FROM, 5, ACC, Some(0));
+        let log = deposit_log(BRIDGE, U256::from(1), sepolia_sender(), 5, ACC, Some(0));
         let mined = deposit_receipt(h, &header(150, 150), true, vec![log]);
         evm.script_receipt(h, vec![None, Some(mined)]);
         let err = candidates(&evm, &op(7, None), BRIDGE, 200)
@@ -786,7 +865,7 @@ mod tests {
         assert_eq!(got, vec![Candidate {
             tx_hash: h,
             nonce: 7,
-            from: FROM,
+            from: sepolia_sender(),
             input: deposit_calldata(5, ACC, [0; 32]),
             status_ok: true,
             has_bridge_deposit: true,
@@ -799,8 +878,14 @@ mod tests {
         evm.latest.set([header(200, 1)]);
         evm.hang_finalized
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        evm.counts.lock().unwrap().insert((FROM, "latest"), 8);
-        evm.counts.lock().unwrap().insert((FROM, "finalized"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "latest"), 8);
+        evm.counts
+            .lock()
+            .unwrap()
+            .insert((sepolia_sender(), "finalized"), 8);
         let tx = Some(TxClaim {
             tx_hash: B256::repeat_byte(1),
             tx_nonce: 7,

@@ -422,19 +422,18 @@ mod tests {
     use super::*;
     use crate::deposit::{
         evm::{deposit_calldata, LogLite},
-        testkit::*,
+        testkit::{sepolia_sender, *},
     };
 
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
     const USDC: Address = address!("1c7d4b196cb0c7b01d743fbc6116a902379c7238");
-    const FROM: Address = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
     const ACC: B256 = B256::repeat_byte(0xa3);
     const TX: B256 = B256::repeat_byte(0x77);
 
     fn exp() -> Expect {
         Expect {
             bridge: BRIDGE,
-            from: FROM,
+            from: sepolia_sender(),
             calldata: deposit_calldata(12_500_000, ACC, [0; 32]),
             amount: 12_500_000,
             account: ACC,
@@ -453,7 +452,7 @@ mod tests {
         let b = header(100, 1);
         Observation::Receipt {
             receipt: deposit_receipt(TX, &b, status, logs),
-            tx: deposit_tx(TX, FROM, BRIDGE, 7, tx_type, input),
+            tx: deposit_tx(TX, sepolia_sender(), BRIDGE, 7, tx_type, input),
             head,
             finalized: fin,
             // The finalized chain has the receipt's block, when it reaches it.
@@ -464,7 +463,14 @@ mod tests {
     fn good_logs() -> Vec<LogLite> {
         vec![
             transfer_log(USDC),
-            deposit_log(BRIDGE, U256::from(5), FROM, 12_500_000, ACC, Some(41)),
+            deposit_log(
+                BRIDGE,
+                U256::from(5),
+                sepolia_sender(),
+                12_500_000,
+                ACC,
+                Some(41),
+            ),
         ]
     }
 
@@ -581,7 +587,14 @@ mod tests {
     #[test]
     fn a_deposit_that_differs_from_the_request_is_a_mismatch() {
         let seen = Some(B256::repeat_byte(1));
-        let other_amount = vec![deposit_log(BRIDGE, U256::from(5), FROM, 1, ACC, Some(41))];
+        let other_amount = vec![deposit_log(
+            BRIDGE,
+            U256::from(5),
+            sepolia_sender(),
+            1,
+            ACC,
+            Some(41),
+        )];
         let o = obs(
             true,
             other_amount,
@@ -597,7 +610,7 @@ mod tests {
         let other_account = vec![deposit_log(
             BRIDGE,
             U256::from(5),
-            FROM,
+            sepolia_sender(),
             12_500_000,
             B256::repeat_byte(1),
             Some(41),
@@ -639,7 +652,14 @@ mod tests {
 
     #[test]
     fn a_mismatch_names_what_was_broadcast_next_to_what_was_requested() {
-        let logs = vec![deposit_log(BRIDGE, U256::from(5), FROM, 1, ACC, Some(41))];
+        let logs = vec![deposit_log(
+            BRIDGE,
+            U256::from(5),
+            sepolia_sender(),
+            1,
+            ACC,
+            Some(41),
+        )];
         let o = obs(
             true,
             logs,
@@ -676,7 +696,7 @@ mod tests {
         logs.push(deposit_log(
             BRIDGE,
             U256::from(6),
-            FROM,
+            sepolia_sender(),
             12_500_000,
             ACC,
             Some(42),
@@ -695,14 +715,21 @@ mod tests {
         // on, so a negative verdict here would be final: exit 35 for a
         // deposit that may well be the requested one.
         let seen = Some(B256::repeat_byte(1));
-        let good = deposit_log(BRIDGE, U256::from(5), FROM, 12_500_000, ACC, Some(41));
+        let good = deposit_log(
+            BRIDGE,
+            U256::from(5),
+            sepolia_sender(),
+            12_500_000,
+            ACC,
+            Some(41),
+        );
         let no_index = LogLite {
             block_log_index: None,
             ..good.clone()
         };
         let other_amount_no_index = LogLite {
             block_log_index: None,
-            ..deposit_log(BRIDGE, U256::from(5), FROM, 1, ACC, Some(41))
+            ..deposit_log(BRIDGE, U256::from(5), sepolia_sender(), 1, ACC, Some(41))
         };
         let transfer_no_index = LogLite {
             block_log_index: None,
@@ -759,12 +786,19 @@ mod tests {
         let b = header(100, 1);
         let bare = vec![
             transfer_log(USDC),
-            deposit_log(BRIDGE, U256::from(5), FROM, 12_500_000, ACC, None),
+            deposit_log(
+                BRIDGE,
+                U256::from(5),
+                sepolia_sender(),
+                12_500_000,
+                ACC,
+                None,
+            ),
         ];
-        evm.txs
-            .lock()
-            .unwrap()
-            .insert(TX, deposit_tx(TX, FROM, BRIDGE, 7, 2, exp().calldata));
+        evm.txs.lock().unwrap().insert(
+            TX,
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+        );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &b, true, bare.clone())),
             Some(deposit_receipt(TX, &b, true, bare.clone())),
@@ -804,12 +838,12 @@ mod tests {
         let new = header(100, 2);
         let wrong = vec![
             transfer_log(USDC),
-            deposit_log(BRIDGE, U256::from(5), FROM, 1, ACC, Some(41)),
+            deposit_log(BRIDGE, U256::from(5), sepolia_sender(), 1, ACC, Some(41)),
         ];
-        evm.txs
-            .lock()
-            .unwrap()
-            .insert(TX, deposit_tx(TX, FROM, BRIDGE, 7, 2, exp().calldata));
+        evm.txs.lock().unwrap().insert(
+            TX,
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+        );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, true, wrong.clone())),
             Some(deposit_receipt(TX, &old, true, wrong)),
@@ -862,10 +896,10 @@ mod tests {
         let evm = FakeEvm::sepolia();
         let old = header(100, 1);
         let new = header(100, 2);
-        evm.txs
-            .lock()
-            .unwrap()
-            .insert(TX, deposit_tx(TX, FROM, BRIDGE, 7, 2, exp().calldata));
+        evm.txs.lock().unwrap().insert(
+            TX,
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+        );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, false, vec![])),
             Some(deposit_receipt(TX, &old, false, vec![])),
@@ -889,10 +923,10 @@ mod tests {
         let evm = FakeEvm::sepolia();
         let old = header(100, 1);
         let new = header(100, 2);
-        evm.txs
-            .lock()
-            .unwrap()
-            .insert(TX, deposit_tx(TX, FROM, BRIDGE, 7, 2, exp().calldata));
+        evm.txs.lock().unwrap().insert(
+            TX,
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+        );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, false, vec![])),
             Some(deposit_receipt(TX, &old, false, vec![])),
@@ -915,10 +949,10 @@ mod tests {
         let b = header(100, 1);
         let chain = |status: bool, logs: Vec<LogLite>| {
             let evm = FakeEvm::sepolia();
-            evm.txs
-                .lock()
-                .unwrap()
-                .insert(TX, deposit_tx(TX, FROM, BRIDGE, 7, 2, exp().calldata));
+            evm.txs.lock().unwrap().insert(
+                TX,
+                deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+            );
             evm.script_receipt(TX, vec![Some(deposit_receipt(TX, &b, status, logs))]);
             evm.by_hash.lock().unwrap().insert(b.hash, b.clone());
             evm.latest.set([header(111, 9)]);

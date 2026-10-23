@@ -299,7 +299,7 @@ print(json.dumps(out, indent=2))
 ' > bk_set.json
 ```
 
-**Shellnet** — the file must hold the set at your bootstrap seed. `crates/bridge-prover-libraries/bk_set.shellnet.json` is the committee from before rotations began on 2026-10-08; fold the rotations up to the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)). The newest rotation the chain reports:
+**Shellnet** — the file must hold the set at your bootstrap seed. `crates/bridge-prover-libraries/bk_set.shellnet.json` is the committee at the network's genesis (shellnet restarted on 2026-10-14); fold the rotations up to the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)). The newest rotation the chain reports:
 
 ```bash
 curl -s -X POST -H 'Content-Type: application/json' \

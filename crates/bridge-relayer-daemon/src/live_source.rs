@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::{
+    an_chain_guard::ChainBehindGuard,
     error::RelayerError,
     source::{BkUpdateSource, BlockSource},
     types::{AnBlockData, BkSetUpdateData},
@@ -52,6 +53,7 @@ pub struct LiveBlockSource {
     pending_bundle: Mutex<Option<BundleProofArtifacts>>,
     pending_bk_update: Mutex<Option<BkUpdateProofArtifacts>>,
     state_paths: StatePaths,
+    chain_behind: Mutex<ChainBehindGuard>,
 }
 
 impl LiveBlockSource {
@@ -61,6 +63,7 @@ impl LiveBlockSource {
             pending_bundle: Mutex::new(None),
             pending_bk_update: Mutex::new(None),
             state_paths,
+            chain_behind: Mutex::new(ChainBehindGuard::default()),
         }
     }
 
@@ -219,10 +222,20 @@ impl BlockSource for LiveBlockSource {
         match d.poll_next_bundle().await.map_err(map_driver_err)? {
             LiveBundleEvent::Bootstrapping {
                 ..
-            }
-            | LiveBundleEvent::Nothing {
-                ..
             } => Ok(None),
+            // No boundary past the bridge yet. A head below the bridge's
+            // last verified block is a restarted or different network, not
+            // a wait: the guard stops the daemon if it stays there.
+            LiveBundleEvent::Nothing {
+                chain_head_seqno, ..
+            } => {
+                let last_verified = d.snapshot_state().stored_last_seen_block_seq_no;
+                self.chain_behind
+                    .lock()
+                    .await
+                    .observe(chain_head_seqno, last_verified)?;
+                Ok(None)
+            },
             LiveBundleEvent::Bundle(b) => {
                 if b.block_seq_no < target {
                     warn!(
@@ -233,6 +246,8 @@ impl BlockSource for LiveBlockSource {
                     persist_driver(&d, &self.state_paths)?;
                     return Ok(None);
                 }
+                // A bundle past the bridge: the chain is not behind it.
+                self.chain_behind.lock().await.reset();
                 let data = AnBlockData::from(&b);
                 *self.pending_bundle.lock().await = Some(b);
                 Ok(Some(data))

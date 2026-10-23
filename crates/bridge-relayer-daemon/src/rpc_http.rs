@@ -1,4 +1,4 @@
-//! HTTP client for the Ethereum JSON-RPC endpoint.
+//! HTTP client for the Ethereum JSON-RPC endpoints.
 //!
 //! alloy's `ProviderBuilder::connect_http` builds a reqwest client without a
 //! timeout. A request on a connection that has gone silent then waits until
@@ -16,10 +16,11 @@ use alloy::transports::http::reqwest;
 /// Overrides [`DEFAULT_RPC_REQUEST_TIMEOUT`], in whole seconds.
 pub const ENV_RPC_REQUEST_TIMEOUT_SECS: &str = "BRIDGE_RPC_REQUEST_TIMEOUT_SECS";
 
-/// Bound on one JSON-RPC request, from connecting to the last byte of the
-/// response. The relayer's slowest call, one `eth_getLogs` span of the
-/// startup scan, takes seconds.
-pub const DEFAULT_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound on one JSON-RPC request to one endpoint, from connecting to the
+/// last byte of the response; past it the request moves on to the next
+/// endpoint ([`crate::eth_rpc`]). The relayer's slowest call, one
+/// `eth_getLogs` span of the startup scan, takes seconds.
+pub const DEFAULT_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// [`ENV_RPC_REQUEST_TIMEOUT_SECS`] when it is set and non-empty, else
 /// [`DEFAULT_RPC_REQUEST_TIMEOUT`].

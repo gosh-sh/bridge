@@ -20,12 +20,12 @@ lower() {
 }
 
 call_word() {
-  cast call "$1" "$2" "${@:3}" --rpc-url "$RPC_URL" | awk '{print $1}'
+  cast call "$1" "$2" "${@:3}" --rpc-url "$check_rpc" | awk '{print $1}'
 }
 
 require_code() {
   local address=$1 label=$2 code
-  code=$(cast code "$address" --rpc-url "$RPC_URL")
+  code=$(cast code "$address" --rpc-url "$check_rpc")
   [[ "$code" != 0x && ${#code} -gt 100 ]] || die "$label has no runtime code ($address)"
 }
 
@@ -52,7 +52,7 @@ verify_verifier_lane() {
   # aggregate-proof self-checks every proof against the source, not the bin.
   [[ -s "$BRIDGE_VERIFIERS_DIR/${bin_name%.bin}.sol" ]] ||
     die "missing verifier source ${bin_name%.bin}.sol"
-  on_chain=$(cast code "$yul" --rpc-url "$RPC_URL" | lower)
+  on_chain=$(cast code "$yul" --rpc-url "$check_rpc" | lower)
   # gen_evm_verifier_shplonk emits a 32-byte CREATE prelude followed by the
   # runtime payload. ShplonkDeployLib deploys the full bin; eth_getCode returns
   # only the payload, hence tail from byte 33.
@@ -197,9 +197,40 @@ ok "BK set, Hermez SRS K=17/19/20/21/22, and writable state paths"
 # EnvironmentFile inherited later by the daemon process.
 export -n RELAYER_PRIVATE_KEY 2>/dev/null || true
 
-chain_id=$(cast chain-id --rpc-url "$RPC_URL")
-[[ "$chain_id" == "$EXPECTED_EVM_CHAIN_ID" ]] ||
-  die "RPC chain id $chain_id != $EXPECTED_EVM_CHAIN_ID"
+# The checks below go to the first endpoint that answers, in the order the
+# daemon tries them: RPC_URL, then RPC_FAILOVER_URLS. A primary that is down
+# must not keep the relayer from (re)starting while a fallback answers. Every
+# endpoint that answers must serve EXPECTED_EVM_CHAIN_ID: the daemon refuses
+# to start otherwise. Endpoints are named by scheme and host only, since
+# their URLs can carry API keys.
+rpc_label() {
+  # scheme://authority, then without any user:password@ in the authority.
+  sed -E -e 's|^([A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*).*|\1\2|' \
+    -e 's|^([A-Za-z][A-Za-z0-9+.-]*://).*@|\1|' <<<"$1"
+}
+IFS=',' read -r -a rpc_failover <<<"${RPC_FAILOVER_URLS:-}"
+check_rpc=
+for endpoint in "$RPC_URL" ${rpc_failover[@]+"${rpc_failover[@]}"}; do
+  endpoint=${endpoint//[[:space:]]/}
+  [[ -n "$endpoint" ]] || continue
+  # The daemon accepts only http(s) entries and exits at start on anything
+  # else (eth_rpc.rs: "is not an http(s) URL") — under restart: unless-stopped
+  # that repeats on every start. cast can answer a wss:// entry, so it must
+  # be refused here, before cast makes it look healthy.
+  [[ "$endpoint" =~ ^https?:// ]] ||
+    die "RPC $(rpc_label "$endpoint") is not an http(s) URL; the daemon refuses to start on it"
+  if endpoint_chain=$(cast chain-id --rpc-timeout 20 --rpc-url "$endpoint" 2>/dev/null); then
+    [[ "$endpoint_chain" == "$EXPECTED_EVM_CHAIN_ID" ]] ||
+      die "RPC $(rpc_label "$endpoint") serves chain $endpoint_chain, expected $EXPECTED_EVM_CHAIN_ID"
+    ok "RPC $(rpc_label "$endpoint") serves chain $endpoint_chain"
+    [[ -n "$check_rpc" ]] || check_rpc=$endpoint
+  else
+    warn "RPC $(rpc_label "$endpoint") is not answering; the daemon starts without it and retries it after the cooldown"
+  fi
+done
+[[ -n "$check_rpc" ]] ||
+  die "no Ethereum RPC endpoint answers (RPC_URL + RPC_FAILOVER_URLS)"
+ok "chain checks below use RPC $(rpc_label "$check_rpc")"
 require_code "$BRIDGE_ADDRESS" "bridge"
 
 # The scan accepts any bound at or before the first block with runtime code
@@ -207,14 +238,14 @@ require_code "$BRIDGE_ADDRESS" "bridge"
 # needs an RPC that serves historical state; one that does not is skipped
 # with the RPC's error in a warning, so an archive-less RPC still starts the
 # relayer.
-head_block=$(cast block-number --rpc-url "$RPC_URL")
+head_block=$(cast block-number --rpc-url "$check_rpc")
 (( BRIDGE_DEPLOY_BLOCK <= head_block )) || die "BRIDGE_DEPLOY_BLOCK is above the chain head ($head_block)"
 # stdout only is compared: anything `cast` prints to stderr on success must
 # not end up in the value. The stderr goes to a file for the warning.
 cast_err=$(mktemp)
 trap 'rm -f "$cast_err"' EXIT
-if code_at=$(cast code "$BRIDGE_ADDRESS" --block "$BRIDGE_DEPLOY_BLOCK" --rpc-url "$RPC_URL" 2>"$cast_err") &&
-  code_before=$(cast code "$BRIDGE_ADDRESS" --block "$((BRIDGE_DEPLOY_BLOCK - 1))" --rpc-url "$RPC_URL" 2>>"$cast_err"); then
+if code_at=$(cast code "$BRIDGE_ADDRESS" --block "$BRIDGE_DEPLOY_BLOCK" --rpc-url "$check_rpc" 2>"$cast_err") &&
+  code_before=$(cast code "$BRIDGE_ADDRESS" --block "$((BRIDGE_DEPLOY_BLOCK - 1))" --rpc-url "$check_rpc" 2>>"$cast_err"); then
   [[ "$code_before" == 0x ]] ||
     die "bridge code already present at block $((BRIDGE_DEPLOY_BLOCK - 1)): BRIDGE_DEPLOY_BLOCK is after the deploy block"
   if [[ "$code_at" != 0x && ${#code_at} -gt 100 ]]; then
@@ -283,11 +314,18 @@ verify_verifier_lane 'fallbackVerifier()(address)' 'FallbackAggregatorVerifier.b
 verify_verifier_lane 'layerHashesVerifier()(address)' 'LayerHashesAggregatorVerifier.bin' 'layer-hashes'
 verify_verifier_lane 'bridgeWithdrawalVerifier()(address)' 'BridgeWithdrawalAggregatorVerifier.bin' 'withdrawal'
 
-latest_nonce=$(cast nonce "$RELAYER_ADDRESS" --block latest --rpc-url "$RPC_URL")
-pending_nonce=$(cast nonce "$RELAYER_ADDRESS" --block pending --rpc-url "$RPC_URL")
-[[ "$latest_nonce" == "$pending_nonce" ]] ||
-  die "relayer EOA has a pending transaction (latest=$latest_nonce pending=$pending_nonce)"
-balance=$(cast balance "$RELAYER_ADDRESS" --rpc-url "$RPC_URL")
+latest_nonce=$(cast nonce "$RELAYER_ADDRESS" --block latest --rpc-url "$check_rpc")
+pending_nonce=$(cast nonce "$RELAYER_ADDRESS" --block pending --rpc-url "$check_rpc")
+# A transaction waiting unmined does not stop the start: the daemon sends at
+# the nonce the chain mines next and replaces whatever waits there with
+# higher fees. Refusing here kept the container restarting while the very
+# transaction the daemon would replace held it back.
+if (( pending_nonce > latest_nonce + 1 )); then
+  warn "$((pending_nonce - latest_nonce)) transactions wait unmined from the relayer EOA (latest=$latest_nonce pending=$pending_nonce). The daemon sends one at a time: something else sends from this account, and it must be the relayer's alone"
+elif (( pending_nonce > latest_nonce )); then
+  warn "a transaction waits unmined at nonce $latest_nonce of the relayer EOA; the daemon replaces it with higher fees once it runs"
+fi
+balance=$(cast balance "$RELAYER_ADDRESS" --rpc-url "$check_rpc")
 (( balance >= MIN_RELAYER_BALANCE_WEI )) ||
   die "relayer balance $balance wei is below minimum $MIN_RELAYER_BALANCE_WEI"
 ok "EOA nonce=$latest_nonce balance=$balance wei"

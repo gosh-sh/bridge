@@ -225,7 +225,7 @@ print(json.dumps(out, indent=2))
 ' > bk_set.json
 ```
 
-**Shellnet** — the file must hold the set at the bootstrap seed. `bk_set.shellnet.json` is the committee from before rotations began on 2026-10-08; build the set at the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)).
+**Shellnet** — the file must hold the set at the bootstrap seed. `bk_set.shellnet.json` is the committee at the network's genesis (shellnet restarted on 2026-10-14); build the set at the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)).
 
 > Rotation: the prover follows rotations at runtime. It proves each `bkSetUpdates` event and switches to the new set once the bundles at or below the rotation are done; a key block signed by keepers outside its current set is held back (`signers … not in BK set — returning None so caller can drain pending bk-update or refresh the set`) until then. Keys do **not** need to be regenerated. See `BK set rotation` in `../TECHNICAL_README.md`.
 

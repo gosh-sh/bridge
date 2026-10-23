@@ -164,12 +164,11 @@ mod tests {
     use crate::deposit::{
         args::Network,
         evm::{IDeposit, IErc20},
-        testkit::*,
+        testkit::{sepolia_sender, *},
     };
 
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
     const USDC: Address = address!("1c7d4b196cb0c7b01d743fbc6116a902379c7238");
-    const FROM: Address = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
 
     fn healthy() -> FakeEvm {
         let f = FakeEvm::sepolia();
@@ -204,9 +203,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_healthy_chain_passes() {
-        let p = run(&healthy(), Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
-            .await
-            .unwrap();
+        let p = run(
+            &healthy(),
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(sepolia_sender()),
+        )
+        .await
+        .unwrap();
         assert_eq!(p.usdc, USDC);
     }
 
@@ -244,9 +249,15 @@ mod tests {
                 "the EVM bridge is paused by its owner: deposit() would revert",
             ),
         ] {
-            let e = run(&fake, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
-                .await
-                .unwrap_err();
+            let e = run(
+                &fake,
+                Network::Sepolia,
+                BRIDGE,
+                12_500_000,
+                Some(sepolia_sender()),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
             assert!(e.to_string().contains(needle), "{needle}: {e}");
         }
@@ -256,18 +267,30 @@ mod tests {
     async fn a_bridge_without_the_pause_getter_passes() {
         let f = healthy();
         *f.paused.lock().unwrap() = None;
-        run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
-            .await
-            .unwrap();
+        run(
+            &f,
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(sepolia_sender()),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
     async fn a_bridge_that_is_not_paused_passes() {
         let f = healthy();
         *f.paused.lock().unwrap() = Some(false);
-        run(&f, Network::Sepolia, BRIDGE, 12_500_000, Some(FROM))
-            .await
-            .unwrap();
+        run(
+            &f,
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(sepolia_sender()),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

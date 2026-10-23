@@ -62,6 +62,17 @@ pub enum RelayerError {
         reason: String,
     },
 
+    /// The Acki Nacki chain head stayed below the bridge's last verified
+    /// block (see [`crate::an_chain_guard`]): the network was restarted, or
+    /// GraphQL serves another one. Terminal like [`Self::Stuck`]: only a new
+    /// bridge can follow that chain.
+    #[error(
+        "Acki Nacki chain head {chain_head} is below the bridge's last verified block \
+         {last_verified}: the network was restarted or BRIDGE_GQL_ENDPOINT serves another \
+         network. This bridge cannot follow it; deploy a new one (runbook §5.5)"
+    )]
+    AnChainBehindBridge { chain_head: u64, last_verified: u64 },
+
     /// An unexpected condition we don't have a finer-grained variant
     /// for. Use sparingly.
     #[error("relayer error: {0}")]

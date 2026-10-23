@@ -22,22 +22,80 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **A `withdrawByProof` that reverts on chain is no longer recorded as paid.**
-  `relayer daemon-withdraw` and `daemon-bridge` mapped every mined receipt to
-  `PAID`, read `st.paid` up and put the `proof_event_*.json` in `done`, with
-  the receipt's status never read. A revert after the gas estimate — anchor
-  evicted, treasury short, nullifier spent by another relayer — therefore
-  left a withdrawal unpaid while the log and counters said otherwise, and
-  nothing retried it until a restart; the eccUSDC is already burned by then.
-  A status-0 receipt is now a transient `Reverted`: the proof stays in the
-  scan and is retried with backoff, and the next send reports the decoded
-  reason at the estimate, where a proof-intrinsic one parks as before.
-- The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
-  entry that is not an http(s) URL, as the daemon does at start; `cast` could
-  answer a `wss://` entry and report it healthy while the daemon exited on it
-  under `restart: unless-stopped`.
+- **`eccUSDCBridge.setOutstandingByChain(chainId, amount)` — owner-signed, sets
+  the principal the bridge accounts for on one destination chain.** That
+  counter is both the ceiling `initiateWithdrawal` pays out to a chain and the
+  room a credit to it has under the 10 000 USDC chain cap; `confirmDeposit`
+  raises it, a withdrawal spends it, and `onCodeUpgrade` carries it. What
+  leaves it empty is a build that had no such field to hand over. 1.12.0 had
+  nine fields, and it cannot reach this build in one `updateCode` at all:
+  `onCodeUpgrade` decodes eleven fields only and a direct attempt throws on the
+  cell, safely — the code is swapped after the commit, so the account keeps
+  1.12.0. Crossing that gap needs an intermediate build that decodes nine and
+  hands over eleven, and the counter then arrives empty. Such a bridge, or any
+  whose counter was never credited, holds a zero outstanding amount while its
+  principal is still locked on the source chain, and refuses every withdrawal
+  to that chain until the owner states what is locked there. Read it back as the third return value of
+  `getDepositLimits(chainId)`. Capped at `MAX_BRIDGE_TVL`; above it the call
+  throws exit 235 (`ERR_TVL_CAP`). It adds no authority the owner mints did
+  not already carry, and unlike them it moves the counter without minting
+  ECC[3].
+
+  **It moves that counter alone.** A withdrawal is still bounded by bridged
+  minted less bridged burned, which this does not touch. It therefore recovers
+  a bridge that carried its ECC[3] inventory across an upgrade but not its
+  per-chain counter — the 1.12.0 case above. It does **not** make a fresh
+  deployment pay out: there the inventory is zero as well, and a withdrawal is
+  refused with 233 (`ERR_BURN_EXCEEDS_BRIDGED`) however high the counter is
+  set. Re-pointing a chain's users at a freshly deployed bridge needs the
+  inventory migrated too, together with custody and the consumed withdrawal
+  nullifiers; that migration is not in this release.
+
+  **The figure to write is not L1's balance.** It is that balance less the
+  deposits not yet credited on AN and the burns L1 has not yet paid out:
+  writing the balance itself while transfers are in flight already breaks
+  things, since with 10 000 USDC on L1 of which 50 is an unconfirmed deposit
+  the counter belongs at 9 950. The counter is also the deposit room:
+  `finalizeDeposit` and `confirmDeposit` both bound `outstanding + amount` by
+  the 10 000 USDC ceiling. A counter above the right figure buys withdrawal
+  room by refusing deposits with 235 — and a deposit
+  caught between finalization and confirmation aborts with its voucher already
+  consumed, so re-proving it cannot confirm again and that USDC sits on L1 with
+  nothing minted on AN until the owner lowers the counter. `mintAndSendBridged`
+  is capped by the same check, so it cannot pay those users either. Pause
+  deposits and let the in-flight transfers settle before measuring, and if in
+  doubt write less rather than more: an under-count only refuses withdrawals
+  with 236, which return the ECC and which the owner corrects by raising the
+  counter, while an over-count strands a depositor who cannot correct it.
+  Raising the counter to the ceiling to release a larger inventory is therefore
+  not an operating procedure. It is no new authority — `mintAndSend` has no ceiling at
+  all — and every path that is not owner-signed stays capped at 50 USDC per
+  transfer and at the destination chain's outstanding amount. *Restoring a
+  chain's outstanding amount* in
+  [`contracts/an/README.md`](contracts/an/README.md) carries the full argument.
+
+### Added
+
+- **`eccUSDCBridge.initiateWithdrawal` now emits `WithdrawalRefused` when it
+  returns the ECC instead of burning it.** A refused withdrawal used to leave
+  no record at all: the ECC came back and nothing said why, so a relayer or a
+  UI saw a successful transaction with no `WithdrawalInitiated` and had to
+  guess. The event carries `dstChainId`, `recipient`, `amount`, `tokenId`,
+  `sender` and a `reason` — the error code the call would have thrown had the
+  refusal thrown: 234 (`ERR_TRANSFER_TOO_LARGE`) over the 50 USDC per-transfer
+  cap, 233 (`ERR_BURN_EXCEEDS_BRIDGED`) when the burn would take bridged
+  burned above bridged minted, and 236 (`ERR_CHAIN_BALANCE_EXCEEDED`, new)
+  when the destination chain accounts for less than the amount. The last two
+  used to share one branch and were indistinguishable. Directed to external
+  address 620, beside `WithdrawalInitiated` on 618. The refund itself is
+  unchanged: the ECC returns in full, and gas above `0.1 vmshell` does not.
+
+  Both changes keep the version at 1.13.0: they are additive and small — one
+  owner-only function and one event, with every existing entrypoint, the
+  storage layout and the upgrade tuple as they were — so no version bump is
+  needed. Rebuilt code hash `66d15d49…`, sold 0.80.0.
 
 ### Documentation
 
@@ -62,6 +120,20 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **A `withdrawByProof` that reverts on chain is no longer recorded as paid.**
+  `relayer daemon-withdraw` and `daemon-bridge` mapped every mined receipt to
+  `PAID`, read `st.paid` up and put the `proof_event_*.json` in `done`, with
+  the receipt's status never read. A revert after the gas estimate — anchor
+  evicted, treasury short, nullifier spent by another relayer — therefore
+  left a withdrawal unpaid while the log and counters said otherwise, and
+  nothing retried it until a restart; the eccUSDC is already burned by then.
+  A status-0 receipt is now a transient `Reverted`: the proof stays in the
+  scan and is retried with backoff, and the next send reports the decoded
+  reason at the estimate, where a proof-intrinsic one parks as before.
+- The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
+  entry that is not an http(s) URL, as the daemon does at start; `cast` could
+  answer a `wss://` entry and report it healthy while the daemon exited on it
+  under `restart: unless-stopped`.
 - **The deposit relayer waits for the deposit block's AN anchor before
   proving or submitting it.** Ethereum `--confirmations` can finish before
   the light-client relayer delivers that block. Previously each retry built
@@ -349,7 +421,7 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  The limits release is 1.13.0, code hash `4525d927…`, rebuilt with sold
+  The limits release is 1.13.0, code hash `66d15d49…`, rebuilt with sold
   0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
   described above; the old upgrade tuple cannot initialize this build.
   `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the

@@ -29,8 +29,6 @@ addresses from configuration.
 | deployment block | `11971217` |
 | USDC | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
 
-The previous bridge, `0x8413212869201d4e0d525e6067b605318029d451` (block `11955698`), is paused.
-
 ### Acki Nacki (shellnet)
 
 | | |

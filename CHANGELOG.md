@@ -120,6 +120,26 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **A `withdrawByProof` that reverts on chain is no longer recorded as paid.**
+  `relayer daemon-withdraw` and `daemon-bridge` mapped every mined receipt to
+  `PAID`, read `st.paid` up and put the `proof_event_*.json` in `done`, with
+  the receipt's status never read. A revert after the gas estimate — anchor
+  evicted, treasury short, nullifier spent by another relayer — therefore
+  left a withdrawal unpaid while the log and counters said otherwise, and
+  nothing retried it until a restart; the eccUSDC is already burned by then.
+  A status-0 receipt is now a transient `Reverted`: the proof stays in the
+  scan and is retried with backoff, and the next send reports the decoded
+  reason at the estimate, where a proof-intrinsic one parks as before.
+  The one-shot paths change with it. `relayer submit-withdraw` and
+  `relayer withdraw-e2e` exit with `withdrawByProof reverted (transient): …`
+  instead of logging `withdrawByProof paid out`. `ackinacki-bridge withdraw`
+  marks the withdrawal record `failed` and exits with code 13
+  (`EthSubmitFailed`) instead of reporting it confirmed; a rerun picks the
+  withdrawal up from that record instead of burning again.
+- The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
+  entry that is not an http(s) URL, as the daemon does at start; `cast` could
+  answer a `wss://` entry and report it healthy while the daemon exited on it
+  under `restart: unless-stopped`.
 - **The deposit relayer waits for the deposit block's AN anchor before
   proving or submitting it.** Ethereum `--confirmations` can finish before
   the light-client relayer delivers that block. Previously each retry built
@@ -228,6 +248,19 @@ assigns it when the release is tagged.
   `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
   That is the accepted product choice, not a gap to close by putting
   workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
+- `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md` gains
+  *Case 3e — Anchor eviction deadline*: how long a burned withdrawal can wait
+  before its anchor leaves the 128-slot window. On an L1 deploy that is ~12 h
+  for an L1 anchor and ~8 d for an L2 one; on an L2 deploy such as shellnet it
+  is ~8 d for both, so `--anchor-layer auto` falling back from L1 to L2 gains
+  nothing there. It shows how to poll `anchorRemainingAppends` with the layer
+  and root from a `proof_event_*.json` or a witness — both files store them
+  little-endian, and passed to `cast` unreversed a live anchor reads as `0` —
+  with an alert at `remaining ≤ 32` and the fix for each deploy mode.
+  `daemon-withdraw` and `daemon-bridge` retry `UnknownAnchor` as transient, so
+  a proof whose anchor was evicted holds up every proof behind it until it is
+  moved out of `--proofs-dir`. Trade-off 3 in `docs/EVM-contracts-spec.md`
+  gains the same deploy-mode caveat.
 
 ### Breaking Changes
 
@@ -1270,6 +1303,17 @@ assigns it when the release is tagged.
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
 
+- **`shellnet.common` no longer carries a key.** It gave every tester the
+  same shared shellnet burner as `RELAYER_PRIVATE_KEY`. The relayer now
+  replaces whatever transaction waits at its account's next nonce, so two
+  daemons on one key replaced each other's transactions; the burner also
+  has old transactions waiting in the Sepolia pools, and a deploy from it
+  can fail with `EOA nonce changed unexpectedly`. Put the key of a Sepolia
+  EOA of your own into the untracked `crates/bridge-prover-libraries/.env`
+  as `RELAYER_PRIVATE_KEY=0x…` (live relayer runbook, *Disk and wallet*).
+  Without it `shellnet.common` warns, and the `relayer` commands refuse to
+  start for want of `--private-key`.
+
 ### Documentation
 
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
@@ -1319,6 +1363,41 @@ assigns it when the release is tagged.
   Deposit tx / block / log index when known) and `last_finalized_deposit_id`
   (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
 
+- **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
+  primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
+  `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
+  A request moves on when its endpoint times out, answers HTTP 401/403 (a
+  rejected key), 404, 408, 429 or 5xx, or a rate-limit, quota or key error —
+  that endpoint then waits 60 s at the back of the line — or cannot serve
+  that one request (an `eth_getLogs` span over its cap, which Alchemy's free
+  tier answers with HTTP 400, pruned history, a block it has not seen); a
+  revert or `nonce too low` is returned as before. A signed transaction goes to the first endpoint
+  that accepts it, with copies to the others, and `already known` counts as
+  accepted. At start every endpoint is asked for its chain id: the relayer
+  refuses to start when two disagree or none answers. `shellnet.common` now
+  builds the list — Infura, Alchemy, the EF DevOps endpoint, publicnode,
+  Tenderly's public gateway — from `INFURA_API_KEY` and `ALCHEMY_API_KEY` in
+  the untracked `crates/bridge-prover-libraries/.env`, leaving out an endpoint
+  whose key is not set, and paces the startup scan with
+  `BRIDGE_GET_LOGS_PAUSE_MS=600` for Infura's free tier. Live relayer
+  runbook, *Environment*.
+- **`daemon-live` stops when the Acki Nacki chain is behind the bridge.** A
+  chain head below the bridge's last verified block means shellnet was
+  restarted from a new zerostate, or `BRIDGE_GQL_ENDPOINT` serves another
+  network; the bridge cannot follow either. The daemon took it for "the next
+  bundle is not there yet" and waited without a word (after the 2026-10-14
+  restart it waited three hours for a boundary the new chain reaches in
+  three months). Once the head has stayed below the bridge for 5 minutes,
+  over at least 5 polls in a row (one low read can be a lagging GraphQL
+  replica; a GraphQL answer with no blocks is no head at all and does not
+  count), it exits with
+  `Acki Nacki chain head … is below the bridge's last verified block …:
+  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`
+  and exit status 78 (every other failure exits with 1). Deploy a new bridge
+  (live relayer runbook §5.5). The shellnet-l2 container does not restart
+  on status 78: it stays up with the daemon stopped and logs `STOPPED: the
+  Acki Nacki chain is behind the bridge`, instead of rerunning preflight and
+  the startup scan into the same stop every few minutes.
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -1911,6 +1990,40 @@ assigns it when the release is tagged.
   (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
   those ids, so it would neither retry nor park them.
 
+- **Relayer logs and errors name Ethereum endpoints by scheme and host
+  only, at every log level.** reqwest put the full URL, API key included,
+  into every transport error the relayer logged, and alloy's HTTP transport
+  into a debug span on every request; the relayer no longer goes through
+  that transport.
+- **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
+  set** (the EF DevOps endpoint otherwise, as before). Every tool that
+  sources an `L*_config/env` — the relayer, the `cast` commands of the
+  runbooks, `scripts/launch_withdraw_e2e*.sh` and
+  `scripts/replay_withdraw_shplonk.sh` — then talks to Infura.
+  `scripts/deploy_bridge_bundle.sh` does not source it: it broadcasts
+  through `SEPOLIA_RPC_URL`, publicnode unless that is set.
+- **shellnet-l2 kit: `preflight.sh` no longer refuses a start while a
+  transaction from the relayer EOA waits unmined.** It warns, and the daemon
+  replaces that transaction once it runs; refusing kept the container
+  restarting under `restart: unless-stopped` while the very transaction the
+  daemon would replace held it back. Its chain checks go to the first of
+  `RPC_URL` and `RPC_FAILOVER_URLS` that answers instead of `RPC_URL` alone,
+  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`. Its
+  output names endpoints by scheme and host only, without the path or any
+  `user:password@`.
+- **`bk_set.shellnet.json` holds the genesis committee of shellnet as
+  restarted on 2026-10-14** (5 signers; Poseidon commitment
+  `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
+  `e2a508b4…0020`, of every block before the network's first rotation):
+  `keys_config.json` `bk_nodes[i].bls_pubkey` of the restart's config, which
+  a node's `GET :8600/v2/bk_set_update` confirmed on 2026-10-14. `zs_bk_set`
+  of that config holds another set, as before. Rotation has been on since
+  2026-10-15, so a cold start still folds `bkSetUpdates` up to its seed
+  (`seed_prover_bk_set --cap-height`). `TECHNICAL_README.md`, the prover
+  daemon and circuits READMEs and the live relayer runbook now describe the
+  restarted network, and the shellnet BK-set section shows how to check a set
+  against leaf 2 — the first config posted for the restart held other keys —
+  and how to read the live set from a node on port 8600.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation
@@ -2340,6 +2453,42 @@ assigns it when the release is tagged.
   Upgrade the relayer (for the shellnet-l2 kit, rebuild the image); nothing
   on chain, in the keys or in the state changes, and the stuck block is
   proved again on the next start.
+- **A lost or stuck transaction no longer stalls the relayer.** alloy's
+  default nonce manager read the nonce once and counted locally, advancing
+  before the broadcast: when the RPC lost a send, every later transaction
+  went out one nonce too high and waited for the missing one, and the bridge
+  stood still until the daemon was restarted. A transaction stuck unmined
+  held everything behind it, restart or not. The relayer now reads the
+  `latest` and `pending` counts before every transaction and sends it at the
+  nonce the chain mines next. A transaction already waiting there is
+  replaced, at fees 25 % above what the relayer last paid at that nonce —
+  above the current estimate when it does not know, as after a restart —
+  and 25 % more on every later attempt, at most 4 times the current fee
+  estimate. The replaced transaction can be anyone's: give the relayer a key
+  of its own, and do not send from it by hand while a daemon runs. The gas
+  is estimated before the nonce is chosen, so a call that would revert — a
+  withdrawal whose anchor the bridge does not hold yet — sends nothing and
+  leaves the nonce and fees alone.
+  `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
+  `submit-*` commands all send this way.
+- **A transaction another one replaced is no longer waited for.** Every
+  transaction takes the account's next nonce and replaces whatever waits
+  there, so `daemon-live` could replace a withdrawal that `withdraw-e2e`
+  had sent from the same key, and `withdraw-e2e` then waited for it
+  forever. While a `relayer` command waits for a receipt it now watches the
+  account's `latest` count: once that has been past the transaction's nonce
+  for 30 s with no receipt, the wait ends with `tx confirmation error:
+  transaction 0x… was replaced: another transaction from 0x… took its nonce
+  …; send it again`. The daemons retry; `withdraw-e2e` and `submit-withdraw`
+  exit non-zero, and a second run is refused if the payout has landed
+  meanwhile (nullifier check).
+- **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a
+  `withdrawByProof` receipt**, like `verifyBlock` and `applyBkSetUpdate`.
+  They waited forever, so one dropped transaction held the withdraw scan;
+  the proof is now retried, the warning names the transaction hash, and the
+  nullifier check skips the proof once its payout has landed.
+  `ackinacki-bridge withdraw` and the one-shot `relayer` commands still wait
+  for the receipt as long as it takes.
 - `deposit-relayer` kills a prover that runs past its timeout instead of
   leaving it running, writing the `data/` key cache beside the retry the
   daemon starts after its backoff. `relayer prove-withdraw` does the same
@@ -2411,9 +2560,11 @@ assigns it when the release is tagged.
   request on a connection that went silent waited until the OS dropped the
   connection. `daemon-live` once waited 9.5 minutes on one
   `eth_blockNumber`, and a BK rotation that had landed on Acki Nacki waited
-  with it. A request now fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`):
-  the daemon logs `tick failed, will back off` and retries, and a send that
-  times out is an RPC failure, not counted toward the abort threshold.
+  with it. A request to one endpoint now fails after 20 s
+  (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`) and moves on to the next one in
+  `RPC_FAILOVER_URLS`. Once every endpoint has failed it, the daemon logs
+  `tick failed, will back off` and retries, and a send that times out is an
+  RPC failure, not counted toward the abort threshold.
 - **Check B allows four bundles of the daemon's own stride between two
   snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
   L2 bundle the relayer did not see land — its own `verifyBlock` whose

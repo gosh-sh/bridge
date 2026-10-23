@@ -23,6 +23,9 @@ note here calling out the drift.
 > (slots with `forge inspect`), the `whenNotPaused` and `pause()` / `unpause()` citations (`:536`,
 > `:1685`, `:1692`), §4.2's `bundleStride` row (`:234`), §4's `InvalidBundleStride` (`:714`), and
 > §7.3's description of the rotation gate.
+>
+> **Drift note, 2026-10-19.** Trade-off 3's *Deploy mode* paragraph (§15) was checked against
+> `98df1a95`; its `:234` and `:1170-1181` are that commit's lines.
 
 > **Drift note, 2026-10-20 (workchain removal).** The deposit references in §6 and
 > `whenNotPaused` references in §§6–7 use `src/AckiNackiBridge.sol` at `9604d14`:
@@ -899,6 +902,17 @@ Read off the code, without a formal audit claim.
    a seq_no jump not mass-evicting, re-proving against a still-in-window anchor) and
    `AckiNackiBridgeWithdrawByProof.t.sol:684-866` (L2 and L3 anchors accepted, no-window
    rejected).
+
+   *Deploy mode.* The 12-hour L1 figure and the ×16 step are those of an L1 deploy
+   (`bundleStride = W·P`, `:234`): the relayer submits `verifyBlock` at every W·P boundary, and
+   only the W²-aligned blocks among them carry an L2 hash. On an L2 deploy (`bundleStride = W²`;
+   the shellnet kit's `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   accepts no other `BRIDGE_ANCHOR_LEVEL`) every submitted block is W²-aligned and carries at
+   least the L1 and L2 hashes, so `_appendLayerHashes` (`:1170-1181`) advances the L1 and L2
+   windows together, one slot per bundle. The L1 window then lasts as long as L2 (≈ 8 days) — it
+   slows to the L2 cadence, the reverse of the collapse described next — and `--anchor-layer
+   auto`'s L1→L2 step buys no runway; the next layer that does is L3. Operator alerting on this
+   deadline is Case 3e of `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md`.
 
    The 8-day L2 figure assumes AN reports `numLayers = 1` on non-boundary
    bundles. The contract appends one slot per reported layer on every

@@ -468,6 +468,7 @@ mod tests {
     use alloy_primitives::{address, Bytes, B256, U256};
 
     use super::*;
+    use crate::deposit::testkit::sepolia_sender;
 
     fn params() -> OpParams {
         OpParams {
@@ -688,7 +689,7 @@ mod tests {
     fn an_unknown_outcome_blocks_the_same_parameters_and_the_same_sender() {
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(d.path()).unwrap();
-        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let r = requested(&s, params(), from);
         let recs = s.list().unwrap();
         let b = blocking_by_params(&s, &recs, &params()).unwrap().unwrap();
@@ -708,7 +709,7 @@ mod tests {
     fn another_an_endpoint_does_not_lift_the_block() {
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(d.path()).unwrap();
-        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let r = requested(&s, params(), from);
         let recs = s.list().unwrap();
         let mut moved = params();
@@ -722,7 +723,7 @@ mod tests {
     fn an_abandoned_operation_no_longer_blocks() {
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(d.path()).unwrap();
-        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let mut r = requested(&s, params(), from);
         r.stage = OpStage::Abandoned;
         r.abandoned_ever = true;

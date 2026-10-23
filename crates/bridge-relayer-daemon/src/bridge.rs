@@ -48,7 +48,7 @@ use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::Filter,
-    sol_types::SolEvent,
+    sol_types::{SolCall, SolEvent},
     transports::TransportError,
 };
 use async_trait::async_trait;
@@ -1002,6 +1002,17 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// [`Self::with_scan_config`]. Set `deploy_block` in production so a
     /// failed scan does not walk back to genesis.
     scan: LogScanConfig,
+    /// The account this client sends from ([`Self::with_sender`]). With it
+    /// every transaction carries its nonce and fees from [`crate::nonce`];
+    /// without it the provider's fillers choose them.
+    sender: Option<Address>,
+    /// How long [`Self::submit_withdraw`] waits for the receipt
+    /// ([`Self::with_withdraw_receipt_timeout`]); `None` waits until it
+    /// comes.
+    withdraw_receipt_timeout: Option<Duration>,
+    /// [`RECEIPT_POLL_INTERVAL`] and [`REPLACED_AFTER`] outside tests.
+    receipt_poll_every: Duration,
+    replaced_after: Duration,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -1025,6 +1036,142 @@ where
             contract,
             address,
             scan: scan.normalized(),
+            sender: None,
+            withdraw_receipt_timeout: None,
+            receipt_poll_every: RECEIPT_POLL_INTERVAL,
+            replaced_after: REPLACED_AFTER,
+        }
+    }
+
+    /// Sends from `sender`, the address of the provider's signer, with the
+    /// nonce and fees [`crate::nonce`] plans: read from the chain before
+    /// every transaction, replacing our own transaction while it waits
+    /// unmined.
+    pub fn with_sender(mut self, sender: Address) -> Self {
+        self.sender = Some(sender);
+        self
+    }
+
+    /// Stops [`Self::submit_withdraw`] waiting for the receipt after
+    /// `timeout`; the payout then comes back unconfirmed, with its
+    /// transaction hash in the reason. For the daemons, which retry and skip
+    /// a payout that has landed by its nullifier. Without it the receipt is
+    /// waited for until it comes, as a one-shot command needs.
+    pub fn with_withdraw_receipt_timeout(mut self, timeout: Duration) -> Self {
+        self.withdraw_receipt_timeout = Some(timeout);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_receipt_polling(
+        mut self,
+        every: Duration,
+        replaced_after: Duration,
+    ) -> Self {
+        self.receipt_poll_every = every;
+        self.replaced_after = replaced_after;
+        self
+    }
+
+    /// `call` ready to go out from [`Self::with_sender`]'s account, with the
+    /// nonce it takes: its gas estimated first, so a call that would revert
+    /// leaves the nonce and fees alone, then the nonce and fees
+    /// [`crate::nonce`] plans, remembered before the send. With the gas and
+    /// fees set, `send()` estimates nothing more and only broadcasts.
+    /// Without a sender `call` comes back as it is, for the provider's
+    /// fillers, and no nonce. `Err` is the text of the failed estimate or
+    /// plan, the same a failed `send()` reports.
+    async fn prepare_send<'a, C: SolCall>(
+        &'a self,
+        call: alloy::contract::SolCallBuilder<&'a P, C, N>,
+    ) -> Result<(alloy::contract::SolCallBuilder<&'a P, C, N>, Option<u64>), String> {
+        let Some(sender) = self.sender else {
+            return Ok((call, None));
+        };
+        let call = call.from(sender);
+        let gas = call.estimate_gas().await.map_err(|e| e.to_string())?;
+        let plan = crate::nonce::plan_transaction(self.contract.provider(), sender)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::nonce::remember(sender, &plan);
+        let call = call
+            .gas(gas)
+            .nonce(plan.nonce)
+            .max_fee_per_gas(plan.max_fee_per_gas)
+            .max_priority_fee_per_gas(plan.max_priority_fee_per_gas);
+        Ok((call, Some(plan.nonce)))
+    }
+
+    /// The receipt of a transaction just sent, for at most `timeout` when
+    /// one is set: [`Self::wait_for_receipt`] when [`Self::prepare_send`]
+    /// planned its nonce, alloy's receipt watcher otherwise. `Err` names the
+    /// transaction.
+    async fn confirm(
+        &self,
+        pending: alloy::providers::PendingTransactionBuilder<N>,
+        nonce: Option<u64>,
+        timeout: Option<Duration>,
+    ) -> Result<N::ReceiptResponse, String> {
+        let hash = *pending.tx_hash();
+        match (self.sender, nonce) {
+            (Some(sender), Some(nonce)) => {
+                self.wait_for_receipt(sender, nonce, hash, timeout).await
+            },
+            _ => pending
+                .with_timeout(timeout)
+                .get_receipt()
+                .await
+                .map_err(|e| format!("{e} (transaction {hash})")),
+        }
+    }
+
+    /// Polls for the receipt of `hash`, sent from `sender` at `nonce`.
+    /// Every transaction takes the account's next nonce and replaces
+    /// whatever waits there ([`crate::nonce`]), so another process sending
+    /// from the same key, or the other leg of `daemon-bridge`, can replace
+    /// this one. Once the account's `latest` count has been past `nonce`
+    /// for [`REPLACED_AFTER`] with no receipt for `hash`, another
+    /// transaction took the nonce and this one can never be mined: the wait
+    /// ends there instead of running into `timeout` or, without one, going
+    /// on forever. The grace covers an RPC whose receipts lag its counts.
+    async fn wait_for_receipt(
+        &self,
+        sender: Address,
+        nonce: u64,
+        hash: B256,
+        timeout: Option<Duration>,
+    ) -> Result<N::ReceiptResponse, String> {
+        let provider = self.contract.provider();
+        let started = tokio::time::Instant::now();
+        let mut nonce_taken_since: Option<tokio::time::Instant> = None;
+        loop {
+            match provider.get_transaction_receipt(hash).await {
+                Ok(Some(receipt)) => return Ok(receipt),
+                Ok(None) => {},
+                Err(e) => tracing::debug!(%hash, error = %e, "receipt poll failed; polling on"),
+            }
+            match provider.get_transaction_count(sender).latest().await {
+                Ok(latest) if latest > nonce => {
+                    let since = *nonce_taken_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= self.replaced_after {
+                        return Err(format!(
+                            "transaction {hash} was replaced: another transaction from {sender} \
+                             took its nonce {nonce}; send it again"
+                        ));
+                    }
+                },
+                Ok(_) => nonce_taken_since = None,
+                Err(e) => tracing::debug!(%sender, error = %e, "nonce poll failed; polling on"),
+            }
+            if let Some(timeout) = timeout {
+                if started.elapsed() >= timeout {
+                    return Err(format!(
+                        "no receipt for transaction {hash} within {} s",
+                        timeout.as_secs()
+                    ));
+                }
+            }
+            tokio::time::sleep(self.receipt_poll_every).await;
         }
     }
 
@@ -1245,31 +1392,39 @@ where
         let call = self
             .contract
             .withdrawByProof(proof.clone(), to_sol_withdrawal_pub(pub_inputs));
+        let send_failed = |e: &dyn std::fmt::Display| {
+            let reason = format!("withdrawByProof send failed: {e}");
+            let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+                permanent,
+            }
+        };
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
+            Err(e) => return Ok(send_failed(&e)),
+        };
         match call.send().await {
-            Ok(pending) => match pending.get_receipt().await {
-                Ok(receipt) => Ok(WithdrawSubmitOutcome::Paid {
-                    tx_hash: receipt.transaction_hash(),
-                }),
+            Ok(pending) => match self
+                .confirm(pending, nonce, self.withdraw_receipt_timeout)
+                .await
+            {
+                Ok(receipt) => Ok(outcome_from_mined_withdraw(
+                    receipt.status(),
+                    receipt.transaction_hash(),
+                )),
                 Err(e) => {
                     // Post-send confirmation failures (RPC dropped, receipt
-                    // wait timed out) are transient by nature — the tx
-                    // may still land or the RPC may recover — so we do
-                    // not park the proof here.
-                    let reason = format!("tx confirmation error: {e}");
+                    // wait timed out, transaction replaced) are transient by
+                    // nature — the tx may still land, or a new send pays out —
+                    // so we do not park the proof here.
                     Ok(WithdrawSubmitOutcome::Reverted {
-                        reason,
+                        reason: format!("tx confirmation error: {e}"),
                         permanent: false,
                     })
                 },
             },
-            Err(e) => {
-                let reason = format!("withdrawByProof send failed: {e}");
-                let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
-                Ok(WithdrawSubmitOutcome::Reverted {
-                    reason,
-                    permanent,
-                })
-            },
+            Err(e) => Ok(send_failed(&e)),
         }
     }
 
@@ -1344,8 +1499,17 @@ where
             B256::from(update.sibling_h4_7),
             B256::from(update.sibling_h8_15),
         );
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return Ok(BkSetUpdateSubmitOutcome::Reverted {
+                    reason: format!("applyBkSetUpdate send failed: {e}"),
+                });
+            },
+        };
+        // No bound here: `send_bk_set_update_checked` bounds the whole call.
         match call.send().await {
-            Ok(pending) => match pending.get_receipt().await {
+            Ok(pending) => match self.confirm(pending, nonce, None).await {
                 Ok(receipt) => {
                     let bn = receipt.block_number().ok_or_else(|| {
                         RelayerError::other("applyBkSetUpdate receipt missing block_number")
@@ -1941,6 +2105,38 @@ pub enum WithdrawSubmitOutcome {
     },
 }
 
+/// The outcome of a `withdrawByProof` that was mined, from its receipt.
+///
+/// A receipt proves inclusion, not success: `status == false` is a revert
+/// that happened on chain, after the gas estimate passed — state moved
+/// between the estimate and inclusion (the anchor was evicted, the treasury
+/// drained, the nullifier spent by another relayer). The receipt carries no
+/// revert reason, so the outcome is `Reverted` with `permanent = false`: the
+/// proof is retried with backoff rather than parked, and if the cause is
+/// intrinsic the next send fails at the estimate with a decoded reason that
+/// `classify_withdraw_revert` can park on.
+///
+/// Mapping every receipt to `Paid` was wrong in exactly one way that matters:
+/// the burn on Acki Nacki is already irreversible when this runs, so a revert
+/// here is a user who is not paid — and `withdraw_scan_once` would have put
+/// the proof in `done`, logged `PAID` and raised `st.paid`, with nothing left
+/// to prompt a retry.
+pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmitOutcome {
+    if status {
+        WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        }
+    } else {
+        WithdrawSubmitOutcome::Reverted {
+            reason: format!(
+                "withdrawByProof reverted on chain (tx {tx_hash:#x}); the receipt carries no \
+                 reason, the next send will report it"
+            ),
+            permanent: false,
+        }
+    }
+}
+
 /// Classify a `withdrawByProof` revert reason as permanent (proof-intrinsic;
 /// park the `proof_event_*.json`) or transient (retry with backoff).
 ///
@@ -2104,6 +2300,23 @@ pub enum BkSetUpdateSubmitOutcome {
 /// (~15 Sepolia blocks) `submit_block` allows `verifyBlock`.
 pub const BK_UPDATE_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Bound on the wait for a `withdrawByProof` receipt in `daemon-withdraw` and
+/// `daemon-bridge` ([`EthBridgeClient::with_withdraw_receipt_timeout`]), the
+/// same 180 s. alloy waits forever by default, which held the withdraw scan
+/// on a dropped transaction; past the bound the proof is retried like any
+/// other unconfirmed send, and its nullifier check skips it once it has
+/// landed. A one-shot `withdrawByProof` — `ackinacki-bridge withdraw` among
+/// them — waits for its receipt.
+pub const WITHDRAW_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How often a wait for a receipt polls the receipt and the sender's
+/// `latest` count: a third of a Sepolia block.
+pub const RECEIPT_POLL_INTERVAL: Duration = Duration::from_secs(4);
+
+/// How long the sender's `latest` count must stay past a transaction's
+/// nonce, with no receipt for it, before the wait takes it for replaced.
+pub const REPLACED_AFTER: Duration = Duration::from_secs(30);
+
 /// `true` when a `verifyBlock` or `applyBkSetUpdate` failure says nothing
 /// about the transaction itself: the RPC refused or dropped the request
 /// (rate limit, connection, nonce, fee) or the receipt never came. The
@@ -2260,23 +2473,28 @@ where
         // counts toward `max_attempts_abort` instead of hanging the daemon.
         const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return Ok(SubmitOutcome::Reverted {
+                    reason: format!("verifyBlock send failed: {e}"),
+                });
+            },
+        };
         let send_res = call.send().await;
         let (tx_hash, receipt_block) = match send_res {
-            Ok(pending) => {
-                let pending = pending.with_timeout(Some(RECEIPT_TIMEOUT));
-                match pending.get_receipt().await {
-                    Ok(receipt) => {
-                        let bn = receipt.block_number().ok_or_else(|| {
-                            RelayerError::other("verifyBlock receipt missing block_number")
-                        })?;
-                        (Some(receipt.transaction_hash()), bn)
-                    },
-                    Err(e) => {
-                        return Ok(SubmitOutcome::Reverted {
-                            reason: format!("tx confirmation error: {e}"),
-                        });
-                    },
-                }
+            Ok(pending) => match self.confirm(pending, nonce, Some(RECEIPT_TIMEOUT)).await {
+                Ok(receipt) => {
+                    let bn = receipt.block_number().ok_or_else(|| {
+                        RelayerError::other("verifyBlock receipt missing block_number")
+                    })?;
+                    (Some(receipt.transaction_hash()), bn)
+                },
+                Err(e) => {
+                    return Ok(SubmitOutcome::Reverted {
+                        reason: format!("tx confirmation error: {e}"),
+                    });
+                },
             },
             Err(e) => {
                 return Ok(SubmitOutcome::Reverted {
@@ -2423,6 +2641,51 @@ mod tests {
 
     fn always_accept() -> VerifierDecision {
         Arc::new(|_| true)
+    }
+
+    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
+    /// slower than the daemons' bound must not come back to the user as a
+    /// failure. Only the daemons set a bound.
+    /// A mined `withdrawByProof` with status 0 must not read as paid: the
+    /// user's eccUSDC are already burned, so `Paid` would park an unpaid
+    /// withdrawal in `done` behind a `PAID` log line.
+    #[test]
+    fn a_mined_revert_is_reverted_not_paid() {
+        let hash = B256::repeat_byte(0x42);
+        match outcome_from_mined_withdraw(false, hash) {
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+                permanent,
+            } => {
+                assert!(
+                    !permanent,
+                    "a receipt carries no reason, so it cannot be parked on"
+                );
+                assert!(reason.contains("reverted on chain"), "{reason}");
+                assert!(reason.contains(&format!("{hash:#x}")), "{reason}");
+            },
+            WithdrawSubmitOutcome::Paid {
+                ..
+            } => panic!("status 0 reported as Paid"),
+        }
+        assert!(matches!(
+            outcome_from_mined_withdraw(true, hash),
+            WithdrawSubmitOutcome::Paid { tx_hash } if tx_hash == hash
+        ));
+    }
+
+    #[test]
+    fn only_the_daemons_stop_waiting_for_a_withdraw_receipt() {
+        let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new_http(
+            "http://127.0.0.1:1".parse().unwrap(),
+        );
+        let client = EthBridgeClient::new(Address::ZERO, provider);
+        assert_eq!(client.withdraw_receipt_timeout, None);
+        let client = client.with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
+        assert_eq!(
+            client.withdraw_receipt_timeout,
+            Some(WITHDRAW_RECEIPT_TIMEOUT)
+        );
     }
 
     #[test]

@@ -49,6 +49,16 @@ assigns it when the release is tagged.
   inventory migrated too, together with custody and the consumed withdrawal
   nullifiers; that migration is not in this release.
 
+  The 10 000 USDC ceiling on the counter bounds the amount standing at one
+  moment, not the amount that may pass through over time: once withdrawals
+  drain the counter the owner can set it back to the ceiling, so a larger
+  inventory can be released over several rounds, in 50 USDC slices. That is no
+  new authority — `mintAndSend` has no ceiling at all, only a nonce and a
+  `uint64` width guard — and every path that is not owner-signed stays capped
+  at 50 USDC per transfer and at the destination chain's outstanding amount.
+  *Restoring a chain's outstanding amount* in
+  [`contracts/an/README.md`](contracts/an/README.md) carries the full argument.
+
 ### Added
 
 - **`eccUSDCBridge.initiateWithdrawal` now emits `WithdrawalRefused` when it

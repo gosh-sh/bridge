@@ -815,9 +815,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         empty too — a fresh deployment — this pays nothing out on its
     ///         own: the withdrawal is refused with `ERR_BURN_EXCEEDS_BRIDGED`
     ///         instead. It recovers a deployment that carried its inventory
-    ///         across an upgrade but not its per-chain counter. It grants
-    ///         nothing new — the owner mints move the same counter — and
-    ///         unlike them it writes it without minting.
+    ///         across an upgrade but not its per-chain counter.
+    ///
+    ///         `MAX_BRIDGE_TVL` bounds what stands at one moment, not what may
+    ///         pass through: the owner may set the counter again once
+    ///         withdrawals have drained it. That is no new authority —
+    ///         `mintAndSend` has no ceiling at all — and a call that writes a
+    ///         counter without minting is weaker than one that mints. See
+    ///         `contracts/an/README.md`, *Restoring a chain's outstanding
+    ///         amount*.
     /// @param chainId — EIP-155 chain id of the destination L1/L2.
     /// @param amount  — principal outstanding to that chain, in token units,
     ///                  at most `MAX_BRIDGE_TVL`.

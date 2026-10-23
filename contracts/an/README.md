@@ -119,10 +119,14 @@ before rotating the trusted L1 contract.
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
 with 235; the latter is retryable after withdrawals. Both checks precede proof
-verification and are repeated on confirmation. An oversized withdrawal or one
-without enough inventory on its destination chain returns the attached ECC
-without burning it or emitting `WithdrawalInitiated`. It calls `ensureBalance()`
-and sends back `min(msg.value, 0.1 vmshell)`; it uses no `rawReserve`.
+verification and are repeated on confirmation. A withdrawal that is oversized,
+that would burn more than bridged minted less bridged burned, or that exceeds
+its destination chain's outstanding amount returns the attached ECC without
+burning it and emits `WithdrawalRefused` instead of `WithdrawalInitiated`. That
+event carries the same fields plus `reason` — the error code the call would have
+thrown had the refusal thrown: 234, 233 and 236 for the three cases in that
+order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
+it uses no `rawReserve`.
 `ensureBalance()` is free. Dapp 0 contains only system contracts, and mainnet
 has an unlimited dapp configuration deployed for dapp 0. Withdrawal messages
 arrive from another dapp id, so SHELL sent back to that dapp is burned.
@@ -134,6 +138,44 @@ block time (errors 402 and 401); an identical recorded message is rejected with
 expire; voucher identity remains the deposit double-mint protection. CLI and
 relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
 same BOC while valid.
+
+### Restoring a chain's outstanding amount
+
+`setOutstandingByChain(chainId, amount)` writes one chain's outstanding amount
+under the owner key. It exists because that counter can legitimately be empty
+while the principal is still locked on L1. `onCodeUpgrade` does carry the field
+— `updateCode` hands it over as the tenth of eleven, and
+`test_upgrade_preserves_both_networks` covers it — but 1.12.0 handed its
+successor nine fields and had no such field to hand over, so a bridge migrated
+from it starts at zero and refuses every withdrawal to that chain with 236.
+Nothing else repairs that: `mintAndSendBridged` raises the counter but mints as
+it goes, so repairing with it widens the gap between the copies on AN and the
+principal actually held on L1.
+
+What it does not do:
+
+- It moves that counter alone. A withdrawal is still bounded by bridged minted
+  less bridged burned. Where that inventory is zero too — a fresh deployment —
+  the withdrawal is refused with 233 however high the counter is set. Moving a
+  chain's users onto a freshly deployed bridge needs the inventory migrated as
+  well, alongside custody and the consumed withdrawal nullifiers.
+- It does not touch `_totalMinted` or the bridged counters, and `mintAndSend`
+  still does not credit the bridged counters. Owner-minted USDC is not
+  withdrawable inventory, by design: nothing is locked on L1 behind it.
+
+The 10,000 USDC ceiling still means what it says. It bounds the amount standing
+at one moment, not the amount that may pass through over time: once withdrawals
+have drained the counter the owner can set it back to the ceiling, and
+withdrawals leave in 50 USDC slices, so a larger inventory can be released over
+several rounds. That grants no authority the owner did not already hold.
+`mintAndSend` has no ceiling at all — only a nonce and a `uint64` width guard —
+so an owner key can already create arbitrary ECC[3]; a function that writes a
+counter without minting is strictly weaker than one that mints. The ceiling
+exists to bound what a bug, a forged proof or a compromised L1 contract can
+extract, and it still does that: every path that is not owner-signed stays
+capped at 50 USDC per transfer and at the destination chain's outstanding
+amount. An owner key was unlimited before this function and is no more
+unlimited after it.
 
 ### Deployment
 

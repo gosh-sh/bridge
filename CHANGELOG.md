@@ -35,10 +35,28 @@ assigns it when the release is tagged.
   third return value of `getDepositLimits(chainId)`. Capped at
   `MAX_BRIDGE_TVL`; above it the call throws exit 235 (`ERR_TVL_CAP`). It adds
   no authority the owner mints did not already carry, and unlike them it moves
-  the counter without minting ECC[3]. Rebuilt 1.13.0 code hash `f8f95399…`,
-  sold 0.80.0. The version stays 1.13.0: the change is additive and small —
-  one owner-only function, with every existing entrypoint, the storage layout
-  and the upgrade tuple as they were — so it needs no version bump.
+  the counter without minting ECC[3].
+
+### Added
+
+- **`eccUSDCBridge.initiateWithdrawal` now emits `WithdrawalRefused` when it
+  returns the ECC instead of burning it.** A refused withdrawal used to leave
+  no record at all: the ECC came back and nothing said why, so a relayer or a
+  UI saw a successful transaction with no `WithdrawalInitiated` and had to
+  guess. The event carries `dstChainId`, `recipient`, `amount`, `tokenId`,
+  `sender` and a `reason` — the error code the call would have thrown had the
+  refusal thrown: 234 (`ERR_TRANSFER_TOO_LARGE`) over the 50 USDC per-transfer
+  cap, 233 (`ERR_BURN_EXCEEDS_BRIDGED`) when the burn would take bridged
+  burned above bridged minted, and 236 (`ERR_CHAIN_BALANCE_EXCEEDED`, new)
+  when the destination chain accounts for less than the amount. The last two
+  used to share one branch and were indistinguishable. Directed to external
+  address 620, beside `WithdrawalInitiated` on 618. The refund itself is
+  unchanged: the ECC returns in full, and gas above `0.1 vmshell` does not.
+
+  Both changes keep the version at 1.13.0: they are additive and small — one
+  owner-only function and one event, with every existing entrypoint, the
+  storage layout and the upgrade tuple as they were — so no version bump is
+  needed. Rebuilt code hash `66d15d49…`, sold 0.80.0.
 
 ### Documentation
 

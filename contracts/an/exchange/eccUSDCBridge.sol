@@ -64,6 +64,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint32 tokenId,
         address sender
     );
+    event WithdrawalRefused(
+        uint256 dstChainId,
+        bytes recipient,
+        uint128 amount,
+        uint32 tokenId,
+        address sender,
+        uint16 reason
+    );
     event DepositFinalized(
         uint256 depositId,
         uint256 contractAddr,
@@ -572,7 +580,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint32 tokenId = keys[0];
         require(tokenId == USDC_ECC_ID, ERR_UNSUPPORTED_TOKEN);
         if (currencies[tokenId] > varuint32(MAX_TRANSFER_AMOUNT)) {
-            _refundWithdrawal(currencies);
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_TRANSFER_TOO_LARGE);
             return;
         }
         uint128 amount = uint128(currencies[tokenId]);
@@ -580,9 +589,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         uint128 minted = _totalMintedBridgeByToken[tokenId];
         uint128 burned = _totalBurnedBridgeByToken[tokenId];
-        if (burned > minted || amount > minted - burned
-            || amount > _outstandingByChain[dstChainId]) {
-            _refundWithdrawal(currencies);
+        if (burned > minted || amount > minted - burned) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_BURN_EXCEEDS_BRIDGED);
+            return;
+        }
+        if (amount > _outstandingByChain[dstChainId]) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_CHAIN_BALANCE_EXCEEDED);
             return;
         }
 
@@ -597,9 +611,25 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
     }
 
-    function _refundWithdrawal(mapping(uint32 => varuint32) currencies) private pure {
+    /// @dev Returns the ECC and says why on `WithdrawalRefused`, so a refusal
+    ///      leaves a record a relayer or a UI can read: `reason` is the error
+    ///      code the call would have thrown if a refusal threw —
+    ///      `ERR_TRANSFER_TOO_LARGE` (234) over the per-transfer cap,
+    ///      `ERR_BURN_EXCEEDS_BRIDGED` (233) when the burn would take bridged
+    ///      burned above bridged minted, `ERR_CHAIN_BALANCE_EXCEEDED` (236)
+    ///      when the destination chain accounts for less than this amount.
+    ///      An amount too large for `uint128` is reported saturated; it is
+    ///      already far above the cap that refused it.
+    function _refundWithdrawal(mapping(uint32 => varuint32) currencies, uint256 dstChainId,
+                               bytes recipient, uint32 tokenId, uint16 reason) private pure {
         tvm.accept();
         ensureBalance();
+        varuint32 sent = currencies[tokenId];
+        uint128 shown = sent > varuint32(type(uint128).max)
+            ? type(uint128).max : uint128(sent);
+        address addrExtern = address.makeAddrExtern(WithdrawalRefusedEmit, bitCntAddress);
+        emit WithdrawalRefused{dest: addrExtern}(dstChainId, recipient, shown, tokenId,
+                                                msg.sender, reason);
         msg.sender.transfer({value: math.min(msg.value, 0.1 vmshell),
                              bounce: false, flag: 1, currencies: currencies});
     }

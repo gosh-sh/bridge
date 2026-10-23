@@ -1049,7 +1049,7 @@ mod tests {
         // protection.
         assert_eq!(
             &hash[..8],
-            "f8f95399",
+            "66d15d49",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

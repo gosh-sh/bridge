@@ -143,10 +143,18 @@ class BridgeLimits(unittest.TestCase):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
                          source=SENDER, ecc=amount, shell=shell)
 
-    def refund(self, result, amount, shell):
+    def refund(self, result, amount, shell, reason):
         self.assertTrue(result["vm_success"])
-        self.assertEqual(len(result["messages"]), 1)
-        msg = result["messages"][0]
+        external = [m for m in result["messages"] if m["type"] == "external"]
+        internal = [m for m in result["messages"] if m["type"] != "external"]
+        self.assertEqual(len(external), 1, result["messages"])
+        self.assertEqual(len(internal), 1, result["messages"])
+        event = json.loads(command(["tvm-cli", "-j", "decode", "msg", external[0]["boc"],
+                                    "--abi", str(self.abi)]))["BodyCall"]["WithdrawalRefused"]
+        self.assertEqual(int(event["reason"]), reason)
+        self.assertEqual(int(event["amount"]), min(amount, (1 << 128) - 1))
+        self.assertEqual(event["sender"], SENDER)
+        msg = internal[0]
         self.assertEqual(msg["destination"], SENDER)
         decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", msg["boc"],
                                       "--abi", str(self.abi)]))["Header"]
@@ -184,7 +192,7 @@ class BridgeLimits(unittest.TestCase):
 
     def test_another_networks_inventory_cannot_cover_a_burn(self):
         self.seed(0, TRANSFER)
-        self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000)
+        self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000, 236)
         self.assertEqual(int(self.limits(1)["outstanding"]), 0)
         self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
 
@@ -208,7 +216,7 @@ class BridgeLimits(unittest.TestCase):
         for amount in (TRANSFER + 1, (1 << 64) + 1, (1 << 128) + 1):
             for incoming in (1, 50_000_000, 100_000_000, 1_000_000_000):
                 with self.subTest(amount=amount, incoming=incoming):
-                    self.refund(self.withdraw(amount, shell=incoming), amount, incoming)
+                    self.refund(self.withdraw(amount, shell=incoming), amount, incoming, 234)
                     self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER)
 
     def test_finalization_does_not_save_an_external_timestamp(self):

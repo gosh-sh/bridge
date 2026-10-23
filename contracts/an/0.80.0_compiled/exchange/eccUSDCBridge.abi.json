@@ -375,6 +375,19 @@
 			]
 		},
 		{
+			"name": "WithdrawalRefused",
+			"inputs": [
+				{"name":"dstChainId","type":"uint256"},
+				{"name":"recipient","type":"bytes"},
+				{"name":"amount","type":"uint128"},
+				{"name":"tokenId","type":"uint32"},
+				{"name":"sender","type":"address"},
+				{"name":"reason","type":"uint16"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "DepositFinalized",
 			"inputs": [
 				{"name":"depositId","type":"uint256"},

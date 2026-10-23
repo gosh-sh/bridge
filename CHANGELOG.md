@@ -24,6 +24,24 @@ assigns it when the release is tagged.
 
 ### Added
 
+- **Arbitrum One is a native deposit and withdrawal chain.** Deposits call
+  `AckiNackiBridge.deposit` on the bridge deployed on Arbitrum (chain id
+  42161): `ackinacki-bridge deposit --network arbitrum`. The deposit proof
+  is of that Arbitrum block, and Acki Nacki credits chain 42161. Withdrawals
+  are paid by that same deployment: `ackinacki-bridge withdraw --to-chain
+  42161`, with the AN→EVM relayer's `--rpc-url` and `--bridge-address`
+  pointed at Arbitrum, so `verifyBlock` and `withdrawByProof` run there.
+  AN will not burn a withdrawal to 42161 unless deposits proven with that
+  chain id have funded it. The owner anchors the Arbitrum block with
+  `setAcceptedBlockHash` (`scripts/deposit_anchor_params.py` already knows
+  a public Arbitrum RPC). There is no Ethereum inclusion proof and no
+  second transfer. Sepolia remains the Ethereum testnet
+  (`--network sepolia`, `--to-chain 11155111`). Ethereum mainnet is not a
+  deposit network. No verification key changes. Deploy a fresh
+  `AckiNackiBridge` on Arbitrum, trust its address on Acki Nacki under
+  chain id 42161, and do not alias Arbitrum payouts onto the Ethereum
+  bridge.
+
 - **`eccUSDCBridge.setOutstandingByChain(chainId, amount)` — owner-signed, sets
   the principal the bridge accounts for on one destination chain.** That
   counter is both the ceiling `initiateWithdrawal` pays out to a chain and the

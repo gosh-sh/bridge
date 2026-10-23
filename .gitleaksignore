@@ -38,3 +38,7 @@ dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/
 dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:generic-api-key:80
 dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:generic-api-key:84
 dbe80bc14aa7edc5cac8efb71fb20d9792210659:crates/ackinacki-bridge/src/deposit/wc/jwt.rs:jwt:84
+
+# Historical only: 7960577 named Circle's TokenMessengerV2 as TOKEN_MESSENGER.
+# That commit is still in this branch's history. The current tree has no such line.
+7960577600ad2581f936ab6d66d0dd6139cb41f8:contracts/ethereum/test/CctpMainnetAaveFork.t.sol:generic-api-key:51

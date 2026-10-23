@@ -39,6 +39,7 @@ pub const USDC_DECIMALS: u32 = 6;
 /// dep footprint tight and avoid a cross-workspace path.
 pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
     (1, "Ethereum mainnet"),
+    (42161, "Arbitrum One"),
     (11155111, "Sepolia (testnet)"),
     (8453, "Base"),
     (84532, "Base Sepolia"),
@@ -821,6 +822,13 @@ mod tests {
         let raw = "eip155:11155111:0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
         let t = parse_to(raw, None).unwrap();
         assert_eq!(t.chain_id, 11155111);
+    }
+
+    #[test]
+    fn to_accepts_arbitrum_one() {
+        let raw = "eip155:42161:0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
+        let t = parse_to(raw, Some(42_161)).unwrap();
+        assert_eq!(t.chain_id, 42_161);
     }
 
     #[test]

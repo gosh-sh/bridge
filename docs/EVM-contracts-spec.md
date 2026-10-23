@@ -299,6 +299,16 @@ Notes that matter downstream:
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The
   contract itself is chain-agnostic; the constraint lives in the prover/relayer allowlist and the
   AN-side `(chainId → bridge Fr)` allowlist.
+* **Arbitrum One is the production deposit chain.** The user calls `deposit` on
+  `AckiNackiBridge` deployed on Arbitrum (chain id 42161). The deposit proof is of that
+  Arbitrum block: header, receipt and the typed-transaction `chainId`, which the circuit
+  publishes as public input 4. `confirmDeposit` credits `_outstandingByChain[42161]`
+  (`contracts/an/exchange/eccUSDCBridge.sol`). A withdrawal to Arbitrum spends that same
+  balance. The beacon light client does not anchor Arbitrum; the owner accepts the block
+  with `setAcceptedBlockHash(42161, blockHash, true)` after
+  `scripts/deposit_anchor_params.py --verify`. There is no Ethereum inclusion proof and no
+  second hop, so the wait is the anchor plus one deposit proof. Sepolia remains the
+  Ethereum testnet. Do not trust Arbitrum's bridge address under chain id 1.
 
 ---
 
@@ -433,6 +443,13 @@ only the window named by Circuit 4's 1-indexed `anchorLayer` public input
 `finalRoot` sits in a different layer's window is rejected (`UnknownAnchor`),
 even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
+
+**Arbitrum payouts.** A withdrawal to Arbitrum One is paid by the `AckiNackiBridge` deployed
+on Arbitrum. The relayer submits `verifyBlock` and `withdrawByProof` to that deployment, so
+the Acki Nacki history is proven on Arbitrum and USDC moves there directly. `dstChainId` is
+42161, which is `block.chainid` on that deployment; do not pay it from the Ethereum bridge
+through `altDstChainId`. AN only burns the withdrawal when `_outstandingByChain[42161]`
+covers it, and that balance grows from deposits whose proof carries chain id 42161.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
 (or its scoped alias), so the same proof cannot be replayed on a second deployment. The

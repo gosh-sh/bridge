@@ -15,7 +15,10 @@ verifiers deployed as Yul bytecode.
 ## The current deployment
 
 Sepolia ↔ shellnet, deployed from tag [`v0.5.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.5.0).
-The CLI, relayers and web form take their addresses from configuration.
+The CLI, relayers and web form take their addresses from configuration. This
+deployment is the Ethereum testnet. Production deposits and withdrawals use
+the same contracts on Arbitrum One: `deposit --network arbitrum` and
+`withdraw --to-chain 42161`, with the relayer pointed at that deployment.
 
 ### Ethereum (Sepolia, chain id 11155111)
 

@@ -445,7 +445,7 @@ Set the remaining per-invocation vars yourself:
 
 ```bash
 export WITHDRAW_TO=0x742d35Cc6634C0532925a3b844Bc9e7595f0aC49                   # ← REPLACE. Sepolia recipient EOA (20-byte hex, 0x-prefixed, EIP-55).
-export WITHDRAW_TO_CHAIN=11155111                                                # Sepolia chain id.
+export WITHDRAW_TO_CHAIN=11155111                                                # Sepolia. Production: 42161, the Arbitrum bridge.
 export WITHDRAW_AMOUNT=1.000000                                                  # Decimal USDC, ≤ 6 fractional digits, no rounding.
 ```
 
@@ -1234,7 +1234,7 @@ state directory or an operation for the same deposit has an unknown outcome.
 
 ### Command line
 
-    ackinacki-bridge deposit --network sepolia --amount 12.500000 --to <dapp_id>::<account_id>
+    ackinacki-bridge deposit --network arbitrum --amount 12.500000 --to <dapp_id>::<account_id>
 
 Everything else comes from the profile, exactly as for `withdraw`: explicit
 flag > shell environment > profile file > compiled default. The shipped
@@ -1245,7 +1245,7 @@ profile it installed before deposits existed.
 
 | Flag | Value | Refused with exit 2 |
 |------|-------|---------------------|
-| `--network` | `sepolia` (chain id 11155111), the only deposit network in this version | any other name |
+| `--network` | `arbitrum` (42161, production) or `sepolia` (11155111, testnet) | any other name |
 | `--amount` | USDC, at most 6 fractional digits, never rounded; above 0 and at most `u64::MAX` micro-USDC | anything else |
 | `--to` | `dapp_id::account_id`, both halves 64 hex characters without `0x`, the account non-zero | a wrong shape; an active account that lives in another dapp: `--to names dapp <x>, but account <acc> lives in dapp <y>` |
 
@@ -1377,11 +1377,15 @@ cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
 
 ### Networks
 
-Sepolia is the only deposit network in this version. **Ethereum mainnet is
-not a deposit network**: the deposit circuit accepts OP Mainnet, World Chain,
-Mantle, Base, Arbitrum One, Blast and Sepolia (`crates/deposit-chain-ids`), so
-production deposits come from L2s. `bridge_config.mainnet` cannot be used for
-`deposit`.
+`deposit --network arbitrum` is the production deposit. It calls
+`AckiNackiBridge.deposit` on Arbitrum One (chain id 42161); the proof is of
+that Arbitrum block, and Acki Nacki credits chain 42161. `deposit --network
+sepolia` is the Ethereum testnet. Ethereum mainnet is not a deposit network.
+`withdraw --to-chain 42161` pays from the bridge deployed on Arbitrum: the
+relayer proves Acki Nacki blocks there (`--rpc-url` is an Arbitrum RPC,
+`--bridge-address` is that deployment). Point the profile's RPC and
+`BRIDGE_ADDRESS` at the same chain as `--network` or `--to-chain`.
+`bridge_config.mainnet` cannot be used for `deposit`.
 
 ### Deposit timing
 
@@ -1389,8 +1393,13 @@ The wait for the block anchor dominates. On the shellnet deploy the bridge
 owner anchors blocks by hand, and the owner's procedure
 (`scripts/deposit_anchor_params.py --verify` at the repository root) wants at
 least 64 confirmations: on Sepolia the anchor comes no sooner than ~13 minutes
-after the deposit, plus however long the owner takes to act. The status line
-prints the owner's call to pass on:
+after the deposit, plus however long the owner takes to act. On Arbitrum One
+those 64 blocks are under a minute, and the beacon light client is not on the
+path: the owner accepts the Arbitrum block hash with
+`setAcceptedBlockHash(42161, …, true)`. The proof then covers that block
+directly. There is no Ethereum inclusion wait and no second transfer, so once
+the hash is anchored the credit lands within 2 hours of the Arbitrum
+transaction. The status line prints the owner's call to pass on:
 `setAcceptedBlockHash(<chainId>, 0x<blockHash>, true)`.
 
 | Phase | On Sepolia |

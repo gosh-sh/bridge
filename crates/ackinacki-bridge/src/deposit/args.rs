@@ -12,20 +12,25 @@ use crate::{
 };
 
 /// EVM networks a deposit can be made from. Each one must be a chain the
-/// deposit circuit accepts; mainnet is not one of them.
+/// deposit circuit accepts. Arbitrum One is the production network: the
+/// wallet calls `deposit` on the bridge deployed there, and the proof is of
+/// that Arbitrum block. Sepolia is the Ethereum testnet. Ethereum mainnet
+/// is not a deposit network.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
+    Arbitrum,
     Sepolia,
 }
 
 impl Network {
-    pub const ALL: &'static [Network] = &[Network::Sepolia];
+    pub const ALL: &'static [Network] = &[Network::Arbitrum, Network::Sepolia];
 
     pub fn chain_id(self) -> u64 {
         match self {
+            Network::Arbitrum => deposit_chain_ids::CHAIN_ID_ARBITRUM_ONE,
             Network::Sepolia => deposit_chain_ids::CHAIN_ID_SEPOLIA,
         }
     }
@@ -33,6 +38,7 @@ impl Network {
     /// The name people read, e.g. `Sepolia`.
     pub fn name(self) -> &'static str {
         match self {
+            Network::Arbitrum => "Arbitrum One",
             Network::Sepolia => "Sepolia",
         }
     }
@@ -54,6 +60,13 @@ impl Network {
     /// The `wallet_addEthereumChain` payload (EIP-3085).
     pub fn eip3085(self) -> serde_json::Value {
         match self {
+            Network::Arbitrum => json!({
+                "chainId": format!("0x{:x}", self.chain_id()),
+                "chainName": "Arbitrum One",
+                "nativeCurrency": { "name": "Ether", "symbol": "ETH", "decimals": 18 },
+                "rpcUrls": ["https://arbitrum-one-rpc.publicnode.com"],
+                "blockExplorerUrls": ["https://arbiscan.io"],
+            }),
             Network::Sepolia => json!({
                 "chainId": format!("0x{:x}", self.chain_id()),
                 "chainName": "Sepolia",
@@ -596,6 +609,11 @@ mod tests {
                 n.chain_id()
             );
         }
+        assert_eq!(Network::Arbitrum.chain_id(), 42_161);
+        assert_eq!(Network::Arbitrum.arg(), "arbitrum");
+        assert_eq!(Network::Arbitrum.name(), "Arbitrum One");
+        assert_eq!(Network::Arbitrum.caip2(), "eip155:42161");
+        assert_eq!(Network::Arbitrum.eip3085()["chainId"], "0xa4b1");
         assert_eq!(Network::Sepolia.chain_id(), 11_155_111);
         assert_eq!(Network::Sepolia.arg(), "sepolia");
         assert_eq!(Network::Sepolia.name(), "Sepolia");

@@ -37,8 +37,8 @@ the next push either way.
 | `gen-zerostate` | runner | `gen-zerostate.sh`: x86_64 tvm-cli/tvm-debugger/sold (sha256-checked); moves acki-nacki's `BRIDGE_COMMIT` pin (`contracts/scripts/bridge_contracts.py`) to `$CI_COMMIT_SHA` in the disposable checkout and places `contracts/an/*` from `BRIDGE_REPO=$CI_WORKSPACE` (the generator re-places from that pin at import, so the pin is what decides); `make compile_contracts`; `generate_zerostate.py` |
 | `lease-acquire` | host | `host-lease.sh acquire bridge-<pipeline>`: one network per host at a time, dexdo's runs included; a live lease is waited out for up to 30 min |
 | `net-up` | host | asserts the lease, then `dexdo-e2e-up.yml -e target=bridge_e2e -e acki_dir=… …`: clone acki-nacki on the host at the resolved commit, ship `config/` + `docker/.env`, `up.sh` with the three images by digest (start, wait for finalization + its ext-message probe) |
-| `run-test` | host | `run-test-on-host.sh` over ssh: clean bridge checkout at `$CI_COMMIT_SHA`, pinned tvm-cli, `MODE=local`, endpoint `http://127.0.0.1:80`, lease heartbeat while the test runs |
-| `dump-logs` | host | on failure: `up.sh` log, compose state, node/block-manager/gql log tails |
+| `run-test` | host | `run-test-on-host.sh` over ssh: clean bridge checkout at `$CI_COMMIT_SHA`, pinned tvm-cli, waits up to 10 min for nginx0's node to serve the bridge account (a node that fails its first start is started only with the rest of the stack and syncs for minutes; `up.sh` does not wait for that), then `MODE=local` against `http://127.0.0.1:80` with a lease heartbeat while the test runs |
+| `dump-logs` | host | on failure: `up.sh` log, compose state, each node's container state and `docker compose logs` (both runs of a node that failed its first start), node0's log, block-manager and gql tails |
 | `net-down` | host | after success and after failure: lease owner check, `dexdo-e2e-down.yml -e full_cleanup=true -e dexdo_deploy_dir=…` (our checkout and data removed, dexdo's deploy dir untouched), `~/.netrc` removed, lease released even when the playbook fails. Not after a cancel or a timeout: no step runs then and the lease ages out (90 min) |
 
 The test runs **on the host**: the tvm client follows the block-producer redirect to
@@ -60,7 +60,7 @@ The test runs **on the host**: the tvm client follows the block-producer redirec
 | lease guard/lease files | `host-lease.sh`, `run-test-on-host.sh` | `/var/lock/dexdo-e2e.{lock,lease}`, the same files and protocol as dexdo's `tests/e2e/host-lease.sh`, TTL 5400 s as there (both sides must agree on when a lease is dead); bridge ids are `bridge-<pipeline>` |
 | test endpoint | `run-test-on-host.sh` `NETWORK_ENDPOINT` | `http://127.0.0.1:80`, GraphQL `http://127.0.0.1/graphql` |
 | withdrawal destination chain | test default `DST_CHAIN_ID` (11155111) | also the `chainId` of `mintAndSendBridged` |
-| account-state waits in the test | env `ACCOUNT_STATUS_TIMEOUT_SECS` (default 60), `BRIDGE_READY_TIMEOUT_SECS` (default 180) | a block must finalize before `deployx` shows up (10 s was too short on the five-node network); right after `up.sh` hands over, the API node can still be catching up on account state, so the bridge's `Active` is waited for rather than asserted once |
+| readiness waits | `run-test-on-host.sh` `API_WAIT_SECS` (default 600); test env `BRIDGE_READY_TIMEOUT_SECS` (default 180), `ACCOUNT_STATUS_TIMEOUT_SECS` (default 60) | the runner waits for nginx0's node to serve the zerostate bridge account (node0 may have come up late and still be syncing; the other nodes' APIs are behind the token nginx0 adds, so they are no alternative), the test then re-checks it; a block must finalize before `deployx` shows up (10 s was too short on the five-node network) |
 
 Host prerequisites (a VPS; 8 cores / 22 GB / 190 GB are plenty): Ubuntu 24.04, docker with
 compose v2, a registry login for docker.gosh.sh (pulls by `resolve-acki` and by `up.sh`), a CI

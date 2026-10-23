@@ -21,6 +21,8 @@
 #   BRIDGE_REPO      clone URL (default: public https)
 #   WORK_ROOT        checkout + work dir (default: ~/bridge-e2e)
 #   NETWORK_ENDPOINT http endpoint of nginx0 (default http://127.0.0.1:80)
+#   API_WAIT_SECS    how long to wait for that endpoint to serve the zerostate bridge
+#                    account before the test starts (default 600; see the wait below)
 #   TVM_CLI_VERSION  tvmlabs/tvm-sdk release the test runs with (default v3.0.4-rc.an);
 #                    the host's own tvm-cli is used when `tvm-cli version` reports that
 #                    version, otherwise the release is fetched into WORK_ROOT/bin
@@ -88,6 +90,29 @@ echo "==> tvm-cli: $(command -v tvm-cli) ($(tvm-cli version 2>/dev/null | head -
 
 lease_assert
 PY_DIR=$DIR/crates/bridge-prover-libraries/python
+
+# Wait for the API behind nginx0 (node0) to serve the zerostate bridge account. up.sh hands
+# the network over once blocks finalize and one external message lands, network-wide; but a
+# node that did not come up on the first `compose up` is started only when the rest of the
+# stack is (up.sh step 4c) and then syncs for several minutes, during which its API answers
+# nothing for any account. When that node is node0 the test would fail at its first query,
+# so wait here, printing the node containers' state along the way; the other nodes' APIs are
+# not an alternative (they want the token nginx0 adds).
+BRIDGE_ACC=0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
+API_WAIT_SECS=${API_WAIT_SECS:-600}
+deadline=$(( $(date +%s) + API_WAIT_SECS )); waited=0
+until timeout 20 tvm-cli -j -u "$ENDPOINT" account "$BRIDGE_ACC" 2>/dev/null | grep -q '"acc_type": "Active"'; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "FATAL: $ENDPOINT did not serve the bridge account within ${API_WAIT_SECS} s"
+    for n in node0 node1 node2 node3 node4 nginx0 q_server0; do echo "  $n: $(docker inspect "dexdo_e2e-$n-1" --format '{{.State.Status}} since {{.State.StartedAt}}' 2>/dev/null)"; done
+    exit 68
+  fi
+  if [ $(( waited % 60 )) -eq 0 ]; then
+    echo "==> waiting for $ENDPOINT to serve the bridge account (${waited}s): $(for n in node0 node1 node2 node3 node4; do printf '%s=%s ' "$n" "$(docker inspect "dexdo_e2e-$n-1" --format '{{.State.Status}}/{{.State.StartedAt}}' 2>/dev/null | cut -c1-27)"; done)"
+  fi
+  sleep 10; waited=$(( waited + 10 ))
+done
+echo "==> $ENDPOINT serves the bridge account (after ${waited}s)"
 export MODE=local
 export NETWORK="$ENDPOINT"
 export GRAPHQL_URL="${ENDPOINT%:80}/graphql"

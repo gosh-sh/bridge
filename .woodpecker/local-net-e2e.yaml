@@ -227,7 +227,8 @@ steps:
         "set +e; cd $ACKI_DIR;
         echo '===== up.sh log (tail 80) ====='; tail -n 80 dexdo-e2e-up.log 2>/dev/null;
         echo '===== docker compose ps -a ====='; docker compose -f docker/dexdo-e2e.compose.yaml ps -a 2>/dev/null;
-        for n in node0 node1 node2 node3 node4; do echo \"===== \$n (logs/\$n/node.log, tail 80) =====\"; tail -n 80 logs/\$n/node.log 2>/dev/null; done;
+        for n in node0 node1 node2 node3 node4; do echo \"===== \$n: \$(docker inspect dexdo_e2e-\$n-1 --format '{{.State.Status}} since {{.State.StartedAt}}, created {{.Created}}' 2>/dev/null) =====\"; docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=40 \$n 2>/dev/null | grep -vE ' TRACE | DEBUG '; done;
+        echo '===== node0 (logs/node0/node.log, non-trace tail 60) ====='; grep -vE ' TRACE | DEBUG ' logs/node0/node.log 2>/dev/null | tail -n 60;
         echo '===== block_manager (logs/bm0/bm.log, tail 120) ====='; tail -n 120 logs/bm0/bm.log 2>/dev/null;
         echo '===== q_server0 (docker logs, tail 80) ====='; docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=80 q_server0 2>/dev/null;
         echo '===== test work dir ====='; ls -la ~/$WORK_ROOT/work_dir 2>/dev/null; true"

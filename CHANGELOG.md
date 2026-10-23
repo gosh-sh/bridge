@@ -22,6 +22,29 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Documentation
+
+- ***The current deployment* in `README.md` names `v0.6.0`.** The contracts
+  and their addresses are unchanged: `v0.6.0` carries the same Ethereum and
+  Acki Nacki contract sources as the deployed `AckiNackiBridge`
+  `0x6957…4c9b` and `eccUSDCBridge` `1.13.0` (`66d15d49…`). The shellnet
+  `eccUSDCBridge` now trusts `0x6957…4c9b` for chain 11155111.
+
+## [0.6.0] – 2026-10-23
+
+### Breaking Changes
+
+- **`shellnet.common` no longer carries a key.** It gave every tester the
+  same shared shellnet burner as `RELAYER_PRIVATE_KEY`. The relayer now
+  replaces whatever transaction waits at its account's next nonce, so two
+  daemons on one key replaced each other's transactions; the burner also
+  has old transactions waiting in the Sepolia pools, and a deploy from it
+  can fail with `EOA nonce changed unexpectedly`. Put the key of a Sepolia
+  EOA of your own into the untracked `crates/bridge-prover-libraries/.env`
+  as `RELAYER_PRIVATE_KEY=0x…` (live relayer runbook, *Disk and wallet*).
+  Without it `shellnet.common` warns, and the `relayer` commands refuse to
+  start for want of `--private-key`.
+
 ### Added
 
 - **`eccUSDCBridge.setOutstandingByChain(chainId, amount)` — owner-signed, sets
@@ -76,8 +99,6 @@ assigns it when the release is tagged.
   chain's outstanding amount* in
   [`contracts/an/README.md`](contracts/an/README.md) carries the full argument.
 
-### Added
-
 - **`eccUSDCBridge.initiateWithdrawal` now emits `WithdrawalRefused` when it
   returns the ECC instead of burning it.** A refused withdrawal used to leave
   no record at all: the ECC came back and nothing said why, so a relayer or a
@@ -97,39 +118,89 @@ assigns it when the release is tagged.
   storage layout and the upgrade tuple as they were — so no version bump is
   needed. Rebuilt code hash `66d15d49…`, sold 0.80.0.
 
-### Documentation
+- **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
+  primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
+  `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
+  A request moves on when its endpoint times out, answers HTTP 401/403 (a
+  rejected key), 404, 408, 429 or 5xx, or a rate-limit, quota or key error —
+  that endpoint then waits 60 s at the back of the line — or cannot serve
+  that one request (an `eth_getLogs` span over its cap, which Alchemy's free
+  tier answers with HTTP 400, pruned history, a block it has not seen); a
+  revert or `nonce too low` is returned as before. A signed transaction goes to the first endpoint
+  that accepts it, with copies to the others, and `already known` counts as
+  accepted. At start every endpoint is asked for its chain id: the relayer
+  refuses to start when two disagree or none answers. `shellnet.common` now
+  builds the list — Infura, Alchemy, the EF DevOps endpoint, publicnode,
+  Tenderly's public gateway — from `INFURA_API_KEY` and `ALCHEMY_API_KEY` in
+  the untracked `crates/bridge-prover-libraries/.env`, leaving out an endpoint
+  whose key is not set, and paces the startup scan with
+  `BRIDGE_GET_LOGS_PAUSE_MS=600` for Infura's free tier. Live relayer
+  runbook, *Environment*.
 
-- **`README.md` opens with *The current deployment*.** No bridge address is
-  pinned in the tree any more, so a checkout had nowhere to read the live
-  ones. The section carries the Sepolia bridge and its deployment block, the
-  USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
-  client, and the four settings to copy. Read back from both chains.
-- ***The current deployment* in `README.md` follows the redeploy of the
-  limits.** The Sepolia `AckiNackiBridge` is now
-  `0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b`, deployed in block `11971217`
-  from `c7054529`; the previous `0x8413…d451` is paused. On shellnet
-  `eccUSDCBridge` reports `1.13.0`, code hash `66d15d49…`, and its Sepolia
-  light client is `0:9121fc37…8462`. Take `BRIDGE_ADDRESS`,
-  `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` from the section. Read back from
-  both chains.
-- ***The current deployment* in `README.md` names `v0.6.0`.** The contracts
-  and their addresses are unchanged: `v0.6.0` carries the same Ethereum and
-  Acki Nacki contract sources as the deployed `AckiNackiBridge`
-  `0x6957…4c9b` and `eccUSDCBridge` `1.13.0` (`66d15d49…`). The shellnet
-  `eccUSDCBridge` now trusts `0x6957…4c9b` for chain 11155111.
+- **`daemon-live` stops when the Acki Nacki chain is behind the bridge.** A
+  chain head below the bridge's last verified block means shellnet was
+  restarted from a new zerostate, or `BRIDGE_GQL_ENDPOINT` serves another
+  network; the bridge cannot follow either. The daemon took it for "the next
+  bundle is not there yet" and waited without a word (after the 2026-10-14
+  restart it waited three hours for a boundary the new chain reaches in
+  three months). Once the head has stayed below the bridge for 5 minutes,
+  over at least 5 polls in a row (one low read can be a lagging GraphQL
+  replica; a GraphQL answer with no blocks is no head at all and does not
+  count), it exits with
+  `Acki Nacki chain head … is below the bridge's last verified block …:
+  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`
+  and exit status 78 (every other failure exits with 1). Deploy a new bridge
+  (live relayer runbook §5.5). The shellnet-l2 container does not restart
+  on status 78: it stays up with the daemon stopped and logs `STOPPED: the
+  Acki Nacki chain is behind the bridge`, instead of rerunning preflight and
+  the startup scan into the same stop every few minutes.
 
-### Documentation
+### Changed
 
-- New [`REFACTORING.md`](REFACTORING.md) at the repository root, registered in
-  `DOCS.md`: a backlog of changes that are not bugs. Six entries to start —
-  `num_active_layers` naming the opposite of what it means; the EVM deployment
-  address pinned separately by the CLI profile and the web form, which is how
-  the form spent a week on a retired bridge; the deposit and withdrawal sides
-  keeping separate chain lists that have already drifted over Arbitrum One; the
-  literal `vmshell` amounts on the `DepositVoucher` deploy and its
-  `confirmDeposit` callback; guard scripts wired into no pipeline; and the
-  unbounded owner mint. Entries carry `file:line` and the shape of the change,
-  and are deleted when done rather than ticked.
+- **Relayer logs and errors name Ethereum endpoints by scheme and host
+  only, at every log level.** reqwest put the full URL, API key included,
+  into every transport error the relayer logged, and alloy's HTTP transport
+  into a debug span on every request; the relayer no longer goes through
+  that transport.
+
+- **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
+  set** (the EF DevOps endpoint otherwise, as before). Every tool that
+  sources an `L*_config/env` — the relayer, the `cast` commands of the
+  runbooks, `scripts/launch_withdraw_e2e*.sh` and
+  `scripts/replay_withdraw_shplonk.sh` — then talks to Infura.
+  `scripts/deploy_bridge_bundle.sh` does not source it: it broadcasts
+  through `SEPOLIA_RPC_URL`, publicnode unless that is set.
+
+- **shellnet-l2 kit: `preflight.sh` no longer refuses a start while a
+  transaction from the relayer EOA waits unmined.** It warns, and the daemon
+  replaces that transaction once it runs; refusing kept the container
+  restarting under `restart: unless-stopped` while the very transaction the
+  daemon would replace held it back. Its chain checks go to the first of
+  `RPC_URL` and `RPC_FAILOVER_URLS` that answers instead of `RPC_URL` alone,
+  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`. Its
+  output names endpoints by scheme and host only, without the path or any
+  `user:password@`.
+
+- **`bk_set.shellnet.json` holds the genesis committee of shellnet as
+  restarted on 2026-10-14** (5 signers; Poseidon commitment
+  `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
+  `e2a508b4…0020`, of every block before the network's first rotation):
+  `keys_config.json` `bk_nodes[i].bls_pubkey` of the restart's config, which
+  a node's `GET :8600/v2/bk_set_update` confirmed on 2026-10-14. `zs_bk_set`
+  of that config holds another set, as before. Rotation has been on since
+  2026-10-15, so a cold start still folds `bkSetUpdates` up to its seed
+  (`seed_prover_bk_set --cap-height`). `TECHNICAL_README.md`, the prover
+  daemon and circuits READMEs and the live relayer runbook now describe the
+  restarted network, and the shellnet BK-set section shows how to check a set
+  against leaf 2 — the first config posted for the restart held other keys —
+  and how to read the live set from a node on port 8600.
+
+- **`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` bounds one request to one endpoint and
+  defaults to 20 s** (it was 60 s for the whole request). A request that times
+  out moves on to the next endpoint in `RPC_FAILOVER_URLS`; once every endpoint
+  has failed it, the daemon logs `tick failed, will back off` and retries, and
+  a send that times out is an RPC failure, not counted toward the abort
+  threshold. A runtime env that sets 60 explicitly keeps 60 per endpoint.
 
 ### Fixed
 
@@ -149,118 +220,62 @@ assigns it when the release is tagged.
   marks the withdrawal record `failed` and exits with code 13
   (`EthSubmitFailed`) instead of reporting it confirmed; a rerun picks the
   withdrawal up from that record instead of burning again.
+
 - The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
   entry that is not an http(s) URL, as the daemon does at start; `cast` could
   answer a `wss://` entry and report it healthy while the daemon exited on it
   under `restart: unless-stopped`.
-- **The deposit relayer waits for the deposit block's AN anchor before
-  proving or submitting it.** Ethereum `--confirmations` can finish before
-  the light-client relayer delivers that block. Previously each retry built
-  a proof and called `finalizeDeposit` too early, producing exit 224 and
-  `an_rejected` alerts. A missing anchor now causes a healthy wait without
-  proving, submission, failed attempts or parking. Getter errors and actual
-  contract rejections remain visible. Upgrade the daemon; no contract
-  redeploy or VK change is needed.
 
-- **The web deposit form explains what the wallet said instead of printing
-  the raw rejection.** Clicking *Connect Wallet* twice before answering
-  MetaMask used to put the whole EIP-1193 error object — code, message and
-  the extension's stack — into a browser `alert()`. The form now reads the
-  error's `code` and says what to do: `-32002` points at the extensions
-  button, because MetaMask keeps a pending connection request behind its
-  toolbar icon and never raises a window for it; `4001` reports a rejection
-  in one line; `4100` asks for the wallet to be unlocked; `4902` explains the
-  prompt that offers to add Sepolia. Anything else shows the provider's own
-  `message`. The untouched object still goes to the browser console.
-- **The web deposit form's *Connect Wallet* button no longer sends a second
-  request while the first is open.** It is disabled and reads *Check
-  MetaMask…* until the wallet answers, so a second click cannot produce the
-  `-32002` it used to.
+- **A lost or stuck transaction no longer stalls the relayer.** alloy's
+  default nonce manager read the nonce once and counted locally, advancing
+  before the broadcast: when the RPC lost a send, every later transaction
+  went out one nonce too high and waited for the missing one, and the bridge
+  stood still until the daemon was restarted. A transaction stuck unmined
+  held everything behind it, restart or not. The relayer now reads the
+  `latest` and `pending` counts before every transaction and sends it at the
+  nonce the chain mines next. A transaction already waiting there is
+  replaced, at fees 25 % above what the relayer last paid at that nonce —
+  above the current estimate when it does not know, as after a restart —
+  and 25 % more on every later attempt, at most 4 times the current fee
+  estimate. The replaced transaction can be anyone's: give the relayer a key
+  of its own, and do not send from it by hand while a daemon runs. The gas
+  is estimated before the nonce is chosen, so a call that would revert — a
+  withdrawal whose anchor the bridge does not hold yet — sends nothing and
+  leaves the nonce and fees alone.
+  `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
+  `submit-*` commands all send this way.
+
+- **A transaction another one replaced is no longer waited for.** Every
+  transaction takes the account's next nonce and replaces whatever waits
+  there, so `daemon-live` could replace a withdrawal that `withdraw-e2e`
+  had sent from the same key, and `withdraw-e2e` then waited for it
+  forever. While a `relayer` command waits for a receipt it now watches the
+  account's `latest` count: once that has been past the transaction's nonce
+  for 30 s with no receipt, the wait ends with `tx confirmation error:
+  transaction 0x… was replaced: another transaction from 0x… took its nonce
+  …; send it again`. The daemons retry; `withdraw-e2e` and `submit-withdraw`
+  exit non-zero, and a second run is refused if the payout has landed
+  meanwhile (nullifier check).
+
+- **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a
+  `withdrawByProof` receipt**, like `verifyBlock` and `applyBkSetUpdate`.
+  They waited forever, so one dropped transaction held the withdraw scan;
+  the proof is now retried, the warning names the transaction hash, and the
+  nullifier check skips the proof once its payout has landed.
+  `ackinacki-bridge withdraw` and the one-shot `relayer` commands still wait
+  for the receipt as long as it takes.
 
 ### Documentation
 
-- Clarify the owner-anchor flip trust model (bridge-audit #57 / #106).
-  `disableOwnerAnchorsOn(chainId)` disables direct owner writes for that chain,
-  while owner upgrades and light-client replacement remain available. Bridge
-  upgrades reset the flags and recorded clients: restore configuration and
-  repeat the intended flips afterwards. NatSpec and operator runbooks now state
-  these powers consistently. An owner retaining `updateCode` can install
-  arbitrary replacement code that changes or removes the current checks, so
-  both owners remain trusted after a flip. No contract behavior, ABI or
-  deployment artifact changes.
+- ***The current deployment* in `README.md` follows the redeploy of the
+  limits.** The Sepolia `AckiNackiBridge` is now
+  `0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b`, deployed in block `11971217`
+  from `c7054529`; the previous `0x8413…d451` is paused. On shellnet
+  `eccUSDCBridge` reports `1.13.0`, code hash `66d15d49…`, and its Sepolia
+  light client is `0:9121fc37…8462`. Take `BRIDGE_ADDRESS`,
+  `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` from the section. Read back from
+  both chains.
 
-- The deposit form uses the 50 USDC transfer ceiling and Circle Sepolia USDC
-  (`0x1c7D4B19…`), with the bridge address supplied at build time as described
-  below. Test USDC comes from Circle's faucet. The ursus deposit-relayer
-  example uses `rpc.sepolia.ethpandaops.io` and requires logs back to the
-  configured deployment block.
-- New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
-  deposit relayer. It covers one daemon per AN bridge and backing up
-  `state.json`, later ids going first while failed ids retry from
-  `outstanding_deposits`, parking with `--skip-after-attempts` and finishing
-  parked deposits with `prove-one` + `finalize-one`, which outcomes are retried
-  automatically (pending, paused lane) and which need a person, a fix for each
-  exit code, the `--force-state` checklist after a redeploy, alert rules over
-  the Prometheus metrics (`deposit_relayer_outstanding_deposits` for a stuck
-  id), and failing over to a cold standby by copying the full `state.json`
-  (QC-OFF-01, -02, -08, -11). A pending submit stays at the base outstanding
-  delay (it does not increment attempts). `--force-state` also drops
-  outstanding ids and logs them. An outstanding id with no stored log is
-  scanned from the persisted `scan_done_through_block` plus one, not from
-  `--from-block` and not to the live head.
-
-- `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
-  row told operators to re-prove `applyBkSetUpdate` against the live
-  `storedLastSeenBlockSeqNo`. That value reverts
-  `AttestationLastSeenNotBeforeSeqNo`; pass the `last_seen` the attestation
-  was proven against.
-
-- `docs/aave-yield.md` gains *If AAVE lost money*: what still pays out when
-  `suppliedPrincipal()` is above `aUsdcBalance()`, and when to call
-  `writeOffUnbackedPrincipal()`. It no longer says `harvestYield` accepts
-  `type(uint256).max` — it never did.
-
-- Pause is two owner switches, not one. `AckiNackiBridge.pause()` on Ethereum
-  does not call `eccUSDCBridge.setPaused`, and `setPaused` does not call
-  `pause()`; Circle can still freeze USDC itself. An incident that must stop
-  both directions of the bridge has to flip both switches —
-  `contracts/an/README.md`, `docs/EVM-custody-and-accounting.md`.
-- The prover and circuit docs describe BK-set rotation as it works:
-  `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
-  and its opened L2/L3 leaves, no circuit of its own. Gone are the
-  "Circuit 3 (BK Set Update)" future-work item, references to a plan
-  document that does not exist, and the claims that shellnet rotation is off
-  (it has been on since 2026-10-08) and that the daemons take the BK set from
-  GraphQL (they read the file at `BRIDGE_BK_SET_CONFIG`; on shellnet it must
-  be the set at the seed) — in `crates/bridge-prover-libraries/TECHNICAL_README.md`,
-  the prover daemon and circuits READMEs and `PROBE_BK_UPDATES.md`.
-- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
-  is part of replay protection, and that an upgrade changing it has to ship a
-  block cutoff in the same code so past deposits stop going through. The
-  current contracts need no such restriction — the voucher's code is installed
-  by the zerostate and `updateCode` is called with an empty `userCell`.
-- `scripts/ursus/flip_deposit_to_light_client.md` and
-  `scripts/ursus/eth_lc_shellnet_e2e.md` pin the Gloas fork slot with
-  `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
-  deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
-  runs.
-- `docs/eth-light-client.md` §3.5 records that the owner keys stay until
-  the bridge is mature: `disableOwnerRotation` / `--flip-owner` are not a
-  pending production step. §4.5 has the per-network Gloas slot table. A
-  pin that later needs a published date is corrected with
-  `set-gloas-fork-slot`; `updateCode` is not required for that field.
-
-- `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
-  row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
-  bridge has recorded. A window with `dataLen > 0` is never cleared, so
-  that layer stays in `t` when later key blocks skip it.
-- `AckiNackiBridge.deposit`'s `anWorkchain` is telemetry. It is kept in
-  the ABI and the `Deposit` event so the log shape stays stable, but it
-  is not a deposit-proof public input and Acki Nacki always credits
-  workchain 0 (`eccUSDCBridge._parsePublicInputs` /
-  `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
-  That is the accepted product choice, not a gap to close by putting
-  workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
 - `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md` gains
   *Case 3e — Anchor eviction deadline*: how long a burned withdrawal can wait
   before its anchor leaves the 128-slot window. On an L1 deploy that is ~12 h
@@ -275,12 +290,15 @@ assigns it when the release is tagged.
   moved out of `--proofs-dir`. Trade-off 3 in `docs/EVM-contracts-spec.md`
   gains the same deploy-mode caveat.
 
+## [0.5.0] – 2026-10-23
+
 ### Breaking Changes
 
 - The Python withdrawal E2E tools use Sepolia (`11155111`) by default.
   Set `DST_CHAIN_ID` to the destination's actual EIP-155 id on other networks.
   They check `getDepositLimits(chainId)` before sending ECC; inventory
   belonging to another chain cannot cover the withdrawal.
+
 - Bridge transfers are limited to 50 USDC. Each L1 bridge caps deposited
   principal minus completed payouts at 10,000 USDC, including Aave principal;
   AN tracks that capacity separately per destination/source chain. Deposit and
@@ -292,6 +310,7 @@ assigns it when the release is tagged.
   event. CLI and UI check limits before approval, deposit or burn; failed
   limit reads stop the operation. Deposit relayers wait for capacity, while
   withdrawal relayers park oversized proofs.
+
 - Deploy the limits as a fresh pair. AN 1.13.0 adds chain balances and replay
   hashes to its upgrade tuple; it cannot decode the 1.12.0 tuple. Drain pending
   transfers, including old amounts above 50 USDC, before switching. Pause old
@@ -299,6 +318,7 @@ assigns it when the release is tagged.
   two funded payout contracts for the same AN identity and chain. Custody and
   consumed withdrawal nullifiers require a separate migration before funding
   a replacement that accepts the same history. See `contracts/an/README.md`.
+
 - AN external-message replay protection now hashes the verified message body
   and signer, preventing replay through changes to the unsigned external
   envelope. Expiring hashes also prevent an unsigned finalization with a
@@ -307,6 +327,177 @@ assigns it when the release is tagged.
   (402/401); a recorded duplicate returns 400. CLI and relayer finalizations
   bound expiry to 240 seconds. The CLI resends its existing BOC after an
   uncertain outcome until expiry; proof bytes are retained.
+
+- **The rotate verification key is rotated and an early `/updates`
+  hand-off no longer freezes the head.** The rotate circuit now exposes
+  the attested slot as public input 16 (17 Fr in all: 12 accumulator
+  limbs then `[current, next, period, gloas_fork_slot, attested_slot]`).
+  `submitRotate` reverts 240 if `attestedSlot / 8192 + 1` is not the
+  proof's `period`. There is no end-of-period window: a beacon `/updates`
+  best update is a valid hand-off, and the replaced committee can still
+  advance the head for the period it served. Previous rotate proofs (16
+  public inputs) do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3`
+  (was `4dc3f0a7…71d4cf54`). `updateCode` in place keeps the head and
+  committee and clears `_prevCommittee`; a new deploy is a new address
+  (`getLightClient` / `AN_LIGHT_CLIENT` change). The new `eth-lc-relayer`
+  refuses old 512-byte rotate bundles. Light client `1.6.0`, code hash
+  `c4b63228…`. The ABI is unchanged.
+
+  Two early rotates in a row still cut the replaced committee's late-
+  registration time: rotate P→P+1 during P, then P+1→P+2 on the best
+  update of P+1 (about 20 min after the boundary) retires C_P, so
+  checkpoints it skipped in P can no longer be registered. Honest rotates
+  leave that window until the start of P+2, about 27 h. A proper fix would
+  keep two previous committees.
+
+- **A checkpoint skipped near the end of a sync-committee period can still be
+  registered after the rotation.** `submitUpdate` keeps the commitment a
+  `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
+  while `attestedSlot / 8192 + 1 == _committeePeriod` — the period that
+  committee served — including to move the head. An early `/updates` best
+  update is therefore a valid hand-off and does not freeze the rest of that
+  period. The owner hatches
+  (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
+  rather than carrying it: they replace a committee the owner is rejecting, or
+  jump several periods, so neither is a hand-off. `getCommitteeState` returns
+  `prevCommittee` so an operator can see what is trusted. Before this, a checkpoint the daemon had not proven by
+  the time `submitRotate` landed was unanchorable for good: its proof carries
+  the old commitment and `ERR_WRONG_COMMITTEE` (242) refused it for ever, so
+  the 32 blocks of that epoch could only be admitted by the owner's
+  `setAcceptedBlockHash`, and not at all after `disableOwnerAnchors`. A period
+  is about 27 hours and a step proof takes longer than an epoch, so a skip at
+  the edge of a period was the likely case, not a corner one.
+
+  `_prevCommittee` is **not** in the `updateCode` migration cell, and must not
+  be: that cell is built by the code being replaced, so a live 1.4.1 client
+  writes the old 15 fields and a decode expecting 16 would read 256 bits from
+  where the period and the flags sit, corrupting the trust root after
+  `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
+  upgraded client therefore starts with no previous committee, which only
+  means no catch-up across the rotation already behind it; the field fills on
+  the next rotation. `_prevCommitteeHeadSlot` sits next to it in the layout
+  and is written on rotate, but nothing reads it: the previous-committee path
+  opens when `_prevCommittee` is filled.
+
+  `getCommitteeState` gains a `prevCommittee` output and no other function or
+  event changes. **Every caller of that getter has to take the new ABI**, not
+  just positional ones: the compiled ABI is version 2.4 with no explicit
+  function id, so the id is derived from the signature including its outputs,
+  and an added `uint256` output changes it. A caller still holding the 1.4.1
+  ABI sends an id this code does not dispatch and the getter simply fails. The
+  relayer's embedded copy of the ABI is updated here. The shadow kit's
+  `status.sh` and `deploy-contract.sh` read whatever `AN_LC_ABI_PATH` points
+  at, so they need the new ABI file beside them and no change of their own.
+  The
+  ABI's `fields` section gains `_prevCommittee` and `_prevCommitteeHeadSlot`
+  at positions 11 and 12, so account data decoded with the 1.4.1 ABI reads
+  rubbish from `_committeePeriod` onward: anything decoding this client's state
+  off-chain needs the new ABI.
+
+  The replaced committee is accepted for the period it served
+  (`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
+  head. `_prevCommitteeHeadSlot` is kept for the storage layout; nothing
+  reads it.
+
+### Added
+
+- `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
+  user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
+  as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
+  nothing; needs a build with `--features live-submit`. Use it when an
+  upgrade should set the pin in the same `updateCode` as the new code.
+
+- **Deposit anchor-wait diagnostics.** The relayer exports
+  `deposit_relayer_waiting_for_anchor`,
+  `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
+  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` outcome, and
+  `stage="is_block_accepted"` label in
+  `deposit_relayer_stage_duration_seconds`.
+  Outstanding entries in `state.json` gain optional
+  `anchor_wait_started_unix` and `anchor_wait_last_warned_unix` timestamps;
+  older state files remain readable. Missing anchors warn immediately by
+  default; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
+  default `0`) can delay the warning when coverage is monitored separately.
+  Warnings repeat at most every 15 minutes per deposit across restarts.
+  The logs identify the deposit, chain and block, distinguish the initial
+  wait from a delayed warning, and remain visible if saving state fails.
+  Before manual admission, compare the logged block number and hash using
+  `eth_getBlockByNumber` on an independent RPC for that chain; an expected
+  delivery delay alone is not a reason to admit a hash manually.
+
+### Changed
+
+- **`setGloasForkSlot` stays owner-callable after `disableOwnerRotation`.**
+  Light client `1.6.1`: the `require` that reverted 246 once the pin was
+  set is gone from both sources and from the placed `0.81.0_compiled`
+  TVC. A `u64::MAX` pin is a setting: when mainnet publishes Gloas,
+  `set-gloas-fork-slot` updates it. `updateCode` already exceeds that
+  write, so freezing the field was not a security boundary. The daemon
+  still returns `ProofFailed` and names `setGloasForkSlot` when the
+  beacon spec slot disagrees with the pin, instead of proving into 255.
+  Slot table in `docs/eth-light-client.md` §4.5. A live 1.6.0 client
+  needs `updateCode` with this TVC to pick it up.
+
+- **Deposit retries alternate with new work.** Finite retry rounds prevent
+  incoming traffic from indefinitely delaying older deposits. A first anchor
+  wait resets the daemon polling delay to `--backoff-initial-secs`, including
+  after idle polls or errors. Repeat waits preserve active failure backoff;
+  with no failures, they reset idle backoff for responsive normal polling.
+  Progress or a new wait clears the failure streak. Per-deposit anchor
+  polling uses the larger of failure backoff and one quarter of wait age,
+  with the age component capped at 60 seconds. Setting
+  `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. Fresh waits retain
+  the short base interval.
+
+- **`deposit_relayer_outstanding_deposits` includes healthy anchor waits.**
+  Adjust alerts that treat any nonzero value as failure to distinguish
+  failed attempts and missing anchors using their age and coverage.
+  An uncovered block can require the anchor writer's intervention.
+
+- **The deposit daemon's `AN_BRIDGE_ABI_PATH` must include
+  `isAcceptedBlockHash(uint256,uint256) returns (bool)`.** Upgrade a custom
+  ABI alongside the daemon; a missing getter causes tick errors and stops
+  delivery. The full bridge ABI shipped in the repository includes it.
+
+- **The replaced committee may still advance the head** for the period it
+  served (`attestedSlot / 8192 + 1 == _committeePeriod`), not only
+  late-register a skipped checkpoint. An early rotate therefore does not
+  freeze the rest of that period.
+
+- **The bridge zerostate has no default L1 bridge.** `BRIDGE_ZS_L1_BRIDGE`
+  must name the fresh paired L1 deployment: missing, zero or malformed
+  addresses stop generation before any account is changed. It used to default
+  to `0xcdfd6cef70f68d0849310cd970f8ef8f8e4b4fdb` on Sepolia.
+  `BRIDGE_ZS_L1_CHAIN_ID` still defaults to Sepolia (`11155111`).
+
+### Fixed
+
+- **The deposit relayer waits for the deposit block's AN anchor before
+  proving or submitting it.** Ethereum `--confirmations` can finish before
+  the light-client relayer delivers that block. Previously each retry built
+  a proof and called `finalizeDeposit` too early, producing exit 224 and
+  `an_rejected` alerts. A missing anchor now causes a healthy wait without
+  proving, submission, failed attempts or parking. Getter errors and actual
+  contract rejections remain visible. Upgrade the daemon; no contract
+  redeploy or VK change is needed.
+
+### Documentation
+
+- The deposit form uses the 50 USDC transfer ceiling and Circle Sepolia USDC
+  (`0x1c7D4B19…`), with the bridge address supplied at build time as described
+  below. Test USDC comes from Circle's faucet. The ursus deposit-relayer
+  example uses `rpc.sepolia.ethpandaops.io` and requires logs back to the
+  configured deployment block.
+
+- `docs/eth-light-client.md` §3.5 records that the owner keys stay until
+  the bridge is mature: `disableOwnerRotation` / `--flip-owner` are not a
+  pending production step. §4.5 has the per-network Gloas slot table. A
+  pin that later needs a published date is corrected with
+  `set-gloas-fork-slot`; `updateCode` is not required for that field.
+
+## [0.4.0] – 2026-10-20
+
+### Breaking Changes
 
 - **Every prover the relayers start is a binary the operator names, checked
   at startup; the `cargo run` fallbacks are gone.** A daemon started with a
@@ -361,34 +552,12 @@ assigns it when the release is tagged.
   A daemon started from an old unit refuses with the name of the missing
   flag.
 
-- **The rotate verification key is rotated and an early `/updates`
-  hand-off no longer freezes the head.** The rotate circuit now exposes
-  the attested slot as public input 16 (17 Fr in all: 12 accumulator
-  limbs then `[current, next, period, gloas_fork_slot, attested_slot]`).
-  `submitRotate` reverts 240 if `attestedSlot / 8192 + 1` is not the
-  proof's `period`. There is no end-of-period window: a beacon `/updates`
-  best update is a valid hand-off, and the replaced committee can still
-  advance the head for the period it served. Previous rotate proofs (16
-  public inputs) do not verify. Rotate VkBlob sha256 `60c0af2a…e2df58d3`
-  (was `4dc3f0a7…71d4cf54`). `updateCode` in place keeps the head and
-  committee and clears `_prevCommittee`; a new deploy is a new address
-  (`getLightClient` / `AN_LIGHT_CLIENT` change). The new `eth-lc-relayer`
-  refuses old 512-byte rotate bundles. Light client `1.6.0`, code hash
-  `c4b63228…`. The ABI is unchanged.
-
-  Two early rotates in a row still cut the replaced committee's late-
-  registration time: rotate P→P+1 during P, then P+1→P+2 on the best
-  update of P+1 (about 20 min after the boundary) retires C_P, so
-  checkpoints it skipped in P can no longer be registered. Honest rotates
-  leave that window until the start of P+2, about 27 h. A proper fix would
-  keep two previous committees.
-
-- **Workchain removal and owner recovery were combined in 1.12.0.** Two branches each
+- **`eccUSDCBridge` is 1.12.0, and neither 1.11.0 exists.** Two branches each
   built a 1.11.0: one adding owner `mintAndSendBridged`, one carrying the
   deposit ABI without `anWorkchain` and its regenerated key. They are now one
   contract with both changes, rebuilt with sold 0.80.0, code hash
-  `a1fd7d19…`; the limits release supersedes it with 1.13.0. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
-  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.13.0 with limits.
+  `a1fd7d19…`. Any note naming `aeeadc7f…` or `774c9571…` describes a binary
+  that was never deployed. `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
 
 - **Deposits no longer have a workchain parameter.** For a fresh deployment,
   use `deposit(uint256,bytes32)` and
@@ -422,6 +591,7 @@ assigns it when the release is tagged.
   and clients, then publish the new addresses and start deposits. Do not switch
   clients alone against an earlier deployment. The installer preserves an
   existing profile, so its deployment values must be updated by the operator.
+
 - **`eccUSDCBridge` 1.12.0 adds owner `mintAndSendBridged` for CLI exit 37.**
   After a voucher-consumed `confirmDeposit` abort the deposit cannot be
   finalized again, Ethereum already holds the USDC, and ordinary
@@ -440,24 +610,182 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  The limits release is 1.13.0, code hash `66d15d49…`, rebuilt with sold
-  0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
-  described above; the old upgrade tuple cannot initialize this build.
-  `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the
-  aborted deposit's source chain and enforces the transfer and chain limits.
-  Pass the deposit's EIP-155 source chain id. Deposit and withdrawal
-  entrypoint arguments are unchanged. The CLI's supported deposit version
-  and `NEWEST_KNOWN_BRIDGE_VERSION` are 1.13.0.
+  Upgrade with `updateCode` and an empty `userCell` — the storage *layout*
+  is unchanged, but `onCodeUpgrade` still `resetStorage`s and restores
+  only pubkey, usdcWallet, `_totalMinted`, both mint nonces, the two
+  bridged maps and the voucher code. It wipes `_paused`,
+  `_trustedL1Bridge`, `_acceptedBlockHash`, `_lightClientCode`,
+  `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`.
+  After the call, re-run `setPaused` if the lane was paused,
+  `setTrustedL1Bridge`, and `setLightClientCode` / `deployLightClient`
+  before deposits work again (222/224 until then). Owner anchors come
+  back on for every chain (`_ownerAnchorsDisabled` is wiped). If a chain
+  had been flipped to light-client-only, call `disableOwnerAnchorsOn`
+  again after `deployLightClient` — it turns the owner writer off and
+  reverts 226 until a client exists. The ABI gains `mintAndSendBridged`.
+  `eccUSDCBridge` 1.12.0,
+  code hash `a1fd7d19…`, rebuilt with sold 0.80.0. The deposit CLI's
+  exit-37 message names the aborted deposit's `depositId`, amount, recipient,
+  EVM bridge and chain, and tells the operator to call `mintAndSendBridged`.
+  `NEWEST_KNOWN_BRIDGE_VERSION` is 1.12.0.
+
+### Added
+
+- `deposit-relayer daemon --outstanding-backoff-secs` /
+  `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
+  is retried, doubled on each later failure of that id up to 64×. Gauge
+  `deposit_relayer_outstanding_deposits`. `state.json` gains
+  `outstanding_deposits` (per-id attempts, `retry_after_unix`, and the
+  Deposit tx / block / log index when known) and `last_finalized_deposit_id`
+  (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
+
+### Changed
+
+- The ETH→AN deposit relayer no longer stalls every later deposit behind one
+  that cannot be finalised. Later ids are tried first; a failed id stays in
+  `outstanding_deposits` and is retried with backoff on idle ticks,
+  round-robin, from its stored Deposit tx (or its block) so the log-scan
+  cursor can keep moving. A pending submit (`ERR_PAUSED`, a confirmation
+  timeout) goes into that set with backoff but does not count toward
+  `--skip-after-attempts`. Parked ids stay parked. A `state.json` written by
+  an earlier relayer that only has `attempts_since_progress` for the last
+  failed id carries that count into the new outstanding entry, so
+  `--skip-after-attempts` does not start over; that id has no stored tx, so
+  the first retry starts at the `scan_done_through_block` from that file
+  plus one (the earlier relayer left the cursor at the deposit's block
+  minus one), not at `--from-block` and not at the live head.
+  `finalize-one` is unchanged.
+
+  Gauges that used to mean "the one stuck head-of-line id" now mean something
+  else: `deposit_relayer_attempts_since_progress` follows the last failed
+  outstanding id and resets when any later id finalizes;
+  `deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` and
+  only goes up; `deposit_relayer_target_deposit_id` shows the retried id
+  during an idle retry, then the forward id again. Alert on
+  `deposit_relayer_outstanding_deposits`.
+
+  Before running an older binary, move every `outstanding_deposits[].deposit_id`
+  into `parked_deposit_ids`. An older binary ignores `outstanding_deposits`
+  (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
+  those ids, so it would neither retry nor park them.
+
+### Fixed
+
+- **The web deposit form explains what the wallet said instead of printing
+  the raw rejection.** Clicking *Connect Wallet* twice before answering
+  MetaMask used to put the whole EIP-1193 error object — code, message and
+  the extension's stack — into a browser `alert()`. The form now reads the
+  error's `code` and says what to do: `-32002` points at the extensions
+  button, because MetaMask keeps a pending connection request behind its
+  toolbar icon and never raises a window for it; `4001` reports a rejection
+  in one line; `4100` asks for the wallet to be unlocked; `4902` explains the
+  prompt that offers to add Sepolia. Anything else shows the provider's own
+  `message`. The untouched object still goes to the browser console.
+
+- **The web deposit form's *Connect Wallet* button no longer sends a second
+  request while the first is open.** It is disabled and reads *Check
+  MetaMask…* until the wallet answers, so a second click cannot produce the
+  `-32002` it used to.
+
+- `deposit-prover/scripts/recanonicalize_fixture_headers.py` skips fixtures
+  marked `fixture_kind: synthetic` in both check and write modes, so they do
+  not interrupt header checks and updates for real chain witnesses.
+
+- Frontend deposits use the validated Acki Nacki recipient entered in the form.
+  The connected Ethereum address is used for USDC allowance checks. Invalid AN
+  recipients are rejected before a deposit transaction is sent.
+
+- The withdraw relayer proved a block whose attestation carried a signer
+  more than once with `block_seq_no = 0`: the fetcher wrote the height into
+  the assembled attestation bytes at an offset computed from the sum of the
+  signer counts, while the layout, and the circuit, count entries (one per
+  distinct signer). `AckiNackiBridge` rejected the proof with
+  `AttestationProofRejected()`, the daemon aborted after three rejects and
+  was restarted into the same loop. Shellnet block 1239860 (2026-10-19,
+  three signers with count 3) stopped the relayer this way at
+  `applyBkSetUpdate`; a bundle block with a repeated signer would have done
+  the same at `verifyBlock`. The height is now written where the circuit
+  reads it, a block whose `seq_no` is not the requested height is refused,
+  and a proof whose height is not the block's is refused before it is sent.
+  Upgrade the relayer (for the shellnet-l2 kit, rebuild the image); nothing
+  on chain, in the keys or in the state changes, and the stuck block is
+  proved again on the next start.
+
+- `deposit-relayer` kills a prover that runs past its timeout instead of
+  leaving it running, writing the `data/` key cache beside the retry the
+  daemon starts after its backoff. `relayer prove-withdraw` does the same
+  with `bridge-event-halo2-prover`, and passes a relative `--witness` or
+  `--out-dir` to it as an absolute path: the prover runs in `--work-dir`, and
+  resolved them there.
+
+### Removed
+
+- The `cargo run` fallbacks of `eth-lc-relayer` (`export_step_vk_blob`,
+  `rotate_tree_n8`), `deposit-relayer` (`fetch_deposit_data`,
+  `export_vk_blob`, `export_blake2b_proof`) and `relayer` (`aggregate-proof`,
+  `bridge-event-halo2-prover`), and with them the `--aggregator-dir` /
+  `--bridge-prover-libraries-dir` flags of `relayer` and their
+  `BRIDGE_AGGREGATOR_DIR`, `AGGREGATOR_DIR` and `BRIDGE_PROVER_LIBRARIES_DIR`.
+  See Breaking Changes.
+
+### Documentation
+
+- **`README.md` opens with *The current deployment*.** No bridge address is
+  pinned in the tree any more, so a checkout had nowhere to read the live
+  ones. The section carries the Sepolia bridge and its deployment block, the
+  USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
+  client, and the four settings to copy. Read back from both chains.
+
+- New [`REFACTORING.md`](REFACTORING.md) at the repository root, registered in
+  `DOCS.md`: a backlog of changes that are not bugs. Six entries to start —
+  `num_active_layers` naming the opposite of what it means; the EVM deployment
+  address pinned separately by the CLI profile and the web form, which is how
+  the form spent a week on a retired bridge; the deposit and withdrawal sides
+  keeping separate chain lists that have already drifted over Arbitrum One; the
+  literal `vmshell` amounts on the `DepositVoucher` deploy and its
+  `confirmDeposit` callback; guard scripts wired into no pipeline; and the
+  unbounded owner mint. Entries carry `file:line` and the shape of the change,
+  and are deleted when done rather than ticked.
+
+- New `crates/deposit-relayer-daemon/docs/operator_runbook.md`: how to run the
+  deposit relayer. It covers one daemon per AN bridge and backing up
+  `state.json`, later ids going first while failed ids retry from
+  `outstanding_deposits`, parking with `--skip-after-attempts` and finishing
+  parked deposits with `prove-one` + `finalize-one`, which outcomes are retried
+  automatically (pending, paused lane) and which need a person, a fix for each
+  exit code, the `--force-state` checklist after a redeploy, alert rules over
+  the Prometheus metrics (`deposit_relayer_outstanding_deposits` for a stuck
+  id), and failing over to a cold standby by copying the full `state.json`
+  (QC-OFF-01, -02, -08, -11). A pending submit stays at the base outstanding
+  delay (it does not increment attempts). `--force-state` also drops
+  outstanding ids and logs them. An outstanding id with no stored log is
+  scanned from the persisted `scan_done_through_block` plus one, not from
+  `--from-block` and not to the live head.
+
+- `docs/EVM-contracts-spec.md` §7.1 and the `PrevAnchorMismatch` runbook
+  row: `expectedPrevAnchor(n)` keeps anchoring at the highest layer the
+  bridge has recorded. A window with `dataLen > 0` is never cleared, so
+  that layer stays in `t` when later key blocks skip it.
+
+- `AckiNackiBridge.deposit`'s `anWorkchain` is telemetry. It is kept in
+  the ABI and the `Deposit` event so the log shape stays stable, but it
+  is not a deposit-proof public input and Acki Nacki always credits
+  workchain 0 (`eccUSDCBridge._parsePublicInputs` /
+  `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
+  That is the accepted product choice, not a gap to close by putting
+  workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
+
+## [0.3.0] – 2026-10-19
+
+### Breaking Changes
 
 - **`eccUSDCBridge.initiateWithdrawal` refuses a burn that would take
   bridged burned above bridged minted for that token, exit 233
   (`ERR_BURN_EXCEEDS_BRIDGED`).** Read the totals with `getTotalBridged`.
-  Ordinary owner `mintAndSend` / `mintAndSendAccumulator` and TIP-3 mint
-  increment only `getTotalMinted` and add no headroom. 1.12.0's
-  `mintAndSendBridged` is the exception, for exit-37 recovery only. ECC[3]
-  is fungible, so such ECC can still be withdrawn against headroom that
-  deposits created: the cap limits total bridge payouts to total deposits,
-  not one depositor's own withdrawal.
+  Owner-minted and TIP-3-minted ECC increment only `getTotalMinted` and add
+  no headroom. ECC[3] is fungible, so such ECC can still be withdrawn
+  against headroom that deposits created: the cap limits total bridge
+  payouts to total deposits, not one depositor's own withdrawal.
 
   A fresh zerostate starts both counters at 0, so the cap holds from the
   first burn. `updateCode` copies the maps as they are. On a live bridge
@@ -466,13 +794,9 @@ assigns it when the release is tagged.
   burn is refused until `finalizeDeposit` brings minted up to burned.
   That is not the same as a fresh deploy.
 
-  Included in the `eccUSDCBridge` 1.12.0 build described above. The withdrawal
-  ABI is unchanged. The withdraw CLI preflight checks
-  `getTotalBridged` and refuses before the burn.
   `eccUSDCBridge` 1.10.0, code hash `4b2a9600…`, rebuilt with sold 0.80.0.
-  The 1.10.0 ABI was unchanged; 1.12.0 above adds `mintAndSendBridged`.
-  The withdraw CLI preflight checks `getTotalBridged` and refuses before
-  the burn.
+  The ABI is unchanged. The withdraw CLI preflight checks
+  `getTotalBridged` and refuses before the burn.
 
 - **The relayer's owner flip and the deposit CLI read the light client per
   chain, and the relayer now needs a 1.9.0 bridge.** `eth-lc-relayer
@@ -581,15 +905,14 @@ assigns it when the release is tagged.
   and scans `checkpoint_slot - 32 ..= checkpoint_slot` (33 slots), so a
   deposit inside a Gloas checkpoint's own payload is not reported as
   covered by that checkpoint.
+
 - **The rotate proof's `period` is proven.** The rotate circuit computes it
   as the attested slot's period plus one (`attested_slot / 8192 + 1`, the
   period the proven next committee serves) instead of loading it as a free
   witness, so a hand-off can no longer be submitted under a period of the
   sender's choosing. `submitRotate` stores it in `_committeePeriod` and emits
-  it in `CommitteeRotated`. The 1.6.0 entry above now requires
-  `attestedSlot / 8192 + 1 == period` on `submitRotate` (240) and uses that
-  stored period as the replaced committee's signing bound. This is part of
-  the rotate verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
+  it in `CommitteeRotated`; nothing gates on it. This is part of the rotate
+  verification key rotation (rotate VkBlob sha256 `4dc3f0a7…`):
   rotate proofs made before it do not verify. `eth-lc-relayer` refuses a
   rotate proof whose period is not the one it is rotating into, and it
   does not start `rotate_tree_n8` for a live period that tree cannot
@@ -611,6 +934,7 @@ assigns it when the release is tagged.
   `8d49b996…cca292` → `8d2ec6dc…ae5336`. The ABI gains `setGloasForkSlot`,
   `getGloasForkSlot` and the `_gloasForkSlot` / `_gloasForkSlotSet`
   fields.
+
 - **`eccUSDCBridge.disableOwnerAnchors` is per-chain.** The previous bool
   `_ownerAnchorsEnabled` turned the owner writer off for every source
   chain at once, so a flip left the six L2s on the deposit allowlist
@@ -646,6 +970,7 @@ assigns it when the release is tagged.
   consecutive proven anchors sit within one ancestry span: accepted
   checkpoints are often two or more epochs apart, and `eth-lc-relayer`
   still leaves the flip off unless started with `--flip-owner`.
+
 - **`daemon`, `daemon-bridge` and `smoke-fixture` take the bundle stride
   from the bridge.** They read `bundleStride()`; for a bridge deployed
   before that field, set `--anchor-level` / `BRIDGE_ANCHOR_LEVEL` (1 or 2)
@@ -658,6 +983,7 @@ assigns it when the release is tagged.
   server template `scripts/ursus/bridge-relayer.env.example` sets
   `BRIDGE_ANCHOR_LEVEL=2`. `RelayerConfig::new` takes the stride; it has
   no default.
+
 - **`VerifyBlockConfig` gained `uint64 genesisLastBkSetUpdateSeqNo`.** All
   callers that build the struct directly (`DeployShellnetE2EBridge`,
   `DeployRealBridge`, `DeployReuseVerifiersBridge`,
@@ -676,6 +1002,7 @@ assigns it when the release is tagged.
   cursor, a daemon cold-started against such a chain halts on its first
   tick with `prover out of sync` because the drain picks up a historical
   rotation whose pre-state no longer matches the live BK-set commitment.
+
 - **`BootstrapSeed` schema bumped v2 → v3** (added
   `last_bk_set_update_seq_no: u64`). v2 seed files fail
   `BootstrapSeed::load` with the same schema-version diagnostic as the
@@ -685,12 +1012,14 @@ assigns it when the release is tagged.
   verifier daemon then picks up the new file on its next startup; the
   startup drift check will refuse to open the daemon until seed and
   state agree.
+
 - **`compute_bridge_anchors` emits a new env line
   `GENESIS_LAST_BK_SET_UPDATE_SEQNO`.**
   `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
   persists it into the generated `$CFG_DIR/env` next to
   `BRIDGE_BOOTSTRAP_SEQNO`. Operators do not need to set the var by
   hand; the forge script already consumes it through `vm.envOr(..., 0)`.
+
 - **`submitAncestry` fills the span between two proven anchors instead of
   walking back from one.** The headers go in oldest first, and both ends are
   checked: `headerRlps[0]` and the last header must each hash to a block
@@ -841,55 +1170,6 @@ assigns it when the release is tagged.
   when that is spent — on a self-rooted test deployment it yields nothing at
   all — which is why the bound, not the mint, is the fix.
 
-- **A checkpoint skipped near the end of a sync-committee period can still be
-  registered after the rotation.** `submitUpdate` keeps the commitment a
-  `submitRotate` replaced (`_prevCommittee`) and accepts a proof signed by it
-  while `attestedSlot / 8192 + 1 == _committeePeriod` — the period that
-  committee served — including to move the head. An early `/updates` best
-  update is therefore a valid hand-off and does not freeze the rest of that
-  period. The owner hatches
-  (`setCommitteeCommitment`, `reAnchorCommittee`) clear `_prevCommittee`
-  rather than carrying it: they replace a committee the owner is rejecting, or
-  jump several periods, so neither is a hand-off. `getCommitteeState` returns
-  `prevCommittee` so an operator can see what is trusted. Before this, a checkpoint the daemon had not proven by
-  the time `submitRotate` landed was unanchorable for good: its proof carries
-  the old commitment and `ERR_WRONG_COMMITTEE` (242) refused it for ever, so
-  the 32 blocks of that epoch could only be admitted by the owner's
-  `setAcceptedBlockHash`, and not at all after `disableOwnerAnchors`. A period
-  is about 27 hours and a step proof takes longer than an epoch, so a skip at
-  the edge of a period was the likely case, not a corner one.
-
-  `_prevCommittee` is **not** in the `updateCode` migration cell, and must not
-  be: that cell is built by the code being replaced, so a live 1.4.1 client
-  writes the old 15 fields and a decode expecting 16 would read 256 bits from
-  where the period and the flags sit, corrupting the trust root after
-  `tvm.resetStorage()`. The encode and decode are byte-identical to 1.4.1. An
-  upgraded client therefore starts with no previous committee, which only
-  means no catch-up across the rotation already behind it; the field fills on
-  the next rotation. `_prevCommitteeHeadSlot` sits next to it in the layout
-  and is written on rotate, but nothing reads it: the previous-committee path
-  opens when `_prevCommittee` is filled.
-
-  `getCommitteeState` gains a `prevCommittee` output and no other function or
-  event changes. **Every caller of that getter has to take the new ABI**, not
-  just positional ones: the compiled ABI is version 2.4 with no explicit
-  function id, so the id is derived from the signature including its outputs,
-  and an added `uint256` output changes it. A caller still holding the 1.4.1
-  ABI sends an id this code does not dispatch and the getter simply fails. The
-  relayer's embedded copy of the ABI is updated here. The shadow kit's
-  `status.sh` and `deploy-contract.sh` read whatever `AN_LC_ABI_PATH` points
-  at, so they need the new ABI file beside them and no change of their own.
-  The
-  ABI's `fields` section gains `_prevCommittee` and `_prevCommitteeHeadSlot`
-  at positions 11 and 12, so account data decoded with the 1.4.1 ABI reads
-  rubbish from `_committeePeriod` onward: anything decoding this client's state
-  off-chain needs the new ABI.
-
-  The replaced committee is accepted for the period it served
-  (`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
-  head. `_prevCommitteeHeadSlot` is kept for the storage layout; nothing
-  reads it.
-
 - **`submitRotate` no longer decides anything by the period on the proof, and
   refuses a hand-off that does not change the committee.** The rotate circuit
   loaded its period as a free witness (`rotate_aggregation`: `ctx.load_witness`),
@@ -909,9 +1189,9 @@ assigns it when the release is tagged.
   committee is unique. So the period is now out of the decision entirely: the
   monotonicity test is gone, and `ERR_STALE_PERIOD` (245) can only come from
   the owner's `reAnchorCommittee`. `_committeePeriod` and `CommitteeRotated`
-  carry the rotate proof's period, which the circuit binds to the attested
-  slot. 1.6.0 additionally requires that equality on `submitRotate` (240) and
-  uses the stored period as the replaced committee's signing bound.
+  carry the rotate proof's period, which the circuit now binds to the attested
+  slot (the rotate verification key entry above). It is a report for
+  operators, and nothing gates on it.
 
   `submitRotate` also now requires `nextCommitteeCommitment != _currentCommittee`
   (`ERR_SELF_ROTATION`, 253). A genuine proof with
@@ -921,10 +1201,15 @@ assigns it when the release is tagged.
   overwritten `_prevCommittee` with `_currentCommittee` — silently stranding
   every checkpoint the replaced committee had not registered yet.
 
-  An early hand-off used to freeze the head until the successor's period,
-  about 27 hours. 1.6.0 lets the replaced committee keep advancing the head
-  for the period it served, so a `/updates` best update is a valid rotate
-  and does not strand the rest of that period.
+  **Still open, and not fixable here.** Nothing binds a committee to a period
+  except that free label, so a genuine hand-off submitted early — the next
+  committee is in the headers of the current period, so the proof exists from
+  its first slot — installs a committee that has signed nothing yet. The head
+  then cannot move until the chain reaches that committee's period (up to ~27
+  h), and the replaced committee's unregistered checkpoints are stranded. This
+  is permissionless, repeatable once per period, and true of the deployed
+  1.4.1 as well. The fix is to bind the hand-off to a slot inside the rotate
+  circuit, which is not in this change.
 
 - **A rotate whose confirmation is lost no longer stops the daemon for
   good.** `call_contract` broadcasts the message and waits for it in one
@@ -1074,6 +1359,7 @@ assigns it when the release is tagged.
   stage 5 refuses with exit 12 an `aggregate-proof` that is not the binary
   preflight hashed, and the way on is `--allow-retry`, whose preflight checks
   the new one.
+
 - **The compose kit's `preflight.sh` requires `BRIDGE_DEPLOY_BLOCK` in the
   runtime env.** Add it (the block `AckiNackiBridge` was deployed in, above 0
   and not above the head) to the kit's runtime env file before upgrading the
@@ -1153,9 +1439,11 @@ assigns it when the release is tagged.
   and for `PrimaryAggregatorVerifier.sol` and
   `FallbackAggregatorVerifier.sol`, regenerated in `6360455` with the
   other two. All four sources match the `.bin` files in this tree.
+
 - **`aggregate-proof --allow-bin-drift` is now `--allow-source-drift`.** Same
   meaning — a bootstrap escape hatch for a verifier whose source is not
   committed yet — with no alias for the old spelling.
+
 - **The Circuit 4 (withdrawal) verification key is rotated.** The inner
   Poseidon preimage now includes `events_pos`, and the public-input vector
   grows from 10 to 11 with `anchorLayer` (1-indexed, range-checked
@@ -1316,101 +1604,8 @@ assigns it when the release is tagged.
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
 
-- **`shellnet.common` no longer carries a key.** It gave every tester the
-  same shared shellnet burner as `RELAYER_PRIVATE_KEY`. The relayer now
-  replaces whatever transaction waits at its account's next nonce, so two
-  daemons on one key replaced each other's transactions; the burner also
-  has old transactions waiting in the Sepolia pools, and a deploy from it
-  can fail with `EOA nonce changed unexpectedly`. Put the key of a Sepolia
-  EOA of your own into the untracked `crates/bridge-prover-libraries/.env`
-  as `RELAYER_PRIVATE_KEY=0x…` (live relayer runbook, *Disk and wallet*).
-  Without it `shellnet.common` warns, and the `relayer` commands refuse to
-  start for want of `--private-key`.
-
-### Documentation
-
-- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
-  is part of replay protection, and that an upgrade changing it has to ship a
-  block cutoff in the same code so past deposits stop going through. The
-  current contracts need no such restriction — the voucher's code is installed
-  by the zerostate and `updateCode` is called with an empty `userCell`.
-- `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
-  `docs/eth-light-client.md` §3.5, and
-  `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
-  the owner writer; L1 still covers only the blocks a span reaches when
-  accepted checkpoints sit more than a span apart, because nothing
-  late-registers the ones the daemon skipped. Check 3 of the deposit
-  CLI names both `disableOwnerAnchors` and `disableOwnerAnchorsOn` as
-  the switch-off.
-
 ### Added
 
-- `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
-  user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
-  as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
-  nothing; needs a build with `--features live-submit`. Use it when an
-  upgrade should set the pin in the same `updateCode` as the new code.
-- **Deposit anchor-wait diagnostics.** The relayer exports
-  `deposit_relayer_waiting_for_anchor`,
-  `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
-  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` outcome, and
-  `stage="is_block_accepted"` label in
-  `deposit_relayer_stage_duration_seconds`.
-  Outstanding entries in `state.json` gain optional
-  `anchor_wait_started_unix` and `anchor_wait_last_warned_unix` timestamps;
-  older state files remain readable. Missing anchors warn immediately by
-  default; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
-  default `0`) can delay the warning when coverage is monitored separately.
-  Warnings repeat at most every 15 minutes per deposit across restarts.
-  The logs identify the deposit, chain and block, distinguish the initial
-  wait from a delayed warning, and remain visible if saving state fails.
-  Before manual admission, compare the logged block number and hash using
-  `eth_getBlockByNumber` on an independent RPC for that chain; an expected
-  delivery delay alone is not a reason to admit a hash manually.
-
-- `deposit-relayer daemon --outstanding-backoff-secs` /
-  `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
-  is retried, doubled on each later failure of that id up to 64×. Gauge
-  `deposit_relayer_outstanding_deposits`. `state.json` gains
-  `outstanding_deposits` (per-id attempts, `retry_after_unix`, and the
-  Deposit tx / block / log index when known) and `last_finalized_deposit_id`
-  (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
-
-- **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
-  primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
-  `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
-  A request moves on when its endpoint times out, answers HTTP 401/403 (a
-  rejected key), 404, 408, 429 or 5xx, or a rate-limit, quota or key error —
-  that endpoint then waits 60 s at the back of the line — or cannot serve
-  that one request (an `eth_getLogs` span over its cap, which Alchemy's free
-  tier answers with HTTP 400, pruned history, a block it has not seen); a
-  revert or `nonce too low` is returned as before. A signed transaction goes to the first endpoint
-  that accepts it, with copies to the others, and `already known` counts as
-  accepted. At start every endpoint is asked for its chain id: the relayer
-  refuses to start when two disagree or none answers. `shellnet.common` now
-  builds the list — Infura, Alchemy, the EF DevOps endpoint, publicnode,
-  Tenderly's public gateway — from `INFURA_API_KEY` and `ALCHEMY_API_KEY` in
-  the untracked `crates/bridge-prover-libraries/.env`, leaving out an endpoint
-  whose key is not set, and paces the startup scan with
-  `BRIDGE_GET_LOGS_PAUSE_MS=600` for Infura's free tier. Live relayer
-  runbook, *Environment*.
-- **`daemon-live` stops when the Acki Nacki chain is behind the bridge.** A
-  chain head below the bridge's last verified block means shellnet was
-  restarted from a new zerostate, or `BRIDGE_GQL_ENDPOINT` serves another
-  network; the bridge cannot follow either. The daemon took it for "the next
-  bundle is not there yet" and waited without a word (after the 2026-10-14
-  restart it waited three hours for a boundary the new chain reaches in
-  three months). Once the head has stayed below the bridge for 5 minutes,
-  over at least 5 polls in a row (one low read can be a lagging GraphQL
-  replica; a GraphQL answer with no blocks is no head at all and does not
-  count), it exits with
-  `Acki Nacki chain head … is below the bridge's last verified block …:
-  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`
-  and exit status 78 (every other failure exits with 1). Deploy a new bridge
-  (live relayer runbook §5.5). The shellnet-l2 container does not restart
-  on status 78: it stays up with the daemon stopped and logs `STOPPED: the
-  Acki Nacki chain is behind the bridge`, instead of rerunning preflight and
-  the startup scan into the same stop every few minutes.
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -1524,11 +1719,13 @@ assigns it when the release is tagged.
   a finalized block is the bid's `parent_block_hash`, the execution block that
   block built on, read from `finalized_header.execution_block_hash`; before
   Gloas it is still the payload's own `block_hash`.
+
 - `EthBeaconLightClient.setGloasForkSlot(uint64)` (owner) and
   `getGloasForkSlot() → (uint64 gloasForkSlot, bool isSet)`; errors 255 (proof made for
   a different Gloas fork slot) and 256 (fork slot not set). `eth-lc-relayer
   set-gloas-fork-slot --slot …` is the operator call; a fresh deploy rejects
   every submission with 256 until it runs.
+
 - **`daemon-live` checks the bridge's `bundleStride` at startup.** It reads
   `bundleStride()` and refuses to start when it differs from the stride of
   its anchor level: `bridge … has bundleStride=…, but this daemon runs at
@@ -1539,12 +1736,14 @@ assigns it when the release is tagged.
   report bundleStride() (…)`): it still applies the old rotation gate
   (`VerifyBlockLagBehindRotation`), which the daemon no longer follows, so
   its rotations would revert until the daemon aborted.
+
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
   takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key
   block (`compute_bridge_anchors --seed-seqno`; it must be a multiple of
   the level's stride and at or below chain head) instead of the newest
   boundary at deploy time (`--at-head`). Use it with a BK-set file built
   for the same seed.
+
 - `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
   neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
   bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
@@ -1552,6 +1751,7 @@ assigns it when the release is tagged.
   the capture (exit 11); a paused EVM bridge let the burn through and the run
   failed in stage 4b or 6. A resume over a recorded burn checks only the EVM
   side and refuses with exit 10, naming `--allow-retry`.
+
 - **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
   account.** The wallet signs `approve` and `deposit` from a QR code —
   WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681
@@ -1637,6 +1837,7 @@ assigns it when the release is tagged.
     a legacy one makes the deposit unprovable (exit 35). The CLI asks you to
     accept that risk; `--yes` accepts it, and Ctrl-C at the question ends the
     run.
+
 - **`deposit` requires an Acki Nacki bridge at or above
   `MIN_BRIDGE_VERSION`.** The CLI sends `finalizeDeposit` again when an
   earlier send's outcome is unknown, which is safe only on a bridge that
@@ -1648,6 +1849,7 @@ assigns it when the release is tagged.
   bridge, and the release pipeline refuses to build a tag. The cargo feature
   `dev-unfixed-bridge` turns the refusal into a warning for development
   against an older bridge; a release never enables it.
+
 - **Release assets for deposits.** `ackinacki-bridge-linux-x86_64.tar.gz`
   now carries `deposit-prover/`: `fetch_deposit_data`,
   `export_blake2b_proof` and `export_vk_blob`, built unchanged from
@@ -1666,6 +1868,7 @@ assigns it when the release is tagged.
   [--no-build]` lays out the same prover directory from a checkout, and
   `scripts/check_deposit_prover_bundle.sh <prover dir>
   deposit-prover/fixtures/deposit_10proofs` checks one.
+
 - **`scripts/install.sh` installs the deposit prover** into
   `<prefix>/deposit-prover/` and `kzg_params_18.srs` into its `data/`,
   checks the SRS against `SHA256SUMS` and the Hermez [s]·G2, and runs both
@@ -1700,6 +1903,7 @@ assigns it when the release is tagged.
   `BRIDGE_DEPLOY_BLOCK` next to the `BRIDGE_ADDRESS` it deploys (a commented
   placeholder when the receipt cannot be read; never fatal after the
   broadcast).
+
 - **`deposit-relayer daemon` exports Prometheus metrics.** `--metrics-addr`
   (`DEPOSIT_RELAYER_METRICS_ADDR`, e.g. `127.0.0.1:9467`) serves the text
   format at `GET /metrics`, the same facade and histogram buckets as
@@ -1733,6 +1937,7 @@ assigns it when the release is tagged.
   revert `BridgePaused`. AAVE management stays available so the owner can
   evacuate funds. Restored after it was dropped in #20; the AN-side
   `eccUSDCBridge.setPaused` is a separate control.
+
 - **`eccUSDCBridge` can be stopped and restarted by its owner: `setPaused(bool)`,
   read back with `isPaused()`.** While it is paused, the two cross-chain entry
   points refuse with exit code **231** (`ERR_PAUSED`) before doing any work:
@@ -1773,20 +1978,21 @@ assigns it when the release is tagged.
   with: `eccUSDCBridge` with 0.80.0, `DepositVoucher` and `EthBeaconLightClient`
   with 0.81.0. The build stops if either variable is unset or names a compiler
   of another version, since any other compiler changes the code hash.
+
 - **CI pipeline `.woodpecker/an-contracts.yaml`** runs
   `scripts/check_voucher_abi_consistency.py` and
   `scripts/embed_deposit_vk_blob.py --check` on every pull request and on
   `main`.
+
 - **The zerostate setup of the Acki Nacki bridge lives here too.**
   `contracts/an/zerostate_init.py` builds the data cell, upgrades the premined
   stub to the bridge's code, seeds the trusted L1 bridge, installs the
   light-client code and writes the account into the zerostate; acki-nacki
   places it with the contracts and calls it while generating one. A new setup
   call, a new parameter or a new storage field is now a change in this
-  repository alone. `BRIDGE_ZS_L1_BRIDGE` must name the fresh paired L1
-  deployment: missing, zero or malformed addresses stop generation before
-  any account is changed. There is no default address.
-  `BRIDGE_ZS_L1_CHAIN_ID` defaults to Sepolia (`11155111`).
+  repository alone. `BRIDGE_ZS_L1_CHAIN_ID` and `BRIDGE_ZS_L1_BRIDGE` override
+  the trusted L1 bridge a generated zerostate starts with, defaulting to
+  `11155111` and `0xCdFd6Cef70F68d0849310cD970F8ef8F8E4b4fdb` (Sepolia).
   `contracts/an/zerostate/BridgeZerostateData.sol` is the contract that builds
   the cell — never deployed, executed in `tvm-debugger` — and
   `scripts/check_zerostate_data_encoder.py`, wired into
@@ -1798,117 +2004,29 @@ assigns it when the release is tagged.
   window. A return of N means the Nth further append overwrites it; 0 means it
   is not in the window. Intended as the monitoring hook for the withdrawal
   deadline described under the withdrawal-window item below.
+
 - `VERIFY_GAS_CAP` (1 500 000) bounds the `staticcall` into every Yul verifier,
   so a malformed proof cannot burn the whole transaction gas.
+
 - `YulCodehashMismatch` in `ShplonkDeployLib`: deployment asserts the deployed
   Yul verifier's `extcodehash` against a pinned value, which is what makes an
   accidentally-substituted verifier a failed deploy rather than a live one.
+
 - `TransferAmountMismatch` and `ApproveFailed`: token transfers are measured by
   `balanceOf` delta and `approve` return values are checked, so a
   fee-on-transfer or non-standard token fails closed instead of crediting book
   value that never arrived.
+
 - `contracts/ethereum/verifiers/SIZES` pins every artefact's byte size, and
   `scripts/check_shplonk_artefacts.sh` verifies the eight SHA-256 sums, fails on
   size drift, and warns from 90% of EIP-170 (none warn today; Primary and
   Fallback sit at 88%, layer hashes at 78%).
   Growth now shows up in a diff instead of in a reverted deploy.
+
 - `contracts/ethereum/test/WithdrawAnchorEviction.t.sol` — eviction after 128
   appends, a seq_no jump not mass-evicting earlier anchors,
   `anchorRemainingAppends` at its edges, and the same nullifier paid
   against a still-in-window anchor after the original evicted.
-
-- `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
-  reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
-  against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)
-  and runs it in `tvm-cli debug run --tvc`: no network, no keys. Measured with
-  sold 0.81.0 / tvm-cli 3.0.6: the library as deployed on shellnet
-  (`reference/EthKeccak_1.4.0_as_deployed.sol`, code hash `78905cf7...`) throws
-  exit 50 on every input at the first `bc[i] = ...`; the fixed library returns
-  the right digests at 12.93M gas per keccak-f permutation against the 10M
-  per-transaction limit (`acki-nacki/node/blockchain.conf.json` p20/p21), and the
-  642-byte Sepolia header 11683168 (`fixtures/`) runs out of the debugger's
-  16.7M credit. `fetch_headers.py` rebuilds header RLPs from any JSON-RPC the
-  way `header_rlp.rs` does; `emulate_live.sh` replays `submitAncestry` against
-  the live light-client account with `tvm-cli runx`. Second, independent
-  measurement of the ancestry gas wall (gosh-sh/bridge#36).
-- `docs/eth-light-client.md`: design and deployment reference for the beacon
-  light client (components, step update, period rotation, trust switches,
-  deployment topology with ports and endpoints, configuration, operating
-  numbers), with Mermaid diagrams.
-- `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
-  `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
-  (`/eth/v1/config/spec`), picking the `fork_version` active at the update's
-  `signature_slot`, and hands the pair to the prover as `BEACON_FORK_VERSION` /
-  `BEACON_GENESIS_VALIDATORS_ROOT`. Sepolia (and any other network with the
-  mainnet preset) now proves without code changes; the prover still defaults
-  to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
-  The state file is pinned to the first `genesis_validators_root` it sees and
-  refuses a source on another network.
-- `eth-lc-relayer daemon --no-rotate --owner-hop`: on a period jump the
-  daemon proves a step of the new period, advances the committee with the
-  owner key from that proof's commitment (`setCommitteeCommitment`) and
-  submits the same bundle, instead of stopping at `RotateRequired`. Shadow
-  only (refused after `disableOwnerRotation`).
-- `eth-lc-relayer set-committee --bundle-dir …`: owner
-  `setCommitteeCommitment(commitment, period)` from a proven step bundle
-  (public-input word 5), recording the period in the state file. Bootstraps a
-  fresh `EthBeaconLightClient` (weak-subjectivity anchor) and hops periods
-  while `--no-rotate`.
-- `crates/eth-light-client-relayer/deploy/shellnet-shadow/`: operator kit for
-  a shadow instance on shellnet against Sepolia (build, SRS install, contract
-  compile with the Linux `sold` release, giver funding, deploy, status,
-  systemd unit, README).
-- `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
-  Ethereum beacon light-client oracle. Polls `finality_update` **and**
-  `light_client/updates` (current 512-committee), proves a step via
-  `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
-  not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
-  `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
-  `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
-  unit is the live loop (no hardcoded `--dry-run --mock-prove`). Rotate
-  of the committed fixture is on by default; a live period jump is
-  `RotateRequired` — prove on n14 and `submit-rotate`. `--no-rotate`
-  opts out of even the fixture path. The owner flip is **off** by default: only
-  `daemon --flip-owner` runs it, after the first accepted `submitUpdate`, and
-  the daemon refuses to start with the flag unless `AN_USDC_BRIDGE` and
-  `AN_USDC_ABI_PATH` are set. The flip reads `getAnchorConfig()` on the bridge
-  and sends nothing unless `lightClient` is `AN_LIGHT_CLIENT`; a failed read is
-  retried after the next accepted update. Then it calls `disableOwnerAnchors`
-  (skipped when `ownerAnchorsEnabled` is already false) and
-  `disableOwnerRotation`; one-shot: `eth-lc-relayer flip-owner`. Do not flip
-  yet: afterwards deposits from the allowlisted L2s and from the 31
-  non-checkpoint blocks of an epoch fail `finalizeDeposit` with
-  `ERR_UNKNOWN_BLOCK` (224). `deposit-relayer` walks past a failed id and
-  retries it with backoff; `--skip-after-attempts` still parks one that
-  keeps failing (`docs/eth-light-client.md` §3.5). `--no-flip-owner` is still accepted and
-  changes nothing. Relayer keys must be the owner pubkey of both contracts. The
-  slim ABIs in `crates/eth-light-client-relayer/abi/` follow the compiled
-  contracts: `USDCBridge.abi.json` has `getAnchorConfig` and no
-  `setLightClient`, and `EthBeaconLightClient.abi.json` has
-  `setCommitteeCommitment`, which `set-committee` calls; point
-  `AN_USDC_ABI_PATH` / `AN_LC_ABI_PATH` at these files. The light client is
-  deployed from the bridge with `deployLightClient`; for `getAnchorConfig()`
-  returning `lightClient = 0:<account>`, `AN_LIGHT_CLIENT` is
-  `<account>::<account>`. tvm-sdk#284 co-deploys with this contract.
-  Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
-  headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
-  proven checkpoint (≤ 31 parents), then pushes those hashes into
-  `  USDCBridge._acceptedBlockHash`. The daemon fetches that chain after every
-  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`) and runs
-  `link_headers` locally; on-chain `submitAncestry` is `--submit-ancestry`
-  (default **off**) because two headers already cost ~130 M gas against the
-  10 M limit. It also calls `rePushAnchor` so a bounce before the light client
-  was the sink writer is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
-  0x…`. Contracts: `contracts/an/EthKeccak.sol`,
-  `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
-  the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
-  between them is fixes and comments — see Removed). `updateCode` / `onCodeUpgrade` persist the committee, head,
-  proven-hash set and `reAnchorsApplied` across a VkBlob rotation.
-  `reAnchorCommittee` is the logged weak-subjectivity hatch after
-  `disableOwnerRotation` (does not write exec hashes; `getCommitteeState`
-  exposes `reAnchorsApplied`). Shellnet E2E:
-  `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
-  `eth-light-client-prover/docs/m_audit_scope.md`.
 
 - **`.woodpecker/verifier_sources.yaml` checks that every committed verifier
   source compiles to its committed bytecode.** Nothing at run time ties the
@@ -1919,6 +2037,7 @@ assigns it when the release is tagged.
   `.sol` does not compile to its `.bin` byte for byte, when either half of a
   pair is missing, or when a `.bin` exceeds EIP-170. Run it locally with
   `SOLC=/path/to/solc-0.8.19 scripts/check_verifier_sources.sh`.
+
 - **`contracts/an/place.json` says which files acki-nacki places and where.**
   It lists every file that goes into an Acki Nacki tree with its destination
   there, and names the ones that stay here — among them this repository's
@@ -1941,102 +2060,6 @@ assigns it when the release is tagged.
 
 ### Changed
 
-- **`setGloasForkSlot` stays owner-callable after `disableOwnerRotation`.**
-  Light client `1.6.1`: the `require` that reverted 246 once the pin was
-  set is gone from both sources and from the placed `0.81.0_compiled`
-  TVC. A `u64::MAX` pin is a setting: when mainnet publishes Gloas,
-  `set-gloas-fork-slot` updates it. `updateCode` already exceeds that
-  write, so freezing the field was not a security boundary. The daemon
-  still returns `ProofFailed` and names `setGloasForkSlot` when the
-  beacon spec slot disagrees with the pin, instead of proving into 255.
-  Slot table in `docs/eth-light-client.md` §4.5. A live 1.6.0 client
-  needs `updateCode` with this TVC to pick it up.
-
-- **Deposit retries alternate with new work.** Finite retry rounds prevent
-  incoming traffic from indefinitely delaying older deposits. A first anchor
-  wait resets the daemon polling delay to `--backoff-initial-secs`, including
-  after idle polls or errors. Repeat waits preserve active failure backoff;
-  with no failures, they reset idle backoff for responsive normal polling.
-  Progress or a new wait clears the failure streak. Per-deposit anchor
-  polling uses the larger of failure backoff and one quarter of wait age,
-  with the age component capped at 60 seconds. Setting
-  `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. Fresh waits retain
-  the short base interval.
-- **`deposit_relayer_outstanding_deposits` includes healthy anchor waits.**
-  Adjust alerts that treat any nonzero value as failure to distinguish
-  failed attempts and missing anchors using their age and coverage.
-  An uncovered block can require the anchor writer's intervention.
-- **The deposit daemon's `AN_BRIDGE_ABI_PATH` must include
-  `isAcceptedBlockHash(uint256,uint256) returns (bool)`.** Upgrade a custom
-  ABI alongside the daemon; a missing getter causes tick errors and stops
-  delivery. The full bridge ABI shipped in the repository includes it.
-- **The replaced committee may still advance the head** for the period it
-  served (`attestedSlot / 8192 + 1 == _committeePeriod`), not only
-  late-register a skipped checkpoint. An early rotate therefore does not
-  freeze the rest of that period.
-
-- The ETH→AN deposit relayer no longer stalls every later deposit behind one
-  that cannot be finalised. Later ids are tried first; a failed id stays in
-  `outstanding_deposits` and is retried with backoff on idle ticks,
-  round-robin, from its stored Deposit tx (or its block) so the log-scan
-  cursor can keep moving. A pending submit (`ERR_PAUSED`, a confirmation
-  timeout) goes into that set with backoff but does not count toward
-  `--skip-after-attempts`. Parked ids stay parked. A `state.json` written by
-  an earlier relayer that only has `attempts_since_progress` for the last
-  failed id carries that count into the new outstanding entry, so
-  `--skip-after-attempts` does not start over; that id has no stored tx, so
-  the first retry starts at the `scan_done_through_block` from that file
-  plus one (the earlier relayer left the cursor at the deposit's block
-  minus one), not at `--from-block` and not at the live head.
-  `finalize-one` is unchanged.
-
-  Gauges that used to mean "the one stuck head-of-line id" now mean something
-  else: `deposit_relayer_attempts_since_progress` follows the last failed
-  outstanding id and resets when any later id finalizes;
-  `deposit_relayer_last_finalized_deposit_id` is seeded from `state.json` and
-  only goes up; `deposit_relayer_target_deposit_id` shows the retried id
-  during an idle retry, then the forward id again. Alert on
-  `deposit_relayer_outstanding_deposits`.
-
-  Before running an older binary, move every `outstanding_deposits[].deposit_id`
-  into `parked_deposit_ids`. An older binary ignores `outstanding_deposits`
-  (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
-  those ids, so it would neither retry nor park them.
-
-- **Relayer logs and errors name Ethereum endpoints by scheme and host
-  only, at every log level.** reqwest put the full URL, API key included,
-  into every transport error the relayer logged, and alloy's HTTP transport
-  into a debug span on every request; the relayer no longer goes through
-  that transport.
-- **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
-  set** (the EF DevOps endpoint otherwise, as before). Every tool that
-  sources an `L*_config/env` — the relayer, the `cast` commands of the
-  runbooks, `scripts/launch_withdraw_e2e*.sh` and
-  `scripts/replay_withdraw_shplonk.sh` — then talks to Infura.
-  `scripts/deploy_bridge_bundle.sh` does not source it: it broadcasts
-  through `SEPOLIA_RPC_URL`, publicnode unless that is set.
-- **shellnet-l2 kit: `preflight.sh` no longer refuses a start while a
-  transaction from the relayer EOA waits unmined.** It warns, and the daemon
-  replaces that transaction once it runs; refusing kept the container
-  restarting under `restart: unless-stopped` while the very transaction the
-  daemon would replace held it back. Its chain checks go to the first of
-  `RPC_URL` and `RPC_FAILOVER_URLS` that answers instead of `RPC_URL` alone,
-  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`. Its
-  output names endpoints by scheme and host only, without the path or any
-  `user:password@`.
-- **`bk_set.shellnet.json` holds the genesis committee of shellnet as
-  restarted on 2026-10-14** (5 signers; Poseidon commitment
-  `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
-  `e2a508b4…0020`, of every block before the network's first rotation):
-  `keys_config.json` `bk_nodes[i].bls_pubkey` of the restart's config, which
-  a node's `GET :8600/v2/bk_set_update` confirmed on 2026-10-14. `zs_bk_set`
-  of that config holds another set, as before. Rotation has been on since
-  2026-10-15, so a cold start still folds `bkSetUpdates` up to its seed
-  (`seed_prover_bk_set --cap-height`). `TECHNICAL_README.md`, the prover
-  daemon and circuits READMEs and the live relayer runbook now describe the
-  restarted network, and the shellnet BK-set section shows how to check a set
-  against leaf 2 — the first config posted for the restart held other keys —
-  and how to read the live set from a node on port 8600.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation
@@ -2046,6 +2069,7 @@ assigns it when the release is tagged.
   match: `aggregated_source: same proof and inputs as the last attempt;
   reusing its aggregated calldata`. A contract rejection and a successful
   submission drop it, so a refused proof is aggregated anew.
+
 - **The relayer no longer reports an ordinary wait between bundles as a
   stall.** `WARN block source still has no data; relayer is stalled` came
   after 16 polls without a new bundle, which at L2 (about 90 minutes between
@@ -2054,12 +2078,14 @@ assigns it when the release is tagged.
   warning reads `no new bundle for much longer than a bundle interval; check
   the prover and the chain`. Until then every 16th poll logs `INFO waiting
   for the next bundle`.
+
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh` takes
   `BUNDLE_STRIDE` from `compute_bridge_anchors`.** `compute_bridge_anchors`
   prints `BUNDLE_STRIDE`, `AnchorMode::stride()` for its `--level`: the value
   `daemon-live` checks against `bundleStride()` at startup. The script
   deploys with it instead of the 1024 and 16384 it had written in, and
   ignores a `BUNDLE_STRIDE` set in the caller's shell.
+
 - **A chain that stays below the relayer's last confirmed write is reported
   after 10 minutes.** `daemon-live` retries a `_rewound` signal as
   read-after-write lag (`WARN transient RPC read-after-write lag — will
@@ -2069,6 +2095,7 @@ assigns it when the release is tagged.
   `history_drift_detected_total`, retried with backoff like every other
   drift. Before, it was retried silently and without limit, so a reorg that
   dropped the relayer's transaction never surfaced.
+
 - **The shellnet L2 bridge was redeployed.** `AckiNackiBridge` is now
   `0xb733a57c393214254506bde7e9950a1b57e06fb4` (Sepolia block 11910592),
   seeded at shellnet seq_no 23887872 (`BRIDGE_BOOTSTRAP_SEQNO`) with
@@ -2082,6 +2109,7 @@ assigns it when the release is tagged.
   `BRIDGE_DEPLOY_BLOCK`, and a cold start with its `relayer-state.json`
   and `state/*.json` archived first (§3.5 of
   [the live relayer runbook](crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md)).
+
 - **The bridge deploy and `daemon-live`'s cold start refuse a BK-set file
   that is not the chain's set at the seed.** `compute_bridge_anchors`
   (run by `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`)
@@ -2094,6 +2122,7 @@ assigns it when the release is tagged.
   and the daemon failed only at the first rotation with
   `prover out of sync`. Build the file for the exact seed:
   `seed_prover_bk_set --cap-height <seed>`, then `jq .pubkeys_hex`.
+
 - **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
   broadcasts legacy transactions at a fixed 2 gwei** (`--legacy
   --with-gas-price 2000000000`) with a 12× gas-limit estimate
@@ -2101,17 +2130,20 @@ assigns it when the release is tagged.
   account must cover the larger upfront reservation (~0.6 ETH for the
   whole bundle on Sepolia); on a congested network, raise the price in
   the script.
+
 - **`scripts/install.sh` warns below 24 GB of RAM and swap, not 48 GB**, and
   the `ackinacki-bridge` docs give a withdrawal's measured peak: ~19 GB for a
   cold run on the test host, system-wide and sampled every 5 s; the CLI
   reached 9.5 GB RSS in Circuit 4, and the `aggregate-proof` it waits on
   12.6 GB while the CLI still held part of its own. They said ~40 GB, which no
   measurement backed.
+
 - `ackinacki-bridge withdraw` exit 11 and exit 12 end with the AN burn's hash,
   the path of the withdrawal's record and the command that carries on (the same
   command with `--allow-retry`, which skips the burn and resumes at capture).
   Exit 11 also says when not to: a bounced burn emits no event, and the
   advanced runbook's Case 3a applies.
+
 - `ackinacki-bridge withdraw` checks the `WithdrawalInitiated` event it
   captures against the withdrawal it is running — amount, recipient,
   destination chain, token (USDC) and sender multisig — before proving it. A
@@ -2119,6 +2151,7 @@ assigns it when the release is tagged.
   it was. Before, a resume whose record carried another withdrawal's burn hash
   (written in by hand during reconciliation) proved and paid out that other
   withdrawal and marked this record confirmed.
+
 - `ackinacki-bridge withdraw` exit 13 names the `AckiNackiBridge` custom error
   a `withdrawByProof` dry run or submit reverted with, with its arguments
   (`NullifierAlreadyUsed(nullifier: 0x…)`, `BridgePaused()`,
@@ -2126,6 +2159,7 @@ assigns it when the release is tagged.
   ones what to do next. Before, it printed the node's raw text, which on public
   Sepolia RPCs reads "tried to decode error from abi but failed" followed by
   the selector.
+
 - The AN→ETH relayer's startup read of the bridge (`daemon-live`, and the
   `ackinacki-bridge` CLI before the burn and after coverage) rebuilds the
   per-slot window heights from `LayerAnchorAppended` logs. The scan walks
@@ -2165,6 +2199,7 @@ assigns it when the release is tagged.
   of the message when the wait gives up, and once `latest` has shown the
   target the wait allows a few rounds past the deadline for the snapshot to
   catch up.
+
 - **The shellnet profile's `RPC_URL` is `https://rpc.sepolia.ethpandaops.io`**
   (was `https://ethereum-sepolia-rpc.publicnode.com`); the relayer-side
   `RPC_URL` in `crates/bridge-prover-libraries/shellnet.common` is the same
@@ -2185,6 +2220,7 @@ assigns it when the release is tagged.
   may not serve history that far back, and no re-read is spent on it; with
   no `BRIDGE_DEPLOY_BLOCK` at all a short log set is final too, since the
   re-read would walk to genesis again.
+
 - **The pinned shellnet `BRIDGE_ADDRESS` in `config/bridge_config.shellnet`
   rotated to `0x5384f162aa1a80b7a03687e1a3188f67b1fffad5`** (the 2026-10-15
   deploy from `main` for the shellnet network started on 2026-10-14; its
@@ -2209,6 +2245,7 @@ assigns it when the release is tagged.
   `BRIDGE_ADDRESS` and `RPC_URL`: change both and add `BRIDGE_DEPLOY_BLOCK`.
   Each deploy keeps its own treasury, and nothing moves from the old one to
   the new one.
+
 - `ackinacki-bridge withdraw` runs the window-heights read in preflight, so a
   wrong `BRIDGE_DEPLOY_BLOCK`, an `eth_getLogs` span the RPC rejects or an RPC
   without log history refuses with exit 2 instead of failing after the burn
@@ -2349,6 +2386,7 @@ assigns it when the release is tagged.
   (single-step ownership), 6 (`approve` return ignored) and most of 10 (genesis
   unvalidated) are closed by this release, and item 3 now states the real
   withdrawal boundary instead of calling an evicted anchor "unredeemable".
+
 - The withdrawal deadline, written down for the first time. Each layer keeps
   128 anchors, and the witness builder escalates a layer at a time
   (`--anchor-layer auto`, the relayer default). Because an L(n) anchor is
@@ -2360,56 +2398,6 @@ assigns it when the release is tagged.
   event whose T_n the chain has not yet passed. No code changed here; the
   horizon was always this and was documented as 12 hours.
 
-- `scripts/check_english_only.py` treats mathematical letters as notation, like
-  the unaccented Greek it already accepts: the Mathematical Alphanumeric Symbols
-  block (double-struck, bold, italic, script, fraktur), the letterlike
-  double-struck / script / black-letter capitals and superscript Latin letters
-  (`𝔾₂`, `ℤ`, `limbᵢ·(2⁸⁸)ⁱ`). They occur only in formulas, never in another
-  language's prose, so the pairing and light-client notes no longer trip the
-  hygiene pipeline. Cyrillic, accented Greek, CJK and the rest still fail.
-
-- On-chain `submitAncestry` is opt-in (`--submit-ancestry` / `SUBMIT_ANCESTRY`,
-  default **off**). The daemon used to fire a 32-header call every epoch whenever
-  `ETH_RPC_URL` was set; two headers already cost 129.7 M gas against a 10 M
-  limit, so every cycle burned ~0.7 vmshell past `tvm.accept()` on a call that
-  cannot succeed. `ETH_RPC_URL` still attaches the execution RPC: the epoch is
-  fetched and `link_headers` runs locally. Dropping the URL is no longer the
-  only lever, and no longer takes the local check with it. The one-shot
-  `submit-ancestry` subcommand stays, and warns. Measured by @SeHor05 on both
-  `v3.0.6.an` and tvm-sdk#284 (gosh-sh/bridge#36).
-- `EthBeaconLightClient` keeps proven execution hashes for **one year** of
-  Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
-  are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
-  expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
-  `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
-  cannot outlive the oracle. The bridge method is `USDCBridge_forget_block_hash_from_light_client.patch`
-  (same sender gate as `acceptBlockHashFromLightClient`, idempotent `delete`). `updateCode` encoding of the proven set changed
-  (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
-  old `mapping => bool` across this upgrade — redeploy or re-prove from the
-  checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.
-- **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
-  `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
-  carried `32 - len` extra constant-equality cells and the VK depended on the
-  finalized block's `extra_data` length. The fixture VK was emitted over a
-  27-byte mainnet `extra_data`; a 25-byte Sepolia block produced a different
-  VkBlob and would have been rejected by the deployed contract. The chunk is
-  now a zero-padded 32-byte witness (soundness unchanged: the payload root is
-  bound to the signed state by `execution_branch`). Regression test
-  `execution_root_shape_is_independent_of_extra_data_len`. Fixture
-  `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
-  `contracts/an/EthBeaconLightClient.sol` re-emitted. The tvm-sdk
-  opcode fixtures still carry the old blob and need
-  `scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`. Verified on Sepolia: the same blob comes
-  out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
-  18 B of `extra_data`.
-- `crates/eth-light-client-relayer` builds with `--features live-submit`
-  outside the tvm-sdk workspace: the crate manifest now mirrors tvm-sdk's
-  `[patch]` tables (gosh `halo2-axiom` / `halo2-lib` / `axiom-eth` forks);
-  before, cargo resolved two `halo2_axiom` versions and `tvm_vm` failed to
-  compile.
-- `prove-one` and the daemon keep the prover transcript
-  (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
-  stderr tail on failure instead of a bare exit status.
 - `eth-lc-relayer daemon` auto-rotates only the committed fixture period;
   a live period jump is `RotateRequired` (prove on n14 and
   `submit-rotate`). `--no-rotate` is the shadow/laptop opt-out. The owner flip runs only with
@@ -2421,10 +2409,6 @@ assigns it when the release is tagged.
   head not rewound). Sink notify uses `bounce: true`; a drop emits
   `AnchorPushBounced` and is retried via `rePushAnchor`. `encode_header_rlp`
   fails closed when `keccak256(rlp)` does not match the node's `block.hash`.
-- `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
-  `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
-  witness (real sync committee). Unset committee path still emits a synthetic
-  committee for VkBlob-only keygen.
 
 - **The release bundle's `verifiers/` directory includes `*.sol`**, and
   `scripts/install.sh` installs them and reports a host without
@@ -2433,81 +2417,18 @@ assigns it when the release is tagged.
   the bundle predates verifier sources and reports the verifier files as
   missing rather than installing an incomplete tree — so
   `scripts/install.sh` from `main` needs a release built from this change.
+
 - **Stage 1 of `ackinacki-bridge withdraw` checks
   `BridgeWithdrawalAggregatorVerifier.sol` in `--verifiers-dir`** against the
   copy embedded in the build, exactly as it already checks the `.bin`, and
   `--allow-verifier-drift` now covers both files.
+
 - **The relayer image's `IMAGE-SHA256SUMS` lists the four verifier `.sol`
   files** and no longer lists `bin/solc`; `preflight.sh` refuses a verifier
   lane whose `.sol` is missing.
 
 ### Fixed
 
-- `deposit-prover/scripts/recanonicalize_fixture_headers.py` skips fixtures
-  marked `fixture_kind: synthetic` in both check and write modes, so they do
-  not interrupt header checks and updates for real chain witnesses.
-
-- Frontend deposits use the validated Acki Nacki recipient entered in the form.
-  The connected Ethereum address is used for USDC allowance checks. Invalid AN
-  recipients are rejected before a deposit transaction is sent.
-
-- The withdraw relayer proved a block whose attestation carried a signer
-  more than once with `block_seq_no = 0`: the fetcher wrote the height into
-  the assembled attestation bytes at an offset computed from the sum of the
-  signer counts, while the layout, and the circuit, count entries (one per
-  distinct signer). `AckiNackiBridge` rejected the proof with
-  `AttestationProofRejected()`, the daemon aborted after three rejects and
-  was restarted into the same loop. Shellnet block 1239860 (2026-10-19,
-  three signers with count 3) stopped the relayer this way at
-  `applyBkSetUpdate`; a bundle block with a repeated signer would have done
-  the same at `verifyBlock`. The height is now written where the circuit
-  reads it, a block whose `seq_no` is not the requested height is refused,
-  and a proof whose height is not the block's is refused before it is sent.
-  Upgrade the relayer (for the shellnet-l2 kit, rebuild the image); nothing
-  on chain, in the keys or in the state changes, and the stuck block is
-  proved again on the next start.
-- **A lost or stuck transaction no longer stalls the relayer.** alloy's
-  default nonce manager read the nonce once and counted locally, advancing
-  before the broadcast: when the RPC lost a send, every later transaction
-  went out one nonce too high and waited for the missing one, and the bridge
-  stood still until the daemon was restarted. A transaction stuck unmined
-  held everything behind it, restart or not. The relayer now reads the
-  `latest` and `pending` counts before every transaction and sends it at the
-  nonce the chain mines next. A transaction already waiting there is
-  replaced, at fees 25 % above what the relayer last paid at that nonce —
-  above the current estimate when it does not know, as after a restart —
-  and 25 % more on every later attempt, at most 4 times the current fee
-  estimate. The replaced transaction can be anyone's: give the relayer a key
-  of its own, and do not send from it by hand while a daemon runs. The gas
-  is estimated before the nonce is chosen, so a call that would revert — a
-  withdrawal whose anchor the bridge does not hold yet — sends nothing and
-  leaves the nonce and fees alone.
-  `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
-  `submit-*` commands all send this way.
-- **A transaction another one replaced is no longer waited for.** Every
-  transaction takes the account's next nonce and replaces whatever waits
-  there, so `daemon-live` could replace a withdrawal that `withdraw-e2e`
-  had sent from the same key, and `withdraw-e2e` then waited for it
-  forever. While a `relayer` command waits for a receipt it now watches the
-  account's `latest` count: once that has been past the transaction's nonce
-  for 30 s with no receipt, the wait ends with `tx confirmation error:
-  transaction 0x… was replaced: another transaction from 0x… took its nonce
-  …; send it again`. The daemons retry; `withdraw-e2e` and `submit-withdraw`
-  exit non-zero, and a second run is refused if the payout has landed
-  meanwhile (nullifier check).
-- **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a
-  `withdrawByProof` receipt**, like `verifyBlock` and `applyBkSetUpdate`.
-  They waited forever, so one dropped transaction held the withdraw scan;
-  the proof is now retried, the warning names the transaction hash, and the
-  nullifier check skips the proof once its payout has landed.
-  `ackinacki-bridge withdraw` and the one-shot `relayer` commands still wait
-  for the receipt as long as it takes.
-- `deposit-relayer` kills a prover that runs past its timeout instead of
-  leaving it running, writing the `data/` key cache beside the retry the
-  daemon starts after its backoff. `relayer prove-withdraw` does the same
-  with `bridge-event-halo2-prover`, and passes a relative `--witness` or
-  `--out-dir` to it as an absolute path: the prover runs in `--work-dir`, and
-  resolved them there.
 - An AAVE loss left `suppliedPrincipal` above the aToken balance with no way
   to bring it down: `accruedYield()` stayed zero for good, and
   `withdrawFromAave` kept reverting once the pool was empty. The book can now
@@ -2556,6 +2477,7 @@ assigns it when the release is tagged.
   bundles past the remembered one (after a deploy with a genesis cursor of
   0 the first one always is), and every tick and every restart failed with
   `last_bk_set_update_seq_no_jumped`.
+
 - **A failed RPC call no longer stops `daemon-live`.** A `verifyBlock` or
   `applyBkSetUpdate` whose send the RPC refused (rate limit, connection,
   nonce) or whose receipt never came is logged as `… not confirmed — RPC
@@ -2568,31 +2490,34 @@ assigns it when the release is tagged.
   the daemon with `daemon: stuck — hard aborting`. Reverts the node
   simulates (`execution reverted`) and failed post-submit checks still
   count, and still stop the daemon at the third.
+
 - **An RPC request that gets no answer no longer holds the relayer.** The
   Ethereum RPC client of every `relayer` command had no timeout, so a
   request on a connection that went silent waited until the OS dropped the
   connection. `daemon-live` once waited 9.5 minutes on one
   `eth_blockNumber`, and a BK rotation that had landed on Acki Nacki waited
-  with it. A request to one endpoint now fails after 20 s
-  (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`) and moves on to the next one in
-  `RPC_FAILOVER_URLS`. Once every endpoint has failed it, the daemon logs
-  `tick failed, will back off` and retries, and a send that times out is an
-  RPC failure, not counted toward the abort threshold.
+  with it. A request now fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`):
+  the daemon logs `tick failed, will back off` and retries, and a send that
+  times out is an RPC failure, not counted toward the abort threshold.
+
 - **Check B allows four bundles of the daemon's own stride between two
   snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
   L2 bundle the relayer did not see land — its own `verifyBlock` whose
   receipt read failed, or a sibling relayer's — failed every later tick
   with `last_seen_block_seq_no_jumped`.
+
 - **The relayer reads the bridge's state at one block.** The per-tick read
   and the startup audit take `eth_blockNumber` and pin all five view calls
   to it; on a load-balanced RPC the calls could land on backends at
   different heights and report a false `bk_set_commitment_without_update`.
+
 - **`applyBkSetUpdate` waits at most 180 s for its receipt and is checked
   after it**, as `verifyBlock` already was. Before, a dropped transaction
   hung the daemon on the receipt indefinitely, and a transaction mined but
   reverted was taken as applied. Now the chain must hold the submitted N
   and commitment at the receipt's block, or the outcome is a revert
   (`post-submit drift: …`).
+
 - `daemon-live` logged `ERROR chain monotonicity drift — halting` and
   failed its ticks seconds after a successful `applyBkSetUpdate` or
   `verifyBlock` tx on load-balanced public RPCs (observed on publicnode's
@@ -2613,6 +2538,7 @@ assigns it when the release is tagged.
   serves an older snapshot, not a different timeline. Validated on the
   Sepolia Deploy #8 shellnet replay: five BK rotations and one bundle
   applied in 24 minutes with no false-positive drift errors.
+
 - **A zero owner key can no longer be installed in `eccUSDCBridge` or
   `EthBeaconLightClient`.** Both gate their admin calls on
   `msg.pubkey() == _ownerPubkey`, and an unsigned external message carries
@@ -2630,6 +2556,7 @@ assigns it when the release is tagged.
   the owner key and migration-cell layout are unchanged.
   `DepositVoucher` code is unchanged, so its replay-protection addresses
   stay the same.
+
 - An `aggregate-proof` run that hits its timeout (`--prover-timeout-s` in
   `ackinacki-bridge withdraw` and `relayer withdraw-e2e`, a fixed 30 min in
   `relayer daemon-live` and `relayer prove-withdraw-shplonk`) is killed.
@@ -2639,6 +2566,7 @@ assigns it when the release is tagged.
   `--prover-timeout-s` says to raise it rather than retry with the same
   budget. For scale: a cold withdrawal `aggregate-proof`, keygen included,
   took ~2 min on the test host.
+
 - `aggregate-proof` logs to stderr, at `info` unless `RUST_LOG` says
   otherwise, and `ackinacki-bridge withdraw` and the relayer put each of its
   lines into their own log as it comes, prefixed `aggregate-proof:` and at
@@ -2652,6 +2580,7 @@ assigns it when the release is tagged.
   message — up to its backtrace — or, without one, its last 40 lines. Before,
   it logged only errors, to stdout, which the callers discarded, a failure
   quoted the whole of its stderr, and a timeout quoted nothing.
+
 - `aggregate-proof` writes a new pk-cache slot under
   `<stem>.pk.partial-<pid>-<random>` /
   `<stem>.meta.json.partial-<pid>-<random>`, syncs each file to disk and renames
@@ -2703,6 +2632,7 @@ assigns it when the release is tagged.
   degree it records, whose `.meta.json` is not whole or not one the aggregator
   wrote (a field missing or of the wrong type), or that this user cannot read —
   the last with advice to fix its permissions, not to remove it.
+
 - `docs/EVM-contracts-spec.md` documents the owner's pause: `pause()` /
   `unpause()`, the `paused` slot, the `Paused` / `Unpaused` events, the
   `BridgePaused` / `AlreadyInThatPauseState` errors, and that `deposit`,
@@ -2711,6 +2641,7 @@ assigns it when the release is tagged.
   from `forge inspect`: `pendingOwner` (slot 6), `paused` (slot 7, offset 20)
   and `storedPrevBkSetCommitment` (slot 11) were missing, and the slots after
   them were off.
+
 - Two `ackinacki-bridge withdraw` runs with one `--snark-dir` prove one at a
   time: stage 5 holds `<snark-dir>/.prove.lock`, and the second run logs that
   it waits, then reads the bridge's state again and re-checks the Circuit-4
@@ -2724,6 +2655,7 @@ assigns it when the release is tagged.
   `.keygen.lock` counts against `--prover-timeout-s`.
   Before, both runs wrote the snark directory's fixed-name files at once and
   one failed with exit 12 ("calldata instance … != public input …").
+
 - `ackinacki-bridge withdraw` preflight reserves 7 GiB for the outer aggregator
   proving key instead of 1 GiB: the key a cold run writes into the pk cache is
   ~6.85 GB. A cold run now asks for ~10.7 GB free on the filesystem that holds
@@ -2743,6 +2675,7 @@ assigns it when the release is tagged.
   `aggregate-proof`, ~20 GB when it also brings a new Circuit-4 key, or
   remove the previous `BridgeWithdrawalAggregatorVerifier__v3__*.pk` and its
   `.meta.json` first.
+
 - The read of the bridge that rebuilds window heights scanned
   `LayerAnchorAppended` with no from/to block, so `eth_getLogs` defaulted
   both ends to `latest` and the read failed on any contract that already had
@@ -2751,11 +2684,13 @@ assigns it when the release is tagged.
   `ackinacki-bridge withdraw`, which ran that read on every coverage poll,
   failed at stage 4b after the burn. The scan now walks the range; see
   Changed.
+
 - `scripts/install.sh` now makes `<prefix>/withdraw-state` and
   `<prefix>/deposit-state` owner-only (0700), also over an earlier install
   that left them at the umask's mode, so `withdraw` and `deposit` no longer
   warn on every run that the state directory can be reached by more than
   its owner.
+
 - `deposit-relayer daemon` lost deposits it had already seen. Its log-scan
   cursor in `state.json` (`scanned_through_block`) jumped to the confirmed
   head on every poll, whether the target `depositId` was found or not. A
@@ -2783,6 +2718,7 @@ assigns it when the release is tagged.
   upgrade the first scan starts at `--from-block`, which must not be above
   the oldest deposit the daemon has yet to deliver. The RPC must answer
   `eth_call` at a block `--confirmations` below the head.
+
 - `deposit-relayer daemon --skip-after-attempts` counted every poll that
   found no deposit as a failed attempt, so an idle daemon parked ids nobody
   had deposited yet, and the deposits that later took those ids needed a
@@ -2795,6 +2731,7 @@ assigns it when the release is tagged.
   `--skip-after-attempts`, so a `SKIP_AFTER_ATTEMPTS` line in
   `deposit-relayer.env` did nothing before and takes effect now: check it
   before restarting the daemon.
+
 - `deposit-relayer` did not build against tvm-sdk `v3.0.6.an`: its
   `Cargo.toml` lacked the halo2 `[patch]` tables that pin `tvm_vm` to a
   single `halo2-axiom` (already present on `eth-light-client-relayer`),
@@ -2804,6 +2741,7 @@ assigns it when the release is tagged.
   / `AN_GRAPHQL_URL` must now name a host that serves GraphQL *and*
   `/v2/messages`. Rebuild `deposit-relayer` from this tree before
   `daemon` / `finalize-one`.
+
 - **No block the light client admitted could finalize a deposit.**
   `EthBeaconLightClient` sent `USDCBridge` its stored anchor key — the block
   hash with each 16-byte half byte-reversed, `(LE(h[0..16]) << 128) |
@@ -2841,6 +2779,7 @@ assigns it when the release is tagged.
   this copy: its `rePushAnchor` note is now in the source, the two remaining
   hunks still apply, and the code hash stays `314ac6b8…6092f5` with them
   applied.
+
 - The deposit form accepted an Ethereum address as an Acki Nacki recipient. It
   required *at most* 64 hex characters, so a pasted 40-character address was
   left-padded into a well-formed non-zero `bytes32`, passed the contract's
@@ -2848,6 +2787,7 @@ assigns it when the release is tagged.
   with deposit being one-way, the length check was the last place to catch it.
   Now exactly 64. The workchain field, which Acki Nacki ignores since `dappId`
   replaced the concept, is no longer editable and is pinned to 0.
+
 - `MAX_FORWARD_GAP` was sized when the thinning factor `P` was 4 and the bundle
   stride 512, where its literal 2048 meant "four bundles". `P` is 8 and the
   stride 1024, so the same literal had quietly become two bundles, and a sibling
@@ -2856,6 +2796,7 @@ assigns it when the release is tagged.
   const assertion that the three-bundle floor holds at build time. Four
   restatements of `P = 4` / stride 512 as the current setting corrected
   (module docs, thinning tests, prover-daemon README, verifyBlock runbook).
+
 - `covering_bundle_seq_no` treated a burn that landed exactly on a stride
   boundary as already covered by that boundary's bundle. The proof uses the
   opposite rule (`l1_anchor_boundaries`: for `e = 1024`, `K = 2048`, because
@@ -2863,47 +2804,380 @@ assigns it when the release is tagged.
   one bundle too early and `resolve_anchor_layer` probed a height the chain
   may not have produced yet. 1 in 1024 burns; re-running later worked. Now the
   strictly-next multiple, matching the proof.
+
 - `anchorRemainingAppends` NatSpec said the anchor survives N appends where it
   survives N-1.
+
 - `applyBkSetUpdate` attestation `lastSeen` is the prove-time cursor
   (`attestationLastSeen`, strictly less than `blockSeqNo`). Passing the
   live cursor after `verifyBlock(N)` reverts
   `AttestationLastSeenNotBeforeSeqNo`. See Breaking.
+
 - After `applyBkSetUpdate` the relayer pins the follow-up slot reads to
   the receipt block, same as `verifyBlock`. An unpinned `latest` on a
   load-balanced RPC could record a torn snapshot and halt the next tick
   as chain drift. Check B also rejects a `last_bk` rewind, a jump past
   `MAX_FORWARD_GAP`, and a second rotation while the previous N is
   still ahead of `last_seen`.
+
 - Production `verifyBlock` tests that lack `bound_scenario.json` now
   `vm.skip` instead of returning, so the hole shows up in the forge summary.
+
 - `DeployRealBridge` on mainnet also requires `altDstChainId` and
   `altDstHostChainId` to be 0, matching the existing `altTokenId` require.
+
 - Constructor now rejects a non-canonical Circuit 4 `dappFr` / `accFr` /
   `altTokenId`. A raw word cannot equal a Yul-reduced instance, so the
   previous values would have made every withdrawal revert permanently.
+
 - `supplyToAave` books the aUSDC delta, not the USDC sent, so a rounding
   pool cannot inflate `suppliedPrincipal` above the shares the bridge
   holds. `emergencyWithdrawAll` keeps `principal - received` when the
   drain pays short; leftover-aToken still reverts unchanged.
+
 - `forge` default profile no longer enables `ffi`. Tests only read the
   tree; write permission is limited to `deployment_real.json`.
+
 - `verifyBlock` no longer SSTOREs per-slot window heights (~29k gas on a
   ten-layer call). `lastHeight` and `LayerAnchorAppended` remain; the
   relayer paints `HistoryWindow.heights` from those logs on resurrect.
+
 - After `emergencyWithdrawAll` the surplus is liquid: `harvestYield`
   reverts `NoYield` (it only sees AAVE). Collect with `skimExcessUsdc`
   (QC-A1-3). Test: `test_harvestYield_afterEmergency_revertsNoYield`.
+
 - GitHub Woodpecker now `forge build` + `fmt --check` +
   `forge test --no-match-contract Fork` on every PR. Solidity compile
   used to live only on the GitLab mirror, so a broken head could stay
   mergeable on GitHub.
+
 - L2 anchoring is the shellnet operational default (Deploy #12), not
   smoke-pending. Daemons log `info` on L2 startup; `AnchorMode::default()`
   stays L1 for local/CI.
+
 - Spec §7.3: `applyBkSetUpdate` attestation `lastSeen` is the prove-time
   cursor. `storedLastBkSetUpdateSeqNo` selects the set and gates the
   next rotation.
+
+- **`scripts/production_preflight.sh` runs its relayer step through the
+  prover workspace.** The step ran `cargo test` inside
+  `crates/bridge-relayer-daemon`, where cargo cannot read the manifest on its
+  own, so the script aborted there after the Foundry gates and never printed
+  `RESULT:`. `scripts/shellnet_e2e.sh` stopped at the same point, because it
+  starts with the preflight. The step now runs the relayer tests from
+  `crates/bridge-prover-libraries`, the way `make relayer-test` does. Fixed the
+  same way: `make relayer-fmt`, which `make pre-push` runs, and the
+  `verify-fixture` step of `scripts/shellnet_e2e.sh`, which could not start the
+  relayer and reported every run as
+  `verify-fixture failed (deploy bridge first or check anchors)`. That step also
+  passes its fixtures directory as an absolute path now: from a relative one the
+  relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
+  looks for legacy Groth16 fixtures instead. The preflight step still fails for
+  as long as that workspace does not build against its pinned circuit revision.
+
+- **`make deploy-local` runs `script/DeployTestBridge.s.sol`**, the local and
+  testnet smoke-test deployment; the `script/Deploy.s.sol` it named does not
+  exist. It reads `PRIVATE_KEY` from the environment or from
+  `contracts/ethereum/.env`. `make dev-setup` now creates that file from
+  `contracts/ethereum/.env.example` when it is missing, instead of silently
+  failing to copy a root `.env.example` that does not exist. `make audit` runs
+  `cargo audit` only; the `forge audit` it also called is not a Foundry command.
+
+- **`make setup` (`setup.sh`) no longer runs `forge init --force` in
+  `contracts/ethereum`.** On a fresh clone, where the gitignored `lib/` is
+  absent, it did, and left Foundry's template `src/Counter.sol`,
+  `script/Counter.s.sol`, `test/Counter.t.sol` and a `README.md` in the
+  project, where they were built and tested with it. It now installs the
+  Solidity dependencies the way CI does — `npm install` and `forge-std` — and
+  stops with an error when `npm` is missing, since `poseidon-solidity` comes
+  from npm. It also installs the pinned Rust toolchains from
+  `rust-toolchain.toml` and `deposit-prover/rust-toolchain.toml` instead of
+  switching the global default to the latest nightly, keeps an existing
+  `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
+  `test/integration/` directory or a root `.env.example`; the template for
+  the deploy scripts is `contracts/ethereum/.env.example`.
+
+- **`deposit-prover/download_trusted_setup.sh` no longer calls the Hermez SRS
+  a test-only fallback.** It told operators that production deposit proofs need
+  an Acki Nacki chain-ceremony SRS in `params/kzg_bn254_18.srs` and that proofs
+  keyed on Hermez are rejected on chain. The reverse is true: the
+  `ZKHALO2VERIFYWITHVK` opcode embeds the Hermez `[s]·G2`, and the deposit
+  prover loads only the Hermez `data/kzg_params_18.srs` this script downloads.
+  The script now checks that file's `[s]·G2` and refuses one from any other
+  ceremony. A failed download is reported as such instead of as a corrupted
+  file — the default source currently answers HTTP 403.
+
+### Removed
+
+- **`solc 0.8.19` is no longer a prerequisite of `ackinacki-bridge withdraw`
+  or of the relayer.** Stage 1 no longer probes the compiler or its version.
+  `scripts/install.sh` no longer downloads it and `BRIDGE_SOLC_URL` is gone;
+  the closing `export PATH` line is still printed, but only for the CLI. The
+  relayer image no longer contains `/opt/gosh-relayer/bin/solc`, the
+  `solc_bin` build context and `SOLC_BIN_DIR` are gone from
+  `deploy/shellnet-l2/compose.yaml` and `compose.env.example` — delete
+  `SOLC_BIN_DIR` from your `.env` — and the image preflight no longer checks
+  the compiler version. An installed `solc` can stay; nothing on these paths
+  uses it. Regenerating verifiers (`export-inner-aggregator`,
+  `export-spike-artifacts`) still needs `solc 0.8.19`.
+
+- `make generate-proof`, `make test-integration` and `make generate-verifier`,
+  with `scripts/regenerate_verifier.sh`. They ran a `generate-proof` binary,
+  an `eth-frontend` integration test and a `generate-verifier` binary, none of
+  which exists, so each failed on every run. Production verifiers are
+  regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
+
+- `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
+  which ran the same missing `generate-proof` binary.
+
+### Documentation
+
+- Clarify the owner-anchor flip trust model (bridge-audit #57 / #106).
+  `disableOwnerAnchorsOn(chainId)` disables direct owner writes for that chain,
+  while owner upgrades and light-client replacement remain available. Bridge
+  upgrades reset the flags and recorded clients: restore configuration and
+  repeat the intended flips afterwards. NatSpec and operator runbooks now state
+  these powers consistently. An owner retaining `updateCode` can install
+  arbitrary replacement code that changes or removes the current checks, so
+  both owners remain trusted after a flip. No contract behavior, ABI or
+  deployment artifact changes.
+
+- `live_relayer_bridge_verifyBlock_runbook.md`: the `AttestationProofRejected`
+  row told operators to re-prove `applyBkSetUpdate` against the live
+  `storedLastSeenBlockSeqNo`. That value reverts
+  `AttestationLastSeenNotBeforeSeqNo`; pass the `last_seen` the attestation
+  was proven against.
+
+- `docs/aave-yield.md` gains *If AAVE lost money*: what still pays out when
+  `suppliedPrincipal()` is above `aUsdcBalance()`, and when to call
+  `writeOffUnbackedPrincipal()`. It no longer says `harvestYield` accepts
+  `type(uint256).max` — it never did.
+
+- Pause is two owner switches, not one. `AckiNackiBridge.pause()` on Ethereum
+  does not call `eccUSDCBridge.setPaused`, and `setPaused` does not call
+  `pause()`; Circle can still freeze USDC itself. An incident that must stop
+  both directions of the bridge has to flip both switches —
+  `contracts/an/README.md`, `docs/EVM-custody-and-accounting.md`.
+
+- The prover and circuit docs describe BK-set rotation as it works:
+  `applyBkSetUpdate` with a Circuit 1A/1B attestation of the rotation block
+  and its opened L2/L3 leaves, no circuit of its own. Gone are the
+  "Circuit 3 (BK Set Update)" future-work item, references to a plan
+  document that does not exist, and the claims that shellnet rotation is off
+  (it has been on since 2026-10-08) and that the daemons take the BK set from
+  GraphQL (they read the file at `BRIDGE_BK_SET_CONFIG`; on shellnet it must
+  be the set at the seed) — in `crates/bridge-prover-libraries/TECHNICAL_README.md`,
+  the prover daemon and circuits READMEs and `PROBE_BK_UPDATES.md`.
+
+- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
+  is part of replay protection, and that an upgrade changing it has to ship a
+  block cutoff in the same code so past deposits stop going through. The
+  current contracts need no such restriction — the voucher's code is installed
+  by the zerostate and `updateCode` is called with an empty `userCell`.
+
+- `scripts/ursus/flip_deposit_to_light_client.md` and
+  `scripts/ursus/eth_lc_shellnet_e2e.md` pin the Gloas fork slot with
+  `eth-lc-relayer set-gloas-fork-slot` after `deployLightClient`. A fresh
+  deploy rejects every `submitUpdate` / `submitRotate` with 256 until it
+  runs.
+
+- `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
+  is part of replay protection, and that an upgrade changing it has to ship a
+  block cutoff in the same code so past deposits stop going through. The
+  current contracts need no such restriction — the voucher's code is installed
+  by the zerostate and `updateCode` is called with an empty `userCell`.
+
+- `disableOwnerAnchors` is documented as L1-only in `contracts/an/README.md`,
+  `docs/eth-light-client.md` §3.5, and
+  `scripts/ursus/flip_deposit_to_light_client.md`. After the flip, L2s keep
+  the owner writer; L1 still covers only the blocks a span reaches when
+  accepted checkpoints sit more than a span apart, because nothing
+  late-registers the ones the daemon skipped. Check 3 of the deposit
+  CLI names both `disableOwnerAnchors` and `disableOwnerAnchorsOn` as
+  the switch-off.
+
+### Known issues
+
+- **The FIFO compaction walk is not measured against a full proven set.**
+  `_evictExpired` re-queues every still-live hash it examines, which advances
+  the queue head, so the loop runs its full examination cap on every
+  `submitUpdate` and `submitAncestry` whether anything has expired or not.
+  With ancestry on, the proven set grows from one hash per epoch to one per
+  execution block — roughly 2.6M entries over a year instead of ~82K — and
+  each examination is a dictionary read, delete and write whose cost grows
+  with that depth. The numbers in Breaking Changes were measured on an
+  essentially empty map. Before mainnet this wants measuring against a
+  populated one, together with the eviction lag it implies: the bridge forgets
+  a hash only when the tail passes it, so `finalizeDeposit` can still accept a
+  deposit whose block is older than a year by as much as one full rotation of
+  the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
+  is the light client's own `_isLive`, not the bridge's map.
+
+- **A deposit is only covered once both checkpoints bracketing its block are
+  proven and within a span of each other.** Gas is no longer the obstacle —
+  the `KECCAK256` instruction brought a full 33-header span to 1,976,017 gas
+  against the 10M per-transaction limit (see Breaking Changes) — and a
+  checkpoint the daemon skipped can be late-registered through `submitUpdate`,
+  which closes the gap without the owner key — but the daemon never does it by
+  itself, so today those blocks need `setAcceptedBlockHash` unless an operator
+  late-registers the checkpoint by hand. What is left is ordering: until the
+  skipped checkpoint is late-registered and the span sent, a deposit in those
+  blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and on a
+  bridge with `disableOwnerAnchors` already called there is no owner fallback
+  to bridge the wait. `submitRotate` and `rePushAnchor` are unaffected; so are
+  withdrawals. The earlier software-keccak measurements that made ancestry
+  impossible outright (one permutation 12.93M gas, a real 642-byte Sepolia
+  header 64.68M, a 32-header walk ≈2.07G) are kept here for the record:
+  shellnet 2026-09-11, re-measured in tvm-debugger 3.0.6 on 2026-09-13 and on
+  a real VM 2026-09-14.
+
+## [0.2.1] – 2026-09-15
+
+### Added
+
+- `scripts/keccak-tvm-bench/`: executes `EthKeccak` on a TVM instead of
+  reasoning about it. `run.sh` compiles the exit-code wrapper `KeccakCheck.sol`
+  against any copy of the library (`--lib`, default `contracts/an/EthKeccak.sol`)
+  and runs it in `tvm-cli debug run --tvc`: no network, no keys. Measured with
+  sold 0.81.0 / tvm-cli 3.0.6: the library as deployed on shellnet
+  (`reference/EthKeccak_1.4.0_as_deployed.sol`, code hash `78905cf7...`) throws
+  exit 50 on every input at the first `bc[i] = ...`; the fixed library returns
+  the right digests at 12.93M gas per keccak-f permutation against the 10M
+  per-transaction limit (`acki-nacki/node/blockchain.conf.json` p20/p21), and the
+  642-byte Sepolia header 11683168 (`fixtures/`) runs out of the debugger's
+  16.7M credit. `fetch_headers.py` rebuilds header RLPs from any JSON-RPC the
+  way `header_rlp.rs` does; `emulate_live.sh` replays `submitAncestry` against
+  the live light-client account with `tvm-cli runx`. Second, independent
+  measurement of the ancestry gas wall (gosh-sh/bridge#36).
+
+- `docs/eth-light-client.md`: design and deployment reference for the beacon
+  light client (components, step update, period rotation, trust switches,
+  deployment topology with ports and endpoints, configuration, operating
+  numbers), with Mermaid diagrams.
+
+- `eth-lc-relayer` resolves the beacon signing domain from the node it polls:
+  `genesis_validators_root` (`/eth/v1/beacon/genesis`) and the fork schedule
+  (`/eth/v1/config/spec`), picking the `fork_version` active at the update's
+  `signature_slot`, and hands the pair to the prover as `BEACON_FORK_VERSION` /
+  `BEACON_GENESIS_VALIDATORS_ROOT`. Sepolia (and any other network with the
+  mainnet preset) now proves without code changes; the prover still defaults
+  to mainnet Fulu when the variables are unset. `beacon-watch` prints them.
+  The state file is pinned to the first `genesis_validators_root` it sees and
+  refuses a source on another network.
+
+- `eth-lc-relayer daemon --no-rotate --owner-hop`: on a period jump the
+  daemon proves a step of the new period, advances the committee with the
+  owner key from that proof's commitment (`setCommitteeCommitment`) and
+  submits the same bundle, instead of stopping at `RotateRequired`. Shadow
+  only (refused after `disableOwnerRotation`).
+
+- `eth-lc-relayer set-committee --bundle-dir …`: owner
+  `setCommitteeCommitment(commitment, period)` from a proven step bundle
+  (public-input word 5), recording the period in the state file. Bootstraps a
+  fresh `EthBeaconLightClient` (weak-subjectivity anchor) and hops periods
+  while `--no-rotate`.
+
+- `crates/eth-light-client-relayer/deploy/shellnet-shadow/`: operator kit for
+  a shadow instance on shellnet against Sepolia (build, SRS install, contract
+  compile with the Linux `sold` release, giver funding, deploy, status,
+  systemd unit, README).
+
+- `eth-lc-relayer` (`crates/eth-light-client-relayer`): operator loop for the
+  Ethereum beacon light-client oracle. Polls `finality_update` **and**
+  `light_client/updates` (current 512-committee), proves a step via
+  `export_step_vk_blob` with `COMMITTEE_JSON_PATH` (real keys + bits + signature,
+  not OsRng), and calls `EthBeaconLightClient.submitUpdate`. CLI:
+  `beacon-watch`, `prove-one`, `submit-one`, `submit-rotate`, `ancestry-one`,
+  `submit-ancestry`, `flip-owner`, `daemon`. Live AN submit is `--features live-submit`. systemd
+  unit is the live loop (no hardcoded `--dry-run --mock-prove`; rotate **on** by
+  default, `--no-rotate` opts out). After the first accepted `submitUpdate` the
+  daemon issues `setLightClient` + `disableOwnerAnchors` +
+  `disableOwnerRotation` (`--no-flip-owner` opts out; one-shot:
+  `eth-lc-relayer flip-owner`). Relayer keys must be the owner pubkey.
+  `AN_USDC_BRIDGE` / `AN_USDC_ABI_PATH`. tvm-sdk#284 co-deploys with this contract.
+  Epoch ancestry **on-chain**: `EthBeaconLightClient.submitAncestry(bytes[]
+  headerRlps)` keccak256-binds each execution header and walks `parentHash` to a
+  proven checkpoint (≤ 31 parents), then pushes those hashes into
+  `  USDCBridge._acceptedBlockHash`. The daemon fetches that chain after every
+  accepted `submitUpdate` when `ETH_RPC_URL` is set (`--eth-rpc-url`) and runs
+  `link_headers` locally; on-chain `submitAncestry` is `--submit-ancestry`
+  (default **off**) because two headers already cost ~130 M gas against the
+  10 M limit. It also calls `rePushAnchor` so a bounce before `setLightClient`
+  is retried. Operator one-shot: `eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash
+  0x…`. Contracts: `contracts/an/EthKeccak.sol`,
+  `contracts/an/EthBeaconLightClient.sol` (the standalone variant; shellnet runs
+  the constant-sink one from `acki-nacki` `contracts/exchange`, and what crosses
+  between them is fixes and comments — see Removed). `updateCode` / `onCodeUpgrade` persist the committee, head,
+  proven-hash set and `reAnchorsApplied` across a VkBlob rotation.
+  `reAnchorCommittee` is the logged weak-subjectivity hatch after
+  `disableOwnerRotation` (does not write exec hashes; `getCommitteeState`
+  exposes `reAnchorsApplied`). Shellnet E2E:
+  `scripts/ursus/eth_lc_shellnet_e2e.md`. Audit scope:
+  `eth-light-client-prover/docs/m_audit_scope.md`.
+
+### Changed
+
+- `scripts/check_english_only.py` treats mathematical letters as notation, like
+  the unaccented Greek it already accepts: the Mathematical Alphanumeric Symbols
+  block (double-struck, bold, italic, script, fraktur), the letterlike
+  double-struck / script / black-letter capitals and superscript Latin letters
+  (`𝔾₂`, `ℤ`, `limbᵢ·(2⁸⁸)ⁱ`). They occur only in formulas, never in another
+  language's prose, so the pairing and light-client notes no longer trip the
+  hygiene pipeline. Cyrillic, accented Greek, CJK and the rest still fail.
+
+- On-chain `submitAncestry` is opt-in (`--submit-ancestry` / `SUBMIT_ANCESTRY`,
+  default **off**). The daemon used to fire a 32-header call every epoch whenever
+  `ETH_RPC_URL` was set; two headers already cost 129.7 M gas against a 10 M
+  limit, so every cycle burned ~0.7 vmshell past `tvm.accept()` on a call that
+  cannot succeed. `ETH_RPC_URL` still attaches the execution RPC: the epoch is
+  fetched and `link_headers` runs locally. Dropping the URL is no longer the
+  only lever, and no longer takes the local check with it. The one-shot
+  `submit-ancestry` subcommand stays, and warns. Measured by @SeHor05 on both
+  `v3.0.6.an` and tvm-sdk#284 (gosh-sh/bridge#36).
+
+- `EthBeaconLightClient` keeps proven execution hashes for **one year** of
+  Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). `isProven` / `isAcceptedBlockHash`
+  are false outside that window; `rePushAnchor` and `submitAncestry` refuse an
+  expired hash. A FIFO compact (128 entries per tx) deletes the keys and calls
+  `forgetBlockHashFromLightClient` on the sink so `USDCBridge._acceptedBlockHash`
+  cannot outlive the oracle. The bridge method is `USDCBridge_forget_block_hash_from_light_client.patch`
+  (same sender gate as `acceptBlockHashFromLightClient`, idempotent `delete`). `updateCode` encoding of the proven set changed
+  (`mapping(hash => slot)` + queue); existing shadow deployments cannot carry the
+  old `mapping => bool` across this upgrade — redeploy or re-prove from the
+  checkpoint. Off-chain replica: `crates/eth-light-client-relayer/src/contract_model.rs`.
+
+- **Step VK rotated: `bd108c08…` → `2d66c205…`.** `execution.rs` padded
+  `extra_data` (List[byte,32]) with `load_constant`, so the constraint system
+  carried `32 - len` extra constant-equality cells and the VK depended on the
+  finalized block's `extra_data` length. The fixture VK was emitted over a
+  27-byte mainnet `extra_data`; a 25-byte Sepolia block produced a different
+  VkBlob and would have been rejected by the deployed contract. The chunk is
+  now a zero-padded 32-byte witness (soundness unchanged: the payload root is
+  bound to the signed state by `execution_branch`). Regression test
+  `execution_root_shape_is_independent_of_extra_data_len`. Fixture
+  `eth-light-client-prover/fixtures/step_vkblob/` and the `VK_BLOB` in
+  `contracts/an/EthBeaconLightClient.sol` re-emitted. The tvm-sdk
+  opcode fixtures still carry the old blob and need
+  `scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`. Verified on Sepolia: the same blob comes
+  out of the mainnet fixture (27 B), a Sepolia block with 25 B and one with
+  18 B of `extra_data`.
+
+- `crates/eth-light-client-relayer` builds with `--features live-submit`
+  outside the tvm-sdk workspace: the crate manifest now mirrors tvm-sdk's
+  `[patch]` tables (gosh `halo2-axiom` / `halo2-lib` / `axiom-eth` forks);
+  before, cargo resolved two `halo2_axiom` versions and `tvm_vm` failed to
+  compile.
+
+- `prove-one` and the daemon keep the prover transcript
+  (`prover-stdout.log` / `prover-stderr.log`) next to the bundle and report the
+  stderr tail on failure instead of a bare exit status.
+
+- `export_step_vk_blob` reads `FINALITY_UPDATE_PATH` and, when
+  `COMMITTEE_JSON_PATH` / `BOOTSTRAP_PATH` is set, builds a **live** step
+  witness (real sync committee). Unset committee path still emits a synthetic
+  committee for VkBlob-only keygen.
+
+### Fixed
 
 - The step VkBlob gate only checked that `step_vk_blob.bin` had
   `accumulator_limbs = 0`. It did not compare the fixture to the `VK_BLOB`
@@ -2917,6 +3191,7 @@ assigns it when the release is tagged.
   requires contract `VK_BLOB` == the step fixture (and the sha256 sidecar),
   and if a sibling `tvm-sdk` tree is present, that fixture too. Rotate already
   had the equivalent check.
+
 - `EthKeccak` never computed a hash in the TVM. Three `sold` behaviours, each
   fatal on the first input: `uint64[5] bc;` declares a **zero-length** array, so
   the first write of the theta step threw exit 50 (this is what aborted every
@@ -2957,94 +3232,6 @@ assigns it when the release is tagged.
   live via `updateCode` (code hash `78905cf7…`, state intact). This copy now
   uses the same `_piForm` name and body, so the two trees differ only
   structurally.
-- **`scripts/production_preflight.sh` runs its relayer step through the
-  prover workspace.** The step ran `cargo test` inside
-  `crates/bridge-relayer-daemon`, where cargo cannot read the manifest on its
-  own, so the script aborted there after the Foundry gates and never printed
-  `RESULT:`. `scripts/shellnet_e2e.sh` stopped at the same point, because it
-  starts with the preflight. The step now runs the relayer tests from
-  `crates/bridge-prover-libraries`, the way `make relayer-test` does. Fixed the
-  same way: `make relayer-fmt`, which `make pre-push` runs, and the
-  `verify-fixture` step of `scripts/shellnet_e2e.sh`, which could not start the
-  relayer and reported every run as
-  `verify-fixture failed (deploy bridge first or check anchors)`. That step also
-  passes its fixtures directory as an absolute path now: from a relative one the
-  relayer cannot find the R15 calldata in `contracts/ethereum/verifiers/` and
-  looks for legacy Groth16 fixtures instead. The preflight step still fails for
-  as long as that workspace does not build against its pinned circuit revision.
-- **`make deploy-local` runs `script/DeployTestBridge.s.sol`**, the local and
-  testnet smoke-test deployment; the `script/Deploy.s.sol` it named does not
-  exist. It reads `PRIVATE_KEY` from the environment or from
-  `contracts/ethereum/.env`. `make dev-setup` now creates that file from
-  `contracts/ethereum/.env.example` when it is missing, instead of silently
-  failing to copy a root `.env.example` that does not exist. `make audit` runs
-  `cargo audit` only; the `forge audit` it also called is not a Foundry command.
-- **`make setup` (`setup.sh`) no longer runs `forge init --force` in
-  `contracts/ethereum`.** On a fresh clone, where the gitignored `lib/` is
-  absent, it did, and left Foundry's template `src/Counter.sol`,
-  `script/Counter.s.sol`, `test/Counter.t.sol` and a `README.md` in the
-  project, where they were built and tested with it. It now installs the
-  Solidity dependencies the way CI does — `npm install` and `forge-std` — and
-  stops with an error when `npm` is missing, since `poseidon-solidity` comes
-  from npm. It also installs the pinned Rust toolchains from
-  `rust-toolchain.toml` and `deposit-prover/rust-toolchain.toml` instead of
-  switching the global default to the latest nightly, keeps an existing
-  `.git/hooks/pre-commit`, and no longer creates empty crate directories, a
-  `test/integration/` directory or a root `.env.example`; the template for
-  the deploy scripts is `contracts/ethereum/.env.example`.
-- **`deposit-prover/download_trusted_setup.sh` no longer calls the Hermez SRS
-  a test-only fallback.** It told operators that production deposit proofs need
-  an Acki Nacki chain-ceremony SRS in `params/kzg_bn254_18.srs` and that proofs
-  keyed on Hermez are rejected on chain. The reverse is true: the
-  `ZKHALO2VERIFYWITHVK` opcode embeds the Hermez `[s]·G2`, and the deposit
-  prover loads only the Hermez `data/kzg_params_18.srs` this script downloads.
-  The script now checks that file's `[s]·G2` and refuses one from any other
-  ceremony. A failed download is reported as such instead of as a corrupted
-  file — the default source currently answers HTTP 403.
-
-### Known issues
-
-- **The FIFO compaction walk is not measured against a full proven set.**
-  `_evictExpired` re-queues every still-live hash it examines, which advances
-  the queue head, so the loop runs its full examination cap on every
-  `submitUpdate` and `submitAncestry` whether anything has expired or not.
-  With ancestry on, the proven set grows from one hash per epoch to one per
-  execution block — roughly 2.6M entries over a year instead of ~82K — and
-  each examination is a dictionary read, delete and write whose cost grows
-  with that depth. The numbers in Breaking Changes were measured on an
-  essentially empty map. Before mainnet this wants measuring against a
-  populated one, together with the eviction lag it implies: the bridge forgets
-  a hash only when the tail passes it, so `finalizeDeposit` can still accept a
-  deposit whose block is older than a year by as much as one full rotation of
-  the queue. The year in "deposits older than a year cannot `finalizeDeposit`"
-  is the light client's own `_isLive`, not the bridge's map.
-
-- **A deposit is only covered once both checkpoints bracketing its block are
-  proven and within a span of each other.** Gas is no longer the obstacle —
-  the `KECCAK256` instruction brought a full 33-header span to 1,976,017 gas
-  against the 10M per-transaction limit (see Breaking Changes) — and a
-  checkpoint the daemon skipped can be late-registered through `submitUpdate`,
-  which closes the gap without the owner key — but the daemon never does it by
-  itself, so today those blocks need `setAcceptedBlockHash` unless an operator
-  late-registers the checkpoint by hand. What is left is ordering: until the
-  skipped checkpoint is late-registered and the span sent, a deposit in those
-  blocks fails `finalizeDeposit` with `ERR_UNKNOWN_BLOCK` (224), and on a
-  bridge with `disableOwnerAnchors` already called there is no owner fallback
-  to bridge the wait. `submitRotate` and `rePushAnchor` are unaffected; so are
-  withdrawals. The earlier software-keccak measurements that made ancestry
-  impossible outright (one permutation 12.93M gas, a real 642-byte Sepolia
-  header 64.68M, a 32-header walk ≈2.07G) are kept here for the record:
-  shellnet 2026-09-11, re-measured in tvm-debugger 3.0.6 on 2026-09-13 and on
-  a real VM 2026-09-14.
-
-- `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
-  message to `addr_none` when no `USDCBridge` was configured: the unset
-  `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
-  action phase aborted with result code 34 and the whole `submitUpdate` was
-  rolled back although the proof had verified. Guard is now
-  `!_usdcBridge.isNone() && _usdcBridge != address(0)` (now in `_notifySink`,
-  so `rePushAnchor` is covered too). Observed on the first shellnet shadow
-  deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
 
 ### Removed
 
@@ -3083,31 +3270,16 @@ assigns it when the release is tagged.
   before `provenQueue` landed. The real diff is 206 lines and `provenQueue` is in
   both.
 
-- **`solc 0.8.19` is no longer a prerequisite of `ackinacki-bridge withdraw`
-  or of the relayer.** Stage 1 no longer probes the compiler or its version.
-  `scripts/install.sh` no longer downloads it and `BRIDGE_SOLC_URL` is gone;
-  the closing `export PATH` line is still printed, but only for the CLI. The
-  relayer image no longer contains `/opt/gosh-relayer/bin/solc`, the
-  `solc_bin` build context and `SOLC_BIN_DIR` are gone from
-  `deploy/shellnet-l2/compose.yaml` and `compose.env.example` — delete
-  `SOLC_BIN_DIR` from your `.env` — and the image preflight no longer checks
-  the compiler version. An installed `solc` can stay; nothing on these paths
-  uses it. Regenerating verifiers (`export-inner-aggregator`,
-  `export-spike-artifacts`) still needs `solc 0.8.19`.
-- `make generate-proof`, `make test-integration` and `make generate-verifier`,
-  with `scripts/regenerate_verifier.sh`. They ran a `generate-proof` binary,
-  an `eth-frontend` integration test and a `generate-verifier` binary, none of
-  which exists, so each failed on every run. Production verifiers are
-  regenerated with `export-inner-aggregator` in `crates/bridge-evm-aggregator`.
-- `test_poseidon.sh` and `contracts/ethereum/test/generate_test_proof.sh`,
-  which ran the same missing `generate-proof` binary.
-- The `cargo run` fallbacks of `eth-lc-relayer` (`export_step_vk_blob`,
-  `rotate_tree_n8`), `deposit-relayer` (`fetch_deposit_data`,
-  `export_vk_blob`, `export_blake2b_proof`) and `relayer` (`aggregate-proof`,
-  `bridge-event-halo2-prover`), and with them the `--aggregator-dir` /
-  `--bridge-prover-libraries-dir` flags of `relayer` and their
-  `BRIDGE_AGGREGATOR_DIR`, `AGGREGATOR_DIR` and `BRIDGE_PROVER_LIBRARIES_DIR`.
-  See Breaking Changes.
+### Known issues
+
+- `EthBeaconLightClient._pushExecHash` sent the `acceptBlockHashFromLightClient`
+  message to `addr_none` when no `USDCBridge` was configured: the unset
+  `_usdcBridge` is `addr_none`, not `address(0)`, so the guard passed, the
+  action phase aborted with result code 34 and the whole `submitUpdate` was
+  rolled back although the proof had verified. Guard is now
+  `!_usdcBridge.isNone() && _usdcBridge != address(0)` (now in `_notifySink`,
+  so `rePushAnchor` is covered too). Observed on the first shellnet shadow
+  deploy (2026-09-04). `EthBeaconLightClient_rotate_decider.patch` regenerated.
 
 ## [0.2.0] – 2026-09-11
 

@@ -64,6 +64,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint32 tokenId,
         address sender
     );
+    event WithdrawalRefused(
+        uint256 dstChainId,
+        bytes recipient,
+        uint128 amount,
+        uint32 tokenId,
+        address sender,
+        uint16 reason
+    );
     event DepositFinalized(
         uint256 depositId,
         uint256 contractAddr,
@@ -572,7 +580,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint32 tokenId = keys[0];
         require(tokenId == USDC_ECC_ID, ERR_UNSUPPORTED_TOKEN);
         if (currencies[tokenId] > varuint32(MAX_TRANSFER_AMOUNT)) {
-            _refundWithdrawal(currencies);
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_TRANSFER_TOO_LARGE);
             return;
         }
         uint128 amount = uint128(currencies[tokenId]);
@@ -580,9 +589,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         uint128 minted = _totalMintedBridgeByToken[tokenId];
         uint128 burned = _totalBurnedBridgeByToken[tokenId];
-        if (burned > minted || amount > minted - burned
-            || amount > _outstandingByChain[dstChainId]) {
-            _refundWithdrawal(currencies);
+        if (burned > minted || amount > minted - burned) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_BURN_EXCEEDS_BRIDGED);
+            return;
+        }
+        if (amount > _outstandingByChain[dstChainId]) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_CHAIN_BALANCE_EXCEEDED);
             return;
         }
 
@@ -597,9 +611,25 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
     }
 
-    function _refundWithdrawal(mapping(uint32 => varuint32) currencies) private pure {
+    /// @dev Returns the ECC and says why on `WithdrawalRefused`, so a refusal
+    ///      leaves a record a relayer or a UI can read: `reason` is the error
+    ///      code the call would have thrown if a refusal threw —
+    ///      `ERR_TRANSFER_TOO_LARGE` (234) over the per-transfer cap,
+    ///      `ERR_BURN_EXCEEDS_BRIDGED` (233) when the burn would take bridged
+    ///      burned above bridged minted, `ERR_CHAIN_BALANCE_EXCEEDED` (236)
+    ///      when the destination chain accounts for less than this amount.
+    ///      An amount too large for `uint128` is reported saturated; it is
+    ///      already far above the cap that refused it.
+    function _refundWithdrawal(mapping(uint32 => varuint32) currencies, uint256 dstChainId,
+                               bytes recipient, uint32 tokenId, uint16 reason) private pure {
         tvm.accept();
         ensureBalance();
+        varuint32 sent = currencies[tokenId];
+        uint128 shown = sent > varuint32(type(uint128).max)
+            ? type(uint128).max : uint128(sent);
+        address addrExtern = address.makeAddrExtern(WithdrawalRefusedEmit, bitCntAddress);
+        emit WithdrawalRefused{dest: addrExtern}(dstChainId, recipient, shown, tokenId,
+                                                msg.sender, reason);
         msg.sender.transfer({value: math.min(msg.value, 0.1 vmshell),
                              bounce: false, flag: 1, currencies: currencies});
     }
@@ -769,6 +799,47 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     function setPaused(bool paused) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         _paused = paused;
+    }
+
+    /// @notice States how much of one chain's principal this bridge still
+    ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
+    ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
+    ///         credit to it. `confirmDeposit` raises the counter, a withdrawal
+    ///         spends it, and `onCodeUpgrade` carries it between builds that
+    ///         both have it. What leaves it empty is a migration from a build
+    ///         that had none, while the principal stays locked on the source
+    ///         chain. This is how the owner states what is locked there.
+    ///
+    ///         The figure to write is the principal L1 holds less the deposits
+    ///         not yet credited here and the burns L1 has not yet paid out —
+    ///         not L1's balance, which still carries both. The counter is also
+    ///         the deposit room, since `finalizeDeposit` and `confirmDeposit`
+    ///         bound `outstanding + amount` by `MAX_BRIDGE_TVL`, so writing
+    ///         more than that figure buys withdrawal room by refusing deposits
+    ///         with `ERR_TVL_CAP`, and a deposit caught between finalization
+    ///         and confirmation aborts with its voucher already consumed.
+    ///         Writing less is the safe direction: it only refuses
+    ///         withdrawals, which return the ECC.
+    ///
+    ///         It moves this counter alone. A withdrawal is still bounded by
+    ///         bridged minted less bridged burned, so where that inventory is
+    ///         empty too — a fresh deployment — this pays nothing out on its
+    ///         own: the withdrawal is refused with `ERR_BURN_EXCEEDS_BRIDGED`
+    ///         instead. It recovers a deployment that carried its inventory
+    ///         across an upgrade but not its per-chain counter. It is no new
+    ///         authority: `mintAndSend` has no ceiling at all, and a call that
+    ///         writes a counter without minting is weaker than one that mints.
+    ///         See `contracts/an/README.md`, *Restoring a chain's outstanding
+    ///         amount*.
+    /// @param chainId — EIP-155 chain id of the destination L1/L2.
+    /// @param amount  — principal outstanding to that chain, in token units,
+    ///                  at most `MAX_BRIDGE_TVL`.
+    function setOutstandingByChain(uint256 chainId, uint128 amount)
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
+    {
+        require(amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
+        ensureBalance();
+        _outstandingByChain[chainId] = amount;
     }
 
     /// @notice Admits a block hash the light client proved final on the source

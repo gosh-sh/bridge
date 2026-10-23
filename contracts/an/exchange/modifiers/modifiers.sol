@@ -17,6 +17,7 @@ abstract contract eccUSDCBridgeModifiers is eccUSDCBridgeErrors {
     uint128 constant UsdcMintedEmit          = 616;
     uint128 constant WithdrawalInitiatedEmit = 618;
     uint128 constant DepositFinalizedEmit    = 619;
+    uint128 constant WithdrawalRefusedEmit   = 620;
 
     modifier accept() {
         tvm.accept();

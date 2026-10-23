@@ -14,7 +14,7 @@ verifiers deployed as Yul bytecode.
 
 ## The current deployment
 
-Sepolia ↔ shellnet, deployed from tag [`v0.5.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.5.0).
+Sepolia ↔ shellnet, deployed from tag [`v0.6.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.6.0).
 The CLI, relayers and web form take their addresses from configuration.
 
 ### Ethereum (Sepolia, chain id 11155111)

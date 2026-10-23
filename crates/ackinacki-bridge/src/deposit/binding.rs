@@ -240,9 +240,10 @@ mod tests {
     use alloy_primitives::{address, Address, Bytes, B256};
 
     use super::*;
-    use crate::deposit::store::{OpParams, OpRecord, OpStage, RequestInfo, TxClaim};
-
-    const FROM: Address = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+    use crate::deposit::{
+        store::{OpParams, OpRecord, OpStage, RequestInfo, TxClaim},
+        testkit::sepolia_sender,
+    };
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
 
     fn calldata() -> Bytes {
@@ -262,7 +263,7 @@ mod tests {
             },
             "bd44".into(),
         );
-        r.from = Some(FROM);
+        r.from = Some(sepolia_sender());
         r.stage = OpStage::Requested;
         r.request = Some(RequestInfo {
             nonce_before,
@@ -277,7 +278,7 @@ mod tests {
         Candidate {
             tx_hash: B256::repeat_byte(h),
             nonce,
-            from: FROM,
+            from: sepolia_sender(),
             input: calldata(),
             status_ok: true,
             has_bridge_deposit: true,

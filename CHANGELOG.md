@@ -130,6 +130,20 @@ assigns it when the release is tagged.
   A status-0 receipt is now a transient `Reverted`: the proof stays in the
   scan and is retried with backoff, and the next send reports the decoded
   reason at the estimate, where a proof-intrinsic one parks as before.
+  The one-shot paths change with it. `relayer submit-withdraw` and
+  `relayer withdraw-e2e` exit with `withdrawByProof reverted (transient): …`
+  instead of logging `withdrawByProof paid out`. `ackinacki-bridge withdraw`
+  marks the withdrawal record `failed` and exits with code 13
+  (`EthSubmitFailed`) instead of reporting it confirmed; a rerun picks the
+  withdrawal up from that record instead of burning again.
+- **`--help` no longer prints credentials taken from the environment.** clap
+  showed `[env: NAME=value]` for every flag read from a variable, so with
+  the profile sourced `relayer --help` printed `RELAYER_PRIVATE_KEY`, and
+  `RPC_URL` / `RPC_FAILOVER_URLS` with their Infura and Alchemy keys;
+  `ackinacki-bridge withdraw --help` printed `BURNER_PRIVATE_KEY` and
+  `RPC_URL`. These flags, and the GraphQL endpoint flags, now show the
+  variable's name only. If you pasted `--help` output from a shell with
+  these set anywhere, rotate those keys.
 - The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
   entry that is not an http(s) URL, as the daemon does at start; `cast` could
   answer a `wss://` entry and report it healthy while the daemon exited on it

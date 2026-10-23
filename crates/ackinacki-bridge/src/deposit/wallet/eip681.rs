@@ -113,6 +113,7 @@ mod tests {
     use alloy_primitives::{address, B256, U256};
 
     use super::*;
+    use crate::deposit::testkit::sepolia_sender;
 
     #[test]
     fn uris_match_the_documented_shape() {
@@ -140,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn an_eip681_send_returns_no_hash_after_showing_the_qr() {
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let mut w = Eip681Wallet::new(from, 11_155_111);
         assert_eq!(w.connect(&ui).await.unwrap(), from);
         let tx = TxRequest {

@@ -52,6 +52,10 @@ use bridge_relayer_daemon::{
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
+// `hide_env_values` on every flag whose variable can hold a credential:
+// clap otherwise prints `[env: NAME=value]` in `--help`. RPC and GraphQL
+// URLs carry API keys, and `RELAYER_PRIVATE_KEY` is the signing key.
+// `help_tests` holds every such flag to it.
 #[derive(Parser, Debug)]
 #[command(
     name = "relayer",
@@ -67,7 +71,13 @@ struct Args {
     /// tried in order when the one before fails (see
     /// `bridge_relayer_daemon::eth_rpc`). Their URLs may carry API keys:
     /// logs name hosts only.
-    #[arg(long, env = "RPC_FAILOVER_URLS", value_delimiter = ',', global = true)]
+    #[arg(
+        long,
+        env = "RPC_FAILOVER_URLS",
+        hide_env_values = true,
+        value_delimiter = ',',
+        global = true
+    )]
     rpc_failover_urls: Vec<String>,
 
     #[command(subcommand)]
@@ -93,7 +103,7 @@ enum Cmd {
         #[arg(long)]
         bridge_address: Address,
         /// Hex-encoded private key of the relayer EOA.
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Maximum ticks to run before exiting (1 is enough for a
         /// canned fixture).
@@ -128,7 +138,7 @@ enum Cmd {
         #[arg(long)]
         bridge_address: Address,
         /// Hex-encoded private key of the relayer EOA.
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Initial backoff sleep on the first non-success outcome.
         #[arg(long, default_value_t = 2)]
@@ -189,11 +199,11 @@ enum Cmd {
         proofs_dir: PathBuf,
         #[arg(long)]
         block_seq_no: u64,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long)]
         dry_run: bool,
@@ -204,7 +214,7 @@ enum Cmd {
         proofs_dir: PathBuf,
         #[arg(long)]
         block_seq_no: u64,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
@@ -287,11 +297,11 @@ enum Cmd {
         /// Directory containing `proof_event_*.json` bundles.
         #[arg(long, env = "PROVER_PROOFS_DIR")]
         proofs_dir: PathBuf,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Seconds to sleep between directory scans when idle.
         #[arg(long, default_value_t = 15)]
@@ -328,11 +338,11 @@ enum Cmd {
         /// `proof_event_*.json` bundles.
         #[arg(long, env = "PROVER_PROOFS_DIR")]
         proofs_dir: PathBuf,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Seconds to sleep between iterations when idle (no work / all done).
         #[arg(long, default_value_t = 15)]
@@ -360,14 +370,14 @@ enum Cmd {
     /// Requires SRS/PKs under `--params-dir`, shellnet (or local) GQL, and a
     /// BK-set JSON fallback. Prover state lives under `--prover-state-dir`.
     DaemonLive {
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         /// Acki Nacki GraphQL endpoint (same as partner `BRIDGE_GQL_ENDPOINT`).
-        #[arg(long, env = "BRIDGE_GQL_ENDPOINT")]
+        #[arg(long, env = "BRIDGE_GQL_ENDPOINT", hide_env_values = true)]
         gql_endpoint: String,
         /// Comma-separated failover GraphQL endpoints, tried in order after
         /// `--gql-endpoint` exhausts its retries. Every request starts from
@@ -377,7 +387,7 @@ enum Cmd {
         /// `BRIDGE_GQL_REQUEST_TIMEOUT_SECS` (30),
         /// `BRIDGE_GQL_CONNECT_TIMEOUT_SECS` (10), `BRIDGE_GQL_MAX_ROUNDS`
         /// (unset = loop forever).
-        #[arg(long, env = "BRIDGE_GQL_FAILOVER_ENDPOINTS")]
+        #[arg(long, env = "BRIDGE_GQL_FAILOVER_ENDPOINTS", hide_env_values = true)]
         gql_failover_endpoints: Option<String>,
         /// Bind address for the Prometheus text exporter (`GET /metrics`),
         /// e.g. `0.0.0.0:9464`. Unset = no exporter.
@@ -448,11 +458,11 @@ enum Cmd {
     SubmitWithdraw {
         #[arg(long)]
         proof_event: PathBuf,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long)]
         dry_run: bool,
@@ -463,11 +473,11 @@ enum Cmd {
         proofs_dir: PathBuf,
         #[arg(long)]
         block_seq_no: u64,
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: String,
         #[arg(long)]
         accept_halo2_proofs: bool,
@@ -483,7 +493,7 @@ enum Cmd {
     /// only logs the produced proof metadata.
     WithdrawE2E {
         /// GraphQL endpoint (e.g. `https://shellnet.ackinacki.org/bk/v2/graphql`).
-        #[arg(long, env = "GQL_ENDPOINT")]
+        #[arg(long, env = "GQL_ENDPOINT", hide_env_values = true)]
         gql_endpoint: String,
         /// Path to the `prover_state.json` snapshot the enricher reads.
         #[arg(long, env = "PROVER_STATE_PATH")]
@@ -560,11 +570,11 @@ enum Cmd {
         prover_seq_no: u32,
         /// If set together with `--bridge-address` + `--private-key`,
         /// also drive `withdrawByProof` on Ethereum after proving.
-        #[arg(long, env = "RPC_URL")]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: Option<String>,
         #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Option<Address>,
-        #[arg(long, env = "RELAYER_PRIVATE_KEY")]
+        #[arg(long, env = "RELAYER_PRIVATE_KEY", hide_env_values = true)]
         private_key: Option<String>,
         /// If the submit trio is supplied, do only an `eth_call`
         /// dry-run (no signed tx).
@@ -2913,5 +2923,41 @@ mod withdraw_scan_tests {
             calls.dry_run, 0,
             "already-used proof must short-circuit before dry-run"
         );
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    /// A variable named like a key, a URL or an endpoint can hold a
+    /// credential, so `--help` must not print its value.
+    fn may_hold_a_credential(env: &str) -> bool {
+        ["KEY", "URL", "ENDPOINT", "SECRET", "TOKEN"]
+            .iter()
+            .any(|word| env.contains(word))
+    }
+
+    fn assert_hidden(cmd: &clap::Command, path: &str) {
+        for arg in cmd.get_arguments() {
+            let Some(env) = arg.get_env().map(|e| e.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            assert!(
+                !may_hold_a_credential(&env) || arg.is_hide_env_values_set(),
+                "`{path} --help` prints the value of {env} (--{})",
+                arg.get_id()
+            );
+        }
+        for sub in cmd.get_subcommands() {
+            assert_hidden(sub, &format!("{path} {}", sub.get_name()));
+        }
+    }
+
+    #[test]
+    fn help_prints_no_credential_from_the_environment() {
+        assert_hidden(&Args::command(), "relayer");
     }
 }

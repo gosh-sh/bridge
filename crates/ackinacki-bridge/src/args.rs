@@ -174,8 +174,16 @@ pub struct WithdrawArgs {
     pub allow_verifier_drift: bool,
 
     // -- Environment / plumbing --
+    // `hide_env_values` on the endpoints and the signer key below, as in
+    // `deposit::args`: `--help` must not echo a value taken from the
+    // environment or the profile. Provider URLs carry API keys.
     /// GraphQL endpoint for the AN chain (event capture + account queries).
-    #[arg(long, env = "BRIDGE_GQL_ENDPOINT", value_name = "URL")]
+    #[arg(
+        long,
+        env = "BRIDGE_GQL_ENDPOINT",
+        hide_env_values = true,
+        value_name = "URL"
+    )]
     pub gql_endpoint: String,
 
     /// On-chain USDCBridge account id (64 hex, no `0x`). No compiled
@@ -204,7 +212,7 @@ pub struct WithdrawArgs {
 
     // -- ETH side (submit) --
     /// EVM JSON-RPC endpoint.
-    #[arg(long, env = "RPC_URL", value_name = "URL")]
+    #[arg(long, env = "RPC_URL", hide_env_values = true, value_name = "URL")]
     pub rpc_url: String,
 
     /// Deployed AckiNackiBridge address on the destination chain.
@@ -232,7 +240,12 @@ pub struct WithdrawArgs {
     /// Signer key for the EVM `withdrawByProof` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the USDC is `--to`, not this signer.
-    #[arg(long, env = "BURNER_PRIVATE_KEY", value_name = "0x…")]
+    #[arg(
+        long,
+        env = "BURNER_PRIVATE_KEY",
+        hide_env_values = true,
+        value_name = "0x…"
+    )]
     pub eth_private_key: Option<String>,
 
     // -- Prover subprocess plumbing (passed through to run_once) --
@@ -692,7 +705,38 @@ impl WithdrawArgs {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+
     use super::*;
+
+    /// A variable named like a key, a URL, an endpoint or a project id can
+    /// hold a credential, so `--help` must not print its value.
+    fn may_hold_a_credential(env: &str) -> bool {
+        ["KEY", "URL", "ENDPOINT", "SECRET", "TOKEN", "PROJECT_ID"]
+            .iter()
+            .any(|word| env.contains(word))
+    }
+
+    fn assert_hidden(cmd: &clap::Command, path: &str) {
+        for arg in cmd.get_arguments() {
+            let Some(env) = arg.get_env().map(|e| e.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            assert!(
+                !may_hold_a_credential(&env) || arg.is_hide_env_values_set(),
+                "`{path} --help` prints the value of {env} (--{})",
+                arg.get_id()
+            );
+        }
+        for sub in cmd.get_subcommands() {
+            assert_hidden(sub, &format!("{path} {}", sub.get_name()));
+        }
+    }
+
+    #[test]
+    fn help_prints_no_credential_from_the_environment() {
+        assert_hidden(&Cli::command(), "ackinacki-bridge");
+    }
 
     #[test]
     fn from_parses_lowercase_hex() {

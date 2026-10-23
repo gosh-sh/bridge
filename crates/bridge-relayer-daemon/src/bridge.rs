@@ -2657,11 +2657,16 @@ mod tests {
                 reason,
                 permanent,
             } => {
-                assert!(!permanent, "a receipt carries no reason, so it cannot be parked on");
+                assert!(
+                    !permanent,
+                    "a receipt carries no reason, so it cannot be parked on"
+                );
                 assert!(reason.contains("reverted on chain"), "{reason}");
                 assert!(reason.contains(&format!("{hash:#x}")), "{reason}");
             },
-            WithdrawSubmitOutcome::Paid { .. } => panic!("status 0 reported as Paid"),
+            WithdrawSubmitOutcome::Paid {
+                ..
+            } => panic!("status 0 reported as Paid"),
         }
         assert!(matches!(
             outcome_from_mined_withdraw(true, hash),

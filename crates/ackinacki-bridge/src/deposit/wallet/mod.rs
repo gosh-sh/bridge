@@ -174,7 +174,7 @@ mod tests {
     use alloy_primitives::{address, B256};
 
     use super::*;
-    use crate::deposit::testkit::FakeEvm;
+    use crate::deposit::testkit::{sepolia_sender, FakeEvm};
 
     #[tokio::test]
     async fn the_deposit_request_is_type_2_without_access_list_or_gas_price() {
@@ -182,7 +182,7 @@ mod tests {
         let bridge = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
         let tx = TxRequest::build(
             &evm,
-            address!("b586356d52eaee055ca569ff412dfeffc5bb2307"),
+            sepolia_sender(),
             TxPurpose::Deposit {
                 bridge,
                 amount: 12_500_000,

@@ -78,8 +78,10 @@ time they take.
   one and seeds it with 1 USDC — that one needs a checkout and `tvm-cli`,
   neither of which a withdrawal does, and a freshly minted wallet still
   needs a prior deposit on that bridge.)
-- **A Sepolia wallet with ~0.02 ETH** to pay for `withdrawByProof`. Use a
-  fresh, disposable one — never a wallet holding real funds.
+- **ETH on the payout chain** to pay for `withdrawByProof`, about 0.02 on
+  Sepolia and much less on Arbitrum One. Production payouts use
+  `--to-chain 42161` and the bridge deployed on Arbitrum; Sepolia
+  (`11155111`) is the testnet. Use a fresh, disposable wallet.
 
 ## 3. Set your values
 
@@ -91,16 +93,22 @@ export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 export WITHDRAW_FROM=<dapp_id>::<account_id>     # the AN multisig
 export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json
 export WITHDRAW_TO=0xYourRecipient
-export WITHDRAW_TO_CHAIN=11155111                # Sepolia
+export WITHDRAW_TO_CHAIN=11155111                # Sepolia. Production: 42161
 export WITHDRAW_AMOUNT=1.000000                  # USDC, at most 6 decimals
 
-export BURNER_PRIVATE_KEY=0x…                    # the Sepolia signer
+export BURNER_PRIVATE_KEY=0x…                    # signer on WITHDRAW_TO_CHAIN
 ```
 
 RPC and GraphQL endpoints and the prover directories come from the profile.
-The shipped profile leaves the deployment target unset: obtain `BRIDGE_ADDRESS`
-and `BRIDGE_DEPLOY_BLOCK` from the operator of the new paired deployment. Exported shell variables win over it,
-so if you change the profile, open a new shell or re-`export`.
+The shipped profile is the Sepolia shellnet and leaves the deployment target
+unset: obtain `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` from the operator of
+the new paired deployment. Exported shell variables win over it, so if you
+change the profile, open a new shell or re-`export`.
+
+Production withdrawals are paid on Arbitrum One. Use an Arbitrum RPC, the
+bridge deployed there, and `WITHDRAW_TO_CHAIN=42161`. The Acki Nacki block
+proofs are submitted to that bridge; they are not proved on Ethereum and
+then forwarded. The Sepolia values above are the testnet walk-through.
 
 ## 4. Dry run
 
@@ -210,8 +218,10 @@ be resumed, except the two outcomes only the bridge operator can settle
   ceremony; `install.sh --check` tells you whether they are in place.
 - **An EVM wallet that speaks WalletConnect, on a plain account** — see
   [section 13](#13-which-wallets-work) first. It needs the USDC you deposit
-  and a little Sepolia ETH for two transactions, `approve` and `deposit`.
-  On the shellnet deploy the token is Circle's Sepolia USDC,
+  and a little ETH on that chain for two transactions, `approve` and
+  `deposit`. Production is `--network arbitrum`: the bridge on Arbitrum One,
+  native USDC there. `--network sepolia` is the testnet; on the shellnet
+  deploy the token is Circle's Sepolia USDC,
   `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, which Circle's faucet hands
   out.
 - **The recipient**, the Acki Nacki account as `dapp_id::account_id`. If the
@@ -235,14 +245,15 @@ Transfers are limited to 50 USDC. Each L1 bridge caps deposited principal minus
 completed payouts at 10,000 USDC; AN tracks the same capacity separately per
 chain. Limit reads must succeed before an approval, deposit or burn is requested.
 
-Sepolia is the only network the interactive `deposit` CLI lists; Ethereum
-mainnet is the CCTP hub the deposit relayer proves, not a wallet option.
-The new EVM deployment must expose `deposit(uint256,bytes32)` and be paired
-with an AN bridge at version 1.13.0 or newer using this build's key. Older
-deployment addresses are incompatible. Everything else — the RPC, the Acki
-Nacki endpoint, the bridge address, the prover directory, the state
-directory — comes from the profile. When reusing a profile, replace its
-old deployment values before running this build.
+`deposit --network arbitrum` is the production deposit; `--network sepolia`
+is the Ethereum testnet. Ethereum mainnet is not a deposit network. The
+deployment must expose `deposit(uint256,bytes32)` on the same chain as
+`--network`, and be paired with an AN bridge at version 1.13.0 or newer
+using this build's key. A deposit on Arbitrum is credited to chain 42161,
+which is what a withdrawal to Arbitrum spends. Older deployment addresses
+are incompatible. The RPC, Acki Nacki endpoint, prover directory and state
+directory come from the profile. When reusing a profile, replace its old
+deployment values before running this build.
 
 ## 10. Dry run
 

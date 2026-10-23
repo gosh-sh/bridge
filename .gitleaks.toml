@@ -60,12 +60,3 @@ regexTarget = "line"
 regexes = [
   '''"blockAccessListHash": "0x[0-9a-fA-F]{64}"''',
 ]
-
-# Circle's published TokenMessengerV2 / MessageTransmitterV2 Ethereum
-# addresses. `generic-api-key` fires on the 40-hex next to MESSENGER.
-[[allowlists]]
-description = "Public Circle CCTP V2 contract addresses, not a credential"
-regexTarget = "line"
-regexes = [
-  '''address constant CIRCLE_(MESSENGER|TRANSMITTER)_V2 = 0x[0-9a-fA-F]{40};''',
-]

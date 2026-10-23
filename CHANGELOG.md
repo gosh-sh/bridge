@@ -22,6 +22,99 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Added
+
+- **Arbitrum One is a native deposit and withdrawal chain.** Deposits call
+  `AckiNackiBridge.deposit` on the bridge deployed on Arbitrum (chain id
+  42161): `ackinacki-bridge deposit --network arbitrum`. The deposit proof
+  is of that Arbitrum block, and Acki Nacki credits chain 42161. Withdrawals
+  are paid by that same deployment: `ackinacki-bridge withdraw --to-chain
+  42161`, with the AN→EVM relayer's `--rpc-url` and `--bridge-address`
+  pointed at Arbitrum, so `verifyBlock` and `withdrawByProof` run there.
+  AN will not burn a withdrawal to 42161 unless deposits proven with that
+  chain id have funded it. The owner anchors the Arbitrum block with
+  `setAcceptedBlockHash` (`scripts/deposit_anchor_params.py` already knows
+  a public Arbitrum RPC). There is no Ethereum inclusion proof and no
+  second transfer. Sepolia remains the Ethereum testnet
+  (`--network sepolia`, `--to-chain 11155111`). Ethereum mainnet is not a
+  deposit network. No verification key changes. Deploy a fresh
+  `AckiNackiBridge` on Arbitrum, trust its address on Acki Nacki under
+  chain id 42161, and do not alias Arbitrum payouts onto the Ethereum
+  bridge.
+
+- **`eccUSDCBridge.setOutstandingByChain(chainId, amount)` — owner-signed, sets
+  the principal the bridge accounts for on one destination chain.** That
+  counter is both the ceiling `initiateWithdrawal` pays out to a chain and the
+  room a credit to it has under the 10 000 USDC chain cap; `confirmDeposit`
+  raises it, a withdrawal spends it, and `onCodeUpgrade` carries it. What
+  leaves it empty is a build that had no such field to hand over. 1.12.0 had
+  nine fields, and it cannot reach this build in one `updateCode` at all:
+  `onCodeUpgrade` decodes eleven fields only and a direct attempt throws on the
+  cell, safely — the code is swapped after the commit, so the account keeps
+  1.12.0. Crossing that gap needs an intermediate build that decodes nine and
+  hands over eleven, and the counter then arrives empty. Such a bridge, or any
+  whose counter was never credited, holds a zero outstanding amount while its
+  principal is still locked on the source chain, and refuses every withdrawal
+  to that chain until the owner states what is locked there. Read it back as the third return value of
+  `getDepositLimits(chainId)`. Capped at `MAX_BRIDGE_TVL`; above it the call
+  throws exit 235 (`ERR_TVL_CAP`). It adds no authority the owner mints did
+  not already carry, and unlike them it moves the counter without minting
+  ECC[3].
+
+  **It moves that counter alone.** A withdrawal is still bounded by bridged
+  minted less bridged burned, which this does not touch. It therefore recovers
+  a bridge that carried its ECC[3] inventory across an upgrade but not its
+  per-chain counter — the 1.12.0 case above. It does **not** make a fresh
+  deployment pay out: there the inventory is zero as well, and a withdrawal is
+  refused with 233 (`ERR_BURN_EXCEEDS_BRIDGED`) however high the counter is
+  set. Re-pointing a chain's users at a freshly deployed bridge needs the
+  inventory migrated too, together with custody and the consumed withdrawal
+  nullifiers; that migration is not in this release.
+
+  **The figure to write is not L1's balance.** It is that balance less the
+  deposits not yet credited on AN and the burns L1 has not yet paid out:
+  writing the balance itself while transfers are in flight already breaks
+  things, since with 10 000 USDC on L1 of which 50 is an unconfirmed deposit
+  the counter belongs at 9 950. The counter is also the deposit room:
+  `finalizeDeposit` and `confirmDeposit` both bound `outstanding + amount` by
+  the 10 000 USDC ceiling. A counter above the right figure buys withdrawal
+  room by refusing deposits with 235 — and a deposit
+  caught between finalization and confirmation aborts with its voucher already
+  consumed, so re-proving it cannot confirm again and that USDC sits on L1 with
+  nothing minted on AN until the owner lowers the counter. `mintAndSendBridged`
+  is capped by the same check, so it cannot pay those users either. Pause
+  deposits and let the in-flight transfers settle before measuring, and if in
+  doubt write less rather than more: an under-count only refuses withdrawals
+  with 236, which return the ECC and which the owner corrects by raising the
+  counter, while an over-count strands a depositor who cannot correct it.
+  Raising the counter to the ceiling to release a larger inventory is therefore
+  not an operating procedure. It is no new authority — `mintAndSend` has no ceiling at
+  all — and every path that is not owner-signed stays capped at 50 USDC per
+  transfer and at the destination chain's outstanding amount. *Restoring a
+  chain's outstanding amount* in
+  [`contracts/an/README.md`](contracts/an/README.md) carries the full argument.
+
+### Added
+
+- **`eccUSDCBridge.initiateWithdrawal` now emits `WithdrawalRefused` when it
+  returns the ECC instead of burning it.** A refused withdrawal used to leave
+  no record at all: the ECC came back and nothing said why, so a relayer or a
+  UI saw a successful transaction with no `WithdrawalInitiated` and had to
+  guess. The event carries `dstChainId`, `recipient`, `amount`, `tokenId`,
+  `sender` and a `reason` — the error code the call would have thrown had the
+  refusal thrown: 234 (`ERR_TRANSFER_TOO_LARGE`) over the 50 USDC per-transfer
+  cap, 233 (`ERR_BURN_EXCEEDS_BRIDGED`) when the burn would take bridged
+  burned above bridged minted, and 236 (`ERR_CHAIN_BALANCE_EXCEEDED`, new)
+  when the destination chain accounts for less than the amount. The last two
+  used to share one branch and were indistinguishable. Directed to external
+  address 620, beside `WithdrawalInitiated` on 618. The refund itself is
+  unchanged: the ECC returns in full, and gas above `0.1 vmshell` does not.
+
+  Both changes keep the version at 1.13.0: they are additive and small — one
+  owner-only function and one event, with every existing entrypoint, the
+  storage layout and the upgrade tuple as they were — so no version bump is
+  needed. Rebuilt code hash `66d15d49…`, sold 0.80.0.
+
 ### Documentation
 
 - **`README.md` opens with *The current deployment*.** No bridge address is
@@ -29,6 +122,14 @@ assigns it when the release is tagged.
   ones. The section carries the Sepolia bridge and its deployment block, the
   USDC it accepts, the shellnet `eccUSDCBridge` version, code hash and light
   client, and the four settings to copy. Read back from both chains.
+- ***The current deployment* in `README.md` follows the redeploy of the
+  limits.** The Sepolia `AckiNackiBridge` is now
+  `0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b`, deployed in block `11971217`
+  from `c7054529`; the previous `0x8413…d451` is paused. On shellnet
+  `eccUSDCBridge` reports `1.13.0`, code hash `66d15d49…`, and its Sepolia
+  light client is `0:9121fc37…8462`. Take `BRIDGE_ADDRESS`,
+  `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` from the section. Read back from
+  both chains.
 
 ### Documentation
 
@@ -45,6 +146,26 @@ assigns it when the release is tagged.
 
 ### Fixed
 
+- **A `withdrawByProof` that reverts on chain is no longer recorded as paid.**
+  `relayer daemon-withdraw` and `daemon-bridge` mapped every mined receipt to
+  `PAID`, read `st.paid` up and put the `proof_event_*.json` in `done`, with
+  the receipt's status never read. A revert after the gas estimate — anchor
+  evicted, treasury short, nullifier spent by another relayer — therefore
+  left a withdrawal unpaid while the log and counters said otherwise, and
+  nothing retried it until a restart; the eccUSDC is already burned by then.
+  A status-0 receipt is now a transient `Reverted`: the proof stays in the
+  scan and is retried with backoff, and the next send reports the decoded
+  reason at the estimate, where a proof-intrinsic one parks as before.
+  The one-shot paths change with it. `relayer submit-withdraw` and
+  `relayer withdraw-e2e` exit with `withdrawByProof reverted (transient): …`
+  instead of logging `withdrawByProof paid out`. `ackinacki-bridge withdraw`
+  marks the withdrawal record `failed` and exits with code 13
+  (`EthSubmitFailed`) instead of reporting it confirmed; a rerun picks the
+  withdrawal up from that record instead of burning again.
+- The shellnet-l2 `preflight.sh` refuses an `RPC_URL` or `RPC_FAILOVER_URLS`
+  entry that is not an http(s) URL, as the daemon does at start; `cast` could
+  answer a `wss://` entry and report it healthy while the daemon exited on it
+  under `restart: unless-stopped`.
 - **The deposit relayer waits for the deposit block's AN anchor before
   proving or submitting it.** Ethereum `--confirmations` can finish before
   the light-client relayer delivers that block. Previously each retry built
@@ -153,6 +274,19 @@ assigns it when the release is tagged.
   `address.makeAddrStd(0, anAccount)`). A wrong value changes nothing.
   That is the accepted product choice, not a gap to close by putting
   workchain back into the circuit (QC-AN-J3 / gosh-sh/bridge-audit#59).
+- `crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md` gains
+  *Case 3e — Anchor eviction deadline*: how long a burned withdrawal can wait
+  before its anchor leaves the 128-slot window. On an L1 deploy that is ~12 h
+  for an L1 anchor and ~8 d for an L2 one; on an L2 deploy such as shellnet it
+  is ~8 d for both, so `--anchor-layer auto` falling back from L1 to L2 gains
+  nothing there. It shows how to poll `anchorRemainingAppends` with the layer
+  and root from a `proof_event_*.json` or a witness — both files store them
+  little-endian, and passed to `cast` unreversed a live anchor reads as `0` —
+  with an alert at `remaining ≤ 32` and the fix for each deploy mode.
+  `daemon-withdraw` and `daemon-bridge` retry `UnknownAnchor` as transient, so
+  a proof whose anchor was evicted holds up every proof behind it until it is
+  moved out of `--proofs-dir`. Trade-off 3 in `docs/EVM-contracts-spec.md`
+  gains the same deploy-mode caveat.
 
 ### Breaking Changes
 
@@ -319,7 +453,7 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  The limits release is 1.13.0, code hash `4525d927…`, rebuilt with sold
+  The limits release is 1.13.0, code hash `66d15d49…`, rebuilt with sold
   0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
   described above; the old upgrade tuple cannot initialize this build.
   `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the
@@ -1195,6 +1329,17 @@ assigns it when the release is tagged.
   runbook or script that assumed `transferOwnership` completes the handover
   needs the second call.
 
+- **`shellnet.common` no longer carries a key.** It gave every tester the
+  same shared shellnet burner as `RELAYER_PRIVATE_KEY`. The relayer now
+  replaces whatever transaction waits at its account's next nonce, so two
+  daemons on one key replaced each other's transactions; the burner also
+  has old transactions waiting in the Sepolia pools, and a deploy from it
+  can fail with `EOA nonce changed unexpectedly`. Put the key of a Sepolia
+  EOA of your own into the untracked `crates/bridge-prover-libraries/.env`
+  as `RELAYER_PRIVATE_KEY=0x…` (live relayer runbook, *Disk and wallet*).
+  Without it `shellnet.common` warns, and the `relayer` commands refuse to
+  start for want of `--private-key`.
+
 ### Documentation
 
 - `contracts/an/README.md` gains *Upgrading the bridge*: why the voucher's code
@@ -1213,137 +1358,6 @@ assigns it when the release is tagged.
 
 ### Added
 
-- **USDC from Arbitrum (and any other Circle CCTP chain) can reach Acki Nacki
-  through the hub `AckiNackiBridge`, with no new deposit circuit and no
-  Acki Nacki contract change.** Acki Nacki proves a deposit on the hub and
-  trusts the hub bridge; the source chain never enters the proof. Do **not**
-  add Arbitrum's chain id 42161 to `setTrustedL1Bridge` for this path. Two
-  Ethereum contracts, same code on every chain:
-
-  - `CctpEndpoint` (`contracts/ethereum/src/cctp/CctpEndpoint.sol`), on the
-    source chain and again on the hub. `depositToHub(token, amount,
-    anWorkchain, anAccount, maxFee, minFinalityThreshold)` pulls the token
-    and burns it through Circle `TokenMessengerV2.depositForBurnWithHook`,
-    naming the hub receiver as both mint recipient and the only
-    `destinationCaller`; it emits `HubDeposit`. `bridgeOut(token, amount,
-    destinationDomain, mintRecipient, maxFee, minFinalityThreshold)` is the
-    return leg to a domain the owner `setEgressDomain`'d. Routing is
-    `setHub(token, destinationDomain, hubReceiver, enabled)`. Arbitrum is
-    CCTP domain **3**, Ethereum **0**. `minFinalityThreshold` is **2000**
-    for a finalized transfer and **1000** for a fast one, which is where
-    Circle takes `maxFee`.
-  - `CctpHubReceiver`, on the hub next to one `AckiNackiBridge`. Circle does
-    not call the mint recipient, so crediting takes two hub transactions:
-    - `receiveBurn(message, attestation)` — anyone may send it with the
-      signed message from Circle's Iris API. It checks the burn came from a
-      `setSource(domain, chainId, adapter, remoteToken, remoteTokenMessenger,
-      enabled)` row, requires the outer CCTP `recipient` to be the local
-      `TokenMessengerV2` and `sender` the source TokenMessenger, asks
-      `MessageTransmitterV2.receiveMessage` to mint, and parks
-      `amount - feeExecuted` under `messageKey(sourceDomain, nonce)` =
-      `keccak256(abi.encode(sourceDomain, nonce))`, emitting
-      `RemoteDepositReceived(key, sourceDomain, chainId, depositor,
-      anAccount, amount, feeExecuted)`. Readable state: `pending(key)`,
-      `totalPending`.
-    - `forward(key)` — calls `AckiNackiBridge.deposit` for the parked
-      amount. This is the transaction the deposit relayer proves: 36 bytes
-      of calldata, and a receipt holding only the token `Transfer` and
-      `Deposit` (the receiver gives the bridge a standing maximum allowance
-      at construction). Only an address the owner enabled with
-      `setForwarder(account, allowed)` (event `ForwarderSet`) may call it.
-      Nothing on chain enforces the transaction type: a type 0 or 7702
-      `forward` leaves an unprovable `Deposit` with the funds in the
-      bridge. Anyone holding the public attestation could otherwise
-      deposit through a public executor at the depositor's address
-      (Multicall3, a router) and leave that same unprovable `Deposit`.
-
-    The `Deposit` is a hub deposit: `sender` is the receiver, `chainId` in
-    the proof is the hub's, `anAccount` comes from the hook. The source
-    chain id and depositor are only in `RemoteDepositReceived`. `rescue`
-    cannot take the bridge token below `totalPending` (`PendingFunds`).
-    Errors, events, two-step ownership and `rescue` are in
-    `docs/EVM-contracts-spec.md` §6. Do not pass a non-USDC hub bridge to
-    `setTrustedL1Bridge`: `confirmDeposit` always mints USDC ECC.
-
-  One receiver serves one hub bridge, so one token; a second source chain is
-  another `setSource` / `setHub` row.
-
-- **`deposit-relayer cctp-forward` and `deposit-relayer cctp-daemon` move a
-  Circle burn onto the hub.** `cctp-forward` takes one source-chain burn
-  (`--tx-hash`, `--source-domain`) and settles it from hub state.
-  `cctp-daemon` scans `HubDeposit` logs on the source `CctpEndpoint`
-  (`--source-rpc-url`, `--endpoint`, `--from-block` is required,
-  `--confirmations` default 2) and does the same for every new burn. Both
-  need `--iris-url` / `CCTP_IRIS_URL` (`https://iris-api.circle.com`, or
-  `https://iris-api-sandbox.circle.com` on testnets), `--hub-rpc-url` /
-  `CCTP_HUB_RPC_URL`, `--receiver`, and the hub key `CCTP_HUB_PRIVATE_KEY`,
-  whose address must be a forwarder on the receiver. The daemon's state is
-  its own `--state` (default `./cctp-forward-state.json`), not the deposit
-  relayer's. Each burn is settled from hub state at a block no older
-  than the last receipt this process saw: unused nonce → `receiveBurn`
-  then `forward`; already parked → `forward` only; nonce used and
-  nothing parked → done. A parked burn is not retried with `receiveBurn`,
-  and a burn another caller already forwarded is not counted as a
-  failure. `forward` goes out as EIP-1559 with no access
-  list; a receipt of another type or with more than 20 logs is logged as an
-  unprovable `Deposit`. Other failures are retried and left in `gave_up`
-  after eight attempts; `gave_up` is never retried, and an expired Iris
-  attestation needs `POST /v2/reattest/{nonce}`. Flags include
-  `--private-key`, `--dry-run`, `--wait-secs`, `--poll-secs`,
-  `--force-state`, and `cctp-daemon --source-domain`. Neither command
-  proves or calls Acki Nacki: run `deposit-relayer daemon` against the hub
-  bridge for that.
-
-- **`scripts/cctp_usdc.sh` deploys and wires the CCTP contracts.**
-  `deploy-endpoint` and `deploy-receiver` broadcast
-  `contracts/ethereum/script/DeployCctp.s.sol`; `set-hub`, `set-source`,
-  `set-egress` and `set-forwarder` broadcast `script/WireCctp.s.sol`.
-  Every broadcast needs `CONFIRM_CCTP=BROADCAST`, `RPC_URL` and
-  `PRIVATE_KEY`, and takes its gas limits from the node
-  (`--skip-simulation`) — forge's local estimate can be several times too
-  low on a chain past a gas repricing. Circle's addresses are arguments,
-  not defaults. `print-keepers` prints the `cctp-daemon` and hub
-  `deposit-relayer daemon` commands without keys.
-
-- **AAVE on Sepolia, for a CCTP route or on its own (testnet only).** On
-  Sepolia, CCTP mints Circle USDC (`0x1c7D…7238`), while the Aave V3 market
-  lists only the Aave faucet's USDC (`0x94a9…E4C8`), and that reserve is over
-  its supply cap: `supplyToAave` reverts with Aave error `51` for any
-  amount. Two testnet contracts, not for mainnet:
-  - `SepoliaAaveUsdcShim(bridge, circleUsdc, faucet)`
-    (`contracts/ethereum/src/testnet/`) goes between a `CctpHubReceiver`
-    and an AAVE-enabled bridge: deploy the receiver with
-    `DEPOSIT_BRIDGE=<shim>`. `deposit` pulls Circle USDC and deposits the
-    same amount of faucet USDC (minted for what the shim does not hold, at
-    most 10 000 USDC per call); `redeem(amount, to)` swaps faucet USDC back
-    to Circle USDC 1:1. Events `Shimmed`, `Redeemed`. The hub `Deposit`
-    names the shim as `sender`. The `forward` receipt log count depends on
-    whether the shim had to mint faucet USDC (six logs, `Deposit` at index
-    4) or already held it (five logs, index 3).
-  - `TestnetAavePool(underlying, faucet)` with its `TestnetAToken`: the
-    `supply` / `withdraw` / `getReserveData` the bridge calls, and an owner
-    `accrue(holder, amount)` that simulates interest. The bridge's AAVE
-    commands work against it unchanged.
-
-  `script/DeployTestBridge.s.sol` takes `USE_AAVE=true` (the Sepolia
-  market) and `USE_AAVE=true TESTNET_AAVE_POOL=true` (a fresh
-  `TestnetAavePool`). `DeployCctp.s.sol` takes `CCTP_KIND=aave-shim`
-  (`DEPOSIT_BRIDGE`, `CIRCLE_USDC`, `AAVE_FAUCET`), and
-  `scripts/cctp_usdc.sh deploy-aave-shim` wraps it, with the faucet
-  `0xC959…f42D` as the default. DeployTestBridge instances used in test
-  runs have no withdrawal verifiers, so trusting them on Acki Nacki would
-  mint ECC that cannot come back through them.
-
-- **Ethereum mainnet (chain id 1) is a supported deposit chain** in
-  `crates/deposit-chain-ids`, so `deposit-prover` and `deposit-relayer`
-  accept `Deposit` events from a mainnet `AckiNackiBridge` — the CCTP hub.
-  The allowlist is checked off-circuit: the verification key does not
-  change and existing proofs still verify. `deposit-relayer watch` /
-  `daemon` pointed at a mainnet RPC no longer fails in
-  `ensure_supported_rpc_chain` unless `--expect-chain-id` is set. On Acki
-  Nacki, trust the hub with `setTrustedL1Bridge(1, <hub bridge>, true)` and
-  anchor mainnet blocks (`deployLightClient` for chain 1, or owner anchors
-  until then).
 - `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
   user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
   as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
@@ -1375,6 +1389,41 @@ assigns it when the release is tagged.
   Deposit tx / block / log index when known) and `last_finalized_deposit_id`
   (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
 
+- **Ethereum RPC failover for the `relayer` binary.** `RPC_URL` stays the
+  primary endpoint; `RPC_FAILOVER_URLS` (comma-separated, or
+  `--rpc-failover-urls` on any subcommand) lists fallbacks, tried in order.
+  A request moves on when its endpoint times out, answers HTTP 401/403 (a
+  rejected key), 404, 408, 429 or 5xx, or a rate-limit, quota or key error —
+  that endpoint then waits 60 s at the back of the line — or cannot serve
+  that one request (an `eth_getLogs` span over its cap, which Alchemy's free
+  tier answers with HTTP 400, pruned history, a block it has not seen); a
+  revert or `nonce too low` is returned as before. A signed transaction goes to the first endpoint
+  that accepts it, with copies to the others, and `already known` counts as
+  accepted. At start every endpoint is asked for its chain id: the relayer
+  refuses to start when two disagree or none answers. `shellnet.common` now
+  builds the list — Infura, Alchemy, the EF DevOps endpoint, publicnode,
+  Tenderly's public gateway — from `INFURA_API_KEY` and `ALCHEMY_API_KEY` in
+  the untracked `crates/bridge-prover-libraries/.env`, leaving out an endpoint
+  whose key is not set, and paces the startup scan with
+  `BRIDGE_GET_LOGS_PAUSE_MS=600` for Infura's free tier. Live relayer
+  runbook, *Environment*.
+- **`daemon-live` stops when the Acki Nacki chain is behind the bridge.** A
+  chain head below the bridge's last verified block means shellnet was
+  restarted from a new zerostate, or `BRIDGE_GQL_ENDPOINT` serves another
+  network; the bridge cannot follow either. The daemon took it for "the next
+  bundle is not there yet" and waited without a word (after the 2026-10-14
+  restart it waited three hours for a boundary the new chain reaches in
+  three months). Once the head has stayed below the bridge for 5 minutes,
+  over at least 5 polls in a row (one low read can be a lagging GraphQL
+  replica; a GraphQL answer with no blocks is no head at all and does not
+  count), it exits with
+  `Acki Nacki chain head … is below the bridge's last verified block …:
+  the network was restarted or BRIDGE_GQL_ENDPOINT serves another network`
+  and exit status 78 (every other failure exits with 1). Deploy a new bridge
+  (live relayer runbook §5.5). The shellnet-l2 container does not restart
+  on status 78: it stays up with the daemon stopped and logs `STOPPED: the
+  Acki Nacki chain is behind the bridge`, instead of rerunning preflight and
+  the startup scan into the same stop every few minutes.
 - `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
   cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
   `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
@@ -1967,6 +2016,40 @@ assigns it when the release is tagged.
   (no `deny_unknown_fields`) and `last_processed_deposit_id` is already above
   those ids, so it would neither retry nor park them.
 
+- **Relayer logs and errors name Ethereum endpoints by scheme and host
+  only, at every log level.** reqwest put the full URL, API key included,
+  into every transport error the relayer logged, and alloy's HTTP transport
+  into a debug span on every request; the relayer no longer goes through
+  that transport.
+- **`shellnet.common` sets `RPC_URL` to Infura when `INFURA_API_KEY` is
+  set** (the EF DevOps endpoint otherwise, as before). Every tool that
+  sources an `L*_config/env` — the relayer, the `cast` commands of the
+  runbooks, `scripts/launch_withdraw_e2e*.sh` and
+  `scripts/replay_withdraw_shplonk.sh` — then talks to Infura.
+  `scripts/deploy_bridge_bundle.sh` does not source it: it broadcasts
+  through `SEPOLIA_RPC_URL`, publicnode unless that is set.
+- **shellnet-l2 kit: `preflight.sh` no longer refuses a start while a
+  transaction from the relayer EOA waits unmined.** It warns, and the daemon
+  replaces that transaction once it runs; refusing kept the container
+  restarting under `restart: unless-stopped` while the very transaction the
+  daemon would replace held it back. Its chain checks go to the first of
+  `RPC_URL` and `RPC_FAILOVER_URLS` that answers instead of `RPC_URL` alone,
+  and every endpoint that answers must serve `EXPECTED_EVM_CHAIN_ID`. Its
+  output names endpoints by scheme and host only, without the path or any
+  `user:password@`.
+- **`bk_set.shellnet.json` holds the genesis committee of shellnet as
+  restarted on 2026-10-14** (5 signers; Poseidon commitment
+  `0x20003507…a5e2`, which GraphQL prints little-endian as leaf 2,
+  `e2a508b4…0020`, of every block before the network's first rotation):
+  `keys_config.json` `bk_nodes[i].bls_pubkey` of the restart's config, which
+  a node's `GET :8600/v2/bk_set_update` confirmed on 2026-10-14. `zs_bk_set`
+  of that config holds another set, as before. Rotation has been on since
+  2026-10-15, so a cold start still folds `bkSetUpdates` up to its seed
+  (`seed_prover_bk_set --cap-height`). `TECHNICAL_README.md`, the prover
+  daemon and circuits READMEs and the live relayer runbook now describe the
+  restarted network, and the shellnet BK-set section shows how to check a set
+  against leaf 2 — the first config posted for the restart held other keys —
+  and how to read the live set from a node on port 8600.
 - **A retried submission reuses its aggregated proof.** `daemon-live` ran
   `aggregate-proof` (~2 min, ~15 GB) again before every retry, so each
   refused send or missing receipt cost one more aggregation, and a rotation
@@ -2396,6 +2479,42 @@ assigns it when the release is tagged.
   Upgrade the relayer (for the shellnet-l2 kit, rebuild the image); nothing
   on chain, in the keys or in the state changes, and the stuck block is
   proved again on the next start.
+- **A lost or stuck transaction no longer stalls the relayer.** alloy's
+  default nonce manager read the nonce once and counted locally, advancing
+  before the broadcast: when the RPC lost a send, every later transaction
+  went out one nonce too high and waited for the missing one, and the bridge
+  stood still until the daemon was restarted. A transaction stuck unmined
+  held everything behind it, restart or not. The relayer now reads the
+  `latest` and `pending` counts before every transaction and sends it at the
+  nonce the chain mines next. A transaction already waiting there is
+  replaced, at fees 25 % above what the relayer last paid at that nonce —
+  above the current estimate when it does not know, as after a restart —
+  and 25 % more on every later attempt, at most 4 times the current fee
+  estimate. The replaced transaction can be anyone's: give the relayer a key
+  of its own, and do not send from it by hand while a daemon runs. The gas
+  is estimated before the nonce is chosen, so a call that would revert — a
+  withdrawal whose anchor the bridge does not hold yet — sends nothing and
+  leaves the nonce and fees alone.
+  `daemon-live`, `daemon-bridge`, `daemon-withdraw`, `withdraw-e2e` and the
+  `submit-*` commands all send this way.
+- **A transaction another one replaced is no longer waited for.** Every
+  transaction takes the account's next nonce and replaces whatever waits
+  there, so `daemon-live` could replace a withdrawal that `withdraw-e2e`
+  had sent from the same key, and `withdraw-e2e` then waited for it
+  forever. While a `relayer` command waits for a receipt it now watches the
+  account's `latest` count: once that has been past the transaction's nonce
+  for 30 s with no receipt, the wait ends with `tx confirmation error:
+  transaction 0x… was replaced: another transaction from 0x… took its nonce
+  …; send it again`. The daemons retry; `withdraw-e2e` and `submit-withdraw`
+  exit non-zero, and a second run is refused if the payout has landed
+  meanwhile (nullifier check).
+- **`daemon-withdraw` and `daemon-bridge` wait at most 180 s for a
+  `withdrawByProof` receipt**, like `verifyBlock` and `applyBkSetUpdate`.
+  They waited forever, so one dropped transaction held the withdraw scan;
+  the proof is now retried, the warning names the transaction hash, and the
+  nullifier check skips the proof once its payout has landed.
+  `ackinacki-bridge withdraw` and the one-shot `relayer` commands still wait
+  for the receipt as long as it takes.
 - `deposit-relayer` kills a prover that runs past its timeout instead of
   leaving it running, writing the `data/` key cache beside the retry the
   daemon starts after its backoff. `relayer prove-withdraw` does the same
@@ -2467,9 +2586,11 @@ assigns it when the release is tagged.
   request on a connection that went silent waited until the OS dropped the
   connection. `daemon-live` once waited 9.5 minutes on one
   `eth_blockNumber`, and a BK rotation that had landed on Acki Nacki waited
-  with it. A request now fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`):
-  the daemon logs `tick failed, will back off` and retries, and a send that
-  times out is an RPC failure, not counted toward the abort threshold.
+  with it. A request to one endpoint now fails after 20 s
+  (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`) and moves on to the next one in
+  `RPC_FAILOVER_URLS`. Once every endpoint has failed it, the daemon logs
+  `tick failed, will back off` and retries, and a send that times out is an
+  RPC failure, not counted toward the abort threshold.
 - **Check B allows four bundles of the daemon's own stride between two
   snapshots** (65 536 seq_nos at L2) instead of 4 096 at every level. One
   L2 bundle the relayer did not see land — its own `verifyBlock` whose

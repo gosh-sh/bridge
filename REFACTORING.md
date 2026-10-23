@@ -73,9 +73,10 @@ part of that precedent worth learning from.
 single source of truth) and `crates/ackinacki-bridge/src/args.rs:40-45`
 (withdrawal side, `SUPPORTED_CHAINS`).
 
-**They disagree today.** `deposit-chain-ids` carries Arbitrum One (42161); the
-CLI's withdrawal list does not, so `withdraw --to-chain 42161` is refused at
-argument parsing while a deposit from that chain is accepted. Tracked as
+**They disagree today.** Both lists now carry Arbitrum One (42161). The
+deposit allowlist still has OP Mainnet, World Chain, Mantle and Blast, and
+the withdrawal list still has Ethereum mainnet and Base Sepolia, so a chain
+can be accepted in one direction and refused in the other. Tracked as
 `gosh-sh/bridge-audit#119`.
 
 The duplication is deliberate and documented — `args.rs:37-39` carries a

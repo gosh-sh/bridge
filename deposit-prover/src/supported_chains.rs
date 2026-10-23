@@ -7,9 +7,8 @@
 use anyhow::{bail, Result};
 pub use deposit_chain_ids::{
     is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
-    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_ETHEREUM_MAINNET,
-    CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN,
-    SUPPORTED_DEPOSIT_CHAIN_IDS,
+    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET,
+    CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN, SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
 
 /// Returns `Ok(chain_id)` if `chain_id` is in [`SUPPORTED_DEPOSIT_CHAIN_IDS`].
@@ -29,10 +28,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_covers_mainnet_six_l2s_and_sepolia() {
-        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 8);
+    fn allowlist_covers_six_l2s_and_sepolia() {
+        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 7);
         for id in [
-            CHAIN_ID_ETHEREUM_MAINNET,
             CHAIN_ID_ARBITRUM_ONE,
             CHAIN_ID_BASE,
             CHAIN_ID_OP_MAINNET,
@@ -44,6 +42,7 @@ mod tests {
             assert!(require_supported_deposit_chain(id).is_ok());
             assert!(supported_deposit_chain_name(id).is_some());
         }
+        assert!(require_supported_deposit_chain(1).is_err());
         assert!(require_supported_deposit_chain(31337).is_err());
     }
 }

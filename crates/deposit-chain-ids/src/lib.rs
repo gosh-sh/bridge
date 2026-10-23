@@ -11,9 +11,6 @@
 
 #![forbid(unsafe_code)]
 
-/// Ethereum mainnet. The CCTP hub bridge lives here; L2 USDC arrives through
-/// `CctpHubReceiver` and is deposited from the hub.
-pub const CHAIN_ID_ETHEREUM_MAINNET: u64 = 1;
 /// Ethereum Sepolia (shellnet / fixture network).
 pub const CHAIN_ID_SEPOLIA: u64 = 11_155_111;
 /// OP Mainnet.
@@ -29,9 +26,8 @@ pub const CHAIN_ID_ARBITRUM_ONE: u64 = 42_161;
 /// Blast.
 pub const CHAIN_ID_BLAST: u64 = 81_457;
 
-/// Supported deposit-source networks (Ethereum mainnet, six L2s, Sepolia).
+/// Supported deposit-source networks (six L2s + Sepolia).
 pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
-    CHAIN_ID_ETHEREUM_MAINNET,
     CHAIN_ID_OP_MAINNET,
     CHAIN_ID_WORLD_CHAIN,
     CHAIN_ID_MANTLE,
@@ -44,7 +40,6 @@ pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
 /// Human-readable name for a supported chain id, if known.
 pub fn supported_deposit_chain_name(chain_id: u64) -> Option<&'static str> {
     match chain_id {
-        CHAIN_ID_ETHEREUM_MAINNET => Some("Ethereum"),
         CHAIN_ID_OP_MAINNET => Some("OP Mainnet"),
         CHAIN_ID_WORLD_CHAIN => Some("World Chain"),
         CHAIN_ID_MANTLE => Some("Mantle"),
@@ -79,13 +74,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_covers_mainnet_six_l2s_and_sepolia() {
-        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 8);
+    fn allowlist_covers_six_l2s_and_sepolia() {
+        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 7);
         for id in SUPPORTED_DEPOSIT_CHAIN_IDS {
             assert!(is_supported_deposit_chain(*id));
             assert!(supported_deposit_chain_name(*id).is_some());
         }
-        assert!(is_supported_deposit_chain(CHAIN_ID_ETHEREUM_MAINNET));
+        assert!(!is_supported_deposit_chain(1));
         assert!(!is_supported_deposit_chain(31337));
     }
 

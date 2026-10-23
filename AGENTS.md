@@ -175,8 +175,7 @@ make pre-push              # everything a branch should pass; see CI below
 make format                # rustfmt every crate, then forge fmt
 
 cd contracts/ethereum && forge test                          # fork suites skip without FORK_URL
-FOUNDRY_PROFILE=fork FORK_URL=<Sepolia RPC> forge test --match-contract AckiNackiBridgeAaveFork
-FOUNDRY_PROFILE=fork FORK_URL=<mainnet RPC> forge test --match-contract CctpMainnetAaveFork
+FOUNDRY_PROFILE=fork FORK_URL=<RPC URL> forge test --match-contract AaveFork
 
 # AN→ETH relayer — only from the prover workspace
 cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon
@@ -306,7 +305,9 @@ above, not a revision mismatch.
 `deposit::prover::tests::{the_prover_inherits_the_prover_lock_and_no_other_deposit_lock,
 a_tool_still_open_for_writing_is_started_once_it_is_closed,
 sigkill_to_the_cli_leaves_the_lock_with_the_running_prover}` read `/proc` or rely on Linux
-refusing to run a file open for writing (`ETXTBSY`), so they fail on macOS.
+refusing to run a file open for writing (`ETXTBSY`), so they fail on macOS. The same suite needs
+`SEPOLIA_TEST_SENDER` set to a Sepolia EVM address: the deposit tests send from it, no address is
+compiled in, and without it they fail with `set SEPOLIA_TEST_SENDER …`.
 
 `forge coverage` is there for two failure modes a plain `forge test` can miss. A fuzz test whose
 `vm.assume` rejects nearly every input trips Foundry's rejection cap depending on the seed — use

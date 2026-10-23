@@ -145,12 +145,21 @@ same BOC while valid.
 under the owner key. It exists because that counter can legitimately be empty
 while the principal is still locked on L1. `onCodeUpgrade` does carry the field
 — `updateCode` hands it over as the tenth of eleven, and
-`test_upgrade_preserves_both_networks` covers it — but 1.12.0 handed its
-successor nine fields and had no such field to hand over, so a bridge migrated
-from it starts at zero and refuses every withdrawal to that chain with 236.
-Nothing else repairs that: `mintAndSendBridged` raises the counter but mints as
-it goes, so repairing with it widens the gap between the copies on AN and the
-principal actually held on L1.
+`test_upgrade_preserves_both_networks` covers it — but only between builds that
+both have it. 1.12.0 had nine fields and no such field to hand over.
+
+A 1.12.0 bridge therefore cannot reach this build in one `updateCode`:
+`onCodeUpgrade` decodes the eleven-field tuple only, and a direct attempt
+throws on the cell. It throws safely — `updateCode` commits before swapping the
+code, so the account keeps 1.12.0 and its state — but it does not arrive.
+Crossing that gap needs an intermediate build that decodes the old nine fields
+and hands over eleven, leaving the two new ones empty; the deployment procedure
+below is the supported alternative. A bridge that crossed it that way, or any
+bridge whose counter was never credited, holds a zero outstanding amount while
+its principal is still locked on L1, and refuses every withdrawal to that chain
+with 236. Nothing else repairs that: `mintAndSendBridged` raises the counter but
+mints as it goes, so repairing with it widens the gap between the copies on AN
+and the principal actually held on L1.
 
 What it does not do:
 

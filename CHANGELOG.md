@@ -29,11 +29,15 @@ assigns it when the release is tagged.
   counter is both the ceiling `initiateWithdrawal` pays out to a chain and the
   room a credit to it has under the 10 000 USDC chain cap; `confirmDeposit`
   raises it, a withdrawal spends it, and `onCodeUpgrade` carries it. What
-  leaves it empty is a migration from a build that had no such field: 1.12.0
-  handed its successor nine fields, so a bridge coming from it starts with a
-  zero counter while its principal is still locked on the source chain, and
-  every withdrawal to that chain is refused until the owner states what is
-  locked there. Read it back as the third return value of
+  leaves it empty is a build that had no such field to hand over. 1.12.0 had
+  nine fields, and it cannot reach this build in one `updateCode` at all:
+  `onCodeUpgrade` decodes eleven fields only and a direct attempt throws on the
+  cell, safely — the code is swapped after the commit, so the account keeps
+  1.12.0. Crossing that gap needs an intermediate build that decodes nine and
+  hands over eleven, and the counter then arrives empty. Such a bridge, or any
+  whose counter was never credited, holds a zero outstanding amount while its
+  principal is still locked on the source chain, and refuses every withdrawal
+  to that chain until the owner states what is locked there. Read it back as the third return value of
   `getDepositLimits(chainId)`. Capped at `MAX_BRIDGE_TVL`; above it the call
   throws exit 235 (`ERR_TVL_CAP`). It adds no authority the owner mints did
   not already carry, and unlike them it moves the counter without minting

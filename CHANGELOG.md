@@ -1225,8 +1225,11 @@ assigns it when the release is tagged.
   needs (ssh key, host, user, the private inventory repository, a GitHub
   token that reads acki-nacki and that repository) are listed in
   `tests/e2e/local-net/README.md`; the host scripts (`gen-zerostate.sh`,
-  `host-lease.sh`, `run-test-on-host.sh`) live next to it and work by hand
-  with the same variables.
+  `host-lease.sh`, `run-test-on-host.sh`, `checkout-acki-on-host.sh`) live next
+  to it and work by hand with the same variables. `up.sh.patch` there makes
+  acki-nacki's `tests/dexdo/up.sh` start a node again when its first run dies
+  at once, and hand over only once node0 serves accounts; it is applied on the
+  host until acki-nacki carries the change.
 
 - `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
   user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)

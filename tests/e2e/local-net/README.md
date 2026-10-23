@@ -36,14 +36,32 @@ the next push either way.
 | `acki-clone` | runner | shallow-fetches private gosh-sh/acki-nacki at the resolved commit |
 | `gen-zerostate` | runner | `gen-zerostate.sh`: x86_64 tvm-cli/tvm-debugger/sold (sha256-checked); moves acki-nacki's `BRIDGE_COMMIT` pin (`contracts/scripts/bridge_contracts.py`) to `$CI_COMMIT_SHA` in the disposable checkout and places `contracts/an/*` from `BRIDGE_REPO=$CI_WORKSPACE` (the generator re-places from that pin at import, so the pin is what decides); `make compile_contracts`; `generate_zerostate.py` |
 | `lease-acquire` | host | `host-lease.sh acquire bridge-<pipeline>`: one network per host at a time, dexdo's runs included; a live lease is waited out for up to 30 min |
-| `net-up` | host | asserts the lease, then `dexdo-e2e-up.yml -e target=bridge_e2e -e acki_dir=… …`: clone acki-nacki on the host at the resolved commit, ship `config/` + `docker/.env`, `up.sh` with the three images by digest (start, wait for finalization + its ext-message probe) |
-| `run-test` | host | `run-test-on-host.sh` over ssh: clean bridge checkout at `$CI_COMMIT_SHA`, pinned tvm-cli, waits up to 10 min for nginx0's node to serve the bridge account (a node that fails its first start is started only with the rest of the stack and syncs for minutes; `up.sh` does not wait for that), then `MODE=local` against `http://127.0.0.1:80` with a lease heartbeat while the test runs |
+| `net-up` | host | asserts the lease; `checkout-acki-on-host.sh` puts acki-nacki at the resolved commit into `acki_dir` and applies `up.sh.patch` (see below); then `dexdo-e2e-up.yml -e target=bridge_e2e -e acki_repo= -e acki_dir=… …` ships `config/` + `docker/.env` and runs `up.sh` with the three images by digest (start, wait for finalization, ext-message probe, and with the patch: node0 serving accounts) |
+| `run-test` | host | `run-test-on-host.sh` over ssh: clean bridge checkout at `$CI_COMMIT_SHA`, pinned tvm-cli, a bounded wait for nginx0's node to serve the bridge account (belt and braces over the patched hand-over), then `MODE=local` against `http://127.0.0.1:80` with a lease heartbeat while the test runs |
 | `dump-logs` | host | on failure: `up.sh` log, compose state, each node's container state and `docker compose logs` (both runs of a node that failed its first start), node0's log, block-manager and gql tails |
 | `net-down` | host | after success and after failure: lease owner check, `dexdo-e2e-down.yml -e full_cleanup=true -e dexdo_deploy_dir=…` (our checkout and data removed, dexdo's deploy dir untouched), `~/.netrc` removed, lease released even when the playbook fails. Not after a cancel or a timeout: no step runs then and the lease ages out (90 min) |
 
 The test runs **on the host**: the tvm client follows the block-producer redirect to
 `nodeN:8600`, which resolves only there (`up.sh` writes node0..4 into `/etc/hosts`).
 `nginx0` must sit on port 80 (tvm-sdk strips non-default ports).
+
+### Why `up.sh` is patched
+
+`up.sh.patch` changes two things in acki-nacki's `tests/dexdo/up.sh` until the change
+lands upstream (`checkout-acki-on-host.sh` refuses to proceed when it no longer applies):
+
+- A node whose first run dies at once (`--gossip-seeds node2:10000: Temporary failure in
+  name resolution`: docker's DNS does not know its peers yet) is never restarted by docker,
+  whose restart policy only covers a container that ran for 10 s. `up.sh` noticed
+  (`nodeN not running after 120s`) and went on; the node was started only by the
+  full-stack `up -d` minutes later and then had to catch up with a network that had moved
+  on. The patched wait starts such a node again after 15 s.
+- The hand-over waited for finalization and for one external message to land, both
+  network-wide; the node behind `nginx0` (node0) answers account reads from its own state,
+  so a late node0 left the test with no accounts for minutes (pipelines 6599, 6602, 6618,
+  6623). The patched hand-over also waits for node0 to serve the zerostate giver account.
+
+The other nodes' APIs are no way around this: they want the token `nginx0` adds.
 
 ## Knobs (one place each; the future ansible role takes them over)
 

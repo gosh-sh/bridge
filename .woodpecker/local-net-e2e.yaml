@@ -168,18 +168,28 @@ steps:
       GITHUB_TOKEN: { from_secret: ACKI_NACKI_GH_TOKEN }
       ACKI_REPO: *acki_repo
       ACKI_IMAGE_TAG: *acki_image_tag
+      WORK_ROOT: *work_root_on_host
     commands:
       - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- assert bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
-      # The playbook clones acki-nacki on the host at the resolved commit (ACKI_REPO/ACKI_BRANCH/
-      # GITHUB_TOKEN from the environment), ships the generated config/ + docker/.env and runs
-      # up.sh with the resolved image digests (-e args win over docker/.env interpolation).
-      - . $CI_WORKSPACE/.acki/env && export ACKI_BRANCH="$ACKI_SHA"
+      # The checkout on the host is ours, not the playbook's: acki-nacki at the resolved commit
+      # plus tests/e2e/local-net/up.sh.patch (nodes that die on their first start are started
+      # again at once, and the hand-over waits for node0 to serve accounts). The playbook then
+      # ships the generated config/ + docker/.env and runs up.sh with the resolved image
+      # digests (-e args win over docker/.env interpolation); its own clone is skipped
+      # (acki_repo empty).
+      - scp $SSH_OPTS $CI_WORKSPACE/tests/e2e/local-net/up.sh.patch "$E2E_CI_USER@$E2E_HOST:$WORK_ROOT/up.sh.patch"
+      - >
+        . $CI_WORKSPACE/.acki/env &&
+        ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
+        "ACKI_REPO='$ACKI_REPO' ACKI_SHA='$ACKI_SHA' ACKI_DIR='$ACKI_DIR' GITHUB_TOKEN='$GITHUB_TOKEN' PATCH=\$HOME/'$WORK_ROOT'/up.sh.patch bash -s"
+        < $CI_WORKSPACE/tests/e2e/local-net/checkout-acki-on-host.sh
       - >
         . $CI_WORKSPACE/.acki/env &&
         ansible-playbook dexdo-e2e-up.yml
         -i "$CI_WORKSPACE/$INV"
         -e target=bridge_e2e
+        -e acki_repo=
         -e acki_dir="$ACKI_DIR"
         -e config_src="$CI_WORKSPACE/.acki-nacki/config"
         -e env_src="$CI_WORKSPACE/.acki-nacki/docker/.env"

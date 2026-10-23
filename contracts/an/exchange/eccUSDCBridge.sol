@@ -771,6 +771,26 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _paused = paused;
     }
 
+    /// @notice States how much of one chain's principal this bridge still
+    ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
+    ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
+    ///         credit to it. `confirmDeposit` raises the counter and a
+    ///         withdrawal spends it, but a fresh deployment starts it empty and
+    ///         `onCodeUpgrade` does not carry it, while the principal stays
+    ///         locked on the source chain: this is how the owner states what is
+    ///         locked there. It grants nothing new — the owner mints move the
+    ///         same counter — and unlike them it writes it without minting.
+    /// @param chainId — EIP-155 chain id of the destination L1/L2.
+    /// @param amount  — principal outstanding to that chain, in token units,
+    ///                  at most `MAX_BRIDGE_TVL`.
+    function setOutstandingByChain(uint256 chainId, uint128 amount)
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
+    {
+        require(amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
+        ensureBalance();
+        _outstandingByChain[chainId] = amount;
+    }
+
     /// @notice Admits a block hash the light client proved final on the source
     ///         chain. Authorized solely by being the light client this bridge
     ///         — no human asserts canonicality, the proof does.

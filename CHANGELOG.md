@@ -22,6 +22,24 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Added
+
+- **`eccUSDCBridge.setOutstandingByChain(chainId, amount)` — owner-signed, sets
+  the principal the bridge accounts for on one destination chain.** That
+  counter is both the ceiling `initiateWithdrawal` pays out to a chain and the
+  room a credit to it has under the 10 000 USDC chain cap; `confirmDeposit`
+  raises it, a withdrawal spends it. A fresh deployment starts it empty and
+  `onCodeUpgrade` does not carry it, so on a bridge whose principal is already
+  locked on the source chain every withdrawal is refunded — silently, without
+  an event — until the owner states what is locked there. Read it back as the
+  third return value of `getDepositLimits(chainId)`. Capped at
+  `MAX_BRIDGE_TVL`; above it the call throws exit 235 (`ERR_TVL_CAP`). It adds
+  no authority the owner mints did not already carry, and unlike them it moves
+  the counter without minting ECC[3]. Rebuilt 1.13.0 code hash `f8f95399…`,
+  sold 0.80.0. The version stays 1.13.0: the change is additive and small —
+  one owner-only function, with every existing entrypoint, the storage layout
+  and the upgrade tuple as they were — so it needs no version bump.
+
 ### Documentation
 
 - **`README.md` opens with *The current deployment*.** No bridge address is
@@ -319,7 +337,7 @@ assigns it when the release is tagged.
   per-depositor reservation. That half of QC-AN-05 is the accepted
   product choice.
 
-  The limits release is 1.13.0, code hash `4525d927…`, rebuilt with sold
+  The limits release is 1.13.0, code hash `f8f95399…`, rebuilt with sold
   0.80.0. It supersedes the 1.12.0 instructions: deploy a fresh pair as
   described above; the old upgrade tuple cannot initialize this build.
   `mintAndSendBridged(recipient, value, nonce, chainId)` now also credits the

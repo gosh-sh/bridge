@@ -154,6 +154,15 @@
 			]
 		},
 		{
+			"name": "setOutstandingByChain",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "acceptBlockHashFromLightClient",
 			"inputs": [
 				{"name":"chainId","type":"uint256"},

@@ -88,6 +88,12 @@ def accepted(chain_id: int, block_hash: str) -> bool:
     return out.get("value0") in (True, "true")
 
 
+def no_keccak(result) -> bool:
+    """Exit 6 (invalid opcode) from the verifier: the node's VM predates
+    `KECCAK256` (tvm-sdk v3.1.0.an); acki-nacki before that pin cannot run it."""
+    return '"exit_code": 6' in json.dumps(result) or "'exit_code': 6" in str(result)
+
+
 def owner_call(method: str, params: dict):
     result = common.call_contract(USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, USDC_BRIDGE_KEY_PATH, method, params)
     if not common.is_ok(result):
@@ -168,6 +174,11 @@ def main():
             raise SystemExit(f"{name}: its parent block {parent} is already accepted for {l1}")
         result = prove_block()
         tracer.log(f"  verifier: {'ok' if common.is_ok(result) else result}")
+        if no_keccak(result):
+            tracer.log_phase("FAIL — the network's VM has no KECCAK256")
+            tracer.log("  proveBlock exits 6 (invalid opcode): the node build pins a tvm-sdk older than "
+                       "v3.1.0.an. Run the network from an acki-nacki build that has it.")
+            sys.exit(1)
         time.sleep(20)
         if accepted(l2, block):
             tracer.log_phase("FAIL")

@@ -47,6 +47,10 @@ assigns it when the release is tagged.
   Arbitrum One data.
 - `ackinacki-bridge deposit --network arbitrum-sepolia` deposits from Arbitrum Sepolia. A bridge
   whose `getL2Verifier(chainId)` names a verifier for that chain needs no light client there.
+- The light client's step prover `export_step_vk_blob` keeps its proving key: `STEP_KEYGEN_ONLY=1`
+  with `STEP_KEY_DIR` generates it once, and every later run with that `STEP_KEY_DIR` only proves
+  (about 2 minutes instead of 6 on 24 cores). `eth-lc-relayer` passes its environment to the
+  prover, so set `STEP_KEY_DIR` in its unit after one keygen run.
 - `ackinacki-bridge deposit --qr-mode local-key` signs with the key in `BRIDGE_DEPOSIT_PRIVATE_KEY`
   instead of a wallet, for unattended runs. It needs `--from-address`, which must be the key's
   address. `--from-address` now also reads `BRIDGE_DEPOSIT_FROM`.

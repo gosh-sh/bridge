@@ -28,6 +28,29 @@ assigns it when the release is tagged.
   the PR's `contracts/an/*` into a fresh acki-nacki zerostate (acki-nacki `dev`, latest build), runs
   `test_deploy_and_withdraw_only.py` on a whole network on one host, and tears it down. The
   secrets it needs and the by-hand steps are in `tests/e2e/local-net/README.md`.
+- `ArbitrumBlockVerifier` 1.0.0 (`contracts/an/0.81.0_compiled/exchange/`, code hash `ba8c1342…`):
+  proves an Arbitrum block from the assertion its rollup posts on the parent chain and admits the
+  block's hash to the bridge's anchor set without the owner; `proveBlock` is permissionless. Deploy
+  it after the parent chain's light client with `deployL2Verifier(421614, 11155111,
+  0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4)` or `deployL2Verifier(42161, 1,
+  0x4dceb440657f21083db8add07665f8ddbe1dcfc0)`; see *Arbitrum blocks* in `contracts/an/README.md`.
+  Rebuilding it needs `sold` 0.81.0 from TVM-Solidity-Compiler `feature/keccak256-builtin`.
+- `eccUSDCBridge` 1.14.0 (code hash `efd7e735…`): `setL2VerifierCode`, `deployL2Verifier`,
+  `getL2Verifier`, `acceptBlockHashFromL2Verifier`, error 237 `ERR_L2_VERIFIER_UNSET`;
+  `disableOwnerAnchorsOn` also takes a chain that has an Arbitrum verifier. `updateCode` from
+  1.13.0 keeps balances but not the verifier code or the verifiers: install and deploy them again.
+- The zerostate installs the verifier code, and `place.json` places the verifier, `EthTrie.sol`,
+  `ArbitrumBlockVerifierDeploy.sol` and the compiled verifier in acki-nacki.
+- Arbitrum Sepolia (421614) is a deposit chain for the deposit prover and relayer;
+  `ackinacki-bridge withdraw --to-chain` accepts 42161 and 421614, and the CLI knows bridge 1.14.0.
+- `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
+  Arbitrum One data.
+
+### Fixes
+
+- `disableOwnerAnchorsOn(chainId)` in `eccUSDCBridge` 1.13.0 turns the owner writer off for any
+  chain, including one with no light client, which then has no anchor writer until the next
+  `updateCode`. 1.14.0 throws 226 for such a chain.
 
 ## [0.6.0] – 2026-10-23
 

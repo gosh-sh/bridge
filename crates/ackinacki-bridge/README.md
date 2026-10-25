@@ -1379,8 +1379,8 @@ cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
 
 Sepolia is the only deposit network in this version. **Ethereum mainnet is
 not a deposit network**: the deposit circuit accepts OP Mainnet, World Chain,
-Mantle, Base, Arbitrum One, Blast and Sepolia (`crates/deposit-chain-ids`), so
-production deposits come from L2s. `bridge_config.mainnet` cannot be used for
+Mantle, Base, Arbitrum One, Blast, Sepolia and Arbitrum Sepolia
+(`crates/deposit-chain-ids`), so production deposits come from L2s. `bridge_config.mainnet` cannot be used for
 `deposit`.
 
 ### Deposit timing

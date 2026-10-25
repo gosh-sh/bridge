@@ -42,6 +42,8 @@ pub const SUPPORTED_CHAINS: &[(u64, &str)] = &[
     (11155111, "Sepolia (testnet)"),
     (8453, "Base"),
     (84532, "Base Sepolia"),
+    (42161, "Arbitrum One"),
+    (421614, "Arbitrum Sepolia"),
 ];
 
 #[derive(Debug, Parser)]
@@ -730,6 +732,27 @@ mod tests {
         }
         for sub in cmd.get_subcommands() {
             assert_hidden(sub, &format!("{path} {}", sub.get_name()));
+        }
+    }
+
+    /// The bridge proves Arbitrum blocks on Acki Nacki
+    /// (`ArbitrumBlockVerifier`), so both Arbitrum chains are deposit
+    /// sources and withdrawal destinations. The two lists differ for other
+    /// chains; for these they must not.
+    #[test]
+    fn arbitrum_chains_are_on_both_lists() {
+        for id in [
+            deposit_chain_ids::CHAIN_ID_ARBITRUM_ONE,
+            deposit_chain_ids::CHAIN_ID_ARBITRUM_SEPOLIA,
+        ] {
+            assert!(
+                deposit_chain_ids::is_supported_deposit_chain(id),
+                "{id} is not a deposit chain"
+            );
+            assert!(
+                SUPPORTED_CHAINS.iter().any(|(c, _)| *c == id),
+                "{id} is not a withdrawal destination"
+            );
         }
     }
 

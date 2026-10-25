@@ -7,8 +7,9 @@
 use anyhow::{bail, Result};
 pub use deposit_chain_ids::{
     is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
-    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_BASE, CHAIN_ID_BLAST, CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET,
-    CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN, SUPPORTED_DEPOSIT_CHAIN_IDS,
+    CHAIN_ID_ARBITRUM_ONE, CHAIN_ID_ARBITRUM_SEPOLIA, CHAIN_ID_BASE, CHAIN_ID_BLAST,
+    CHAIN_ID_MANTLE, CHAIN_ID_OP_MAINNET, CHAIN_ID_SEPOLIA, CHAIN_ID_WORLD_CHAIN,
+    SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
 
 /// Returns `Ok(chain_id)` if `chain_id` is in [`SUPPORTED_DEPOSIT_CHAIN_IDS`].
@@ -28,10 +29,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_covers_six_l2s_and_sepolia() {
-        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 7);
+    fn allowlist_covers_six_l2s_and_two_testnets() {
+        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 8);
         for id in [
             CHAIN_ID_ARBITRUM_ONE,
+            CHAIN_ID_ARBITRUM_SEPOLIA,
             CHAIN_ID_BASE,
             CHAIN_ID_OP_MAINNET,
             CHAIN_ID_MANTLE,

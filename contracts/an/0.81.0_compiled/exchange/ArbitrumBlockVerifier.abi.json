@@ -1,0 +1,67 @@
+{
+	"ABI version": 2,
+	"version": "2.4",
+	"header": ["pubkey", "time", "expire"],
+	"functions": [
+		{
+			"name": "constructor",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "initialize",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"},
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"rollup","type":"uint160"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "proveBlock",
+			"inputs": [
+				{"name":"l1Header","type":"bytes"},
+				{"name":"txIndex","type":"uint32"},
+				{"name":"receiptProof","type":"bytes[]"},
+				{"name":"l2Header","type":"bytes"},
+				{"name":"accountProof","type":"bytes[]"},
+				{"name":"blockNumber","type":"uint64"},
+				{"name":"storageProof","type":"bytes[]"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getConfig",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"l2ChainId","type":"uint256"},
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"rollup","type":"uint160"}
+			]
+		},
+		{
+			"name": "getVersion",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"string"},
+				{"name":"value1","type":"string"}
+			]
+		}
+	],
+	"events": [
+	],
+	"fields": [
+		{"init":true,"name":"_pubkey","type":"uint256"},
+		{"init":false,"name":"_timestamp","type":"uint64"},
+		{"init":false,"name":"_constructorFlag","type":"bool"},
+		{"init":false,"name":"_l2ChainId","type":"uint256"},
+		{"init":false,"name":"_l1ChainId","type":"uint256"},
+		{"init":false,"name":"_rollup","type":"uint160"}
+	]
+}

@@ -39,7 +39,7 @@ impl std::fmt::Display for BridgeVersion {
 /// this build refuses every bridge unless built with `dev-unfixed-bridge`.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
 /// The first supported bridge with this build's deposit key and mandatory
 /// per-chain limit getters. Refuse older deployments before USDC leaves L1.
 pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
@@ -671,8 +671,17 @@ mod tests {
     /// the way in; it exists because a merge of two branches that both
     /// called themselves 1.11.0 left this constant pointing at a bridge
     /// carrying the previous key.
+    ///
+    /// The floor moves with the deposit key, not with every release: 1.14.0
+    /// adds the Arbitrum block verifier and keeps 1.13.0's key, and a floor
+    /// of 1.14.0 would refuse the 1.13.0 bridge that holds the same key. So
+    /// the key's VkBlob sha256, which the contract source records next to
+    /// the embedded key, is pinned here with the floor: a rotated key fails
+    /// this test until both are moved to the release that carries it.
     #[test]
     fn the_deposit_key_floor_matches_the_contract_this_build_ships() {
+        const FLOOR_KEY_SHA256: &str =
+            "0180ee5af41ba3f408d38bf0c10c005c6618ad379d38da97a7ccc07ab1c3efa1";
         let src = include_str!("../../../../contracts/an/exchange/eccUSDCBridge.sol");
         let line = src
             .lines()
@@ -682,13 +691,22 @@ mod tests {
             .split('"')
             .nth(1)
             .expect("the version constant is a quoted string");
+        let key = src
+            .lines()
+            .find(|l| l.trim_start().starts_with("// sha256 = "))
+            .expect("eccUSDCBridge.sol records the embedded deposit key's sha256");
 
-        assert_eq!(
-            DEPOSIT_KEY_BRIDGE_VERSION.to_string(),
-            shipped,
-            "DEPOSIT_KEY_BRIDGE_VERSION is {}, but the eccUSDCBridge this build ships is \
-             {shipped}. A bridge below the floor is refused; a bridge at the floor is trusted to \
-             hold this build's deposit key. Bump the constant with the contract.",
+        assert!(
+            key.contains(FLOOR_KEY_SHA256),
+            "the eccUSDCBridge this build ships embeds another deposit key ({}). Bump \
+             DEPOSIT_KEY_BRIDGE_VERSION to {shipped} and FLOOR_KEY_SHA256 to that key's sha256.",
+            key.trim(),
+        );
+        assert!(
+            DEPOSIT_KEY_BRIDGE_VERSION
+                <= BridgeVersion::parse(shipped).expect("the version constant parses"),
+            "DEPOSIT_KEY_BRIDGE_VERSION is {}, above the eccUSDCBridge this build ships \
+             ({shipped})",
             DEPOSIT_KEY_BRIDGE_VERSION,
         );
         assert_eq!(

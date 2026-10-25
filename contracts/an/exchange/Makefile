@@ -6,9 +6,10 @@
 # (../0.80.0_compiled), DepositVoucher, EthBeaconLightClient and
 # ArbitrumBlockVerifier with sold 0.81.0 (../0.81.0_compiled). The light client
 # and the verifier call gosh.keccak256, so SOLD_0_81 has to be the 0.81.0 built
-# from gosh-sh/TVM-Solidity-Compiler branch feature/keccak256-builtin. A build refuses a compiler that reports a different
-# version. It does not touch the tracked artefacts: copy the rebuilt ones over
-# by hand and commit them together.
+# from gosh-sh/TVM-Solidity-Compiler branch feature/keccak256-builtin. A build
+# refuses a compiler that reports a different version. It does not touch the
+# tracked artefacts: copy the rebuilt ones over by hand and commit them
+# together.
 #
 #   make SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
 

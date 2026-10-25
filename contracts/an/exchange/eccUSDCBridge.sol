@@ -919,8 +919,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _l2VerifierParent[l2ChainId] = parentChainId;
     }
 
-    /// @notice The verifier of `l2ChainId` and its parent chain (0, 0 until
-    ///         `deployL2Verifier` ran for it).
+    /// @notice The verifier of `l2ChainId` and its parent chain. Until
+    ///         `deployL2Verifier` ran for it: no address (addr_none, not the
+    ///         zero address) and 0.
     function getL2Verifier(uint256 l2ChainId) external view returns (address verifier, uint256 parentChainId) {
         return (_l2Verifiers[l2ChainId], _l2VerifierParent[l2ChainId]);
     }

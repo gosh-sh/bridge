@@ -11,7 +11,9 @@ covers: `.woodpecker/local-net-e2e.yaml`, `tests/e2e/local-net/`,
 `.woodpecker/local-net-e2e.yaml` brings up a complete acki-nacki network on one
 dedicated host, bakes **this PR's** `contracts/an/*` into its zerostate, and runs
 `crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py` against it
-(multisig deploy → `mintAndSendBridged` → `initiateWithdrawal` → `WithdrawalInitiated`).
+(multisig deploy → `mintAndSendBridged` → `initiateWithdrawal` → `WithdrawalInitiated`),
+then `test_arbitrum_block_proof.py` (`deployL2Verifier` → `proveBlock` on the bench's
+synthetic vector, refused before its parent block is accepted and admitted after).
 It follows the dexdo e2e pattern (gosh-sh/dexdo `.woodpecker/e2e.yml`) and reuses
 acki-nacki's `tests/dexdo/up.sh` + `ansible/dexdo-e2e-{prepare,up,down}.yml` as they are.
 The network follows a **branch** of acki-nacki (`dev`), not a commit: each run resolves

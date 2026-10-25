@@ -43,6 +43,10 @@ assigns it when the release is tagged.
   `ArbitrumBlockVerifierDeploy.sol` and the compiled verifier in acki-nacki.
 - Arbitrum Sepolia (421614) is a deposit chain for the deposit prover and relayer;
   `ackinacki-bridge withdraw --to-chain` accepts 42161 and 421614, and the CLI knows bridge 1.14.0.
+- `deposit-relayer arbitrum-anchors` gets the Arbitrum blocks that hold deposits accepted through
+  `proveBlock`, with ordinary RPCs. Run one per Arbitrum chain next to `daemon`, keep
+  `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`.
+  `deposit-relayer arbitrum-vector` writes a test vector.
 - `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
   Arbitrum One data.
 

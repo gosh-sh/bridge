@@ -221,10 +221,12 @@ def test_41_relayers_started(run, an, ctx):
     run.job("lc-relayer", stdin=owner_keys(), LC=ctx["lc"])
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     run.job("anchors", stdin=owner_keys())
-    wait_for("daemon-live reads the bridge's bundle stride", lambda: "bundle stride" in run.log("relayer"),
-             600, log=lambda: run.log("relayer"))
-    wait_for("daemon-live starts its loop", lambda: "daemon starting" in run.log("relayer"),
-             900, log=lambda: run.log("relayer"))
+    # The texts relayer.rs logs at startup (`startup: bridge bundleStride matches`,
+    # `daemon-live starting`); its later proving output pushes them out of a log tail fast.
+    wait_for("daemon-live reads the bridge's bundle stride", lambda: "bundleStride matches" in run.log("relayer"),
+             600, log=lambda: run.log("relayer", 200))
+    wait_for("daemon-live starts its loop", lambda: "daemon-live starting" in run.log("relayer"),
+             900, log=lambda: run.log("relayer", 200))
     wait_for("arbitrum-anchors finds the verifier", lambda: "ArbitrumBlockVerifier of Arbitrum Sepolia" in run.log("anchors"),
              300, log=lambda: run.log("anchors"))
     wait_for("arbitrum-anchors starts", lambda: "arbitrum-anchors starting" in run.log("anchors"),

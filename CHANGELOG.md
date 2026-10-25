@@ -22,6 +22,13 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### New / Improvements
+
+- CI: `.woodpecker/local-net-e2e.yaml` runs for a pull request labelled `local-network`. It bakes
+  the PR's `contracts/an/*` into a fresh acki-nacki zerostate (acki-nacki `dev`, latest build), runs
+  `test_deploy_and_withdraw_only.py` on a whole network on one host, and tears it down. The
+  secrets it needs and the by-hand steps are in `tests/e2e/local-net/README.md`.
+
 ## [0.6.0] – 2026-10-23
 
 ### Breaking Changes

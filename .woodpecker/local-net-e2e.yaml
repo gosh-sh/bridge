@@ -223,8 +223,31 @@ steps:
         BRIDGE_REPO='$CI_REPO_CLONE_URL' TVM_CLI_VERSION='$TVM_CLI_VERSION' TVM_CLI_SHA256='$TVM_CLI_SHA256' bash -s"
         < $CI_WORKSPACE/tests/e2e/local-net/run-test-on-host.sh
 
-  dump-logs:
+  # Arbitrum Sepolia: a fresh AckiNackiBridge every run, a deposit from it to this network
+  # and a withdrawal back (tests/e2e/local-net/arbitrum-e2e.sh). The provers run on a
+  # separate prover host through a restricted CI key (tests/e2e/local-net/prover-host/ci-entry)
+  # and reach this network through the runner's ssh tunnels. The host is a secret too.
+  arbitrum-e2e:
     depends_on: [run-test]
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      ACKI_DIR: *acki_dir_on_host
+      WORK_ROOT: *work_root_on_host
+      PROVER_HOST: { from_secret: PROVER_HOST }
+      PROVER_HOST_PORT: { from_secret: PROVER_HOST_PORT }
+      PROVER_HOST_USER: { from_secret: PROVER_HOST_USER }
+      PROVER_HOST_SSH_KEY: { from_secret: PROVER_HOST_SSH_KEY }
+      ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY: { from_secret: ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY }
+      ARBITRUM_E2E_SECS: "8400"
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - bash $CI_WORKSPACE/tests/e2e/local-net/arbitrum-e2e.sh
+
+  dump-logs:
+    depends_on: [run-test, arbitrum-e2e]
     image: *ansible_image
     when:
       - status: [failure]
@@ -252,7 +275,7 @@ steps:
   # step then, and the lease ages out). The lease is released even when the teardown playbook
   # fails: the next up.sh tears the stand down first anyway.
   net-down:
-    depends_on: [run-test, dump-logs]
+    depends_on: [run-test, arbitrum-e2e, dump-logs]
     image: *ansible_image
     directory: .acki-nacki/ansible
     when:

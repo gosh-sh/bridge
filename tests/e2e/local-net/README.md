@@ -73,6 +73,47 @@ lands upstream (`checkout-acki-on-host.sh` refuses to proceed when it no longer 
 
 The other nodes' APIs are no way around this: they want the token `nginx0` adds.
 
+## Arbitrum Sepolia: `arbitrum-e2e`
+
+After `run-test`, `tests/e2e/local-net/arbitrum-e2e.sh` deploys a fresh `AckiNackiBridge` on
+Arbitrum Sepolia (421614) and moves USDC both ways between it and this network:
+
+1. `genesis`: `compute_bridge_anchors` at the network's latest 1024-block boundary (L1
+   anchoring), with the BK set from the generated `config/block_keeperN_bls.keys.json`.
+2. `deploy`: `DeployShellnetE2EBridge` on Arbitrum Sepolia with Circle's USDC, the four
+   verifiers and the genesis above.
+3. On the host (`an-on-host.sh` → `python/arbitrum_e2e_an.py`): `setTrustedL1Bridge(421614,
+   bridge)`, a multisig, 1 USDC minted to it with `mintAndSendBridged(chainId=421614)`.
+4. `deposit`: 2 USDC from the deployer to the multisig, and gas for the withdrawal's burner.
+5. In parallel: `relayer daemon-live` proves bundles from the seed and submits `verifyBlock`;
+   `deposit-relayer arbitrum-anchors` takes the slot proofs as batches land; `deposit-relayer
+   daemon` proves the deposit; `ackinacki-bridge withdraw` burns 1 USDC on this network and
+   claims it on Arbitrum Sepolia. When arbitrum-anchors holds a proof whose Sepolia block the
+   bridge does not accept yet, the runner owner-anchors that block (`setAcceptedBlockHash
+   (11155111, …)`), standing in for the Sepolia light client.
+6. Done when `deposit-relayer` has finalized the deposit and `withdraw` has exited 0.
+
+The provers and daemons run on a separate **prover host**, not on this one: bundle proving
+peaks at ~23 GB and reads ~40 GB of SRS and keys. The runner reaches it with a CI key whose
+`authorized_keys` entry allows only the dispatcher (a copy of
+`tests/e2e/local-net/prover-host/ci-entry` in the CI directory's `bin/`) and the tunnel ports
+127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
+what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
+socket. It builds each commit once in a `rust:1-bookworm` container (`prover-host/build.sh`,
+caches in the CI directory), and runs `prover-host/jobs/*.sh` on a docker network of its own
+where `nginx0` and `node0..4` are proxies to the runner's tunnels. The CI directory holds its
+own copy of the SRS (K=17–22) and proving keys, and nothing else on the host reads or writes it.
+
+| Secret | Holds |
+|---|---|
+| `PROVER_HOST`, `PROVER_HOST_PORT`, `PROVER_HOST_USER` | the prover host's ssh address, port and user: three secrets so the log masks each |
+| `PROVER_HOST_SSH_KEY` | the private half of its CI key, newline-joined with `@` |
+| `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY` | the deployer on Arbitrum Sepolia; it also sends `verifyBlock`, and the burner key is derived from it |
+
+The deployer needs Arbitrum Sepolia ETH and USDC (https://faucet.circle.com, network
+Arbitrum Sepolia): each run deposits 2 USDC, of which 1 comes back. Every run deploys a new
+bridge; the runner prints its Arbiscan link.
+
 ## Knobs (one place each; the future ansible role takes them over)
 
 | knob | where | value / meaning |

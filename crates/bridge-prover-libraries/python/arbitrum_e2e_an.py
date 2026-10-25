@@ -4,23 +4,21 @@ run on the local-network host, where the tvm client reaches the nodes. Owner cal
 the zerostate bridge and the multisig the deposit and the withdrawal move USDC through.
 Each command prints KEY=VALUE lines on stdout; logs go to stderr.
 
-  msig                      deploy a multisig, mint 1 USDC to it through
-                            mintAndSendBridged(chainId=421614); prints MSIG, MSIG_ACCOUNT,
-                            MSIG_KEYS (the keys file)
+  msig                      deploy a multisig, without USDC: the deposit brings it; prints
+                            MSIG, MSIG_ACCOUNT, MSIG_KEYS (the keys file)
   trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true)
   anchor <chain> <hash>     setAcceptedBlockHash(chain, hash, true): the parent chain's light
                             client, done by the owner
   ecc <dapp::account>       the account's ECC[3] (USDC) balance: ECC3=<base units>
 
 Env: as test_deploy_and_withdraw_only.py (MODE=local, NETWORK, WORK_DIR, PROVER_DIR,
-ACKI_NACKI_ROOT). DST_CHAIN_ID is forced to 421614.
+ACKI_NACKI_ROOT).
 """
 
 import contextlib
 import os
 import sys
 
-os.environ["DST_CHAIN_ID"] = "421614"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 os.environ["PATH"] = os.path.join(_HERE, "bin") + os.pathsep + os.environ.get("PATH", "")
@@ -69,7 +67,7 @@ def main():
             address, _abi = deploy_multisig(
                 tracer, gql, work_dir=WORK_DIR, msig_key_path=keys,
                 usdc_bridge_key_path=USDC_BRIDGE_KEYS, is_shellnet=False,
-                verbose_faucet=False, mint_bridged=True,
+                verbose_faucet=False, mint=False,
             )
             # A multisig lives in its own dapp: keep the address the helper returns.
             ext = address if "::" in address else common.to_dapp_address(address)

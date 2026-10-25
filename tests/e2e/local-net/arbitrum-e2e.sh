@@ -10,9 +10,11 @@
 #                                                         containers: build, genesis, deploy,
 #                                                         deposit, relayer, anchors,
 #                                                         deposit-relayer, withdraw
-# Owner calls on the zerostate bridge run on the local-network host (an-on-host.sh): setTrustedL1Bridge,
-# the multisig, and setAcceptedBlockHash for the Sepolia blocks that hold the assertions
-# arbitrum-anchors waits on (standing in for the Sepolia light client).
+# The USDC makes one round trip: 2 USDC deposited on Arbitrum Sepolia reach a multisig on the
+# local network, and once they are there the same 2 USDC are withdrawn back to the depositor.
+# Owner calls on the zerostate bridge run on the local-network host (an-on-host.sh):
+# setTrustedL1Bridge, the multisig, and setAcceptedBlockHash for the Sepolia blocks that hold
+# the assertions arbitrum-anchors waits on (standing in for the Sepolia light client).
 #
 # Required env: E2E_HOST, E2E_CI_USER, SSH_OPTS (the CI host's ssh, key already in ~/.ssh),
 # PROVER_HOST, PROVER_HOST_PORT, PROVER_HOST_USER (three secrets, so that each is masked in
@@ -28,6 +30,7 @@ SHA=${CI_COMMIT_SHA:?}; RUN=bridge-${CI_PIPELINE_NUMBER:?}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ACKI_CONFIG=${ACKI_CONFIG:-$CI_WORKSPACE/.acki-nacki/config}
 DEADLINE=$(( $(date +%s) + ${ARBITRUM_E2E_SECS:-9000} ))
+AMOUNT=2000000   # base units: 2 USDC there and back
 KEY=$ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY
 log() { printf '[%s] %s\n' "$(date -u +%T)" "$*"; }
 
@@ -104,18 +107,17 @@ OWNER_KEYS_JSON=$(tr -d '\n' <"$ACKI_CONFIG/USDCBridge.keys.json")
 log "multisig $MSIG: $(an ecc "$MSIG")"
 renew
 
-job deposit AMOUNT=2000000 "AN_ACCOUNT=$MSIG_ACCOUNT" <<<"$KEY"; await deposit 600
+job deposit "AMOUNT=$AMOUNT" "AN_ACCOUNT=$MSIG_ACCOUNT" <<<"$KEY"; await deposit 600
 DEP=$(get deposit.env); DEPOSITOR=$(val "$DEP" DEPOSITOR)
 log "deposit 2 USDC: https://sepolia.arbiscan.io/tx/$(val "$DEP" DEPOSIT_TX) (block $(val "$DEP" DEPOSIT_BLOCK))"
 
 job relayer <<<"$KEY"
 job anchors <<<"$OWNER_KEYS_JSON"
 job deposit-relayer <<<"$OWNER_KEYS_JSON"
-job withdraw "FROM=$MSIG" "TO=$DEPOSITOR" AMOUNT=1 <<<"$KEY
-$MSIG_KEYS_JSON"
 
-# Until both legs are done: owner-anchor the Sepolia blocks arbitrum-anchors waits on,
-# watch the deposit get finalized and the withdrawal get paid.
+# Owner-anchor the Sepolia blocks arbitrum-anchors waits on until the deposit lands on the
+# multisig; then withdraw the same USDC and wait for the payout. daemon-live proves bundles
+# from the start, so the burn's bundle is not far behind.
 anchored=" " deposit_done= withdraw_done= last=0
 while :; do
   now=$(date +%s)
@@ -127,11 +129,15 @@ for r in json.load(sys.stdin).get("ready", []): print(r["parent_hash"])' 2>/dev/
     log "an assertion waits on Sepolia block $h: owner-anchoring it"
     an anchor 11155111 "$h" >/dev/null && anchored+="$h "
   done
-  if [ -z "$deposit_done" ] && get deposit-relayer-state.json 2>/dev/null | python3 -c 'import json,sys
-s = json.load(sys.stdin); sys.exit(0 if (s.get("last_processed_deposit_id") is not None and s["last_processed_deposit_id"] >= 0) else 1)' 2>/dev/null; then
-    deposit_done=1; log "PASS deposit: finalized on the local network; multisig $(an ecc "$MSIG")"
+  if [ -z "$deposit_done" ]; then
+    ecc=$(val "$(an ecc "$MSIG" 2>/dev/null || true)" ECC3)
+    if [ "${ecc:-0}" -ge "$AMOUNT" ]; then
+      deposit_done=1; log "PASS deposit: the multisig holds ${ecc} base units of USDC"
+      job withdraw "FROM=$MSIG" "TO=$DEPOSITOR" AMOUNT=2 <<<"$KEY
+$MSIG_KEYS_JSON"
+    fi
   fi
-  if [ -z "$withdraw_done" ]; then
+  if [ -n "$deposit_done" ] && [ -z "$withdraw_done" ]; then
     rc=$(ph wait "$RUN" withdraw 1 | tail -1) || true
     case "$rc" in
       0) withdraw_done=1; log "PASS withdrawal: $(get withdraw.json | tail -1)" ;;
@@ -142,4 +148,4 @@ s = json.load(sys.stdin); sys.exit(0 if (s.get("last_processed_deposit_id") is n
   [ -n "$deposit_done" ] && [ -n "$withdraw_done" ] && break
   sleep 30
 done
-log "PASS: deposit from and withdrawal to Arbitrum Sepolia through $BRIDGE"
+log "PASS: 2 USDC from Arbitrum Sepolia to the local network and back through $BRIDGE"

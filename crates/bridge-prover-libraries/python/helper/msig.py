@@ -29,8 +29,11 @@ from helper.bridge_e2e import (
 
 def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
                     usdc_bridge_key_path: str, is_shellnet: bool,
-                    verbose_faucet: bool = False, mint_bridged: bool = False):
+                    verbose_faucet: bool = False, mint_bridged: bool = False,
+                    mint: bool = True):
     """Genaddr → fund → deployx → top-up → mint. Returns `(msig_address, msig_abi_copy)`.
+
+    `mint=False` stops before the mint: the USDC comes from a deposit instead.
 
     `mint_bridged=True` mints through `mintAndSendBridged` instead of
     `mintAndSend` (see `mint_usdc`). Only the withdraw-only test on a fresh
@@ -133,9 +136,10 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
         )
         time.sleep(5)
 
-    mint_usdc(tracer, gql, msig_address_legacy, WITHDRAWAL_AMOUNT,
-              bridged=mint_bridged,
-              usdc_bridge_key_path=usdc_bridge_key_path)
+    if mint:
+        mint_usdc(tracer, gql, msig_address_legacy, WITHDRAWAL_AMOUNT,
+                  bridged=mint_bridged,
+                  usdc_bridge_key_path=usdc_bridge_key_path)
     return msig_address, msig_abi_copy
 
 

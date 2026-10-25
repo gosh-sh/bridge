@@ -83,15 +83,16 @@ Arbitrum Sepolia (421614) and moves USDC both ways between it and this network:
 2. `deploy`: `DeployShellnetE2EBridge` on Arbitrum Sepolia with Circle's USDC, the four
    verifiers and the genesis above.
 3. On the host (`an-on-host.sh` → `python/arbitrum_e2e_an.py`): `setTrustedL1Bridge(421614,
-   bridge)`, a multisig, 1 USDC minted to it with `mintAndSendBridged(chainId=421614)`.
+   bridge)` and an empty multisig.
 4. `deposit`: 2 USDC from the deployer to the multisig, and gas for the withdrawal's burner.
-5. In parallel: `relayer daemon-live` proves bundles from the seed and submits `verifyBlock`;
+5. `relayer daemon-live` proves bundles from the seed and submits `verifyBlock` from the start;
    `deposit-relayer arbitrum-anchors` takes the slot proofs as batches land; `deposit-relayer
-   daemon` proves the deposit; `ackinacki-bridge withdraw` burns 1 USDC on this network and
-   claims it on Arbitrum Sepolia. When arbitrum-anchors holds a proof whose Sepolia block the
-   bridge does not accept yet, the runner owner-anchors that block (`setAcceptedBlockHash
-   (11155111, …)`), standing in for the Sepolia light client.
-6. Done when `deposit-relayer` has finalized the deposit and `withdraw` has exited 0.
+   daemon` proves the deposit and finalizes it once its block is accepted. When
+   arbitrum-anchors holds a proof whose Sepolia block the bridge does not accept yet, the
+   runner owner-anchors that block (`setAcceptedBlockHash(11155111, …)`), standing in for the
+   Sepolia light client.
+6. Once the 2 USDC are on the multisig, `ackinacki-bridge withdraw` burns them and claims them
+   back to the depositor on Arbitrum Sepolia. Done when it exits 0.
 
 The provers and daemons run on a separate **prover host**, not on this one: bundle proving
 peaks at ~23 GB and reads ~40 GB of SRS and keys. The runner reaches it with a CI key whose
@@ -111,7 +112,7 @@ own copy of the SRS (K=17–22) and proving keys, and nothing else on the host r
 | `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY` | the deployer on Arbitrum Sepolia; it also sends `verifyBlock`, and the burner key is derived from it |
 
 The deployer needs Arbitrum Sepolia ETH and USDC (https://faucet.circle.com, network
-Arbitrum Sepolia): each run deposits 2 USDC, of which 1 comes back. Every run deploys a new
+Arbitrum Sepolia): each run deposits 2 USDC and gets them back. Every run deploys a new
 bridge; the runner prints its Arbiscan link.
 
 ## Knobs (one place each; the future ansible role takes them over)

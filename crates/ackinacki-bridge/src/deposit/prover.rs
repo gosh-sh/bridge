@@ -336,7 +336,9 @@ async fn run(
     limit: Duration,
     op_id: &str,
 ) -> CliResult<Ran> {
-    cmd.stdin(Stdio::null())
+    // The prover never signs anything; `--qr-mode local-key`'s key stays here.
+    cmd.env_remove(crate::deposit::args::LOCAL_KEY_ENV)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

@@ -1872,6 +1872,23 @@ impl World {
         ]);
     }
 
+    /// The bridge as a 1.14.0 one with an Arbitrum verifier for the deposit
+    /// chain, no light client for it and the owner's anchors off.
+    pub fn arbitrum_verifier(&self) {
+        self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
+            serde_json::json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+        ]);
+        self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
+            serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
+        ]);
+        self.an.getter(W_BRIDGE_ACC, "getLightClient", vec![
+            serde_json::json!({ "value0": ":" }),
+        ]);
+        self.an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
+            serde_json::json!({ "value0": false }),
+        ]);
+    }
+
     /// Switches the owner's anchors on or off; the light client stays.
     pub fn owner_anchors(&self, enabled: bool) {
         self.an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
@@ -2648,6 +2665,9 @@ pub fn deposit_args(argv: &[&str]) -> crate::deposit::args::DepositArgs {
     }
     if !given("--wc-project-id") {
         a.wc_project_id = None;
+    }
+    if !given("--from-address") {
+        a.from_address = None;
     }
     if !given("--confirmations") {
         a.confirmations = 12;

@@ -163,7 +163,10 @@ pub async fn check(
         )),
         CodeKind::Eoa => {},
     }
-    if wallet.kind() == WalletKind::WalletConnect {
+    if matches!(
+        wallet.kind(),
+        WalletKind::WalletConnect | WalletKind::LocalKey
+    ) {
         let msg = sign_message(op_id, bridge, amount, net);
         let sig = match wallet.personal_sign(account, &msg).await {
             Ok(s) => s,

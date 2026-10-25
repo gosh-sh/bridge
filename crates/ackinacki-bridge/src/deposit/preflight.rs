@@ -233,17 +233,22 @@ fn writable_work_dir(dir: &Path) -> Result<(), String> {
     removed.map_err(|e| failed("keeps a file it cannot remove", e))
 }
 
-/// Who anchors the deposit's block. With the owner's anchors on, the
-/// light client's checks only choose the status text: they read a bounded
-/// history, and a read that fails leaves the light client out with a
-/// warning. With them off, the deposit goes ahead only if the light client
-/// passes all three checks, and a read that fails refuses it.
+/// Who anchors the deposit's block. On a chain the bridge has an Arbitrum
+/// verifier for, the verifier, in the light client's place. Otherwise,
+/// with the owner's anchors on, the light client's checks only choose the
+/// status text: they read a bounded history, and a read that fails leaves
+/// the light client out with a warning. With them off, the deposit goes
+/// ahead only if the light client passes all three checks, and a read that
+/// fails refuses it.
 async fn anchor_plan(
     d: &Deps,
     bridge_acc: [u8; 32],
     chain_id: u64,
     an: &AnPreflight,
 ) -> CliResult<AnchorPlan> {
+    if an.l2_verifier.is_some() {
+        return Ok(AnchorPlan::LightClient);
+    }
     let owner = an.owner_anchors_enabled;
     let readiness = match an.light_client {
         None => Err(LcFailure::NoLightClient),
@@ -389,7 +394,7 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
         },
         // Past the anchor wait: only a 224 at step 8 brings the run back to
         // it, and then the anchor is expected from whoever the bridge has.
-        _ if an.owner_anchors_enabled => AnchorPlan::Owner {
+        _ if an.owner_anchors_enabled && an.l2_verifier.is_none() => AnchorPlan::Owner {
             lc_ready: false,
         },
         _ => AnchorPlan::LightClient,
@@ -423,6 +428,9 @@ async fn resume_plan(
     an: &AnPreflight,
 ) -> AnchorPlan {
     let ui = d.ui.as_ref();
+    if an.l2_verifier.is_some() {
+        return AnchorPlan::LightClient;
+    }
     let owner = an.owner_anchors_enabled;
     let readiness = match an.light_client {
         None => Err(LcFailure::NoLightClient),
@@ -637,6 +645,19 @@ mod tests {
             e.to_string().contains("does not accept its head block"),
             "{e}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_arbitrum_verifier_takes_the_light_clients_place() {
+        let world = World::healthy();
+        world.arbitrum_verifier();
+        let p = world.params(RunMode::Fresh);
+        let store = Store::open(&p.state_dir).unwrap();
+        let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
+        let c = check(&p, &world.deps(), &store, None).await.unwrap();
+        assert_eq!(c.plan, AnchorPlan::LightClient);
+        assert_eq!(c.an.light_client, None);
+        assert!(!c.an.owner_anchors_enabled);
     }
 
     #[tokio::test]

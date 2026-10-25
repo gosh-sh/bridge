@@ -44,6 +44,9 @@ pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
 /// per-chain limit getters. Refuse older deployments before USDC leaves L1.
 pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
 
+/// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
+pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
+
 /// Refuses a bridge older than this build's mandatory deposit interfaces.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
     if v < key_min {
@@ -131,13 +134,11 @@ pub fn version_verdict(
     // the CLI while both are being worked on.
     if v > newest {
         if dev_unfixed {
-            warnings.push(
-                format!(
+            warnings.push(format!(
                     "development build: bridge {v} is newer than {newest} this CLI was built for, \
                      and                  its deposit key may have been rotated; never ship this \
                      build"
-                ),
-            );
+                ));
         } else {
             return Err(format!(
                 "the bridge is version {v}, newer than {newest} this CLI was built for. Its                  deposit key may have been rotated, and this CLI proves for the older one: the                  deposit would be refused at finalizeDeposit with the USDC already in the EVM                  bridge. Install a CLI built for {v}"
@@ -239,6 +240,10 @@ pub struct AnPreflight {
     pub light_client: Option<[u8; 32]>,
     /// The owner may add anchors by hand.
     pub owner_anchors_enabled: bool,
+    /// The Arbitrum verifier that admits the deposit chain's blocks, when
+    /// that chain is a rollup the bridge has one for. It takes the light
+    /// client's place for that chain.
+    pub l2_verifier: Option<[u8; 32]>,
     /// The code hash of the vouchers the bridge deploys.
     pub voucher_code_hash: [u8; 32],
 }
@@ -368,6 +373,11 @@ pub async fn run_with(
             .as_bool()
             .ok_or_else(|| refuse(format!("getAnchorConfig answered {cfg}")))?
     };
+    let l2_verifier = if version >= L2_VERIFIER_BRIDGE_VERSION {
+        read_l2_verifier(an, bridge, chain_id, ui).await?
+    } else {
+        None
+    };
     let ch = get("getDepositVoucherCodeHash", json!({})).await;
     let mut voucher_code_hash = [0u8; 32];
     hex::decode_to_slice(
@@ -399,6 +409,7 @@ pub async fn run_with(
             version,
             light_client,
             owner_anchors_enabled,
+            l2_verifier,
             voucher_code_hash,
         });
     }
@@ -415,8 +426,43 @@ pub async fn run_with(
         version,
         light_client,
         owner_anchors_enabled,
+        l2_verifier,
         voucher_code_hash,
     })
+}
+
+/// The bridge's Arbitrum verifier for `chain_id`; `None` when the bridge
+/// has none for that chain, as for every chain that is not a rollup. A
+/// bridge that reports 1.14.0 without `getL2Verifier` is read as having
+/// none, with a warning: `transient` would retry an unknown function for
+/// ever.
+async fn read_l2_verifier(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    chain_id: u64,
+    ui: &dyn Ui,
+) -> CliResult<Option<[u8; 32]>> {
+    let input = json!({ "l2ChainId": chain_id.to_string() });
+    let v = match an
+        .run_getter(bridge, BRIDGE_ABI, "getL2Verifier", input.clone())
+        .await
+    {
+        Ok(v) => v,
+        Err(e) if is_unknown_function(&e) => {
+            ui.warn(&format!(
+                "the bridge reports {L2_VERIFIER_BRIDGE_VERSION} or newer but has no \
+                 getL2Verifier ({e:#}); reading it as a bridge without Arbitrum verifiers"
+            ));
+            return Ok(None);
+        },
+        Err(_) => {
+            transient(ui, "reading the Acki Nacki bridge", || {
+                an.run_getter(bridge, BRIDGE_ABI, "getL2Verifier", input.clone())
+            })
+            .await
+        },
+    };
+    Ok(v["verifier"].as_str().and_then(parse_an_address))
 }
 
 /// The TVM answer for a getter the deployed code does not have. Retrying
@@ -759,6 +805,24 @@ mod tests {
         let p = go(&healthy(), [0; 32]).await.unwrap();
         assert_eq!(p.light_client, Some([0x20; 32]));
         assert!(p.owner_anchors_enabled);
+        assert_eq!(p.l2_verifier, None, "1.13.0 has no Arbitrum verifiers");
+    }
+
+    #[tokio::test]
+    async fn a_1_14_bridge_names_its_arbitrum_verifier_or_none() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(BRIDGE, "getL2Verifier", vec![
+            json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
+            json!({ "verifier": ":", "parentChainId": "0" }),
+        ]);
+        assert_eq!(
+            go(&an, [0; 32]).await.unwrap().l2_verifier,
+            Some([0xa2; 32])
+        );
+        assert_eq!(go(&an, [0; 32]).await.unwrap().l2_verifier, None);
     }
 
     #[tokio::test]

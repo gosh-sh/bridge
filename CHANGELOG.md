@@ -49,6 +49,11 @@ assigns it when the release is tagged.
   `deposit-relayer arbitrum-vector` writes a test vector.
 - `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
   Arbitrum One data.
+- `ackinacki-bridge deposit --network arbitrum-sepolia` deposits from Arbitrum Sepolia. A bridge
+  whose `getL2Verifier(chainId)` names a verifier for that chain needs no light client there.
+- `ackinacki-bridge deposit --qr-mode local-key` signs with the key in `BRIDGE_DEPOSIT_PRIVATE_KEY`
+  instead of a wallet, for unattended runs. It needs `--from-address`, which must be the key's
+  address. `--from-address` now also reads `BRIDGE_DEPOSIT_FROM`.
 
 ### Fixes
 

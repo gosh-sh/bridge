@@ -6,6 +6,7 @@ import "./modifiers/modifiers.sol";
 import "./modifiers/replayprotection.sol";
 import "./DepositVoucher.sol";
 import "./EthBeaconLightClient.sol";
+import "./ArbitrumBlockVerifierDeploy.sol";
 import "../token/interface/ISubscriber.sol";
 
 interface IShellAccumulator {
@@ -50,7 +51,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.13.0";
+    string constant version = "1.14.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -159,6 +160,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // chain that has a deployed light client. Like `_trustedL1Bridge` it is
     // NOT carried through `onCodeUpgrade`.
     mapping(uint256 => bool) _ownerAnchorsDisabled;
+
+    // Code every Arbitrum block verifier (`ArbitrumBlockVerifier`) is deployed
+    // from, the second non-owner writer of `_acceptedBlockHash`. Like the
+    // light client, a verifier's address follows from this code salted with
+    // its chain id, so there is no address to set. Not carried through
+    // `onCodeUpgrade`.
+    TvmCell _l2VerifierCode;
+
+    // Verifier per Arbitrum chain id, and the chain whose accepted blocks it
+    // reads the assertions from. Set only by `deployL2Verifier`. Not carried
+    // through `onCodeUpgrade`.
+    mapping(uint256 => address) _l2Verifiers;
+    mapping(uint256 => uint256) _l2VerifierParent;
 
     // Owner-operated stop of the cross-chain lane: `finalizeDeposit` and
     // `initiateWithdrawal` refuse while it is set. Like `_trustedL1Bridge` and
@@ -783,7 +797,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     function _disableOwnerAnchors(uint256 chainId) private {
         require(chainId != 0, ERR_NOT_LIGHT_CLIENT_CHAIN);
-        require(_lightClients[chainId] != address(0), ERR_LIGHT_CLIENT_UNSET);
+        require(_lightClients[chainId] != address(0) || _l2Verifiers[chainId] != address(0),
+                ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         _ownerAnchorsDisabled[chainId] = true;
     }
@@ -860,6 +875,65 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         tvm.accept();
         ensureBalance();
         delete _acceptedBlockHash[chainId][blockHash];
+    }
+
+    /// @notice Installs the code every Arbitrum block verifier is deployed
+    ///         from. Verifiers already recorded keep their addresses.
+    function setL2VerifierCode(TvmCell code) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
+        ensureBalance();
+        _l2VerifierCode = code;
+    }
+
+    /// @notice Deploys the block verifier of Arbitrum chain `l2ChainId`. It
+    ///         proves that chain's blocks from the assertions `rollup` posts on
+    ///         `parentChainId`, whose blocks must reach `_acceptedBlockHash`
+    ///         through that chain's light client. Re-running it for a chain
+    ///         replaces the recorded verifier.
+    /// @param l2ChainId     — EIP-155 id of the Arbitrum chain (42161, 421614).
+    /// @param parentChainId — EIP-155 id of the chain its rollup lives on (1, 11155111).
+    /// @param rollup        — the rollup contract that emits `AssertionCreated`.
+    function deployL2Verifier(uint256 l2ChainId, uint256 parentChainId, uint160 rollup)
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
+    {
+        require(_l2VerifierCode.depth() != 0, ERR_L2_VERIFIER_UNSET);
+        require(l2ChainId != 0 && parentChainId != 0 && rollup != 0, ERR_NOT_LIGHT_CLIENT_CHAIN);
+        ensureBalance();
+        TvmCell stateInit = abi.encodeStateInit({
+            contr: ArbitrumBlockVerifierDeploy,
+            varInit: {},
+            code: abi.setCodeSalt(_l2VerifierCode, abi.encode(l2ChainId))
+        });
+        address verifier = address.makeAddrStd(0, tvm.hash(stateInit));
+        new ArbitrumBlockVerifierDeploy{
+            stateInit: stateInit,
+            value: 10 vmshell,
+            flag: 1
+        }();
+        ArbitrumBlockVerifierDeploy(verifier).initialize{
+            value: 2 vmshell,
+            flag: 1
+        }(l2ChainId, parentChainId, rollup);
+        _l2Verifiers[l2ChainId] = verifier;
+        _l2VerifierParent[l2ChainId] = parentChainId;
+    }
+
+    /// @notice The verifier of `l2ChainId` and its parent chain (0, 0 until
+    ///         `deployL2Verifier` ran for it).
+    function getL2Verifier(uint256 l2ChainId) external view returns (address verifier, uint256 parentChainId) {
+        return (_l2Verifiers[l2ChainId], _l2VerifierParent[l2ChainId]);
+    }
+
+    /// @notice Admits an Arbitrum block hash the chain's verifier proved from
+    ///         an assertion in parent-chain block `parentBlockHash`. Only that
+    ///         verifier may call it, and only once the parent-chain block is
+    ///         accepted here, so the trust reaches back to the light client.
+    function acceptBlockHashFromL2Verifier(uint256 l2ChainId, uint256 parentBlockHash, uint256 blockHash) public {
+        require(_l2Verifiers[l2ChainId] != address(0) && msg.sender == _l2Verifiers[l2ChainId],
+                ERR_INVALID_SENDER);
+        require(_acceptedBlockHash[_l2VerifierParent[l2ChainId]][parentBlockHash], ERR_UNKNOWN_BLOCK);
+        tvm.accept();
+        ensureBalance();
+        _acceptedBlockHash[l2ChainId][blockHash] = true;
     }
 
     /// @notice True if `blockHash` is admitted as canonical for `chainId`.

@@ -181,6 +181,44 @@
 			]
 		},
 		{
+			"name": "setL2VerifierCode",
+			"inputs": [
+				{"name":"code","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "deployL2Verifier",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"},
+				{"name":"parentChainId","type":"uint256"},
+				{"name":"rollup","type":"uint160"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getL2Verifier",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"verifier","type":"address"},
+				{"name":"parentChainId","type":"uint256"}
+			]
+		},
+		{
+			"name": "acceptBlockHashFromL2Verifier",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"},
+				{"name":"parentBlockHash","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "isAcceptedBlockHash",
 			"inputs": [
 				{"name":"chainId","type":"uint256"},
@@ -422,6 +460,9 @@
 		{"init":false,"name":"_lightClients","type":"map(uint256,address)"},
 		{"init":false,"name":"_lightClientL1ChainId","type":"uint256"},
 		{"init":false,"name":"_ownerAnchorsDisabled","type":"map(uint256,bool)"},
+		{"init":false,"name":"_l2VerifierCode","type":"cell"},
+		{"init":false,"name":"_l2Verifiers","type":"map(uint256,address)"},
+		{"init":false,"name":"_l2VerifierParent","type":"map(uint256,uint256)"},
 		{"init":false,"name":"_paused","type":"bool"}
 	]
 }

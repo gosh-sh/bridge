@@ -85,7 +85,7 @@ waited for and the tail of the log.
 | Tests | Step |
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 4 hours |
-| `test_10`–`13` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels; `eth-lc-relayer prove-one` starts proving the latest Sepolia finality update |
+| `test_10`–`14` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels; the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` starts proving the latest Sepolia finality update with it |
 | `test_20`–`23` | Genesis at the network's latest 1024-block boundary; the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `deployLightClient` deploys the Sepolia light client without a committee |
 | `test_30`–`32` | `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off |
 | `test_40`–`42` | The relayer and burner keys (derived from the deployer's) get gas; `eth-lc-relayer daemon`, `daemon-live` and `arbitrum-anchors` log their start, and the light client accepts its first checkpoint; an empty multisig |

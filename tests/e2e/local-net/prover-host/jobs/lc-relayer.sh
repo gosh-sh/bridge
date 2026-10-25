@@ -8,6 +8,7 @@
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 cp /run/input "$WORK/lc-sender.keys.json"
 mkdir -p "$WORK/lc-prover"
+export STEP_KEY_DIR=$LC_STEP_KEY_DIR   # the prover inherits it: proves with lc-keygen's key
 exec eth-lc-relayer daemon --beacon-url "$BEACON_URL" --state "$OUT/lc-state.json" \
   --step-prover-bin /bin-ci/export_step_vk_blob --prover-dir "$WORK/lc-prover" \
   --srs-path /params/kzg_bn254_19.srs --no-rotate --no-flip-owner \

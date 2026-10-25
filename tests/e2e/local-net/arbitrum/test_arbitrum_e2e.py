@@ -14,21 +14,22 @@ logs of the job that did it. A failure names the step, what it waited for and th
 the log; every log of the run stays on the prover host in run-logs/<run>/.
 """
 
+import hashlib
 import json
 import os
 import re
 import time
 from datetime import datetime, timezone
 
-from conftest import (ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, SEPOLIA_BEACON_GENESIS, SEPOLIA_CHAIN,
-                      SLOT_SECS, env, evm_address, kv, tail, wait_for)
+from conftest import (ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOLIA_BEACON_GENESIS,
+                      SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 1800         # upper bound; 1024 blocks take about 6 minutes
 ANCHOR_SECS = 5400          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 5400        # daemon-live proving the bundle that holds the burn
 RUN_SECS = 4 * 3600         # how long a run may take, for the committee-period check
-LC_PROOF_SECS = 3600        # one light-client step proof, keygen included
+LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 
 # ── 0 · the run ─────────────────────────────────────────────────────────────
@@ -92,9 +93,28 @@ def test_12_prover_host_reaches_the_network(ph, run, tunnels):
     assert not closed, f"node REST ports closed: {closed}"
 
 
-def test_13_light_client_proof_started(run):
-    """eth-lc-relayer prove-one starts proving the latest Sepolia finality update: its committee
-    is the light client's one trusted input. It runs while the contracts are deployed."""
+def contract_vk_blob_sha256():
+    """sha256 of the VK_BLOB the light client contract verifies step proofs with."""
+    path = os.path.join(REPO, "contracts", "an", "exchange", "EthBeaconLightClient.sol")
+    m = re.search(r'bytes constant VK_BLOB\s*=((?:\s*hex"[0-9a-fA-F]*")+)\s*;', open(path).read())
+    assert m, f"no `bytes constant VK_BLOB` literal in {path}"
+    return hashlib.sha256(bytes.fromhex("".join(re.findall(r'hex"([0-9a-fA-F]*)"', m.group(1))))).hexdigest()
+
+
+def test_13_light_client_key_generated(run):
+    """The light client's step proving key is generated once, before anything is deployed, and its
+    VK is the one the light client contract verifies with. Every proof of the run reads it."""
+    run.job("lc-keygen")
+    run.finish("lc-keygen", LC_PROOF_SECS)
+    got = kv(run.get("lc-keygen.env"))
+    print(f"  proving key {int(got['LC_PK_BYTES']) / 2**30:.1f} GiB, VK blob sha256 {got['LC_VK_BLOB_SHA256']}")
+    assert got["LC_VK_BLOB_SHA256"] == contract_vk_blob_sha256(), \
+        "the generated step VK is not EthBeaconLightClient's VK_BLOB: its proofs would not verify"
+
+
+def test_14_light_client_proof_started(run):
+    """eth-lc-relayer prove-one starts proving the latest Sepolia finality update with that key:
+    its committee is the light client's one trusted input. It runs while the contracts are deployed."""
     run.job("lc-prove")
     time.sleep(30)
     assert run.wait("lc-prove", 1) in (None, 0), "lc-prove exited\n" + tail(run.log("lc-prove"))

@@ -5,6 +5,7 @@
 # /out/lc-bootstrap/ and LC_COMMITMENT, LC_PERIOD and LC_ATTESTED_SLOT to /out/lc.env.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 mkdir -p "$WORK/lc-prover"
+export STEP_KEY_DIR=$LC_STEP_KEY_DIR   # the prover inherits it: proves with lc-keygen's key
 log "prove-one from $BEACON_URL"
 eth-lc-relayer prove-one --beacon-url "$BEACON_URL" --step-prover-bin /bin-ci/export_step_vk_blob \
   --prover-dir "$WORK/lc-prover" --srs-path /params/kzg_bn254_19.srs --out-dir "$OUT/lc-bootstrap"

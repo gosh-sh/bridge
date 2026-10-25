@@ -46,7 +46,7 @@ LIMITS_SMALL=(--memory 8g --memory-swap 8g --cpus 4 --pids-limit 1024)
 limits() {
   case "$1" in
     build|relayer|cli-deposit|cli-withdraw) echo large ;;
-    lc-prove|lc-relayer) echo lc ;;
+    lc-keygen|lc-prove|lc-relayer) echo lc ;;
     *) echo small ;;
   esac
 }

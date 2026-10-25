@@ -94,7 +94,7 @@ waited for and the tail of the log.
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain
-(https://lodestar-sepolia.chainsafe.io, `BEACON_URL` in `prover-host/jobs/common.sh`), and
+(`https://lodestar-sepolia.chainsafe.io`, `BEACON_URL` in `prover-host/jobs/common.sh`), and
 `lc-bootstrap` sets the committee that signed it, then switches the owner off. From there the
 light client accepts one finalized checkpoint per epoch and, with `--submit-ancestry`, the
 blocks between two consecutive ones; `arbitrum-anchors` proves the deposit's Arbitrum block

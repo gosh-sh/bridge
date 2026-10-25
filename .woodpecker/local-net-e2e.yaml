@@ -243,7 +243,8 @@ steps:
       PROVER_HOST_USER: { from_secret: PROVER_HOST_USER }
       PROVER_HOST_SSH_KEY: { from_secret: PROVER_HOST_SSH_KEY }
       ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY: { from_secret: ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY }
-      ARBITRUM_SEPOLIA_E2E_ADDRESS: { from_secret: ARBITRUM_SEPOLIA_E2E_ADDRESS }
+      # Public: the deployer's address, which the test checks the key against.
+      ARBITRUM_SEPOLIA_E2E_ADDRESS: "0xe8e3bfd675cb889e4adf7ed0ec65c3dd09cc9041"
     commands:
       - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - python3 -m pip install --quiet --no-cache-dir --break-system-packages pytest==8.3.4

@@ -126,7 +126,7 @@ logs `run-logs/<run>/<job>.log` in the CI directory, an external volume every jo
 |---|---|
 | `PROVER_HOST`, `PROVER_HOST_PORT`, `PROVER_HOST_USER` | the prover host's ssh address, port and user: three secrets so the log masks each |
 | `PROVER_HOST_SSH_KEY` | the private half of its CI key, newline-joined with `@` |
-| `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY`, `ARBITRUM_SEPOLIA_E2E_ADDRESS` | the deployer and depositor on Arbitrum Sepolia, and its address; the relayer and burner keys are derived from it |
+| `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY` | the deployer and depositor on Arbitrum Sepolia; the relayer and burner keys are derived from it. Its address, `ARBITRUM_SEPOLIA_E2E_ADDRESS`, is public and set in the pipeline itself; `test_01` checks the key against it |
 
 The deployer needs Arbitrum Sepolia ETH and USDC (https://faucet.circle.com, network
 Arbitrum Sepolia): each run deploys a bridge (~0.0013 ETH), funds the two derived senders and

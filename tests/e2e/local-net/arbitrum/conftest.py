@@ -133,10 +133,11 @@ class LocalNet:
 
     def __call__(self, *args, timeout=600):
         cmd = (f"BRIDGE_SHA='{self.sha}' ACKI_DIR='{env('ACKI_DIR')}' WORK_ROOT=$HOME/'{env('WORK_ROOT')}' "
-               f"bash -s -- {' '.join(args)}")
+               f"bash -s -- {' '.join(str(a) for a in args)}")
         p = subprocess.run([*self.ssh, cmd], input=self.script, capture_output=True, text=True, timeout=timeout)
         if p.returncode != 0:
-            raise AssertionError(f"local network `{' '.join(args)}` exited {p.returncode}:\n{tail(p.stderr)}")
+            raise AssertionError(f"local network `{' '.join(str(a) for a in args)}` exited {p.returncode}:\n"
+                                 f"{tail(p.stderr)}")
         return kv(p.stdout)
 
     def cat(self, path):

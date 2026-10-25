@@ -12,8 +12,8 @@ the same file.
 
 Use it where no archive node is at hand: the bench runs the real verifier on
 it end to end, and the parent block hash it names can be owner-anchored on a
-test bridge before the verifier is called. `fetch_vectors.py` builds the same
-file from live chains.
+test bridge before the verifier is called. `deposit-relayer arbitrum-vector`
+writes the same format from live chains.
 """
 import argparse
 import json
@@ -21,9 +21,113 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fetch_vectors import (ASSERTION_BLOCK_HASH_WORD, ASSERTION_CREATED, HISTORY,  # noqa: E402
-                           HISTORY_WINDOW, ROLLUPS, Trie, encode_header, ib, nibbles, rlp)
 from keccak import keccak256  # noqa: E402
+
+ASSERTION_CREATED = "0x901c3aee23cf4478825462caaab375c606ab83516060388344f0650340753630"
+ASSERTION_BLOCK_HASH_WORD = 13
+HISTORY = "0x0000F90827F1C53a10cb7A02335B175320002935"
+HISTORY_WINDOW = 393168
+ROLLUPS = {421614: "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4",   # Arbitrum Sepolia, on Sepolia
+           42161: "0x4dceb440657f21083db8add07665f8ddbe1dcfc0"}    # Arbitrum One, on Ethereum
+
+def rlp(x):
+    if isinstance(x, bytes):
+        if len(x) == 1 and x[0] < 0x80:
+            return x
+        return _len(len(x), 0x80) + x
+    p = b"".join(rlp(i) for i in x)
+    return _len(len(p), 0xc0) + p
+
+
+def _len(n, off):
+    if n < 56:
+        return bytes([off + n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([off + 55 + len(b)]) + b
+
+
+def hb(h):
+    h = h[2:]
+    return bytes.fromhex(h if len(h) % 2 == 0 else "0" + h)
+
+
+def ib(h):
+    v = int(h, 16) if isinstance(h, str) else h
+    return b"" if v == 0 else v.to_bytes((v.bit_length() + 7) // 8, "big")
+
+
+# Header fields in RLP order, through Amsterdam; a field the node leaves out is
+# not in the header. Same list the relayer's header_rlp.rs encodes.
+HEADER_FIELDS = [("parentHash", hb), ("sha3Uncles", hb), ("miner", hb), ("stateRoot", hb),
+                 ("transactionsRoot", hb), ("receiptsRoot", hb), ("logsBloom", hb), ("difficulty", ib),
+                 ("number", ib), ("gasLimit", ib), ("gasUsed", ib), ("timestamp", ib), ("extraData", hb),
+                 ("mixHash", hb), ("nonce", hb), ("baseFeePerGas", ib), ("withdrawalsRoot", hb),
+                 ("blobGasUsed", ib), ("excessBlobGas", ib), ("parentBeaconBlockRoot", hb),
+                 ("requestsHash", hb), ("blockAccessListHash", hb), ("slotNumber", ib)]
+
+
+def encode_header(b):
+    return rlp([f(b[k]) for k, f in HEADER_FIELDS if b.get(k) is not None])
+
+
+def nibbles(b):
+    return [x for c in b for x in (c >> 4, c & 15)]
+
+
+def hex_prefix(ns, leaf):
+    flag = 2 if leaf else 0
+    if len(ns) % 2:
+        return bytes([(flag + 1) * 16 + ns[0]]) + bytes(ns[i] * 16 + ns[i + 1] for i in range(1, len(ns), 2))
+    return bytes([flag * 16]) + bytes(ns[i] * 16 + ns[i + 1] for i in range(0, len(ns), 2))
+
+
+class Trie:
+    """A Merkle-Patricia trie over (nibble key, value) pairs, enough for a receipt proof."""
+
+    def __init__(self, items):
+        self.root = self._node(items, 0)
+
+    def _node(self, items, d):
+        if len(items) == 1:
+            return ("leaf", items[0][0][d:], items[0][1])
+        pre = 0
+        while all(len(k) > d + pre for k, _ in items) and len({k[d + pre] for k, _ in items}) == 1:
+            pre += 1
+        if pre:
+            return ("ext", items[0][0][d:d + pre], self._node(items, d + pre))
+        children = [None] * 16
+        for i in range(16):
+            sub = [(k, v) for k, v in items if k[d] == i]
+            if sub:
+                children[i] = self._node(sub, d + 1)
+        return ("branch", children)
+
+    def _enc(self, n):
+        if n[0] == "leaf":
+            return rlp([hex_prefix(n[1], True), n[2]])
+        if n[0] == "ext":
+            return rlp([hex_prefix(n[1], False), self._ref(n[2])])
+        return rlp([self._ref(c) if c else b"" for c in n[1]] + [b""])
+
+    def _ref(self, n):
+        e = self._enc(n)
+        if len(e) < 32:
+            raise SystemExit("an inline trie node: the verifier does not take those")
+        return keccak256(e)
+
+    def proof(self, key):
+        out, n, d = [], self.root, 0
+        while True:
+            out.append(self._enc(n))
+            if n[0] == "leaf":
+                return keccak256(self._enc(self.root)), out
+            if n[0] == "ext":
+                d += len(n[1])
+                n = n[2]
+            else:
+                n = n[1][key[d]]
+                d += 1
+
 
 PARENT = {421614: 11155111, 42161: 1}
 

@@ -58,5 +58,6 @@ regexes = [
 description = "Public EIP-7928 execution-header field, not a credential"
 regexTarget = "line"
 regexes = [
-  '''"blockAccessListHash": "0x[0-9a-fA-F]{64}"''',
+  # Pretty and compact JSON alike (recorded RPC answers are compact).
+  '''"blockAccessListHash":\s*"0x[0-9a-fA-F]{64}"''',
 ]

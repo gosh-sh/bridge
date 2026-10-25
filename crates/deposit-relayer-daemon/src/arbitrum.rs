@@ -964,8 +964,8 @@ impl<V: ArbitrumView> ArbitrumView for OneBlockBehind<V> {
 }
 
 /// A ready proof in the format of `scripts/l2-block-proof-bench/fixtures/`,
-/// which the bench (`SYNTH=`) and `test_arbitrum_block_proof.py`
-/// (`L2_VECTOR=`) take.
+/// which the bench (`VECTORS=`) and `test_arbitrum_block_proof.py`
+/// (`L2_VECTORS=`) take.
 pub fn vector_json(
     chain: &ArbitrumChain,
     proof: &ReadyProof,

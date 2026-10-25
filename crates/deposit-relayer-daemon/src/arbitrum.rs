@@ -205,7 +205,16 @@ pub struct AnchorState {
     pub batch_ends: BTreeMap<u64, BatchEnd>,
     /// Proofs whose assertion has landed.
     pub ready: Vec<ReadyProof>,
+    /// Batches that landed on the parent chain before the Arbitrum node could
+    /// place their last block: batch → tries left. Each tick tries them again.
+    #[serde(default)]
+    pub unplaced_batches: BTreeMap<u64, u32>,
 }
+
+/// How many ticks a batch the Arbitrum node cannot place yet is tried again:
+/// about 20 minutes at the default poll, within the ~30 minutes a Nitro node
+/// keeps the state its slot proofs are read from.
+pub const BATCH_RETRIES: u32 = 100;
 
 impl AnchorState {
     pub fn load(path: &Path) -> Result<Option<Self>, RelayerError> {
@@ -391,6 +400,23 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
         state.deposit_cursor = head;
     }
 
+    // Batches an earlier tick could not place, oldest first, before the new
+    // events: an assertion can only end at a batch already taken.
+    for (batch, left) in std::mem::take(&mut state.unplaced_batches) {
+        match take_batch(view, state, batch).await? {
+            Taken::Proofs => report.batches_taken += 1,
+            Taken::Nothing => {},
+            Taken::Unplaced if left > 1 => {
+                state.unplaced_batches.insert(batch, left - 1);
+            },
+            Taken::Unplaced => warn!(
+                batch,
+                "the Arbitrum node still cannot place this batch; given up, the next batch covers \
+                 the same deposits"
+            ),
+        }
+    }
+
     // Batches and assertions.
     let parent_head = view.parent_head().await?.saturating_sub(cfg.parent_lag);
     if parent_head > state.parent_cursor {
@@ -402,10 +428,17 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
             match event {
                 ParentEvent::Batch {
                     batch, ..
-                } => {
-                    if take_batch(view, state, batch).await? {
-                        report.batches_taken += 1;
-                    }
+                } => match take_batch(view, state, batch).await? {
+                    Taken::Proofs => report.batches_taken += 1,
+                    Taken::Nothing => {},
+                    Taken::Unplaced => {
+                        warn!(
+                            batch,
+                            "the Arbitrum node does not know where this batch ends yet; trying \
+                             again on the next ticks"
+                        );
+                        state.unplaced_batches.insert(batch, BATCH_RETRIES);
+                    },
                 },
                 ParentEvent::Assertion {
                     block,
@@ -521,19 +554,29 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     Ok(report)
 }
 
+/// What [`take_batch`] did with a batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Taken {
+    /// Slot proofs were taken at its last block.
+    Proofs,
+    /// No waiting deposit block is covered by it.
+    Nothing,
+    /// The Arbitrum node cannot place its last block yet.
+    Unplaced,
+}
+
 /// Takes the slot proofs of the waiting deposit blocks at the last block of
-/// `batch`. False when there is nothing to take.
+/// `batch`. With no deposit block waiting, the batch is not looked up.
 async fn take_batch<V: ArbitrumView + ?Sized>(
     view: &V,
     state: &mut AnchorState,
     batch: u64,
-) -> Result<bool, RelayerError> {
+) -> Result<Taken, RelayerError> {
+    if state.pending.is_empty() {
+        return Ok(Taken::Nothing);
+    }
     let Some(m) = view.batch_end(batch).await? else {
-        warn!(
-            batch,
-            "the Arbitrum node does not know where this batch ends yet; skipped"
-        );
-        return Ok(false);
+        return Ok(Taken::Unplaced);
     };
     // M's state holds the hashes of blocks M - HISTORY_WINDOW ..= M - 1.
     let wanted: Vec<(u64, B256)> = state
@@ -543,7 +586,7 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
         .map(|(&n, &h)| (n, h))
         .collect();
     if wanted.is_empty() {
-        return Ok(false);
+        return Ok(Taken::Nothing);
     }
     let (hash, header) = view.arbitrum_header(m).await?;
     let mut slots = BTreeMap::new();
@@ -567,7 +610,7 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
         header,
         slots,
     });
-    Ok(true)
+    Ok(Taken::Proofs)
 }
 
 fn unix_now() -> u64 {
@@ -1338,6 +1381,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_batch_the_node_cannot_place_yet_is_taken_on_a_later_tick() {
+        // Batch 7 lands before the Arbitrum node knows where it ends.
+        let chain = one_deposit();
+        {
+            let mut c = chain.lock().unwrap();
+            c.batch_ends.clear();
+            c.parent_head = 15;
+        }
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.batches_taken, 0);
+        assert_eq!(state.unplaced_batches, BTreeMap::from([(7, BATCH_RETRIES)]));
+
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.batches_taken, 0);
+        assert_eq!(
+            state.unplaced_batches,
+            BTreeMap::from([(7, BATCH_RETRIES - 1)])
+        );
+
+        // The node places it, and the assertion ending there lands.
+        {
+            let mut c = chain.lock().unwrap();
+            c.batch_ends.insert(7, 150);
+            c.parent_head = 30;
+        }
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!((r.batches_taken, r.assertions_matched), (1, 1));
+        assert!(state.unplaced_batches.is_empty());
+        assert_eq!(state.ready[0].end.number, 150);
+    }
+
+    #[tokio::test]
+    async fn an_unplaced_batch_is_given_up_after_its_retries() {
+        let chain = one_deposit();
+        chain.lock().unwrap().batch_ends.clear();
+        let an = FakeBridge::default();
+        let mut state = AnchorState {
+            parent_cursor: 30,
+            unplaced_batches: BTreeMap::from([(7, 1)]),
+            ..AnchorState::default()
+        };
+        state.pending.insert(100, h(100));
+        state.deposit_cursor = 200;
+        run(&chain, &an, &mut state).await;
+        assert!(state.unplaced_batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_a_waiting_deposit_a_batch_is_not_looked_up() {
+        let chain = one_deposit();
+        {
+            let mut c = chain.lock().unwrap();
+            c.deposits.clear();
+            c.batch_ends.clear();
+        }
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.batches_taken, 0);
+        assert!(state.unplaced_batches.is_empty(), "nothing to retry");
+    }
+
+    #[tokio::test]
     async fn batch_ends_an_assertion_passed_are_dropped() {
         let chain = one_deposit();
         {
@@ -1376,6 +1484,7 @@ mod tests {
                 slots: BTreeMap::from([(100, SlotProof::default())]),
             })]),
             ready: vec![],
+            unplaced_batches: BTreeMap::from([(7, 3)]),
         };
         state.save(&path).unwrap();
         assert_eq!(AnchorState::load(&path).unwrap(), Some(state));

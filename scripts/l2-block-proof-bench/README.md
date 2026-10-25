@@ -52,11 +52,17 @@ reads that walk it.
 
 ## Why two kinds of fixture
 
-`proveBlock` needs `eth_getProof` at block M, the block an assertion ends at. M is usually an hour
-or more behind the head. On 2026-10-25 no public Arbitrum Sepolia endpoint kept that state:
-`sepolia-rollup.arbitrum.io`, publicnode, zan.top and pocket all answer `missing trie node` or
-`historical state … is not available`, and Tenderly's gateway limits the proof window. A real
-proof therefore needs an archive node. So:
+`proveBlock` needs `eth_getProof` at block M, the block an assertion ends at. When the assertion
+lands, M is already about 33 minutes old on Arbitrum Sepolia and about 62 minutes old on Arbitrum
+One. Ordinary nodes no longer keep that state. On 2026-10-25, `sepolia-rollup.arbitrum.io`,
+publicnode, zan.top and pocket all answered `missing trie node` or `historical state … is not
+available`. So `fetch_vectors.py` without `--follow` needs an archive node. With `--follow MIN`
+it does not.
+
+M is always the last block of a batch, and the batch is posted to the `SequencerInbox` about 20
+seconds after M. `--follow` therefore rolls forward the way a relayer would: it takes the proof at
+the last block of every batch as the batch is posted, and stops at the first assertion that ends
+at one of them. It takes one assertion interval or two, about 35–70 minutes on Arbitrum Sepolia.
 
 - `fixtures/synthetic_421614.json` comes from `make_synthetic.py`. It is a consistent vector: a
   parent block whose receipt trie has the rollup's `AssertionCreated` among 70 receipts, a block M
@@ -67,7 +73,7 @@ proof therefore needs an archive node. So:
   2026-10-25. They come from different chains, so they run one step at a time through
   `ProofBench.sol`.
 
-`fetch_vectors.py --l1-rpc <Sepolia> --l2-rpc <Arbitrum Sepolia archive> -o fixtures/<name>.json`
+`fetch_vectors.py --follow 100 --l1-rpc <Sepolia> --l2-rpc <Arbitrum Sepolia> -o fixtures/<name>.json`
 writes a live vector in the same format as the synthetic one. It checks every piece against the
 nodes. Point `SYNTH=` at the result to run it.
 
@@ -76,6 +82,6 @@ nodes. Point `SYNTH=` at the result to run it.
 - `run.sh` — salts, deploys and calls the verifier; runs the live steps; prints exit code and gas per call.
 - `ProofBench.sol` — `salted` (the bridge's code salt) and the two `EthTrie` steps as separate calls.
 - `make_synthetic.py` — the deterministic synthetic vector.
-- `fetch_vectors.py` — a live vector from a parent-chain RPC and an Arbitrum archive RPC.
+- `fetch_vectors.py` — a live vector from a parent-chain RPC and an Arbitrum RPC (`--follow`: no archive node).
 - `keccak.py` — pure-python Keccak-256 for the two scripts.
 - `fixtures/` — the vectors above.

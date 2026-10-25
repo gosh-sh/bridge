@@ -1,15 +1,17 @@
 """
 Arbitrum block proof on a live Acki Nacki network (local devnet or shellnet).
 
-No Ethereum or Arbitrum node: the vector is
-`scripts/l2-block-proof-bench/fixtures/synthetic_421614.json`, a parent-chain
-block whose receipt trie holds the rollup's `AssertionCreated`, and the
-Arbitrum block M that assertion names with block N's hash in M's state. What
-this runs on the network is everything after the data: the bridge deploying
-the verifier from the code the zerostate installed, `KECCAK256` in the node's
-VM, the verifier's message to the bridge and the bridge's checks on it.
+No Ethereum or Arbitrum node: the vectors are in
+`scripts/l2-block-proof-bench/fixtures/`, a synthetic one and one
+`deposit-relayer arbitrum-vector` wrote from live Arbitrum Sepolia. Each holds
+a parent-chain block whose receipt trie has the rollup's `AssertionCreated`,
+and the Arbitrum block M that assertion names with block N's hash in M's
+state. What this runs on the network is everything after the data: the bridge
+deploying the verifier from the code the zerostate installed, `KECCAK256` in
+the node's VM, the verifier's message to the bridge and the bridge's checks.
 
   1. the owner deploys the verifier: `deployL2Verifier(421614, 11155111, rollup)`;
+  then for each vector:
   2. `proveBlock` before the parent block is accepted: the bridge refuses it
      (224, bounced), N stays out of the anchor set;
   3. the owner admits the vector's parent block for 11155111
@@ -19,7 +21,7 @@ VM, the verifier's message to the bridge and the bridge's checks on it.
 
 Env vars: MODE (local|shellnet), NETWORK, PROVER_DIR, WORK_DIR,
 USDC_BRIDGE_KEY_PATH, ACKI_NACKI_ROOT, BRIDGE_READY_TIMEOUT_SECS,
-ANCHOR_TIMEOUT_SECS, L2_VECTOR (another vector in the same format).
+ANCHOR_TIMEOUT_SECS, L2_VECTORS (space-separated vector files).
 """
 
 import json
@@ -40,8 +42,11 @@ from helper.bridge_e2e import (
 
 REPO = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 VERIFIER_ABI = os.path.join(REPO, "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json")
-VECTOR = os.environ.get("L2_VECTOR",
-                        os.path.join(REPO, "scripts/l2-block-proof-bench/fixtures/synthetic_421614.json"))
+_FIXTURES = os.path.join(REPO, "scripts/l2-block-proof-bench/fixtures")
+VECTORS = os.environ.get("L2_VECTORS", "").split() or [
+    os.path.join(_FIXTURES, "synthetic_421614.json"),
+    os.path.join(_FIXTURES, "arbitrum_sepolia_11992300.json"),
+]
 
 MODE = os.environ.get("MODE", "local").lower()
 if MODE not in ("local", "shellnet"):
@@ -101,14 +106,19 @@ def main():
     common.set_config({"async_call": "false"})
     common.setup()
 
-    with open(VECTOR) as f:
-        v = json.load(f)
-    l2, l1, rollup = v["l2ChainId"], v["l1ChainId"], v["rollup"]
-    parent, block = v["expect"]["parentBlockHash"], v["expect"]["blockHash"]
+    vectors = []
+    for path in VECTORS:
+        with open(path) as f:
+            vectors.append((os.path.basename(path), json.load(f)))
+    l2, l1, rollup = vectors[0][1]["l2ChainId"], vectors[0][1]["l1ChainId"], vectors[0][1]["rollup"]
+    for name, v in vectors:
+        if (v["l2ChainId"], v["l1ChainId"], v["rollup"].lower()) != (l2, l1, rollup.lower()):
+            raise SystemExit(f"{name} is for another chain or rollup than {vectors[0][0]}")
 
     tracer.log_phase(f"Prechecks ({MODE})")
     tracer.log(f"  NETWORK: {network}")
-    tracer.log(f"  vector:  {VECTOR} (chain {l2} on {l1}, N = {v['proveBlock']['blockNumber']})")
+    for name, v in vectors:
+        tracer.log(f"  vector:  {name} (chain {l2} on {l1}, N = {v['proveBlock']['blockNumber']})")
     wait_for(f"USDCBridge active at {USDC_BRIDGE_ADDRESS}",
              lambda: common.is_account_active(USDC_BRIDGE_ADDRESS), BRIDGE_READY_TIMEOUT_SECS)
     version = bridge_getter("getVersion", {})
@@ -116,8 +126,9 @@ def main():
     if not IS_SHELLNET and USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
         materialize_usdc_bridge_key_from_node_config(tracer, PROVER_DIR, USDC_BRIDGE_KEY_PATH)
     validate_usdc_bridge_key(tracer, USDC_BRIDGE_KEY_PATH, overridden=USDC_BRIDGE_KEY_PATH_OVERRIDE is not None)
-    if accepted(l2, block):
-        raise SystemExit(f"N {block} is already accepted for {l2}: this network has run the vector before")
+    for name, v in vectors:
+        if accepted(l2, v["expect"]["blockHash"]):
+            raise SystemExit(f"{name}: N is already accepted for {l2}: this network has run it before")
 
     tracer.log_phase(f"deployL2Verifier({l2}, {l1}, {rollup})")
     owner_call("deployL2Verifier", {"l2ChainId": str(l2), "parentChainId": str(l1), "rollup": rollup})
@@ -140,46 +151,49 @@ def main():
     if int(str(cfg["l1ChainId"]), 0) != l1 or int(str(cfg["rollup"]), 0) != int(rollup, 16):
         raise SystemExit(f"verifier config {cfg} is not ({l2}, {l1}, {rollup})")
 
-    prove = v["proveBlock"]
-    path = os.path.join(WORK_DIR, "proveBlock.params.json")
-    with open(path, "w") as f:
-        json.dump(prove, f)
+    for name, v in vectors:
+        parent, block = v["expect"]["parentBlockHash"], v["expect"]["blockHash"]
+        prove = v["proveBlock"]
+        path = os.path.join(WORK_DIR, f"proveBlock.{name}")
+        with open(path, "w") as f:
+            json.dump(prove, f)
 
-    def prove_block():
-        # Unsigned: proveBlock is permissionless. The parameters go in a file;
-        # they are some 10 KB of hex, too long for a command line on some hosts.
-        return common.execute_cli_cmd(f"callx --abi {VERIFIER_ABI} --addr {target} -m proveBlock {path}")
+        def prove_block():
+            # Unsigned: proveBlock is permissionless. The parameters go in a file;
+            # they are some 10 KB of hex, too long for a command line on some hosts.
+            return common.execute_cli_cmd(f"callx --abi {VERIFIER_ABI} --addr {target} -m proveBlock {path}")
 
-    tracer.log_phase("proveBlock before the parent block is accepted")
-    if accepted(l1, parent):
-        raise SystemExit(f"the vector's parent block {parent} is already accepted for {l1}")
-    result = prove_block()
-    tracer.log(f"  verifier: {'ok' if common.is_ok(result) else result}")
-    time.sleep(20)
-    if accepted(l2, block):
-        tracer.log_phase("FAIL")
-        tracer.log(f"  N admitted for {l2} although its parent block is not accepted for {l1}")
-        sys.exit(1)
-    tracer.log(f"  N not admitted, as it must not be")
+        tracer.log_phase(f"{name}: proveBlock before the parent block is accepted")
+        if accepted(l1, parent):
+            raise SystemExit(f"{name}: its parent block {parent} is already accepted for {l1}")
+        result = prove_block()
+        tracer.log(f"  verifier: {'ok' if common.is_ok(result) else result}")
+        time.sleep(20)
+        if accepted(l2, block):
+            tracer.log_phase("FAIL")
+            tracer.log(f"  N admitted for {l2} although its parent block is not accepted for {l1}")
+            sys.exit(1)
+        tracer.log(f"  N not admitted, as it must not be")
 
-    tracer.log_phase(f"setAcceptedBlockHash({l1}, parent block) — the light client's job, done by the owner")
-    owner_call("setAcceptedBlockHash", {"chainId": str(l1), "blockHash": parent, "accepted": True})
-    wait_for("the parent block accepted", lambda: accepted(l1, parent), ANCHOR_TIMEOUT_SECS)
+        tracer.log_phase(f"{name}: setAcceptedBlockHash({l1}, parent block) — the light client's job, done by the owner")
+        owner_call("setAcceptedBlockHash", {"chainId": str(l1), "blockHash": parent, "accepted": True})
+        wait_for("the parent block accepted", lambda: accepted(l1, parent), ANCHOR_TIMEOUT_SECS)
 
-    tracer.log_phase("proveBlock")
-    result = prove_block()
-    if not common.is_ok(result):
-        tracer.log_phase("FAIL")
-        tracer.log(f"  proveBlock: {result}")
-        sys.exit(1)
-    tracer.log(f"  transaction {result.get('transaction_id') or result}")
-    wait_for(f"N {block} accepted for {l2}", lambda: accepted(l2, block), ANCHOR_TIMEOUT_SECS)
-    if accepted(l1, block):
-        raise SystemExit(f"N is accepted for {l1} too; it may only be for {l2}")
+        tracer.log_phase(f"{name}: proveBlock")
+        result = prove_block()
+        if not common.is_ok(result):
+            tracer.log_phase("FAIL")
+            tracer.log(f"  proveBlock: {result}")
+            sys.exit(1)
+        tracer.log(f"  transaction {result.get('transaction_id') or result}")
+        wait_for(f"N {block} accepted for {l2}", lambda: accepted(l2, block), ANCHOR_TIMEOUT_SECS)
+        if accepted(l1, block):
+            raise SystemExit(f"N is accepted for {l1} too; it may only be for {l2}")
 
-    tracer.log_phase(f"PASS — the bridge accepts N for {l2} from the verifier's proof")
+        tracer.log(f"  {name}: the bridge accepts N {block} for {l2}")
+
+    tracer.log_phase(f"PASS — the bridge accepts each vector's N for {l2} from the verifier's proof")
     tracer.log(f"  verifier: {verifier}")
-    tracer.log(f"  N:        {block}")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,13 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 AN=$(cd "$HERE/../../contracts/an" && pwd)
 VERIFIER=${VERIFIER:-$AN/0.81.0_compiled/exchange/ArbitrumBlockVerifier}
-SYNTH=${SYNTH:-$HERE/fixtures/synthetic_421614.json}
+# Vectors `proveBlock` runs end to end on: the synthetic one and one the relayer
+# wrote from live Arbitrum Sepolia (`deposit-relayer arbitrum-vector`).
+# VECTORS="a.json b.json" (or SYNTH=a.json) runs others.
+if [ -n "${SYNTH:-}" ]; then VECTORS=("$SYNTH")
+elif [ -n "${VECTORS:-}" ]; then read -r -a VECTORS <<<"$VECTORS"
+else VECTORS=("$HERE/fixtures/synthetic_421614.json" "$HERE/fixtures/arbitrum_sepolia_11992300.json")
+fi
 LIVE=${LIVE:-$HERE/fixtures/live_steps.json}
 SOLD=${SOLD:-sold}
 DBG=${TVM_DEBUGGER:-tvm-debugger}
@@ -28,7 +34,6 @@ trap '[ -n "${KEEP:-}" ] && echo "kept $WORK" || rm -rf "$WORK"' EXIT
 "$SOLD" --tvm-version gosh --base-path "$AN" "$HERE/ProofBench.sol" -o "$WORK" >/dev/null 2>"$WORK/sold.err" \
   || { cat "$WORK/sold.err" >&2; exit 1; }
 cp "$WORK/ProofBench.tvc" "$WORK/bench.tvc"
-cp "$VERIFIER.tvc" "$WORK/verifier.tvc"
 
 echo "verifier : $VERIFIER.tvc"
 echo "sold     : $("$SOLD" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1)"
@@ -68,7 +73,13 @@ BENCH=("$WORK/bench.tvc" "$WORK/ProofBench.abi.json")
 VABI=$VERIFIER.abi.json
 run "bench constructor" "${BENCH[@]}" constructor '{}' 0
 
-# --- the verifier as the bridge deploys it -----------------------------------
+# --- the verifier as the bridge deploys it, once per vector -------------------
+# The body is not indented: it carries a heredoc.
+verifier_checks() { # <vector>
+SYNTH=$1
+TAG=$(basename "$1" .json)
+echo "-- $TAG"
+cp "$VERIFIER.tvc" "$WORK/verifier.tvc"
 L2=$(field "$SYNTH" l2ChainId)
 CODE=$("$DBG" state-decode --state-init "$WORK/verifier.tvc" | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["code"])')
 run "salt the verifier code ($L2)" "${BENCH[@]}" salted "{\"code\":\"$CODE\",\"l2ChainId\":$L2}" 0
@@ -88,7 +99,7 @@ run "initialize, wrong chain id" "$WORK/verifier.tvc" "$VABI" initialize \
 run "initialize" "$WORK/verifier.tvc" "$VABI" initialize "$INIT" 0 "${FROM_BRIDGE[@]}"
 run "initialize again" "$WORK/verifier.tvc" "$VABI" initialize "$INIT" 311 "${FROM_BRIDGE[@]}"
 
-run "proveBlock (synthetic, $L2)" "$WORK/verifier.tvc" "$VABI" proveBlock "$(cat "$WORK/prove.json")" 0
+run "proveBlock ($TAG)" "$WORK/verifier.tvc" "$VABI" proveBlock "$(cat "$WORK/prove.json")" 0
 expect "one message, to the bridge" "$SYNTH" \
   'len(r["messages"])==1 and r["messages"][0]["destination"]=="'"$BRIDGE"'"'
 # The body is the function id and three uint256 in one cell: its last 100 bytes.
@@ -145,6 +156,8 @@ run "  other: init, rollup 0x11..11" "$WORK/other.tvc" "$VABI" initialize \
   "{\"l2ChainId\":$L2,\"l1ChainId\":$(field "$SYNTH" l1ChainId),\"rollup\":\"0x$(printf '1%.0s' {1..40})\"}" 0 \
   "${FROM_BRIDGE[@]}"
 run "  foreign rollup" "$WORK/other.tvc" "$VABI" proveBlock "$(cat "$WORK/prove.json")" 307
+}
+for vector in "${VECTORS[@]}"; do verifier_checks "$vector"; done
 
 # --- the two proofs on live data ---------------------------------------------
 run "step 1: assertion -> M (live)" "${BENCH[@]}" assertionBlock "$(field "$LIVE" assertionBlock.args)" 0

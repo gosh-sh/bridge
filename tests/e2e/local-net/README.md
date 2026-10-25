@@ -112,7 +112,7 @@ whose `authorized_keys` entry allows only the dispatcher (a copy of
 127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
 socket and capped memory and CPU (40 GB / 12 cores for the build and the proving jobs, 64 GB /
-24 cores for the light client's step prover, which has an epoch for each proof, 8 GB / 4 cores
+32 cores for the light client's step prover, which has an epoch for each proof, 8 GB / 4 cores
 for the rest). It builds each commit once in a `rust:1-bookworm` container
 (`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
 set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own

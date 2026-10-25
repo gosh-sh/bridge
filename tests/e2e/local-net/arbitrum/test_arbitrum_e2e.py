@@ -14,7 +14,6 @@ logs of the job that did it. A failure names the step, what it waited for and th
 the log; every log of the run stays on the prover host in run-logs/<run>/.
 """
 
-import glob
 import json
 import os
 import re
@@ -25,7 +24,7 @@ from conftest import (ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, SEPOLIA_BEA
                       SLOT_SECS, env, evm_address, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
-GENESIS_SECS = 1800         # the network needs 1024 blocks before the bridge has a seed
+GENESIS_SECS = 1800         # upper bound; 1024 blocks take about 6 minutes
 ANCHOR_SECS = 5400          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 5400        # daemon-live proving the bundle that holds the burn
 RUN_SECS = 4 * 3600         # how long a run may take, for the committee-period check
@@ -104,13 +103,16 @@ def test_13_light_client_proof_started(run):
 # ── 2 · contracts ───────────────────────────────────────────────────────────
 
 def test_20_genesis_from_the_network(run, ctx):
-    """The bridge's genesis anchors at the network's latest 1024-block boundary."""
-    bk_set = {}
-    for path in glob.glob(os.path.join(env("ACKI_CONFIG"), "block_keeper*_bls.keys.json")):
-        idx = re.search(r"block_keeper(\d+)_bls", path).group(1)
-        bk_set[idx] = json.load(open(path))[0]["public"]
-    assert bk_set, "no block_keeperN_bls.keys.json in ACKI_CONFIG"
-    run.job("genesis", stdin=json.dumps(dict(sorted(bk_set.items(), key=lambda kv_: int(kv_[0])))))
+    """The bridge's genesis anchors at the network's latest 1024-block boundary, with the BK set
+    that signs it: the zerostate's keepers replayed up to the seed (genesis.sh)."""
+    # The keepers the zerostate generator put in the zerostate. Not config/block_keeper*_bls
+    # files: acki-nacki ships nine of them, and a five-keeper network regenerates only 0..4.
+    with open(os.path.join(env("ACKI_CONFIG"), "keys_config.json")) as f:
+        nodes = json.load(f)["bk_nodes"]
+    bk_set = {i: nodes[i]["bls_pubkey"] for i in sorted(nodes, key=int)}
+    assert bk_set, "keys_config.json in ACKI_CONFIG records no bk_nodes"
+    print(f"  {len(bk_set)} block keepers in the zerostate")
+    run.job("genesis", stdin=json.dumps(bk_set))
     run.finish("genesis", GENESIS_SECS + 60)
     g = kv(run.get("genesis.env"))
     assert int(g["GENESIS_SEED_SEQNO"]) % 1024 == 0 and int(g["BUNDLE_STRIDE"]) == 1024, g

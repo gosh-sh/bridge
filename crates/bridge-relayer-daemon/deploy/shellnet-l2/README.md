@@ -14,7 +14,11 @@ deployment and anchor derivation are covered by
 - `relayer` is the only long-running service.
 - `preflight` is an opt-in, read-only one-shot service. It hashes all proving
   artifacts and checks the EOA, GraphQL endpoint, bridge configuration,
-  verifier bytecode, nonce and balance. It never sends a transaction.
+  verifier bytecode, nonce and balance. It never sends a transaction. Its
+  chain checks go to the first of `RPC_URL` and `RPC_FAILOVER_URLS` that
+  answers, and every endpoint that answers must serve Sepolia. A transaction
+  waiting unmined from the EOA is a warning, not a failure: the daemon sends
+  at the nonce the chain mines next and replaces it.
 - The container runs as a non-root UID/GID, with a read-only root filesystem,
   all capabilities dropped and `no-new-privileges` enabled.
 - Params, outer proving-key cache, state, submission dumps and scratch space
@@ -25,6 +29,14 @@ deployment and anchor derivation are covered by
   send a transaction. Alert on a growing restart count: a persistent logical
   rejection still requires stopping the service and reconciling nonce,
   receipt, on-chain cursor and both state JSON files.
+- The one exit the container does not restart from is status 78: the Acki
+  Nacki chain is behind the bridge (a restarted shellnet, or a GraphQL
+  endpoint serving another network), which no restart can fix. The
+  container stays up with the daemon stopped, logs `STOPPED: the Acki Nacki
+  chain is behind the bridge`, and its metrics endpoint stops answering.
+  Deploy a new bridge
+  ([runbook §5.5](../../docs/live_relayer_bridge_runbook.md#55-when-to-redeploy)),
+  then recreate the container.
 
 Only one daemon may use a given bridge/EOA/state tuple.
 
@@ -102,8 +114,8 @@ Fill every `CHANGEME` value. `deploy-shellnet-l2.env` is consumed only by the
 one-shot contract deployment workflow; `shellnet-l2.env` is mounted into the
 long-running relayer. In particular, pin the full source commit, binary hashes,
 params-manifest hash, fresh bridge address/anchor and a dedicated Sepolia EOA.
-Never reuse the tracked test burner or repository-generated `shellnet.common`
-as a production secret source.
+Never use a repository-generated `shellnet.common` as a production secret
+source.
 
 The deployment seed must be W²-aligned (`seqno % 16384 == 0`). Use a stable,
 authenticated Sepolia RPC for both preflight and runtime.
@@ -217,8 +229,8 @@ sudo docker compose run --rm preflight
 the `relayer_gql_*` counters and compact `jq` views of both state files.
 Before the next 16,384-block boundary, `NotYetAvailable` / `block source still
 has no data` is expected. Alert on `hard aborting`, `BridgeReverted`, startup
-drift, SRS/VK drift, pending nonce, or unequal local/on-chain cursors after a
-receipt.
+drift, SRS/VK drift, pending nonce, `STOPPED:`, or unequal local/on-chain
+cursors after a receipt.
 
 ## Startup scan
 

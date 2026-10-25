@@ -107,6 +107,11 @@ itself; K=21 and K=22 come from their own ceremony files.
   holds real funds), funded from a faucet without a mainnet-balance gate —
   https://sepolia-faucet.pk910.de/ (proof of work) or
   https://cloud.google.com/application/web3/faucet/ethereum/sepolia.
+  Put its key into the untracked `crates/bridge-prover-libraries/.env` as
+  `RELAYER_PRIVATE_KEY=0x…`: `shellnet.common` takes it from there, carries
+  no key of its own, and warns when none is set. Never share the key: the
+  relayer replaces whatever transaction waits at its account's next nonce,
+  so two daemons on one key replace each other's transactions.
 - A deploy reserves ~0.6 ETH at the script's 2 gwei gas price (the actual
   cost is lower); each `verifyBlock` or `applyBkSetUpdate` costs
   ~0.001–0.003 ETH.
@@ -114,7 +119,7 @@ itself; K=21 and K=22 come from their own ceremony files.
 ### Environment
 
 `L2_config/env` is written by the deploy script and sources `shellnet.common`
-(RPC, GraphQL endpoint, burner key, paths). Every launch also needs:
+(RPC and GraphQL endpoints, paths, and the keys in `.env`). Every launch also needs:
 
 | Variable | Value | Why |
 |---|---|---|
@@ -125,8 +130,55 @@ itself; K=21 and K=22 come from their own ceremony files.
 Optional: `BRIDGE_PK_CACHE_DIR=./params/pk_cache`,
 `BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions` (saves each `verifyBlock`
 calldata for replay), `RELAYER_METRICS_ADDR`, `BRIDGE_GQL_FAILOVER_ENDPOINTS`,
-`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 60: how long one request to
-`RPC_URL` may take).
+`BRIDGE_RPC_REQUEST_TIMEOUT_SECS` (default 20: how long one request to one
+Ethereum endpoint may take before the next endpoint is tried).
+
+**Ethereum RPC.** `RPC_URL` is the primary endpoint and `RPC_FAILOVER_URLS`
+(comma-separated, also `--rpc-failover-urls`) the fallbacks, tried in order.
+`shellnet.common` builds both: Infura first, then Alchemy, the EF DevOps
+endpoint, publicnode and Tenderly's public gateway. The Infura and Alchemy
+URLs carry API keys, which come from the untracked
+`crates/bridge-prover-libraries/.env` (`INFURA_API_KEY=…`,
+`ALCHEMY_API_KEY=…`; `.gitignore` covers it). Never put a key into
+`shellnet.common`: it is tracked and `.gitleaks.toml` does not scan it. An
+endpoint whose key is not set is left out.
+
+- At start the relayer asks every endpoint for its chain id. It refuses to
+  start when two disagree or none answers; one that does not answer stays in
+  the list. The log line `Ethereum RPC endpoints, in order` names them by host
+  only, as every relayer log line does: keys never reach the log.
+- A request goes to the first endpoint that is not cooling down. An endpoint
+  that times out, answers HTTP 401/403 (a rejected key), 404, 408, 429 or 5xx,
+  or refuses with a rate-limit, quota or key error is skipped for 60 s
+  (`WARN … endpoint failing, trying the next one`); one that cannot serve a
+  particular request (an `eth_getLogs` span over its cap, which Alchemy's
+  free tier answers with HTTP 400; pruned history; a block it has not seen
+  yet) passes that request on and keeps its place. A revert or `nonce too
+  low` is the answer and is not retried elsewhere.
+- A signed transaction goes to the first endpoint that accepts it, and copies
+  go to the others. Before every transaction the relayer estimates its gas,
+  then reads the account's nonce from the chain; a call whose estimate
+  reverts sends nothing and changes no nonce. Every transaction takes the
+  nonce the chain mines next. One already waiting unmined there is replaced
+  (`WARN … replacing it at the same nonce with higher fees`): 25 % above
+  what the relayer last paid at that nonce, or above the current estimate
+  when it does not know — after a restart — and 25 % more on every later
+  attempt, up to 4 times the current estimate; past that a node refuses the
+  replacement and the waiting transaction stays. Neither a lost send nor a
+  restart while a transaction is stuck stalls the bridge. The replaced
+  transaction can be anyone's: the relayer's key must be its own, and
+  nobody sends from it by hand while a daemon runs.
+- `BRIDGE_GET_LOGS_PAUSE_MS=600` in `shellnet.common` paces the startup scan
+  for Infura's free tier (500 credits a second, 255 per `eth_getLogs`).
+
+To check a list of endpoints without starting the daemon (read-only: chain
+id, then the bridge's full state with the startup scan):
+
+```bash
+cd crates/bridge-prover-libraries
+set -a && source L2_config/env && set +a     # bash: the env files use BASH_SOURCE
+cargo test -p bridge-relayer-daemon --lib live_endpoints -- --ignored --nocapture
+```
 
 Check before every launch:
 
@@ -183,13 +235,13 @@ jq '.pubkeys_hex' "/tmp/prover_bk_set_$S.json" > bk_set.shellnet.live.json
 ```
 
 It prints the signer indices and the set's Poseidon commitment. The replay
-needs every change since rotations began (2026-10-08) to still be served by
+needs every change since the network's genesis to still be served by
 GraphQL.
 
 ### 3.3 Deploy
 
 ```bash
-set -a; source L2_config/env; set +a          # burner key and endpoints
+set -a; source L2_config/env; set +a          # your key (.env) and endpoints
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=2 \
 PRIVATE_KEY="$RELAYER_PRIVATE_KEY" \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
@@ -317,9 +369,11 @@ after 256 such ticks at L2 (16 at L1), about four hours: by then the prover or
 the chain is stuck.
 
 An occasional `WARN … tick failed, will back off` naming the RPC or GraphQL
-endpoint is a failed read; the next tick repeats it. A request to `RPC_URL`
-that gets no answer fails after 60 s (`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`)
-rather than holding up the ticks.
+endpoint is a failed read; the next tick repeats it. A request to an Ethereum
+endpoint that gets no answer moves to the next endpoint after 20 s
+(`BRIDGE_RPC_REQUEST_TIMEOUT_SECS`); the tick fails only when every endpoint
+has failed it. `WARN … endpoint failing, trying the next one` once a minute
+means the primary is down and its fallbacks carry the load.
 
 **Snapshot.**
 
@@ -454,6 +508,16 @@ different anchor level; archive the state dir and investigate.
   `required object /blockchain/blockByHeight is null` for blocks the next
   bundle needs, and the contract can no longer advance.
 - Startup refuses to resume and the state cannot be reconciled.
+- The daemon stopped with `Acki Nacki chain head … is below the bridge's last
+  verified block`: the chain head stayed below the bridge for 5 minutes, over
+  at least 5 polls in a row. Shellnet was restarted from a new zerostate (or
+  `BRIDGE_GQL_ENDPOINT` points at another network), and the new chain cannot
+  extend this bridge. This stop exits with status 78 (every other failure
+  exits with 1), so a supervisor can tell it apart: the shellnet-l2
+  container stays up with the daemon stopped instead of restarting into the
+  same stop every few minutes.
+  Before §3, rebuild `bk_set.shellnet.json` for the new network (see the
+  [shellnet BK-set section of `TECHNICAL_README.md`](../../bridge-prover-libraries/TECHNICAL_README.md#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson)).
 
 Redeploy with [§3](#3-case-1--fresh-deploy-and-cold-start) at a seed near
 head. The old bridge stays frozen at its last cursor; update everything keyed
@@ -467,8 +531,8 @@ on `BRIDGE_ADDRESS`.
 
 ```
 crates/bridge-prover-libraries/
-├── shellnet.common              shared development env (RPC, GraphQL, burner key, paths)
-├── bk_set.shellnet.json         BK set before rotations began (2026-10-08); input of §3.2
+├── shellnet.common              shared development env (RPC, GraphQL, paths; keys from .env)
+├── bk_set.shellnet.json         BK set at the network's genesis (restart of 2026-10-14); input of §3.2
 ├── bk_set.shellnet.live.json    BK set at the current bridge's seed; BRIDGE_BK_SET_CONFIG
 ├── L2_config/
 │   ├── env                      written by the deploy script
@@ -491,8 +555,9 @@ Rotation is controlled by `minBlockKeepers` on `BlockKeeperContractRoot`
 (`0:7777…7777`). With 5 active keepers, `minBlockKeepers = 5` stops rotations
 and `4` enables them; `setConfig` (owner key in
 `config/BlockKeeperContractRoot.keys.json`) overwrites all six config fields
-at once, so read the live values (`getConfig`) before calling it. Rotations
-have been on since the evening of 2026-10-08. Step by step, with rollback:
+at once, so read the live values (`getConfig`) before calling it. On the
+network started on 2026-10-14 rotations have been on since 2026-10-15 (on the
+previous one, since the evening of 2026-10-08). Step by step, with rollback:
 [`turn_on_bk_sets_on_shellnet.md`](../../../turn_on_bk_sets_on_shellnet.md).
 
 ### Server deployment and handoff

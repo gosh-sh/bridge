@@ -3,8 +3,9 @@
 
 Set SOLD_0_80 to sold 0.80.0. Halo2 verification is stubbed in a temporary
 source copy. Directed events are omitted because tvm-debugger tries to decode
-them as function return values. Test hooks seed balances and derive voucher
-addresses. The accounting, sender checks, refunds and upgrade code execute
+them as function return values; `WithdrawalRefused` is replaced by a hook that
+records its reason, so a refusal's cause is still asserted. Test hooks seed
+balances and derive voucher addresses. The accounting, sender checks, refunds and upgrade code execute
 unchanged. The production voucher is executed unchanged for its replay test.
 """
 
@@ -46,9 +47,18 @@ class BridgeLimits(unittest.TestCase):
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
         source = source.replace(verification, "testVerifyProof()")
+        source = re.sub(r"emit WithdrawalRefused\{dest: addrExtern\}\(.*?\);",
+                        "_testLastRefusal = reason;", source, flags=re.S)
+        source = source.replace(
+            "bytes recipient, uint32 tokenId, uint16 reason) private pure {",
+            "bytes recipient, uint32 tokenId, uint16 reason) private {")
         source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         hooks = """
+    uint16 _testLastRefusal;
+    function testLastRefusal() public view returns (uint16 reason) {
+        reason = _testLastRefusal;
+    }
     bool _testRejectProof;
     function testRejectProof() public { tvm.accept(); _testRejectProof = true; }
     function testVerifyProof() private view returns (bool) { return !_testRejectProof; }
@@ -143,9 +153,10 @@ class BridgeLimits(unittest.TestCase):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
                          source=SENDER, ecc=amount, shell=shell)
 
-    def refund(self, result, amount, shell):
+    def refund(self, result, amount, shell, reason):
         self.assertTrue(result["vm_success"])
         self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), reason)
         msg = result["messages"][0]
         self.assertEqual(msg["destination"], SENDER)
         decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", msg["boc"],
@@ -184,7 +195,7 @@ class BridgeLimits(unittest.TestCase):
 
     def test_another_networks_inventory_cannot_cover_a_burn(self):
         self.seed(0, TRANSFER)
-        self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000)
+        self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000, 236)
         self.assertEqual(int(self.limits(1)["outstanding"]), 0)
         self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
 
@@ -208,7 +219,7 @@ class BridgeLimits(unittest.TestCase):
         for amount in (TRANSFER + 1, (1 << 64) + 1, (1 << 128) + 1):
             for incoming in (1, 50_000_000, 100_000_000, 1_000_000_000):
                 with self.subTest(amount=amount, incoming=incoming):
-                    self.refund(self.withdraw(amount, shell=incoming), amount, incoming)
+                    self.refund(self.withdraw(amount, shell=incoming), amount, incoming, 234)
                     self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER)
 
     def test_finalization_does_not_save_an_external_timestamp(self):
@@ -236,6 +247,25 @@ class BridgeLimits(unittest.TestCase):
         now = int(time.time())
         self.finalize(header={"expire": now + 600}, expect=401)
         self.finalize(header={"expire": now - 1}, expect=402)
+
+    def test_a_chain_balance_alone_does_not_pay_out_an_empty_inventory(self):
+        self.seed(0)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": str(TRANSFER)},
+                  signed=True)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
+        self.refund(self.withdraw(1_000_000, chain=1), 1_000_000, 1_000_000_000, 233)
+
+    def test_the_owner_restores_a_chain_balance_an_upgrade_left_empty(self):
+        self.seed(TRANSFER)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": "0"}, signed=True)
+        self.refund(self.withdraw(1_000_000, chain=1), 1_000_000, 1_000_000_000, 236)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": str(TRANSFER)},
+                  signed=True)
+        result = self.withdraw(1_000_000, chain=1)
+        self.assertTrue(result["vm_success"])
+        self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER - 1_000_000)
+        bridged = self.call("getTotalBridged", {"tokenId": 3})["response"]
+        self.assertEqual(int(bridged["burned"]), 1_000_000)
 
     def test_upgrade_preserves_both_networks(self):
         self.seed(TRANSFER, 2 * TRANSFER)

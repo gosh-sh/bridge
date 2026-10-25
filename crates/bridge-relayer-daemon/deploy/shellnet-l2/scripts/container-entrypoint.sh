@@ -46,4 +46,31 @@ printf 'Starting shellnet -> Sepolia L2 relayer: source=%s bridge=%s EOA=%s seed
   "$EXPECTED_BRIDGE_COMMIT" "$BRIDGE_ADDRESS" \
   "$RELAYER_ADDRESS" "$BRIDGE_BOOTSTRAP_SEQNO"
 cd /opt/gosh-relayer/prover
-exec "$RELAYER_BINARY" --state "$RELAYER_STATE_PATH" daemon-live
+
+# Run as a child, not exec'd: its exit status decides what Docker sees. 78
+# means the Acki Nacki chain is behind the bridge (a restarted network, or a
+# GraphQL endpoint serving another one). No restart can help, and under
+# `restart: unless-stopped` the container would rerun the preflight and the
+# startup scan and stop again every few minutes. It stays up instead, with
+# the daemon stopped, until an operator stops or recreates it.
+"$RELAYER_BINARY" --state "$RELAYER_STATE_PATH" daemon-live &
+daemon=$!
+trap 'kill -TERM "$daemon" 2>/dev/null || true' TERM INT
+status=0
+wait "$daemon" || status=$?
+# A signal handled by the trap ends `wait` early; wait for the daemon itself.
+while kill -0 "$daemon" 2>/dev/null; do
+  status=0
+  wait "$daemon" || status=$?
+done
+trap - TERM INT
+
+if (( status == 78 )); then
+  printf 'STOPPED: the Acki Nacki chain is behind the bridge (error above); restarting cannot help. The container stays up with the daemon stopped. Deploy a new bridge (live relayer runbook, section 5.5), then recreate the container.\n' >&2
+  trap 'exit 0' TERM INT
+  while :; do
+    sleep 3600 &
+    wait $! || true
+  done
+fi
+exit "$status"

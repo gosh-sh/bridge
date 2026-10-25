@@ -676,6 +676,7 @@ mod tests {
     use alloy_primitives::{address, B256, U256};
 
     use super::*;
+    use crate::deposit::testkit::sepolia_sender;
 
     /// The selector of `deposit(uint256,bytes32)`.
     const DEPOSIT_SELECTOR: [u8; 4] = [0xc9, 0x63, 0x0c, 0xb0];
@@ -701,7 +702,7 @@ mod tests {
 
     #[test]
     fn a_deposit_log_parses_back() {
-        let sender = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let sender = sepolia_sender();
         let mut log = crate::deposit::testkit::deposit_log(
             address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
             U256::from(7),
@@ -830,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn a_deposit_log_comes_back_with_where_it_was_mined() {
         let (evm, rpc) = mocked();
-        let sender = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let sender = sepolia_sender();
         rpc.push_success(&vec![rpc_deposit_log(sender)]);
         let got = evm.deposit_logs(BRIDGE, sender, 10, 20).await.unwrap();
         assert_eq!(got.len(), 1);
@@ -845,7 +846,7 @@ mod tests {
     async fn a_deposit_log_without_its_block_or_transaction_fails_the_search() {
         // Dropping such a log would turn "the node did not say" into "there
         // is no deposit".
-        let sender = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let sender = sepolia_sender();
         let strip: [fn(&mut alloy::rpc::types::Log); 3] = [
             |l| l.transaction_hash = None,
             |l| l.block_number = None,
@@ -905,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn a_revert_reason_is_only_what_the_node_calls_a_revert() {
         let (evm, rpc) = mocked();
-        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let data = deposit_calldata(1, B256::repeat_byte(0xa3));
         rpc.push_success(&Bytes::new());
         assert_eq!(
@@ -949,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn only_a_reverting_estimate_is_classified_as_a_revert() {
         let (evm, rpc) = mocked();
-        let from = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        let from = sepolia_sender();
         let data = deposit_calldata(1, B256::repeat_byte(0xa3));
         let paused = alloy::sol_types::SolError::abi_encode(&IDeposit::BridgePaused {});
         rpc_error(

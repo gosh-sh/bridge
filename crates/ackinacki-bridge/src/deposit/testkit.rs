@@ -457,6 +457,16 @@ impl EvmRead for FakeEvm {
     }
 }
 
+/// The Sepolia EVM address the deposit tests send from, read from
+/// `SEPOLIA_TEST_SENDER`. No address is compiled in: each network has its
+/// own test wallet, and the tests refuse to run without one.
+pub fn sepolia_sender() -> Address {
+    let raw = std::env::var("SEPOLIA_TEST_SENDER")
+        .expect("set SEPOLIA_TEST_SENDER to the Sepolia EVM address the deposit tests send from");
+    raw.parse()
+        .unwrap_or_else(|e| panic!("SEPOLIA_TEST_SENDER={raw:?} is not an EVM address: {e}"))
+}
+
 /// Block `number` whose hash is `tag` repeated and whose parent's hash is
 /// `tag - 1` repeated.
 pub fn header(number: u64, tag: u8) -> Header {

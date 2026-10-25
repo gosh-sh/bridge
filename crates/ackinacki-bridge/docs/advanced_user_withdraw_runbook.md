@@ -1321,8 +1321,8 @@ crates/bridge-prover-libraries/                ← halo2 sub-workspace (shared w
 ├── L1_config/env  L2_config/env               ← daemon env files (BRIDGE_BOOTSTRAP_SEQNO,
 │                                              #   BRIDGE_ANCHOR_LEVEL, BRIDGE_BK_SET_CONFIG) —
 │                                              #   the CLI does NOT read these
-├── shellnet.common                            ← shared shellnet-network env (BURNER_PRIVATE_KEY,
-│                                              #   RELAYER_PRIVATE_KEY, etc.)
+├── shellnet.common                            ← shared shellnet-network env (RPC and GraphQL
+│                                              #   endpoints, paths); keys come from .env beside it
 └── scripts/
     └── deploy_bridge_bundle.sh                ← the self-deploy wrapper (Step L1)
 

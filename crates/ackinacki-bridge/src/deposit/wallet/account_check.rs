@@ -198,7 +198,11 @@ mod tests {
     use super::*;
     use crate::{
         args::UsdcAmount,
-        deposit::{args::Network, testkit::*, ui::RecordingUi},
+        deposit::{
+            args::Network,
+            testkit::{sepolia_sender, *},
+            ui::RecordingUi,
+        },
         errors::ExitCode,
     };
 
@@ -303,7 +307,7 @@ mod tests {
     async fn a_signature_by_another_key_is_refused() {
         let evm = FakeEvm::sepolia();
         let mut w = FakeWallet::eoa();
-        w.account = address!("b586356d52eaee055ca569ff412dfeffc5bb2307");
+        w.account = sepolia_sender();
         let (r, _) = run_check(&evm, &mut w).await;
         assert_eq!(r.unwrap_err().exit_code(), ExitCode::WalletFailed);
     }

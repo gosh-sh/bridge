@@ -316,6 +316,12 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                         error!(error = ?e, "daemon: stuck — hard aborting");
                         return Err(e);
                     }
+                    if matches!(e, RelayerError::AnChainBehindBridge { .. }) {
+                        // Retrying cannot help: the chain this bridge
+                        // follows is gone. Stop so the operator sees it.
+                        error!(error = %e, "daemon: Acki Nacki chain is behind the bridge — stopping");
+                        return Err(e);
+                    }
                     warn!(error = ?e, "daemon: tick failed, will back off");
                     (false, LastOutcome::TickError)
                 },
@@ -566,6 +572,72 @@ mod tests {
         // having tripped 4+ NotYetAvailable bumps instead.
         assert!(snap.not_yet_available >= 4);
         assert_eq!(snap.verified, 0);
+    }
+
+    /// A source whose chain head is below the bridge, as after a network
+    /// restart: every poll goes through the same guard `LiveBlockSource`
+    /// uses.
+    struct ChainBehindSource {
+        guard: tokio::sync::Mutex<crate::ChainBehindGuard>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::source::BlockSource for ChainBehindSource {
+        async fn fetch(&self, _target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            self.guard.lock().await.observe(42_630, 24_018_944)?;
+            Ok(None)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn daemon_stops_when_the_an_chain_is_behind_the_bridge() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(ChainBehindSource {
+            guard: tokio::sync::Mutex::new(crate::ChainBehindGuard::default()),
+        });
+        let cfg = RelayerConfig::new(
+            dir.path().join("state.json"),
+            bridge_prover_lib::BUNDLE_STRIDE_L1,
+        );
+        let mut relayer = Relayer::new(
+            cfg,
+            source,
+            Arc::new(crate::source::EmptyBkUpdateSource),
+            bridge,
+        )
+        .unwrap();
+        let metrics = RelayerMetrics::new();
+        let started = tokio::time::Instant::now();
+
+        // Shutdown never comes: only the guard can end the run. The
+        // daemon-live backoff, so the first polls come seconds apart.
+        let backoff = BackoffConfig::default();
+        let err = relayer
+            .run_until_shutdown(backoff, Some(metrics.clone()), std::future::pending())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, RelayerError::AnChainBehindBridge {
+                chain_head: 42_630,
+                last_verified: 24_018_944,
+            }),
+            "{err:?}"
+        );
+        // Not after five polls 4, 8, 16 and 32 s apart, a minute in, but
+        // once the head has stayed below for five minutes.
+        let ran_for = started.elapsed();
+        assert!(ran_for >= crate::BEHIND_FOR_TO_STOP, "{ran_for:?}");
+        assert!(
+            ran_for < crate::BEHIND_FOR_TO_STOP + backoff.max,
+            "{ran_for:?}"
+        );
+        assert!(metrics.snapshot().not_yet_available >= u64::from(crate::POLLS_BEHIND_TO_STOP));
     }
 
     #[tokio::test(start_paused = true)]

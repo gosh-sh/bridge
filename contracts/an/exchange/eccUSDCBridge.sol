@@ -797,7 +797,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     function _disableOwnerAnchors(uint256 chainId) private {
         require(chainId != 0, ERR_NOT_LIGHT_CLIENT_CHAIN);
-        require(_lightClients[chainId] != address(0) || _l2Verifiers[chainId] != address(0),
+        // `exists`, not `!= address(0)`: a missing key reads as addr_none,
+        // which is not address(0), so that comparison passed for any chain.
+        require(_lightClients.exists(chainId) || _l2Verifiers.exists(chainId),
                 ERR_LIGHT_CLIENT_UNSET);
         ensureBalance();
         _ownerAnchorsDisabled[chainId] = true;
@@ -928,7 +930,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         verifier may call it, and only once the parent-chain block is
     ///         accepted here, so the trust reaches back to the light client.
     function acceptBlockHashFromL2Verifier(uint256 l2ChainId, uint256 parentBlockHash, uint256 blockHash) public {
-        require(_l2Verifiers[l2ChainId] != address(0) && msg.sender == _l2Verifiers[l2ChainId],
+        require(_l2Verifiers.exists(l2ChainId) && msg.sender == _l2Verifiers[l2ChainId],
                 ERR_INVALID_SENDER);
         require(_acceptedBlockHash[_l2VerifierParent[l2ChainId]][parentBlockHash], ERR_UNKNOWN_BLOCK);
         tvm.accept();

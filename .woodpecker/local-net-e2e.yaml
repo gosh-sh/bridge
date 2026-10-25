@@ -20,7 +20,11 @@ variables:
   # a tag and up.sh does not pull it.
   - &acki_repo "https://github.com/gosh-sh/acki-nacki.git"
   - &acki_branch "dev"
-  - &acki_image_tag "br_dev"
+  # The build shellnet runs: acki-nacki b31c9d8b pins tvm-sdk 8b108bac, which has the
+  # KECCAK256 instruction ArbitrumBlockVerifier needs; br_dev (c8c9e67e, tvm-sdk v3.0.6.an)
+  # does not. gql-server and block-manager fall back to br_dev when the tag lacks them.
+  - &acki_image_tag "b31c9d8bcda724887afb02f0016a3bb305027792"
+  - &acki_aux_fallback_tag "br_dev"
   - &registry "docker.gosh.sh"
   # Contract toolchain for zerostate generation and for the test on the host (the checkout's
   # own contracts/compiler binaries are macOS builds). Every tarball is sha256-verified.
@@ -94,13 +98,14 @@ steps:
       SSH_OPTS: *ssh_opts
       REGISTRY: *registry
       TAG: *acki_image_tag
+      AUX_FALLBACK_TAG: *acki_aux_fallback_tag
       WORK_ROOT: *work_root_on_host
     commands:
       - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - rm -rf .acki && mkdir -p .acki/helpers
       - >
         ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
-        "REGISTRY='$REGISTRY' TAG='$TAG' WORK_ROOT=\$HOME/'$WORK_ROOT' bash -s"
+        "REGISTRY='$REGISTRY' TAG='$TAG' AUX_FALLBACK_TAG='$AUX_FALLBACK_TAG' WORK_ROOT=\$HOME/'$WORK_ROOT' bash -s"
         < $CI_WORKSPACE/tests/e2e/local-net/resolve-acki-on-host.sh | grep -E '^[A-Z_]+=' > .acki/env
       - cat .acki/env
       - . ./.acki/env && scp $SSH_OPTS "$E2E_CI_USER@$E2E_HOST:$HELPERS_DIR/node-helper" "$E2E_CI_USER@$E2E_HOST:$HELPERS_DIR/zerostate-helper" .acki/helpers/

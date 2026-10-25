@@ -84,18 +84,26 @@ waited for and the tail of the log.
 
 | Tests | Step |
 |---|---|
-| `test_00`–`01` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC |
-| `test_10`–`12` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
-| `test_20`–`22` | Genesis at the network's latest 1024-block boundary; the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier |
-| `test_30` | `setTrustedL1Bridge(421614, bridge)`; the bridge holds the genesis anchor |
-| `test_40`–`42` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` and `arbitrum-anchors` log their start; an empty multisig |
-| `test_50`–`56` | `deposit`: sent, Deposit event, block anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
+| `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 4 hours |
+| `test_10`–`13` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels; `eth-lc-relayer prove-one` starts proving the latest Sepolia finality update |
+| `test_20`–`23` | Genesis at the network's latest 1024-block boundary; the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `deployLightClient` deploys the Sepolia light client without a committee |
+| `test_30`–`32` | `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off |
+| `test_40`–`42` | The relayer and burner keys (derived from the deployer's) get gas; `eth-lc-relayer daemon`, `daemon-live` and `arbitrum-anchors` log their start, and the light client accepts its first checkpoint; an empty multisig |
+| `test_50`–`57` | `deposit`: sent, Deposit event, the light client accepts a span (`submitAncestry`), block anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
 | `test_60`–`65` | `withdraw`: burn, WithdrawalInitiated, `verifyBlock` covering the burn, Circuit 4 proof, `withdrawByProof` paid, 2 USDC back |
 
+Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
+`lc-prove` proves the latest finality update from the beacon chain
+(https://lodestar-sepolia.chainsafe.io, `BEACON_URL` in `prover-host/jobs/common.sh`), and
+`lc-bootstrap` sets the committee that signed it, then switches the owner off. From there the
+light client accepts one finalized checkpoint per epoch and, with `--submit-ancestry`, the
+blocks between two consecutive ones; `arbitrum-anchors` proves the deposit's Arbitrum block
+from the assertion in one of those Sepolia blocks. The light client follows a new sync
+committee (every ~27 h) only by a rotate proof, which does not run live yet, so a run must
+not cross one: `test_02` refuses to start a run that would.
+
 Owner calls and Acki Nacki reads run on this host (`an-on-host.sh` →
-`python/arbitrum_e2e_an.py`). While the deposit waits for its anchor, a fixture stands in for
-the Sepolia light client: when `arbitrum-anchors` holds a proof whose Sepolia block the bridge
-does not accept yet, the owner accepts that block (`setAcceptedBlockHash(11155111, …)`).
+`python/arbitrum_e2e_an.py`).
 
 The provers, daemons and the CLI run on a separate **prover host**, not on this one: bundle
 proving peaks at ~23 GB and reads ~40 GB of SRS and keys. The runner reaches it with a CI key
@@ -103,8 +111,9 @@ whose `authorized_keys` entry allows only the dispatcher (a copy of
 `tests/e2e/local-net/prover-host/ci-entry` in the CI directory's `bin/`) and the tunnel ports
 127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
-socket and capped memory and CPU (40 GB / 12 cores for the build and the proving jobs, 8 GB /
-4 cores for the rest). It builds each commit once in a `rust:1-bookworm` container
+socket and capped memory and CPU (40 GB / 12 cores for the build and the proving jobs, 64 GB /
+24 cores for the light client's step prover, which has an epoch for each proof, 8 GB / 4 cores
+for the rest). It builds each commit once in a `rust:1-bookworm` container
 (`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
 set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own
 where `nginx0` and `node0..4` are proxies to the runner's tunnels.

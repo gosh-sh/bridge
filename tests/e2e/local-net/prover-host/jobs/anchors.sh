@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # deposit-relayer arbitrum-anchors: gets the run's Arbitrum deposit blocks accepted through
-# ArbitrumBlockVerifier.proveBlock. Its state, with the ready proofs the runner reads to
-# owner-anchor their Sepolia blocks, is /out/anchors-state.json.
+# ArbitrumBlockVerifier.proveBlock, once the light client has the assertion's Sepolia block.
+# Its state is /out/anchors-state.json.
 # Input: a tvm keys JSON that signs the proveBlock messages.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 load evm.env

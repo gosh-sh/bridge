@@ -9,10 +9,16 @@ logs go to stderr.
                             deployL2Verifier, then wait until getL2Verifier records it:
                             VERIFIER, VERIFIER_PARENT, VERIFIER_L2/L1/ROLLUP (its getConfig)
   trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true); TRUSTED=true|false read back
+  lightclient               deployLightClient(owner pubkey, 11155111, 0, 0): the Sepolia light
+                            client, its committee unset (lc-bootstrap sets it once); LC (as
+                            dapp::account), LC_L1, LC_OWNER and OWNER_PUBKEY read back
+  lc <dapp::account>        the light client's state: LC_FINALIZED_SLOT, LC_UPDATES, LC_COMMITTEE,
+                            LC_PERIOD, LC_OWNER_ROTATION, LC_GLOAS_SLOT, LC_GLOAS_SET
+  disable-owner-anchors <chain>
+                            disableOwnerAnchorsOn(chain); OWNER_ANCHORS read back
+  owner-anchors <chain>     OWNER_ANCHORS=true|false (isOwnerAnchorsEnabled)
   msig                      deploy a multisig without USDC (the deposit brings it):
                             MSIG, MSIG_ACCOUNT, MSIG_KEYS (the keys file)
-  anchor <chain> <hash>     setAcceptedBlockHash(chain, hash, true): the parent chain's light
-                            client, done by the owner; ACCEPTED read back
   accepted <chain> <hash>   ACCEPTED=true|false
   ecc <dapp::account>       ECC3=<base units of USDC on the account>
 
@@ -21,7 +27,9 @@ ACKI_NACKI_ROOT).
 """
 
 import contextlib
+import json
 import os
+import re
 import sys
 import time
 
@@ -38,11 +46,13 @@ from helper.bridge_e2e import (  # noqa: E402
 from helper.msig import deploy_multisig  # noqa: E402
 
 ARB_SEPOLIA = 421614
+SEPOLIA = 11155111
 PROVER_DIR = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, "work-local"))
 GRAPHQL_URL = os.environ.get("GRAPHQL_URL", "http://localhost/graphql")
-VERIFIER_ABI = os.path.join(_HERE, "..", "..", "..", "contracts", "an", "0.81.0_compiled",
-                            "exchange", "ArbitrumBlockVerifier.abi.json")
+_COMPILED = os.path.join(_HERE, "..", "..", "..", "contracts", "an", "0.81.0_compiled", "exchange")
+VERIFIER_ABI = os.path.join(_COMPILED, "ArbitrumBlockVerifier.abi.json")
+LC_ABI = os.path.join(_COMPILED, "EthBeaconLightClient.abi.json")
 # Account state can lag a call by a block or two.
 READ_BACK_SECS = float(os.environ.get("READ_BACK_SECS", "120"))
 
@@ -95,6 +105,21 @@ def recorded_verifier(l2, parent):
     return got if uint(got.get("parentChainId")) == int(parent) and got.get("verifier") else None
 
 
+def deployed(address):
+    """`0:<account>` when an address getter names an account; None for addr_none or zero."""
+    a = str(address or "")
+    return a if re.fullmatch(r"0:[0-9a-f]{64}", a) and int(a[2:], 16) else None
+
+
+def owner_anchors(chain):
+    return truth(getter("isOwnerAnchorsEnabled", {"chainId": str(chain)}).get("value0"))
+
+
+def lc_getter(target, method):
+    out = common.run_getter(target, LC_ABI, method, {})
+    return out if isinstance(out, dict) else {}
+
+
 def verifier_config(target, l2):
     cfg = common.run_getter(target, VERIFIER_ABI, "getConfig", {})
     return cfg if isinstance(cfg, dict) and uint(cfg.get("l2ChainId")) == int(l2) else None
@@ -137,9 +162,31 @@ def main():
             # A multisig lives in its own dapp: keep the address the helper returns.
             ext = address if "::" in address else common.to_dapp_address(address)
             answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
-        elif cmd == "anchor" and len(args) == 2:
-            owner_call("setAcceptedBlockHash", {"chainId": args[0], "blockHash": args[1], "accepted": True})
-            answer = [f"ACCEPTED={str(bool(until(lambda: accepted(args[0], args[1])))).lower()}"]
+        elif cmd == "lightclient" and not args:
+            with open(USDC_BRIDGE_KEYS) as f:
+                pubkey = json.load(f)["public"]
+            owner_call("deployLightClient", {"pubkey": "0x" + pubkey, "l1ChainId": str(SEPOLIA),
+                                             "bootstrapCommittee": "0", "bootstrapPeriod": "0"})
+            got = until(lambda: deployed(getter("getLightClient", {"l1ChainId": str(SEPOLIA)}).get("value0"))) or ""
+            target = common.to_dapp_address(got) if got else ""
+            cfg = (until(lambda: lc_getter(target, "getConfig")) if target else None) or {}
+            answer = [f"LC={target}", f"LC_L1={uint(cfg.get('l1ChainId'))}",
+                      f"LC_OWNER={uint(cfg.get('ownerPubkey')):064x}", f"OWNER_PUBKEY={pubkey}"]
+        elif cmd == "lc" and len(args) == 1:
+            head, committee = lc_getter(args[0], "getHead"), lc_getter(args[0], "getCommitteeState")
+            gloas = lc_getter(args[0], "getGloasForkSlot")
+            answer = [f"LC_FINALIZED_SLOT={uint(head.get('finalizedSlot'))}",
+                      f"LC_UPDATES={uint(head.get('updatesApplied'))}",
+                      f"LC_COMMITTEE={uint(committee.get('currentCommittee')):#066x}",
+                      f"LC_PERIOD={uint(committee.get('committeePeriod'))}",
+                      f"LC_OWNER_ROTATION={str(truth(committee.get('ownerRotationEnabled'))).lower()}",
+                      f"LC_GLOAS_SLOT={uint(gloas.get('gloasForkSlot'))}",
+                      f"LC_GLOAS_SET={str(truth(gloas.get('isSet'))).lower()}"]
+        elif cmd == "disable-owner-anchors" and len(args) == 1:
+            owner_call("disableOwnerAnchorsOn", {"chainId": args[0]})
+            answer = [f"OWNER_ANCHORS={str(not until(lambda: not owner_anchors(args[0]))).lower()}"]
+        elif cmd == "owner-anchors" and len(args) == 1:
+            answer = [f"OWNER_ANCHORS={str(owner_anchors(args[0])).lower()}"]
         elif cmd == "accepted" and len(args) == 2:
             answer = [f"ACCEPTED={str(accepted(args[0], args[1])).lower()}"]
         elif cmd == "ecc" and len(args) == 1:

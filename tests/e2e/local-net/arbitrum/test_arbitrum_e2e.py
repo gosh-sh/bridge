@@ -2,6 +2,12 @@
 it to the local Acki Nacki network with `ackinacki-bridge deposit`, and the same 2 USDC
 withdrawn back with `ackinacki-bridge withdraw`.
 
+Nothing is accepted by hand. The one trusted input on the Acki Nacki side is the Sepolia
+light client's committee, proven from the beacon chain and set once (sections 2-3); then the
+owner's anchor and rotation powers are switched off and asserted off. From there Sepolia
+blocks are accepted only through the light client's proofs, and Arbitrum blocks only through
+ArbitrumBlockVerifier from those Sepolia blocks.
+
 The tests run in file order and pytest stops at the first failure (-x): each one is a step
 of the scenario and asserts what that step must have produced, from the chains or from the
 logs of the job that did it. A failure names the step, what it waited for and the tail of
@@ -12,13 +18,18 @@ import glob
 import json
 import os
 import re
+import time
+from datetime import datetime, timezone
 
-from conftest import ARB_CHAIN, ARB_ROLLUP, ARB_USDC, SEPOLIA_CHAIN, env, evm_address, kv, tail, wait_for
+from conftest import (ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, SEPOLIA_BEACON_GENESIS, SEPOLIA_CHAIN,
+                      SLOT_SECS, env, evm_address, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 1800         # the network needs 1024 blocks before the bridge has a seed
 ANCHOR_SECS = 5400          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 5400        # daemon-live proving the bundle that holds the burn
+RUN_SECS = 4 * 3600         # how long a run may take, for the committee-period check
+LC_PROOF_SECS = 3600        # one light-client step proof, keygen included
 
 
 # ── 0 · the run ─────────────────────────────────────────────────────────────
@@ -45,6 +56,18 @@ def test_01_deployer_key_matches_its_address(arb, ctx):
     ctx.update(address=address, usdc_before=usdc)
 
 
+def test_02_no_sepolia_committee_change_during_the_run():
+    """The Sepolia sync committee stays the same for the whole run. The light client follows a
+    new committee only through a rotate proof, which does not run live yet, or by the owner's
+    hand, which this test does not allow: a run across the change would stall."""
+    slot = int((time.time() - SEPOLIA_BEACON_GENESIS) // SLOT_SECS)
+    left = (PERIOD_SLOTS - slot % PERIOD_SLOTS) * SLOT_SECS
+    change = datetime.fromtimestamp(time.time() + left, timezone.utc)
+    print(f"  Sepolia period {slot // PERIOD_SLOTS}, next committee at {change:%F %H:%M} UTC")
+    assert left > RUN_SECS, (f"the Sepolia sync committee changes in {left // 60} min, at {change:%H:%M} UTC; "
+                             f"start the run after that")
+
+
 # ── 1 · the network ─────────────────────────────────────────────────────────
 
 def test_10_local_network_bridge_active(an):
@@ -68,6 +91,14 @@ def test_12_prover_host_reaches_the_network(ph, run, tunnels):
     assert got.get("GRAPHQL_OK") == "true", "GraphQL behind nginx0 does not answer\n" + tail(run.log("probe"))
     closed = [n for n in range(5) if got.get(f"NODE{n}_8600") != "open"]
     assert not closed, f"node REST ports closed: {closed}"
+
+
+def test_13_light_client_proof_started(run):
+    """eth-lc-relayer prove-one starts proving the latest Sepolia finality update: its committee
+    is the light client's one trusted input. It runs while the contracts are deployed."""
+    run.job("lc-prove")
+    time.sleep(30)
+    assert run.wait("lc-prove", 1) in (None, 0), "lc-prove exited\n" + tail(run.log("lc-prove"))
 
 
 # ── 2 · contracts ───────────────────────────────────────────────────────────
@@ -116,6 +147,17 @@ def test_22_l2_verifier_deployed(an, ctx):
     ctx["verifier"] = got["VERIFIER"]
 
 
+def test_23_light_client_deployed(an, ctx):
+    """The bridge deploys EthBeaconLightClient for Sepolia, owned by the bridge owner's key, with
+    no committee yet."""
+    got = an("lightclient")
+    assert "::" in got.get("LC", ""), f"getLightClient({SEPOLIA_CHAIN}) names no light client: {got}"
+    assert int(got["LC_L1"]) == SEPOLIA_CHAIN, got
+    assert int(got["LC_OWNER"], 16) == int(got["OWNER_PUBKEY"], 16), got
+    assert an("lc", got["LC"]).get("LC_COMMITTEE") == "0x" + "0" * 64, "the light client has a committee already"
+    ctx["lc"] = got["LC"]
+
+
 # ── 3 · trust ───────────────────────────────────────────────────────────────
 
 def test_30_trust_set(an, arb, ctx):
@@ -126,6 +168,36 @@ def test_30_trust_set(an, arb, ctx):
     assert arb.call(ctx["bridge"], "storedBkSetCommitment()") == int(g["GENESIS_BK_SET_COMMITMENT"], 16)
     assert arb.call(ctx["bridge"], "storedPrevMaxLevelLayerHash()") == int(g["GENESIS_PREV_MAX_LEVEL_LAYER_HASH"], 16)
     assert arb.call(ctx["bridge"], "storedLastSeenBlockSeqNo()") == int(g["GENESIS_SEED_SEQNO"])
+
+
+def owner_keys():
+    with open(os.path.join(env("ACKI_CONFIG"), "USDCBridge.keys.json")) as f:
+        return f.read().replace("\n", "")
+
+
+def test_31_light_client_committee_set_once(run, an, ctx):
+    """The committee lc-prove proved becomes the light client's, once, with the Gloas fork slot."""
+    run.finish("lc-prove", LC_PROOF_SECS)
+    proved = kv(run.get("lc.env"))
+    assert int(proved["LC_COMMITMENT"], 16) != 0, proved
+    run.job("lc-bootstrap", stdin=owner_keys(), LC=ctx["lc"])
+    run.finish("lc-bootstrap", 900)
+    got = an("lc", ctx["lc"])
+    assert int(got["LC_COMMITTEE"], 16) == int(proved["LC_COMMITMENT"], 16), (got, proved)
+    assert int(got["LC_PERIOD"]) == int(proved["LC_PERIOD"]), (got, proved)
+    assert got["LC_GLOAS_SET"] == "true" and int(got["LC_GLOAS_SLOT"]) == 11296768, got
+    print(f"  committee of period {got['LC_PERIOD']}: {got['LC_COMMITTEE']}")
+    ctx["lc_period"] = int(got["LC_PERIOD"])
+
+
+def test_32_owner_cannot_accept_blocks_or_change_the_committee(an, ctx):
+    """From here on no block is accepted by hand: the owner's anchors are off for Sepolia (the
+    flip in lc-bootstrap) and for Arbitrum Sepolia, and the light client's owner rotation is off."""
+    assert an("disable-owner-anchors", ARB_CHAIN).get("OWNER_ANCHORS") == "false", \
+        f"isOwnerAnchorsEnabled({ARB_CHAIN}) is still true after disableOwnerAnchorsOn"
+    assert an("owner-anchors", SEPOLIA_CHAIN).get("OWNER_ANCHORS") == "false", \
+        f"isOwnerAnchorsEnabled({SEPOLIA_CHAIN}) is still true after flip-owner"
+    assert an("lc", ctx["lc"]).get("LC_OWNER_ROTATION") == "false", "the light client's owner rotation is on"
 
 
 # ── 4 · relayers ────────────────────────────────────────────────────────────
@@ -139,12 +211,14 @@ def test_40_sender_keys_funded(run, arb):
         assert arb.eth(f[f"{role}_ADDRESS"]) > 0, f"{role.lower()} {f[f'{role}_ADDRESS']} has no ETH"
 
 
-def test_41_relayers_started(run, owner_as_light_client):
-    """daemon-live and arbitrum-anchors start and say so in their logs."""
+def test_41_relayers_started(run, an, ctx):
+    """eth-lc-relayer, daemon-live and arbitrum-anchors start and say so in their logs; the light
+    client accepts its first Sepolia checkpoint."""
+    # Any key signs submitUpdate, submitAncestry and proveBlock (they are permissionless); the
+    # owner's is at hand in the config, and after test_32 it can no longer accept anything.
+    run.job("lc-relayer", stdin=owner_keys(), LC=ctx["lc"])
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
-    # Any key signs proveBlock (it is permissionless); the owner's is at hand in the config.
-    with open(os.path.join(env("ACKI_CONFIG"), "USDCBridge.keys.json")) as f:
-        run.job("anchors", stdin=f.read().replace("\n", ""))
+    run.job("anchors", stdin=owner_keys())
     wait_for("daemon-live reads the bridge's bundle stride", lambda: "bundle stride" in run.log("relayer"),
              600, log=lambda: run.log("relayer"))
     wait_for("daemon-live starts its loop", lambda: "daemon starting" in run.log("relayer"),
@@ -153,7 +227,11 @@ def test_41_relayers_started(run, owner_as_light_client):
              300, log=lambda: run.log("anchors"))
     wait_for("arbitrum-anchors starts", lambda: "arbitrum-anchors starting" in run.log("anchors"),
              300, log=lambda: run.log("anchors"))
-    for job in ("relayer", "anchors"):
+    wait_for("eth-lc-relayer gets its first checkpoint accepted",
+             lambda: "submitUpdate accepted" in run.log("lc-relayer"), LC_PROOF_SECS, log=lambda: run.log("lc-relayer"))
+    got = an("lc", ctx["lc"])
+    assert int(got["LC_UPDATES"]) >= 1 and int(got["LC_PERIOD"]) == ctx["lc_period"], got
+    for job in ("lc-relayer", "relayer", "anchors"):
         assert run.wait(job, 1) is None, f"{job} exited\n" + tail(run.log(job))
 
 
@@ -203,30 +281,42 @@ def test_51_deposit_event_received(run, ctx):
     assert state[1].startswith("depositId"), state
 
 
-def test_52_deposit_block_anchored(run, an, owner_as_light_client):
-    """The deposit's Arbitrum block reaches the anchor set through ArbitrumBlockVerifier."""
+def test_52_light_client_accepts_spans(run):
+    """The light client accepts the Sepolia blocks between two checkpoints (submitAncestry): an
+    Arbitrum assertion's Sepolia block is one of those."""
+    wait_for("eth-lc-relayer gets a span accepted", lambda: "submitAncestry accepted" in run.log("lc-relayer"),
+             2 * LC_PROOF_SECS, log=lambda: run.log("lc-relayer"))
+    assert "span given up" not in run.log("lc-relayer"), \
+        "eth-lc-relayer gave a span up: its blocks will never be accepted\n" + tail(run.log("lc-relayer"))
+
+
+def test_53_deposit_block_anchored(run, an):
+    """The deposit's Arbitrum block reaches the anchor set through ArbitrumBlockVerifier, from an
+    assertion in a Sepolia block the light client accepted."""
     state = step_done(run, "anchor", "the deposit block is accepted on Acki Nacki", ANCHOR_SECS)
-    assert owner_as_light_client, "no Sepolia block was owner-anchored, so the verifier proved nothing"
     assert an("accepted", ARB_CHAIN, state[1]).get("ACCEPTED") == "true", f"isAcceptedBlockHash({ARB_CHAIN}, {state[1]})"
+    log = run.log("anchors")
+    assert "proveBlock sent" in log and "the bridge accepts the deposit block" in log, \
+        "arbitrum-anchors did not get the block accepted through proveBlock\n" + tail(log)
 
 
-def test_53_deposit_proof_generated(run):
+def test_54_deposit_proof_generated(run):
     """The deposit prover builds the proof."""
     step_done(run, "prove", "the deposit proof is generated", 3600)
 
 
-def test_54_deposit_finalized_on_acki_nacki(run):
+def test_55_deposit_finalized_on_acki_nacki(run):
     """finalizeDeposit is sent to Acki Nacki and accepted."""
     step_done(run, "finalize", "finalizeDeposit is confirmed", 900)
 
 
-def test_55_deposit_minted(run):
+def test_56_deposit_minted(run):
     """The voucher confirms the deposit: USDC is minted on Acki Nacki."""
     state = step_done(run, "credit", "the deposit is minted (confirmDeposit)", 900)
     assert state[1].startswith("confirmDeposit"), state
 
 
-def test_56_deposit_delivered(run, an, ctx):
+def test_57_deposit_delivered(run, an, ctx):
     """The CLI ends well, and the 2 USDC are on the multisig."""
     run.finish("cli-deposit", 600)
     summary = [json.loads(line) for line in run.log("cli-deposit").splitlines()

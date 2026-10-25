@@ -35,6 +35,8 @@ ARB_RPC = os.environ.get("ARB_RPC", "https://sepolia-rollup.arbitrum.io/rpc")
 ARB_USDC = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
 ARB_CHAIN, SEPOLIA_CHAIN = 421614, 11155111
 ARB_ROLLUP = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4"
+# Sepolia's beacon chain: genesis time, seconds per slot, slots per sync-committee period.
+SEPOLIA_BEACON_GENESIS, SLOT_SECS, PERIOD_SLOTS = 1655733600, 12, 8192
 
 
 def env(name):
@@ -250,7 +252,7 @@ def run(ph, an, sha):
     threading.Thread(target=heartbeat, daemon=True).start()
     yield r
     stop.set()
-    for job in ("relayer", "anchors", "cli-deposit", "cli-withdraw"):
+    for job in ("lc-prove", "lc-bootstrap", "lc-relayer", "relayer", "anchors", "cli-deposit", "cli-withdraw"):
         text = r.log(job, 80)
         if text:
             print(f"\n----- {job} (last 80 lines)\n{text}")
@@ -272,30 +274,3 @@ def tunnels(an, ph):
     yield procs
     for p in procs:
         p.terminate()
-
-
-@pytest.fixture(scope="session")
-def owner_as_light_client(an, run):
-    """Stands in for the Sepolia light client: whenever arbitrum-anchors holds a proof whose
-    Sepolia block the bridge does not accept yet, the owner accepts that block."""
-    anchored, stop = [], threading.Event()
-
-    def loop():
-        while not stop.wait(20):
-            try:
-                state = json.loads(run.get("anchors-state.json") or "{}")
-            except ValueError:
-                continue
-            for ready in state.get("ready", []):
-                h = ready["parent_hash"]
-                if h in anchored:
-                    continue
-                answer = an("anchor", SEPOLIA_CHAIN, h)
-                anchored.append(h)
-                line = f"{datetime.now(timezone.utc):%FT%TZ} owner accepted Sepolia block {h}: {answer}\n"
-                print("  " + line.strip())
-                run.put_log("owner-anchors", line)
-    t = threading.Thread(target=loop, daemon=True)
-    t.start()
-    yield anchored
-    stop.set()

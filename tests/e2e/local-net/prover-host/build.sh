@@ -21,6 +21,9 @@ build crates/bridge-evm-aggregator --bin aggregate-proof
 build crates/deposit-relayer-daemon --bin deposit-relayer
 build deposit-prover --example fetch_deposit_data --example export_vk_blob --example export_blake2b_proof \
   --example downsize_srs
+# The Sepolia light client's relayer and its step prover.
+build crates/eth-light-client-relayer --features live-submit --bin eth-lc-relayer
+build eth-light-client-prover --example export_step_vk_blob
 t=/cache/target
 install -m 0755 "$t/crates_bridge-prover-libraries/release/relayer" "$t/crates_bridge-prover-libraries/release/compute_bridge_anchors" \
   "$t/crates_bridge-prover-libraries/release/ackinacki-bridge" "$t/crates_bridge-evm-aggregator/release/aggregate-proof" \
@@ -28,6 +31,8 @@ install -m 0755 "$t/crates_bridge-prover-libraries/release/relayer" "$t/crates_b
 for e in fetch_deposit_data export_vk_blob export_blake2b_proof downsize_srs; do
   install -m 0755 "$t/deposit-prover/release/examples/$e" /out/
 done
+install -m 0755 "$t/crates_eth-light-client-relayer/release/eth-lc-relayer" \
+  "$t/eth-light-client-prover/release/examples/export_step_vk_blob" /out/
 install -m 0644 /src/deposit-prover/configs/circuit_params.json /out/
 
 # Foundry and the Solidity tree the deploy and deposit jobs run, both pinned.

@@ -295,3 +295,35 @@ submit gets exit 51 and is reported as already finalized.
 No service-level targets are defined in the code. How quickly a dead daemon must be
 replaced, and how long a parked deposit may wait, is a production decision for the
 bridge operator.
+
+## 9. Deposits from an Arbitrum chain: `arbitrum-anchors`
+
+`daemon` finalizes a deposit only once its block is in the bridge's anchor set
+(`isAcceptedBlockHash`). For a bridge on Arbitrum Sepolia or Arbitrum One,
+`deposit-relayer arbitrum-anchors` puts it there: it calls
+`ArbitrumBlockVerifier.proveBlock` on Acki Nacki (`src/arbitrum.rs`). Run one per
+Arbitrum chain, next to that chain's `daemon`.
+
+| Setting | Value | Why |
+|---|---|---|
+| `PARENT_RPC_URL` | Sepolia for Arbitrum Sepolia, Ethereum for Arbitrum One; must serve `eth_getBlockReceipts` | The assertion and its receipt are on the parent chain. Checked against the Arbitrum chain at start-up. |
+| `ARBITRUM_RPC_URL` | any node; no archive needed | The proofs are taken when each batch lands, while its state is seconds old. |
+| `--bridge-address`, `--from-block` | `AckiNackiBridge` on the Arbitrum chain and its deploy block | Its `Deposit` logs are the blocks to anchor. |
+| `AN_GRAPHQL_URL`, `AN_KEYS_PATH`, `AN_BRIDGE_ABI_PATH`, `AN_TOKEN_BRIDGE` | as for `daemon` | Any key signs: `proveBlock` is permissionless. |
+| `AN_ARBITRUM_VERIFIER_ABI_PATH` | `contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json` | The verifier's address comes from the bridge (`getL2Verifier`). The relayer refuses to start before `deployL2Verifier`. |
+| `ARBITRUM_ANCHOR_STATE` | an absolute path on persistent disk, backed up like `state.json` | It keeps the proofs taken at batch time until their assertion lands, 30–60 min later. They cannot be fetched again. |
+
+The proofs wait in the state file until the bridge accepts the parent-chain block
+that holds the assertion. That is the parent chain's light client: run
+`eth-lc-relayer` with `--submit-ancestry`, since an assertion is rarely in a
+checkpoint block. While owner anchors are on, the owner can accept the block by hand
+instead.
+
+A restart loses nothing that is in the state file. A batch that lands while the
+relayer is down costs a delay, not a deposit: the next batch covers the same blocks.
+A fresh state file starts from the current parent-chain block.
+
+`deposit-relayer arbitrum-vector --out <file>` writes one `proveBlock` vector from
+the live chains, built the way `arbitrum-anchors` builds its calls, and sends
+nothing. The bench (`scripts/l2-block-proof-bench`) and the local-network test take
+that file.

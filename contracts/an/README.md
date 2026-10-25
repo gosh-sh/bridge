@@ -183,17 +183,16 @@ The verifier code and the recorded verifiers are not carried through
 account already exists at the same address, so the deploy and `initialize`
 fail on it and bounce, and the bridge records the address again.
 
-Nothing in this repository calls `proveBlock` yet. A relayer that does needs
-the state at M, and M is already 30 minutes (Arbitrum Sepolia) or an hour
-(Arbitrum One) old when its assertion lands, which is more state than an
-ordinary node keeps. It does not need an archive node. M is always the last
-block of a batch, and the batch is posted to the parent chain's
-`SequencerInbox` within a minute of M. So the relayer rolls forward: on each
-`SequencerBatchDelivered` it takes M's header and the `eth_getProof` for the
-slots of the deposits still waiting, while that state is seconds old. When an
-assertion ends at that block, it calls `proveBlock` with the parent-chain
-receipt. `scripts/l2-block-proof-bench/fetch_vectors.py --follow` does the same
-for one vector.
+`deposit-relayer arbitrum-anchors` calls `proveBlock`; see section 9 of
+`crates/deposit-relayer-daemon/docs/operator_runbook.md`. It needs the state
+at M, and M is already 30 minutes (Arbitrum Sepolia) or an hour (Arbitrum One)
+old when its assertion lands, which is more state than an ordinary node keeps.
+It does not need an archive node. M is always the last block of a batch, and
+the batch is posted to the parent chain's `SequencerInbox` within a minute of
+M. So the relayer rolls forward: on each `SequencerBatchDelivered` it takes M's
+header and the `eth_getProof` for the slots of the deposits still waiting,
+while that state is seconds old. When an assertion ends at that block, it calls
+`proveBlock` with the parent-chain receipt.
 
 ## Transfer and network limits
 

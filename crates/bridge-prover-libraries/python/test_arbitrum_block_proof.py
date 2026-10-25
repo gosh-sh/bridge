@@ -121,11 +121,14 @@ def main():
 
     tracer.log_phase(f"deployL2Verifier({l2}, {l1}, {rollup})")
     owner_call("deployL2Verifier", {"l2ChainId": str(l2), "parentChainId": str(l1), "rollup": rollup})
-    got = bridge_getter("getL2Verifier", {"l2ChainId": str(l2)})
+
+    # The API answers from account state that can predate the call by a block.
+    def recorded():
+        got = bridge_getter("getL2Verifier", {"l2ChainId": str(l2)})
+        return got if int(str(got.get("parentChainId") or "0"), 0) == l1 and got.get("verifier") else None
+    got = wait_for(f"getL2Verifier({l2}) to record the verifier", recorded, ANCHOR_TIMEOUT_SECS)
     verifier = got["verifier"]
     tracer.log(f"  recorded verifier {verifier}, parent chain {got['parentChainId']}")
-    if int(got["parentChainId"], 0) != l1:
-        raise SystemExit(f"getL2Verifier: parent chain {got['parentChainId']}, want {l1}")
     target = common.to_dapp_address(verifier)
     wait_for("the verifier account active", lambda: common.is_account_active(target), ANCHOR_TIMEOUT_SECS)
 

@@ -75,45 +75,53 @@ The other nodes' APIs are no way around this: they want the token `nginx0` adds.
 
 ## Arbitrum Sepolia: `arbitrum-e2e`
 
-After `run-test`, `tests/e2e/local-net/arbitrum-e2e.sh` deploys a fresh `AckiNackiBridge` on
-Arbitrum Sepolia (421614) and moves USDC both ways between it and this network:
+After `run-test`, the pytest suite in `tests/e2e/local-net/arbitrum/` deploys a fresh
+`AckiNackiBridge` on Arbitrum Sepolia (421614) and sends 2 USDC from it to this network with
+`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. Each
+test is one step and asserts what the step must have produced, from the chains or from the
+log of the job that did it; `-x` stops at the first failure, which names the step, what it
+waited for and the tail of the log.
 
-1. `genesis`: `compute_bridge_anchors` at the network's latest 1024-block boundary (L1
-   anchoring), with the BK set from the generated `config/block_keeperN_bls.keys.json`.
-2. `deploy`: `DeployShellnetE2EBridge` on Arbitrum Sepolia with Circle's USDC, the four
-   verifiers and the genesis above.
-3. On the host (`an-on-host.sh` → `python/arbitrum_e2e_an.py`): `setTrustedL1Bridge(421614,
-   bridge)` and an empty multisig.
-4. `deposit`: 2 USDC from the deployer to the multisig, and gas for the withdrawal's burner.
-5. `relayer daemon-live` proves bundles from the seed and submits `verifyBlock` from the start;
-   `deposit-relayer arbitrum-anchors` takes the slot proofs as batches land; `deposit-relayer
-   daemon` proves the deposit and finalizes it once its block is accepted. When
-   arbitrum-anchors holds a proof whose Sepolia block the bridge does not accept yet, the
-   runner owner-anchors that block (`setAcceptedBlockHash(11155111, …)`), standing in for the
-   Sepolia light client.
-6. Once the 2 USDC are on the multisig, `ackinacki-bridge withdraw` burns them and claims them
-   back to the depositor on Arbitrum Sepolia. Done when it exits 0.
+| Tests | Step |
+|---|---|
+| `test_00`–`01` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC |
+| `test_10`–`12` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_20`–`22` | Genesis at the network's latest 1024-block boundary; the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier |
+| `test_30` | `setTrustedL1Bridge(421614, bridge)`; the bridge holds the genesis anchor |
+| `test_40`–`42` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` and `arbitrum-anchors` log their start; an empty multisig |
+| `test_50`–`56` | `deposit`: sent, Deposit event, block anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
+| `test_60`–`65` | `withdraw`: burn, WithdrawalInitiated, `verifyBlock` covering the burn, Circuit 4 proof, `withdrawByProof` paid, 2 USDC back |
 
-The provers and daemons run on a separate **prover host**, not on this one: bundle proving
-peaks at ~23 GB and reads ~40 GB of SRS and keys. The runner reaches it with a CI key whose
-`authorized_keys` entry allows only the dispatcher (a copy of
+Owner calls and Acki Nacki reads run on this host (`an-on-host.sh` →
+`python/arbitrum_e2e_an.py`). While the deposit waits for its anchor, a fixture stands in for
+the Sepolia light client: when `arbitrum-anchors` holds a proof whose Sepolia block the bridge
+does not accept yet, the owner accepts that block (`setAcceptedBlockHash(11155111, …)`).
+
+The provers, daemons and the CLI run on a separate **prover host**, not on this one: bundle
+proving peaks at ~23 GB and reads ~40 GB of SRS and keys. The runner reaches it with a CI key
+whose `authorized_keys` entry allows only the dispatcher (a copy of
 `tests/e2e/local-net/prover-host/ci-entry` in the CI directory's `bin/`) and the tunnel ports
 127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
-socket. It builds each commit once in a `rust:1-bookworm` container (`prover-host/build.sh`,
-caches in the CI directory), and runs `prover-host/jobs/*.sh` on a docker network of its own
-where `nginx0` and `node0..4` are proxies to the runner's tunnels. The CI directory holds its
-own copy of the SRS (K=17–22) and proving keys, and nothing else on the host reads or writes it.
+socket and capped memory and CPU (40 GB / 12 cores for the build and the proving jobs, 8 GB /
+4 cores for the rest). It builds each commit once in a `rust:1-bookworm` container
+(`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
+set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own
+where `nginx0` and `node0..4` are proxies to the runner's tunnels.
+
+A run is named `arbitrum-e2e-<UTC timestamp>`. Its work directory is `runs/<run>/` and its
+logs `run-logs/<run>/<job>.log` in the CI directory, an external volume every job mounts as
+`/logs`: the logs outlive the containers, and the next run's clean removes everything else.
 
 | Secret | Holds |
 |---|---|
 | `PROVER_HOST`, `PROVER_HOST_PORT`, `PROVER_HOST_USER` | the prover host's ssh address, port and user: three secrets so the log masks each |
 | `PROVER_HOST_SSH_KEY` | the private half of its CI key, newline-joined with `@` |
-| `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY` | the deployer on Arbitrum Sepolia; it also sends `verifyBlock`, and the burner key is derived from it |
+| `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY`, `ARBITRUM_SEPOLIA_E2E_ADDRESS` | the deployer and depositor on Arbitrum Sepolia, and its address; the relayer and burner keys are derived from it |
 
 The deployer needs Arbitrum Sepolia ETH and USDC (https://faucet.circle.com, network
-Arbitrum Sepolia): each run deposits 2 USDC and gets them back. Every run deploys a new
-bridge; the runner prints its Arbiscan link.
+Arbitrum Sepolia): each run deploys a bridge (~0.0013 ETH), funds the two derived senders and
+moves 2 USDC there and back.
 
 ## Knobs (one place each; the future ansible role takes them over)
 

@@ -13,7 +13,10 @@ build() { # <workspace dir> <cargo args...>
   echo "== $dir: cargo build $*"
   (cd "/src/$dir" && CARGO_TARGET_DIR="/cache/target/$name" cargo build --release --locked "$@")
 }
-build crates/bridge-prover-libraries -p bridge-relayer-daemon --bin relayer -p bridge-prover-lib --bin compute_bridge_anchors -p ackinacki-bridge --bin ackinacki-bridge
+# ackinacki-bridge with dev-unfixed-bridge: MIN_BRIDGE_VERSION is unset until the release that
+# sets it, and without the feature the CLI refuses every bridge, this run's fresh one included.
+build crates/bridge-prover-libraries -p bridge-relayer-daemon --bin relayer -p bridge-prover-lib --bin compute_bridge_anchors \
+  -p ackinacki-bridge --bin ackinacki-bridge --features ackinacki-bridge/dev-unfixed-bridge
 build crates/bridge-evm-aggregator --bin aggregate-proof
 build crates/deposit-relayer-daemon --bin deposit-relayer
 build deposit-prover --example fetch_deposit_data --example export_vk_blob --example export_blake2b_proof \

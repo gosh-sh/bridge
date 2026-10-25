@@ -1,6 +1,7 @@
 # Sourced by every job. The dispatcher (ci-entry job) mounts: /src (the commit, read-only),
 # /bin-ci (its build), /params (SRS and proving keys), /cache, /out (files the runner
-# reads back with `ci-entry get`), /work (this run's scratch) and /run/input (stdin).
+# reads back with `ci-entry get`), /work (this run's scratch), /logs (the run's logs, which
+# outlive it; this job's own output already goes to /logs/$JOB.log) and /run/input (stdin).
 set -euo pipefail
 export PATH=/bin-ci:$PATH
 OUT=/out WORK=/work
@@ -14,3 +15,6 @@ log() { printf '[%s] %s\n' "$(date -u +%T)" "$*"; }
 load() { set -a; . "$OUT/$1"; set +a; }   # an env file an earlier job wrote
 # KEY=VALUE lines, appended to an env file in /out that later jobs and the runner read.
 emit() { local f=$1; shift; for kv in "$@"; do printf '%s\n' "$kv" >>"$OUT/$f"; done; }
+# Keys derived from the deployer's, one per sender, so that no two processes share a nonce:
+# daemon-live replaces whatever waits at its account's next nonce.
+derive_key() { cast keccak "$(cast concat-hex "$1" "$(cast from-utf8 "$2")")"; }

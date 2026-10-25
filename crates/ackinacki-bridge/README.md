@@ -1201,7 +1201,10 @@ Preflight, in order:
   still anchors this deposit's chain (on 1.7.0 that flag is still
   `getAnchorConfig().ownerAnchorsEnabled`, one bool for every chain); and
   with owner anchors off the light client must pass its
-  [readiness checks](#when-only-the-light-client-anchors);
+  [readiness checks](#when-only-the-light-client-anchors); from bridge
+  1.14.0, `getL2Verifier(chainId)` naming an Arbitrum verifier for the
+  deposit's chain takes the light client's place: that verifier accepts the
+  chain's blocks from the assertions the rollup posts to its parent chain;
   `getDepositVoucherCodeHash()` is the voucher code this build carries
   (otherwise the CLI cannot compute the voucher's address, and a newer CLI is
   needed); and the recipient: an active account must live in the dapp `--to`
@@ -1245,7 +1248,7 @@ profile it installed before deposits existed.
 
 | Flag | Value | Refused with exit 2 |
 |------|-------|---------------------|
-| `--network` | `sepolia` (chain id 11155111), the only deposit network in this version | any other name |
+| `--network` | `sepolia` (chain id 11155111) or `arbitrum-sepolia` (chain id 421614) | any other name |
 | `--amount` | USDC, at most 6 fractional digits, never rounded; above 0 and at most `u64::MAX` micro-USDC | anything else |
 | `--to` | `dapp_id::account_id`, both halves 64 hex characters without `0x`, the account non-zero | a wrong shape; an active account that lives in another dapp: `--to names dapp <x>, but account <acc> lives in dapp <y>` |
 
@@ -1292,8 +1295,8 @@ time limit, which covers the retries too.
 
 | Flag | Value | Default or effect |
 |------|-------|-------------------|
-| `--qr-mode` | `walletconnect`, `eip681` or `both` | `walletconnect` |
-| `--from-address` | `0x…`, the sending account | checked against the wallet session in `walletconnect`; required by `eip681` and `both` |
+| `--qr-mode` | `walletconnect`, `eip681`, `both` or `local-key` | `walletconnect`. `local-key` uses no wallet: the CLI signs both transactions itself with the private key in `BRIDGE_DEPOSIT_PRIVATE_KEY` (environment only, never a flag) and sends them through `--rpc-url`; for unattended runs such as CI |
+| `--from-address` | `0x…`, the sending account; `BRIDGE_DEPOSIT_FROM` | checked against the wallet session in `walletconnect` and against the key in `local-key`; required by `eip681`, `both` and `local-key` |
 | `--qr-out` | a path ending in `.png` or `.svg` | the WalletConnect QR is written there as well |
 | `--uri-only` | flag | print the URI as text, without the QR picture |
 | `--qr-invert` | flag | swap dark and light in the text code, for a light-on-dark terminal |

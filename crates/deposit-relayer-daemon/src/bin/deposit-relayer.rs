@@ -1093,6 +1093,7 @@ async fn arbitrum_view(
         evm_bridge,
         parent_log_span,
         arbitrum_log_span,
+        batch_txs: Default::default(),
     })
 }
 

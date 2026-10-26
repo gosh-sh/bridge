@@ -151,7 +151,7 @@ steps:
       - bash tests/e2e/local-net/gen-zerostate.sh
 
   # One network per host at a time, shared with dexdo's e2e through the same lease files;
-  # see tests/e2e/local-net/host-lease.sh. A live lease is waited out for up to 30 minutes.
+  # see tests/e2e/local-net/host-lease.sh. dexdo's live lease is waited out for up to 30 minutes; an earlier bridge run's is taken over at once.
   lease-acquire:
     depends_on: [gen-zerostate]
     image: *ansible_image

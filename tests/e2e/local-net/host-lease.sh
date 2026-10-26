@@ -52,15 +52,13 @@ esac
 # when a lease is dead, or one could take over a lease the other still
 # considers live. A dead run blocks the host for that long at most.
 #
-# A lease another bridge pipeline holds is judged by this repository's own
-# cadence instead: every bridge step renews it within minutes (net-up, the
-# longest gap, takes ~15 min), so one not renewed for 30 min belongs to a
-# pipeline that is over, e.g. one whose net-down was cut off before its
-# release. The next bridge run takes it over and net-up tears down what that
-# run left. dexdo still waits its full TTL on a bridge lease, which only
-# makes it more careful.
+# A lease another bridge pipeline holds is taken over at once: the newest
+# bridge run wins. Woodpecker cancels a pull request's running pipeline on a
+# new push, and a cancelled run never releases (no step runs after a cancel),
+# so waiting on a bridge lease only ever waits on a run that is gone. If the
+# older run is still alive, its next `assert` fails and it stops. net-up then
+# tears down what that run left. dexdo's leases keep the full TTL.
 TTL=${3:-5400}
-BRIDGE_TTL=1800
 
 # All state transitions run under this flock. Acquiring, reading the current
 # lease, deciding whether it is free/ours/expired, and writing the new owner
@@ -107,13 +105,15 @@ do_acquire() {
   _read
   if [ -n "$L_ID" ] && [ "$L_ID" != "$ID" ]; then
     AGE=$(( $(_now) - L_TS ))
-    ttl=$TTL
-    case "$L_ID" in bridge-*) [ "$ttl" -gt "$BRIDGE_TTL" ] && ttl=$BRIDGE_TTL ;; esac
-    if [ "$AGE" -lt "$ttl" ]; then
-      echo "FATAL: live lease held by pipeline $L_ID (age ${AGE}s < TTL ${ttl}s)"
-      exit 71
-    fi
-    echo "lease of $L_ID not renewed for ${AGE}s (TTL ${ttl}s): taking it over"
+    case "$L_ID" in
+      bridge-*) echo "lease of $L_ID (age ${AGE}s) belongs to an earlier bridge run: taking it over" ;;
+      *)
+        if [ "$AGE" -lt "$TTL" ]; then
+          echo "FATAL: live lease held by pipeline $L_ID (age ${AGE}s < TTL ${TTL}s)"
+          exit 71
+        fi
+        ;;
+    esac
   fi
   # Reaching here means the lease is ours already, absent, or expired.
   # Takeover of an expired lease happens right here, still under the guard's

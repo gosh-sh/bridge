@@ -19,6 +19,9 @@ logs go to stderr.
   owner-anchors <chain>     OWNER_ANCHORS=true|false (isOwnerAnchorsEnabled)
   msig                      deploy a multisig without USDC (the deposit brings it):
                             MSIG, MSIG_ACCOUNT, MSIG_KEYS (the keys file)
+  msig-funded <amount>      deploy a multisig and have the owner mint <amount> base units of
+                            USDC to it with mintAndSendBridged for 421614, so the withdrawal
+                            does not wait for the deposit: MSIG, MSIG_ACCOUNT, MSIG_KEYS
   accepted <chain> <hash>   ACCEPTED=true|false
   ecc <dapp::account>       ECC3=<base units of USDC on the account>
 
@@ -36,6 +39,8 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 os.environ["PATH"] = os.path.join(_HERE, "bin") + os.pathsep + os.environ.get("PATH", "")
+# mintAndSendBridged books what it mints for this chain (helper.bridge_e2e.DST_CHAIN_ID).
+os.environ.setdefault("DST_CHAIN_ID", "421614")
 
 from helper import common  # noqa: E402
 from helper import bridge_e2e as be  # noqa: E402
@@ -43,7 +48,7 @@ from helper.bridge_e2e import (  # noqa: E402
     USDC_BRIDGE_ABI, USDC_BRIDGE_ADDRESS, USDC_BRIDGE_KEYS,
     materialize_usdc_bridge_key_from_node_config, validate_usdc_bridge_key,
 )
-from helper.msig import deploy_multisig  # noqa: E402
+from helper.msig import deploy_multisig, mint_usdc  # noqa: E402
 
 ARB_SEPOLIA = 421614
 SEPOLIA = 11155111
@@ -161,6 +166,18 @@ def main():
             )
             # A multisig lives in its own dapp: keep the address the helper returns.
             ext = address if "::" in address else common.to_dapp_address(address)
+            answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
+        elif cmd == "msig-funded" and len(args) == 1:
+            gql = be.GqlClient(GRAPHQL_URL)
+            keys = os.path.join(WORK_DIR, "msig_arbitrum_withdraw.keys.json")
+            address, _abi = deploy_multisig(
+                tracer, gql, work_dir=WORK_DIR, msig_key_path=keys,
+                usdc_bridge_key_path=USDC_BRIDGE_KEYS, is_shellnet=False,
+                verbose_faucet=False, mint=False,
+            )
+            ext = address if "::" in address else common.to_dapp_address(address)
+            mint_usdc(tracer, gql, "0:" + ext.split("::")[1], int(args[0]),
+                      usdc_bridge_key_path=USDC_BRIDGE_KEYS, bridged=True)
             answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
         elif cmd == "lightclient" and not args:
             with open(USDC_BRIDGE_KEYS) as f:

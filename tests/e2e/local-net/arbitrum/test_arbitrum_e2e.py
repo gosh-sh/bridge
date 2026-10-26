@@ -11,7 +11,9 @@ ArbitrumBlockVerifier from those Sepolia blocks.
 The run is ordered for time. The bridge's genesis is the network's start (seq_no 0), so it is
 deployed and the deposit sent as soon as the network is up; the light client is set up while
 the deposit waits for its Arbitrum assertion (half an hour at least), and daemon-live proves
-the network's 16384-block bundles from the start.
+the network's 16384-block bundles from the start. The withdrawal does not wait for the deposit:
+its 2 USDC are minted by the owner for 421614 and burned right away, so the burn lands in the
+first bundle, and the bridge pays it out of the deposit's 2 USDC.
 
 The tests run in file order and pytest stops at the first failure (-x): each one is a step
 of the scenario and asserts what that step must have produced, from the chains or from the
@@ -249,6 +251,40 @@ def test_41_deposit_event_received(run, ctx):
     assert state[1].startswith("depositId"), state
 
 
+# ── 4b · withdrawal: ackinacki-bridge withdraw, alongside the deposit ──────
+
+
+def test_42_withdrawal_multisig_funded(an, ctx):
+    """A second multisig gets 2 USDC the owner mints with mintAndSendBridged for 421614, so the
+    withdrawal runs alongside the deposit instead of after it: the bridge on Arbitrum Sepolia
+    already holds the deposit's 2 USDC to pay it with."""
+    got = an("msig-funded", AMOUNT)
+    ctx.update(wmsig=got["MSIG"], wmsig_keys=an.cat(got["MSIG_KEYS"]))
+    assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
+
+
+def log_line(run, pattern, what, timeout):
+    def check():
+        text = run.log("cli-withdraw")
+        code = run.wait("cli-withdraw", 1)
+        m = re.search(pattern, text)
+        assert m or code in (None, 0), f"ackinacki-bridge withdraw exited {code} before: {what}\n" + tail(text)
+        return m
+    return wait_for(what, check, timeout, log=lambda: run.log("cli-withdraw"))
+
+
+def test_43_burn_on_acki_nacki(run, ctx):
+    """The CLI burns the 2 USDC on Acki Nacki."""
+    run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY") + "\n" + ctx["wmsig_keys"].replace("\n", ""),
+            FROM=ctx["wmsig"], TO=ctx["address"], AMOUNT="2")
+    log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
+
+
+def test_44_withdrawal_event_captured(run):
+    """The bridge emits WithdrawalInitiated and the CLI captures it."""
+    log_line(run, r"captured WithdrawalInitiated event", "WithdrawalInitiated is captured", 900)
+
+
 # ── 5 · the light client, while the deposit waits for its assertion ────────
 
 
@@ -376,51 +412,31 @@ def test_65_deposit_delivered(run, an, ctx):
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the multisig does not hold the 2 USDC"
 
 
-# ── 7 · withdrawal: ackinacki-bridge withdraw ───────────────────────────────
+# ── 7 · the withdrawal lands ────────────────────────────────────────────────
 
 
-def log_line(run, pattern, what, timeout):
-    def check():
-        text = run.log("cli-withdraw")
-        code = run.wait("cli-withdraw", 1)
-        m = re.search(pattern, text)
-        assert m or code in (None, 0), f"ackinacki-bridge withdraw exited {code} before: {what}\n" + tail(text)
-        return m
-    return wait_for(what, check, timeout, log=lambda: run.log("cli-withdraw"))
-
-
-def test_70_burn_on_acki_nacki(run, ctx):
-    """The CLI burns the 2 USDC on Acki Nacki."""
-    run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY") + "\n" + ctx["msig_keys"].replace("\n", ""),
-            FROM=ctx["msig"], TO=ctx["address"], AMOUNT="2")
-    log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
-
-
-def test_71_withdrawal_event_captured(run):
-    """The bridge emits WithdrawalInitiated and the CLI captures it."""
-    log_line(run, r"captured WithdrawalInitiated event", "WithdrawalInitiated is captured", 900)
-
-
-def test_72_burn_bundle_verified(run):
+def test_70_burn_bundle_verified(run):
     """daemon-live gets the bundle that holds the burn verified on Arbitrum Sepolia."""
     log_line(run, r"stage 5/6", "verifyBlock covers the burn's bundle", COVERAGE_SECS)
 
 
-def test_73_withdrawal_proof_generated(run):
+def test_71_withdrawal_proof_generated(run):
     """Circuit 4 and its SHPLONK aggregation prove the withdrawal."""
     log_line(run, r"capture \+ prove complete", "the withdrawal proof is generated", 3600)
 
 
-def test_74_withdrawal_paid(run):
+def test_72_withdrawal_paid(run):
     """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
     m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
     run.finish("cli-withdraw", 300)
 
 
-def test_75_usdc_delivered(arb, an, ctx):
-    """The 2 USDC are back on ARBITRUM_SEPOLIA_E2E_ADDRESS, and the multisig is empty."""
+def test_73_usdc_delivered(arb, an, ctx):
+    """The 2 USDC are back on ARBITRUM_SEPOLIA_E2E_ADDRESS, the withdrawal multisig is empty, and
+    the deposit's 2 USDC stay on the recipient multisig."""
     after = arb.usdc(ctx["address"])
     assert after == ctx["usdc_before"], \
         f"{ctx['address']} holds {after / 1e6} USDC, {ctx['usdc_before'] / 1e6} before the deposit"
-    assert int(an("ecc", ctx["msig"])["ECC3"]) == 0, "the multisig still holds USDC"
+    assert int(an("ecc", ctx["wmsig"])["ECC3"]) == 0, "the withdrawal multisig still holds USDC"
+    assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the deposit's 2 USDC left the recipient multisig"

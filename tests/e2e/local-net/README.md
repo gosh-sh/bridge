@@ -90,10 +90,10 @@ waited for and the tail of the log.
 | `test_10`–`12` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the zerostate's keepers); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
-| `test_40`–`41` | `deposit`: sent, Deposit event — as soon as the network is up |
+| `test_40`–`44` | `deposit`: sent, Deposit event — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
 | `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
-| `test_70`–`75` | `withdraw`: burn, WithdrawalInitiated, `verifyBlock` covering the burn, Circuit 4 proof, `withdrawByProof` paid, 2 USDC back |
+| `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, 2 USDC back on the deployer |
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain

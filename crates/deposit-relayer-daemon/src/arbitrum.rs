@@ -432,11 +432,6 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                     Taken::Proofs => report.batches_taken += 1,
                     Taken::Nothing => {},
                     Taken::Unplaced => {
-                        warn!(
-                            batch,
-                            "the Arbitrum node does not know where this batch ends yet; trying \
-                             again on the next ticks"
-                        );
                         state.unplaced_batches.insert(batch, BATCH_RETRIES);
                     },
                 },
@@ -561,7 +556,8 @@ enum Taken {
     Proofs,
     /// No waiting deposit block is covered by it.
     Nothing,
-    /// The Arbitrum node cannot place its last block yet.
+    /// The Arbitrum node cannot place its last block yet, or cannot prove
+    /// it: a load-balanced endpoint answers from a backend without that state.
     Unplaced,
 }
 
@@ -576,6 +572,11 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
         return Ok(Taken::Nothing);
     }
     let Some(m) = view.batch_end(batch).await? else {
+        warn!(
+            batch,
+            "the Arbitrum node does not know where this batch ends yet; trying again on the next \
+             ticks"
+        );
         return Ok(Taken::Unplaced);
     };
     // M's state holds the hashes of blocks M - HISTORY_WINDOW ..= M - 1.
@@ -588,10 +589,28 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
     if wanted.is_empty() {
         return Ok(Taken::Nothing);
     }
-    let (hash, header) = view.arbitrum_header(m).await?;
+    // A read that fails here leaves this batch for a later tick, never the
+    // whole tick: the tick's other events, and its cursor, go on.
+    let unprovable = |e: RelayerError| {
+        warn!(
+            batch,
+            m,
+            error = %e,
+            "the Arbitrum node cannot prove this batch's last block now; trying again on the next \
+             ticks"
+        );
+        Taken::Unplaced
+    };
+    let (hash, header) = match view.arbitrum_header(m).await {
+        Ok(h) => h,
+        Err(e) => return Ok(unprovable(e)),
+    };
     let mut slots = BTreeMap::new();
     for (n, want) in wanted {
-        let (value, proof) = view.history_slot(n, m).await?;
+        let (value, proof) = match view.history_slot(n, m).await {
+            Ok(v) => v,
+            Err(e) => return Ok(unprovable(e)),
+        };
         if value != want {
             warn!(block = n, m, %value, %want, "history slot does not hold the deposit block's hash");
             continue;
@@ -1149,6 +1168,8 @@ mod tests {
         events: Vec<ParentEvent>,
         /// batch → its last block
         batch_ends: BTreeMap<u64, u64>,
+        /// Blocks whose state the node cannot prove.
+        missing_state: Vec<u64>,
     }
 
     #[async_trait]
@@ -1194,6 +1215,11 @@ mod tests {
             Ok(ends.values().copied().find(|&m| h(m) == hash))
         }
         async fn history_slot(&self, n: u64, m: u64) -> Result<(B256, SlotProof), RelayerError> {
+            if self.lock().unwrap().missing_state.contains(&m) {
+                return Err(RelayerError::Eth(format!(
+                    "historical state of {m} is not available"
+                )));
+            }
             let proof = SlotProof {
                 account_proof: vec![Bytes::from(m.to_be_bytes().to_vec())],
                 storage_proof: vec![Bytes::from(n.to_be_bytes().to_vec())],
@@ -1263,6 +1289,7 @@ mod tests {
                 },
             ],
             batch_ends: BTreeMap::from([(7, 150)]),
+            missing_state: vec![],
         })
     }
 
@@ -1412,6 +1439,32 @@ mod tests {
         assert_eq!((r.batches_taken, r.assertions_matched), (1, 1));
         assert!(state.unplaced_batches.is_empty());
         assert_eq!(state.ready[0].end.number, 150);
+    }
+
+    #[tokio::test]
+    async fn a_batch_the_node_cannot_prove_does_not_stop_the_tick() {
+        // Batch 6 ends at 120, whose state the node lacks; batch 7, later in
+        // the same tick, still carries the deposit to its assertion.
+        let chain = one_deposit();
+        {
+            let mut c = chain.lock().unwrap();
+            c.batch_ends.insert(6, 120);
+            c.missing_state.push(120);
+            c.events.insert(0, ParentEvent::Batch {
+                block: 5,
+                log_index: 0,
+                batch: 6,
+            });
+        }
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!((r.batches_taken, r.assertions_matched), (1, 1));
+        assert_eq!(
+            state.parent_cursor, 29,
+            "the tick went through all its events"
+        );
+        assert_eq!(state.unplaced_batches, BTreeMap::from([(6, BATCH_RETRIES)]));
     }
 
     #[tokio::test]

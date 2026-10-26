@@ -5,7 +5,9 @@
 # key. Writes fund.env.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 pk=$(tr -d '[:space:]' </run/input)
-want=$(cast to-wei "${GAS_PER_SENDER:-0.002ether}")
+# GAS_PER_SENDER in cast's form: wei, or a decimal followed by "ether".
+want=$(python3 -c 'import sys; from decimal import Decimal; v = sys.argv[1]
+print(int(Decimal(v[:-5]) * 10**18) if v.endswith("ether") else int(v))' "${GAS_PER_SENDER:-0.002ether}")
 for role in relayer withdraw-burner; do
   addr=$(cast wallet address --private-key "$(derive_key "$pk" "$role")")
   have=$(cast balance "$addr" --rpc-url "$ARB_RPC")

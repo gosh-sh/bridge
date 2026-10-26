@@ -9,7 +9,7 @@ load evm.env
 export BURNER_PRIVATE_KEY; BURNER_PRIVATE_KEY=$(derive_key "$(sed -n 1p /run/input | tr -d '[:space:]')" withdraw-burner)
 sed -n 2p /run/input >"$WORK/msig.keys.json" && chmod 0400 "$WORK/msig.keys.json"
 mkdir -p "$WORK/aggregator/target/release" && ln -sf /bin-ci/aggregate-proof "$WORK/aggregator/target/release/aggregate-proof"
-export RPC_URL=$ARB_RPC BRIDGE_GQL_ENDPOINT=$GQL BRIDGE_ANCHOR_LAYER=1 BRIDGE_I_KNOW_THE_WAIT=true
+export RPC_URL=$ARB_RPC BRIDGE_GQL_ENDPOINT=$GQL BRIDGE_ANCHOR_LAYER=2 BRIDGE_I_KNOW_THE_WAIT=true
 export USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache BRIDGE_VERIFIERS_DIR=/src/contracts/ethereum/verifiers
 export BRIDGE_AGGREGATOR_DIR=$WORK/aggregator BRIDGE_WORK_DIR=$WORK/cli BRIDGE_SNARK_DIR=$WORK/cli/shplonk-snark

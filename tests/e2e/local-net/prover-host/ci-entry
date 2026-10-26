@@ -36,17 +36,18 @@ REPO=https://github.com/gosh-sh/bridge.git
 RUST_IMAGE=rust:1-bookworm
 SOCAT_IMAGE=alpine/socat:1.8.0.1
 # Every CI container is capped so a run cannot starve the host's other services. The caps
-# are per container: the build and the proving jobs (bundle proving peaks near 23 GB) get the
-# large one, the light client's step prover (keygen and proof every epoch, ~42 GB at k=19,
-# done within the 6.4-minute epoch or its spans are lost) its own, everything else the small
-# one. Three large jobs and the light client at once stay under 190 GB and 68 cores.
+# are per container: the build and the deposit prover get the large one; the provers that
+# have to keep pace get the prover one: the light client's step prover (keygen and a proof
+# every epoch, ~42 GB at k=19, done within the 6.4-minute epoch or its spans are lost),
+# daemon-live (a bundle within ~10 minutes, peaking near 23 GB) and the withdrawal's Circuit 4;
+# everything else the small one. All four proving jobs at once stay under 240 GB.
 LIMITS_LARGE=(--memory 40g --memory-swap 40g --cpus 12 --pids-limit 4096)
-LIMITS_LC=(--memory 64g --memory-swap 64g --cpus 32 --pids-limit 4096)
+LIMITS_PROVER=(--memory 64g --memory-swap 64g --cpus 32 --pids-limit 4096)
 LIMITS_SMALL=(--memory 8g --memory-swap 8g --cpus 4 --pids-limit 1024)
 limits() {
   case "$1" in
-    build|relayer|cli-deposit|cli-withdraw) echo large ;;
-    lc-keygen|lc-prove|lc-relayer) echo lc ;;
+    build|cli-deposit) echo large ;;
+    lc-keygen|lc-prove|lc-relayer|relayer|cli-withdraw) echo prover ;;
     *) echo small ;;
   esac
 }
@@ -135,7 +136,7 @@ case "$verb" in
     docker rm -f "ci-$d-$n" >/dev/null 2>&1 || true
     case "$(limits "$n")" in
       large) lim=("${LIMITS_LARGE[@]}") ;;
-      lc) lim=("${LIMITS_LC[@]}") ;;
+      prover) lim=("${LIMITS_PROVER[@]}") ;;
       *) lim=("${LIMITS_SMALL[@]}") ;;
     esac
     docker run -d --name "ci-$d-$n" "${lim[@]}" --network "ci-$d" -u "$(id -u):$(id -g)" -e HOME=/work \

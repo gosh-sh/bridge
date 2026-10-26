@@ -25,10 +25,10 @@ from conftest import (ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOL
                       SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
-GENESIS_SECS = 1800         # upper bound; 1024 blocks take about 6 minutes
-ANCHOR_SECS = 5400          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
-COVERAGE_SECS = 5400        # daemon-live proving the bundle that holds the burn
-RUN_SECS = 4 * 3600         # how long a run may take, for the committee-period check
+GENESIS_SECS = 7200         # upper bound; a fresh network reaches 16384 blocks in about 90 minutes
+ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
+COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
+RUN_SECS = 6 * 3600         # how long a run may take, for the committee-period check
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 
@@ -123,8 +123,9 @@ def test_14_light_client_proof_started(run):
 # ── 2 · contracts ───────────────────────────────────────────────────────────
 
 def test_20_genesis_from_the_network(run, ctx):
-    """The bridge's genesis anchors at the network's latest 1024-block boundary, with the BK set
-    that signs it: the zerostate's keepers replayed up to the seed (genesis.sh)."""
+    """The bridge's genesis anchors at the network's latest 16384-block boundary (L2 anchoring, as
+    the live relayer runs), with the BK set that signs it: the zerostate's keepers replayed up to
+    the seed (genesis.sh)."""
     # The keepers the zerostate generator put in the zerostate. Not config/block_keeper*_bls
     # files: acki-nacki ships nine of them, and a five-keeper network regenerates only 0..4.
     with open(os.path.join(env("ACKI_CONFIG"), "keys_config.json")) as f:
@@ -132,10 +133,10 @@ def test_20_genesis_from_the_network(run, ctx):
     bk_set = {i: nodes[i]["bls_pubkey"] for i in sorted(nodes, key=int)}
     assert bk_set, "keys_config.json in ACKI_CONFIG records no bk_nodes"
     print(f"  {len(bk_set)} block keepers in the zerostate")
-    run.job("genesis", stdin=json.dumps(bk_set))
-    run.finish("genesis", GENESIS_SECS + 60)
+    run.job("genesis", stdin=json.dumps(bk_set), GENESIS_WAIT_SECS=str(GENESIS_SECS))
+    run.finish("genesis", GENESIS_SECS + 600)
     g = kv(run.get("genesis.env"))
-    assert int(g["GENESIS_SEED_SEQNO"]) % 1024 == 0 and int(g["BUNDLE_STRIDE"]) == 1024, g
+    assert int(g["GENESIS_SEED_SEQNO"]) % 16384 == 0 and int(g["BUNDLE_STRIDE"]) == 16384, g
     assert int(g["GENESIS_BK_SET_COMMITMENT"], 16) != 0, g
     ctx.update(genesis=g, bk_signers=len(bk_set))
 

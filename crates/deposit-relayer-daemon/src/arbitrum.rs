@@ -87,6 +87,9 @@ pub struct ArbitrumChain {
     /// Emits `AssertionCreated`; read from `SequencerInbox.rollup()`.
     pub rollup: Address,
     pub sequencer_inbox: Address,
+    /// The block the chain's Nitro history starts at: block number =
+    /// message count - 1 + this.
+    pub nitro_genesis_block: u64,
 }
 
 pub const ARBITRUM_CHAINS: &[ArbitrumChain] = &[
@@ -96,6 +99,7 @@ pub const ARBITRUM_CHAINS: &[ArbitrumChain] = &[
         parent_chain_id: deposit_chain_ids::CHAIN_ID_SEPOLIA,
         rollup: address!("042b2e6c5e99d4c521bd49beed5e99651d9b0cf4"),
         sequencer_inbox: address!("6c97864CE4bEf387dE0b3310A44230f7E3F1be0D"),
+        nitro_genesis_block: 0,
     },
     ArbitrumChain {
         name: "Arbitrum One",
@@ -103,8 +107,39 @@ pub const ARBITRUM_CHAINS: &[ArbitrumChain] = &[
         parent_chain_id: 1,
         rollup: address!("4dceb440657f21083db8add07665f8ddbe1dcfc0"),
         sequencer_inbox: address!("1c479675ad559DC151F6Ec7ed3FbF8ceE79582B6"),
+        nitro_genesis_block: 22_207_817,
     },
 ];
+
+/// The `SequencerInbox` calls that post a batch, with the argument that is
+/// the message count after it: `(sequenceNumber, data,
+/// afterDelayedMessagesRead, gasRefunder, prevMessageCount, newMessageCount,
+/// …)` and the blob calls without `data`. The delay-proof variants append a
+/// static tuple.
+const BATCH_POSTING_CALLS: &[([u8; 4], usize)] = &[
+    ([0x8f, 0x11, 0x1f, 0x3c], 5), // addSequencerL2BatchFromOrigin
+    ([0xe0, 0xbc, 0x97, 0x29], 5), // addSequencerL2Batch
+    ([0x69, 0xca, 0xcd, 0xed], 5), // addSequencerL2BatchFromOriginDelayProof
+    ([0x6e, 0x62, 0x00, 0x55], 5), // addSequencerL2BatchDelayProof
+    ([0x3e, 0x5a, 0xa0, 0x82], 4), // addSequencerL2BatchFromBlobs
+    ([0x91, 0x7c, 0xf8, 0xac], 4), // addSequencerL2BatchFromBlobsDelayProof
+];
+
+/// The last block of `batch`, from the parent-chain call that posted it:
+/// `newMessageCount - 1`, offset by the chain's Nitro genesis. `None` for a
+/// call that is not one of [`BATCH_POSTING_CALLS`] or posts another batch.
+/// Exact, unlike asking a node where a batch ends: a load-balanced endpoint
+/// answers from backends that have executed different amounts of it.
+pub fn batch_end_from_calldata(input: &[u8], batch: u64, nitro_genesis_block: u64) -> Option<u64> {
+    let (selector, args) = input.split_at_checked(4)?;
+    let &(_, at) = BATCH_POSTING_CALLS.iter().find(|(s, _)| s == selector)?;
+    let word = |i: usize| args.get(32 * i..32 * (i + 1)).map(U256::from_be_slice);
+    if word(0)? != U256::from(batch) {
+        return None;
+    }
+    let count = u64::try_from(word(at)?).ok()?;
+    count.checked_sub(1)?.checked_add(nitro_genesis_block)
+}
 
 pub fn arbitrum_chain(chain_id: u64) -> Option<&'static ArbitrumChain> {
     ARBITRUM_CHAINS.iter().find(|c| c.chain_id == chain_id)
@@ -652,6 +687,9 @@ pub struct RpcArbitrumView<P, A> {
     /// Blocks per `eth_getLogs` on each chain.
     pub parent_log_span: u64,
     pub arbitrum_log_span: u64,
+    /// The parent-chain transaction that posted each batch seen: where
+    /// [`batch_end_from_calldata`] reads the batch's last block from.
+    pub batch_txs: std::sync::Mutex<BTreeMap<u64, B256>>,
 }
 
 fn eth<E: std::fmt::Display>(what: &str) -> impl FnOnce(E) -> RelayerError + '_ {
@@ -738,11 +776,19 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
             else {
                 continue;
             };
-            let batch = U256::from_be_bytes(topic.0);
+            let batch: u64 = U256::from_be_bytes(topic.0).saturating_to();
+            if let Some(tx) = log.transaction_hash {
+                let mut txs = self.batch_txs.lock().unwrap_or_else(|p| p.into_inner());
+                txs.insert(batch, tx);
+                // Kept long enough for the retries of an unplaced batch.
+                while txs.len() > 4 * BATCH_RETRIES as usize {
+                    txs.pop_first();
+                }
+            }
             events.push(ParentEvent::Batch {
                 block,
                 log_index,
-                batch: batch.saturating_to(),
+                batch,
             });
         }
         for log in Self::logs(&self.parent, assertions, from, to, span).await? {
@@ -765,6 +811,27 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
     }
 
     async fn batch_end(&self, batch: u64) -> Result<Option<u64>, RelayerError> {
+        // From the call that posted the batch, when it is one this relayer
+        // knows; otherwise from the Arbitrum node, below.
+        let tx = self
+            .batch_txs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&batch)
+            .copied();
+        if let Some(tx) = tx {
+            let posted = self
+                .parent
+                .get_transaction_by_hash(tx)
+                .await
+                .map_err(eth("parent eth_getTransactionByHash"))?;
+            if let Some(m) = posted.and_then(|t| {
+                use alloy::consensus::Transaction as _;
+                batch_end_from_calldata(t.input(), batch, self.chain.nitro_genesis_block)
+            }) {
+                return Ok(Some(m));
+            }
+        }
         // The last block whose batch is at most `batch`; blocks not in a
         // posted batch yet make the NodeInterface call fail.
         let head = self.arbitrum_head().await?;
@@ -1519,6 +1586,97 @@ mod tests {
         );
         assert_eq!(state.ready.len(), 1);
         assert_eq!(state.ready[0].end.number, 150);
+    }
+
+    /// A word of ABI-encoded call data.
+    fn word(v: u64) -> [u8; 32] {
+        U256::from(v).to_be_bytes()
+    }
+
+    #[test]
+    fn a_batch_ends_where_its_posting_call_says() {
+        // Arbitrum Sepolia batch 889611, posted with addSequencerL2BatchFromBlobs
+        // (sequenceNumber, afterDelayedMessagesRead, gasRefunder, prevMessageCount,
+        // newMessageCount): it holds blocks 322874687..=322875126.
+        let mut input = vec![0x3e, 0x5a, 0xa0, 0x82];
+        for w in [889_611, 2_230_866, 0, 322_874_688, 322_875_127] {
+            input.extend_from_slice(&word(w));
+        }
+        assert_eq!(
+            batch_end_from_calldata(&input, 889_611, 0),
+            Some(322_875_126)
+        );
+        assert_eq!(
+            batch_end_from_calldata(&input, 889_612, 0),
+            None,
+            "another batch"
+        );
+        assert_eq!(
+            batch_end_from_calldata(&input, 889_611, 22_207_817),
+            Some(322_875_126 + 22_207_817),
+            "Arbitrum One counts from its Nitro genesis"
+        );
+        // The delay-proof variant appends a tuple; the count stays argument 4.
+        let mut delayed = vec![0x91, 0x7c, 0xf8, 0xac];
+        for w in [889_613, 2_230_870, 0, 322_875_530, 322_875_713, 7, 13] {
+            delayed.extend_from_slice(&word(w));
+        }
+        assert_eq!(
+            batch_end_from_calldata(&delayed, 889_613, 0),
+            Some(322_875_712)
+        );
+        let mut unknown = input.clone();
+        unknown[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(batch_end_from_calldata(&unknown, 889_611, 0), None);
+        assert_eq!(
+            batch_end_from_calldata(&input[..40], 889_611, 0),
+            None,
+            "truncated"
+        );
+    }
+
+    #[test]
+    fn the_batch_posting_selectors_are_the_inbox_functions() {
+        let tuple = "(bytes32,(uint8,address,uint64,uint64,uint256,uint256,bytes32))";
+        for (sig, at) in [
+            (
+                "addSequencerL2BatchFromOrigin(uint256,bytes,uint256,address,uint256,uint256)"
+                    .to_string(),
+                5,
+            ),
+            (
+                "addSequencerL2Batch(uint256,bytes,uint256,address,uint256,uint256)".to_string(),
+                5,
+            ),
+            (
+                format!(
+                    "addSequencerL2BatchFromOriginDelayProof(uint256,bytes,uint256,address,\
+                     uint256,uint256,{tuple})"
+                ),
+                5,
+            ),
+            (
+                format!(
+                    "addSequencerL2BatchDelayProof(uint256,bytes,uint256,address,uint256,uint256,\
+                     {tuple})"
+                ),
+                5,
+            ),
+            (
+                "addSequencerL2BatchFromBlobs(uint256,uint256,address,uint256,uint256)".to_string(),
+                4,
+            ),
+            (
+                format!(
+                    "addSequencerL2BatchFromBlobsDelayProof(uint256,uint256,address,uint256,\
+                     uint256,{tuple})"
+                ),
+                4,
+            ),
+        ] {
+            let selector: [u8; 4] = keccak256(sig.as_bytes())[..4].try_into().unwrap();
+            assert!(BATCH_POSTING_CALLS.contains(&(selector, at)), "{sig}");
+        }
     }
 
     #[test]

@@ -139,7 +139,7 @@ pub async fn check(
             u64::MAX
         ))
     })?;
-    let evm = evm_preflight::run(d.evm.as_ref(), net, bridge, amount, from).await?;
+    let evm = evm_preflight::run(d.evm.as_ref(), d.ui.as_ref(), net, bridge, amount, from).await?;
     let an = an_preflight::run_with(
         d.an.as_ref(),
         bridge_acc,

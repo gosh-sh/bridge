@@ -51,6 +51,8 @@ assigns it when the release is tagged.
   with `STEP_KEY_DIR` generates it once, and every later run with that `STEP_KEY_DIR` only proves
   (about 2 minutes instead of 6 on 24 cores). `eth-lc-relayer` passes its environment to the
   prover, so set `STEP_KEY_DIR` in its unit after one keygen run.
+- `ackinacki-bridge deposit` tries a failed EVM read in preflight again for 2 minutes instead of
+  refusing at once, so a load-balanced public RPC's dropped request no longer ends the run.
 - `ackinacki-bridge deposit --qr-mode local-key` signs with the key in `BRIDGE_DEPOSIT_PRIVATE_KEY`
   instead of a wallet, for unattended runs. It needs `--from-address`, which must be the key's
   address. `--from-address` now also reads `BRIDGE_DEPOSIT_FROM`.

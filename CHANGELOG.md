@@ -76,6 +76,204 @@ assigns it when the release is tagged.
 - Deposit relayer: anchor-wait metrics and warnings (`--anchor-wait-warn-after-secs`), and retries
   alternate with new deposits.
 
+- **Local acki-nacki network e2e in CI.** `.woodpecker/local-net-e2e.yaml` runs
+  for a pull request labelled `local-network` (or by hand): it bakes the PR's
+  `contracts/an/*` into a fresh acki-nacki zerostate, brings a whole network up on
+  one host (acki-nacki `tests/dexdo/up.sh` + `ansible/dexdo-e2e-*.yml`; the
+  network follows acki-nacki's `dev` branch: each run resolves that branch's
+  latest build and uses one build for the checkout, the zerostate helpers and
+  the nodes, which run by digest) and runs
+  `crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py` there,
+  then tears the network down. Paths, pins and the Woodpecker secrets it
+  needs (ssh key, host, user, the private inventory repository, a GitHub
+  token that reads acki-nacki and that repository) are listed in
+  `tests/e2e/local-net/README.md`; the host scripts (`gen-zerostate.sh`,
+  `host-lease.sh`, `run-test-on-host.sh`, `checkout-acki-on-host.sh`) live next
+  to it and work by hand with the same variables. `up.sh.patch` there makes
+  acki-nacki's `tests/dexdo/up.sh` start a node again when its first run dies
+  at once, and hand over only once node0 serves accounts; it is applied on the
+  host until acki-nacki carries the change.
+
+- `eth-lc-relayer gloas-slot-user-cell --slot <n>` prints the `updateCode`
+  user cell that carries a Gloas fork slot (one cell, the slot as 64 bits)
+  as the base64 BOC `tvm-cli callx` takes. It only encodes and sends
+  nothing; needs a build with `--features live-submit`. Use it when an
+  upgrade should set the pin in the same `updateCode` as the new code.
+- **Deposit anchor-wait diagnostics.** The relayer exports
+  `deposit_relayer_waiting_for_anchor`,
+  `deposit_relayer_oldest_anchor_wait_timestamp_seconds`, the
+  `deposit_relayer_ticks_total{outcome="waiting_for_anchor"}` outcome, and
+  `stage="is_block_accepted"` label in
+  `deposit_relayer_stage_duration_seconds`.
+  Outstanding entries in `state.json` gain optional
+  `anchor_wait_started_unix` and `anchor_wait_last_warned_unix` timestamps;
+  older state files remain readable. Missing anchors warn immediately by
+  default; `--anchor-wait-warn-after-secs` (`ANCHOR_WAIT_WARN_AFTER_SECS`,
+  default `0`) can delay the warning when coverage is monitored separately.
+  Warnings repeat at most every 15 minutes per deposit across restarts.
+  The logs identify the deposit, chain and block, distinguish the initial
+  wait from a delayed warning, and remain visible if saving state fails.
+  Before manual admission, compare the logged block number and hash using
+  `eth_getBlockByNumber` on an independent RPC for that chain; an expected
+  delivery delay alone is not a reason to admit a hash manually.
+
+- `deposit-relayer daemon --outstanding-backoff-secs` /
+  `OUTSTANDING_BACKOFF_SECS` (default 2): base delay before a failed deposit
+  is retried, doubled on each later failure of that id up to 64×. Gauge
+  `deposit_relayer_outstanding_deposits`. `state.json` gains
+  `outstanding_deposits` (per-id attempts, `retry_after_unix`, and the
+  Deposit tx / block / log index when known) and `last_finalized_deposit_id`
+  (seeds `deposit_relayer_last_finalized_deposit_id` across restarts).
+
+- `AckiNackiBridge.writeOffUnbackedPrincipal()` (owner): after an AAVE loss,
+  cuts `suppliedPrincipal` down to `aUsdcBalance()` and emits
+  `UnbackedPrincipalWrittenOff(amount)`; moves no tokens. Reverts
+  `NothingToWriteOff` when the book is already covered. Use it once the loss
+  is accepted, so `accruedYield()` reflects interest again (ETH-28).
+  Available only on a bridge deployed from this release.
+
+- `harvestYield(amount)` pays at most the surplus of liquid USDC + aUSDC
+  over `treasuryBalance`, so `harvestYield(accruedYield())` is safe after
+  AAVE rounding and after a write-off. It reverts
+  `HarvestWouldBreakSolvency(amount, backing, treasuryBalance)` only when
+  that surplus is zero. After a loss, interest goes to users first.
+
+- **`deposit-relayer daemon` no longer proves deposits that are already
+  finalized on Acki Nacki.** Before proving, it computes the address of the
+  deposit's `DepositVoucher` and checks whether that account is active. The
+  address comes from the deposit id, source contract and source chain plus
+  the voucher code stored in the bridge. If the voucher is active, the daemon
+  advances without proving, which saves a full proof (minutes) when an
+  operator replays a deposit range or another relayer got there first.
+  Before this the check always answered "not finalized".
+  - The voucher code is read once per process from the bridge's account
+    data, using the ABI in the AN config's `bridge_abi_path`. That ABI must
+    list the bridge's storage `fields`, including `_depositVoucherCode`; the
+    one compiled under `contracts/an/0.80.0_compiled/` does.
+  - If the check cannot run (unreachable endpoint, ABI without the field),
+    the daemon logs `voucher pre-check failed; proving the deposit anyway`
+    and behaves as before.
+  - The check now runs after the deposit event is fetched, not before, since
+    it needs the event's source contract and chain (bridge-audit#26).
+
+- AAVE pulls are exact and bounded by the aToken balance (ETH-28):
+  - `withdrawByProof` tops up the missing part of a payout from all of
+    `aUsdcBalance()`, interest included, instead of stopping at
+    `suppliedPrincipal`. When liquid USDC + aUSDC cannot cover the payout it
+    reverts `InsufficientTreasury`; a bridge without an AAVE position used to
+    fail later, inside the USDC transfer.
+  - `withdrawFromAave(amount)` accepts at most
+    `min(suppliedPrincipal, aUsdcBalance)`; `type(uint256).max` pulls exactly
+    that. A larger explicit amount reverts `InvalidAmount` rather than being
+    trimmed to a partial pull, so `WithdrawnFromAave` always reports a pull
+    that was paid in full.
+  - `supplyToAave` reverts `AaveSupplyFailed(requested, 0)` when AAVE mints
+    no aUSDC (was `AaveWithdrawFailed`).
+  - `harvestYield` sends exactly `amount` to `yieldRecipient`; anything a
+    pool pays above it stays on the bridge.
+
+- `deposit-relayer daemon` accepts `AN_DAPP_ID=0` / `--dapp-id 0` without
+  `--dry-run`; it used to refuse to start. Zero is the right value:
+  `eccUSDCBridge` pins every deposit's dappId to 0 and ignores the proof's
+  dappId inputs. `scripts/ursus/deposit-relayer.env.example` now ships
+  `AN_DAPP_ID=0`. The value has no effect on-chain, but it is part of the
+  `state.json` deployment binding (`chain_id`, EVM bridge, `AN_DAPP_ID`).
+  Changing it on an existing file fails start-up with a deployment
+  mismatch; `--force-state` then discards the cursor, parked ids,
+  outstanding ids, `last_finalized_deposit_id` and unprovable ids even
+  though no bridge changed (QC-OFF-09).
+
+- `deposit-relayer daemon` no longer re-scans Ethereum logs while it retries a
+  deposit that AN keeps refusing. Once a deposit is found, retries reuse it
+  with no `eth_getLogs` or `depositCounter()` call, and `scan_done_through_block`
+  in `state.json` moves to the block before the deposit right away instead of
+  waiting for a finalize, so a restarted daemon finds it again in a single
+  10-block chunk. `deposit_relayer_eth_scan_from_block` reflects that. Nothing
+  to configure (QC-OFF-10).
+
+- `deposit-relayer` reads `--state` from `DEPOSIT_RELAYER_STATE`.
+  `scripts/ursus/deposit-relayer.env.example` has always set that variable,
+  but nothing read it, so a daemon started by the unit kept `state.json` in
+  its working directory (`/home/ubuntu/bridge-e2e/deposit-relayer-state.json`
+  on the Ursus host). **Before upgrading**, if your env file sets
+  `DEPOSIT_RELAYER_STATE`, move the existing file there. Otherwise the daemon
+  starts over at `--start-deposit-id` and forgets its parked ids
+  (QC-OFF-08).
+
+- A `finalizeDeposit` the daemon reports as pending no longer counts toward
+  `--skip-after-attempts`. This covers a confirmation that outlasted the
+  60-second timeout, and a paused lane (`ERR_PAUSED`, 231). Every pending tick
+  used to raise `attempts_since_progress`, so after a long pause the first real
+  failure parked a healthy deposit. Pending ticks are now logged at `info`
+  (QC-OFF-11).
+
+- `deposit-relayer daemon --force-state` now starts `state.json` over when the
+  file was stamped for another deployment (chain id, EVM bridge address or
+  `AN_DAPP_ID`). It used to re-stamp the binding and keep the old
+  `last_processed_deposit_id`, `scan_done_through_block` and
+  `parked_deposit_ids` and `unprovable_deposit_ids`. After a bridge redeploy,
+  that silently skipped the new bridge's deposits up to the old cursor. The
+  daemon now logs every discarded field (record parked and unprovable ids
+  before you run it) and begins at `--start-deposit-id`. If the AN bridge did
+  not change, the replay is cheap: deposits that are already finalized are
+  recognised by their voucher and are not proven again (QC-OFF-08).
+
+- **`deposit-relayer daemon` judges `finalizeDeposit` by the voucher deploy
+  and `confirmDeposit`, not by the bridge transaction's exit code.** The
+  bridge exits 0 as soon as the proof verifies; the mint happens later. A
+  failed voucher or confirm is Rejected; a duplicate (voucher exit 51) is
+  AlreadyFinalized; hops not yet visible — including a GraphQL
+  `transaction: null` that parses as no children — are Pending and are
+  polled until `--confirm-timeout`. The AN GraphQL endpoint must serve
+  `blockchain { message(hash) }`, which shellnet does (QC-OFF-06 /
+  bridge-audit#27).
+
+- Gloas (ePBS) support in the beacon light client. `eth-lc-relayer` reads
+  `GLOAS_FORK_EPOCH` from the beacon node's `/eth/v1/config/spec` and hands
+  the fork slot to the step and rotate provers as `BEACON_GLOAS_FORK_SLOT`;
+  run by hand, the provers default to the network's own value (Sepolia
+  `11296768`, mainnet not scheduled) and take the variable as an override. It
+  must equal the contract's slot. From Gloas the beacon block carries a
+  payload bid instead of the payload, so the hash the light client stores for
+  a finalized block is the bid's `parent_block_hash`, the execution block that
+  block built on, read from `finalized_header.execution_block_hash`; before
+  Gloas it is still the payload's own `block_hash`.
+- `EthBeaconLightClient.setGloasForkSlot(uint64)` (owner) and
+  `getGloasForkSlot() → (uint64 gloasForkSlot, bool isSet)`; errors 255 (proof made for
+  a different Gloas fork slot) and 256 (fork slot not set). `eth-lc-relayer
+  set-gloas-fork-slot --slot …` is the operator call; a fresh deploy rejects
+  every submission with 256 until it runs.
+- **`daemon-live` checks the bridge's `bundleStride` at startup.** It reads
+  `bundleStride()` and refuses to start when it differs from the stride of
+  its anchor level: `bridge … has bundleStride=…, but this daemon runs at
+  L… with stride … (BRIDGE_ANCHOR_LEVEL / --anchor-level)`. A bridge
+  deployed with a different `BUNDLE_STRIDE` reverts rotations the daemon
+  expects to land, and only a redeploy clears that. A bridge deployed
+  before the field existed is refused too (`bridge …: the bridge cannot
+  report bundleStride() (…)`): it still applies the old rotation gate
+  (`VerifyBlockLagBehindRotation`), which the daemon no longer follows, so
+  its rotations would revert until the daemon aborted.
+- **`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+  takes `BRIDGE_SEED_SEQNO`.** When set, the bridge is seeded at that key
+  block (`compute_bridge_anchors --seed-seqno`; it must be a multiple of
+  the level's stride and at or below chain head) instead of the newest
+  boundary at deploy time (`--at-head`). Use it with a BK-set file built
+  for the same seed.
+- `ackinacki-bridge withdraw` checks in stage 1, dry runs included, that
+  neither bridge is paused: `AckiNackiBridge.paused()` and the Acki Nacki
+  bridge's `isPaused()`. Either one refuses with exit 2 before the burn.
+  Before, a paused Acki Nacki bridge bounced the burn and the run waited out
+  the capture (exit 11); a paused EVM bridge let the burn through and the run
+  failed in stage 4b or 6. A resume over a recorded burn checks only the EVM
+  side and refuses with exit 10, naming `--allow-retry`.
+- **`ackinacki-bridge deposit`: USDC from an EVM wallet to an Acki Nacki
+  account.** The wallet signs `approve` and `deposit` from a QR code —
+  WalletConnect v2 (`--qr-mode walletconnect`, the default) or EIP-681
+  (`--qr-mode eip681`, or `both`) — and keeps its keys: the CLI takes no EVM
+  private key and no Acki Nacki key. It then waits for the deposit block's
+  anchor on Acki Nacki, proves the deposit on the same machine, sends
+  `finalizeDeposit` and confirms the credit by the deposit's identity
+  `(chainId, EVM bridge, depositId)`, not by the recipient's balance.
 ### Fixes
 
 - The deposit relayer waits for the deposit block's AN anchor instead of failing with exit 224.

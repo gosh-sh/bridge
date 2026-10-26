@@ -325,9 +325,16 @@ def is_account_active(address: str) -> bool:
         return False
     return account["acc_type"] == "Active"
 
-def wait_account_status(address: str, status: str) -> bool:
+# A block has to finalize before an account changes state: ~10-20 s on a
+# five-node local network, comparable on shellnet. 10 s used to fail a
+# `deployx` that landed a few seconds later.
+ACCOUNT_STATUS_TIMEOUT_SECS = float(os.getenv("ACCOUNT_STATUS_TIMEOUT_SECS", "60"))
+
+
+def wait_account_status(address: str, status: str, timeout: float | None = None) -> bool:
     start_time = time.time()
-    timeout = 10  # seconds
+    if timeout is None:
+        timeout = ACCOUNT_STATUS_TIMEOUT_SECS
 
     while time.time() - start_time < timeout:
         account = get_account(address)

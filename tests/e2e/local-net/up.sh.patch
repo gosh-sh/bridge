@@ -1,0 +1,44 @@
+--- a/tests/dexdo/up.sh
++++ b/tests/dexdo/up.sh
+@@ -101,6 +101,15 @@
+   i=0
+   until [ "$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null | xargs -r docker inspect -f '{{.State.Running}}' 2>/dev/null)" = "true" ]; do
+     i=$((i+1))
++    # A node whose first run died at once (its gossip seeds did not resolve yet)
++    # is never restarted by docker: a restart policy only covers a container that
++    # ran for 10 s. Start it again now rather than leaving it to the full-stack
++    # `up -d` minutes later, after which it would have to catch up with a network
++    # that already moved on.
++    if [ $((i % 15)) -eq 0 ]; then
++      echo "    node$n not running after ${i}s - starting it again"
++      docker compose -f "$COMPOSE" up -d node$n >/dev/null 2>&1 || true
++    fi
+     if [ "$i" -ge 120 ]; then echo "!! node$n not running after 120s" >&2; break; fi
+     sleep 1
+   done
+@@ -219,6 +228,25 @@
+   sleep 5
+ done
+ 
++# The probe above only proves the producer accepts external messages; the node
++# behind the endpoint (node0) answers account reads from its own state, which a
++# node that started late may still be syncing. Hand over only once it serves a
++# zerostate account (the giver).
++echo "==> [5c/5] readiness: the node behind the endpoint serves zerostate accounts"
++PROBE_ACC="0000000000000000000000000000000000000000000000000000000000000000::1111111111111111111111111111111111111111111111111111111111111111"
++deadline=$(( $(date +%s) + READY_TIMEOUT ))
++until tvm-cli -u "$endpoint" -j account "$PROBE_ACC" 2>/dev/null | grep -q '"acc_type": "Active"'; do
++  now=$(date +%s)
++  if [ "$now" -ge "$deadline" ]; then
++    echo "!! the node behind $endpoint does not serve zerostate accounts within ${READY_TIMEOUT}s" >&2
++    echo "   (node0 started late and is still syncing?) check: docker compose -f $COMPOSE logs --tail=100 node0" >&2
++    exit 1
++  fi
++  echo "    [state] node0 does not serve accounts yet, $(( deadline - now ))s left"
++  sleep 5
++done
++echo "    node0 serves zerostate accounts - network ready for the suite"
++
+ # Emit the two values the dexdo e2e suite needs. Written to config/ so the caller
+ # (dexdo deploy / cargo nextest) can `source` it.
+ seed_notes="$(pwd)/config/dex_test_notes.keys.json"

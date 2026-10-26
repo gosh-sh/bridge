@@ -22,6 +22,13 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### New / Improvements
+
+- A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
+  first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
+  (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`
+  with `BRIDGE_BOOTSTRAP_SEQNO=0` proves its first bundle at seq_no 16384. L2 anchoring only.
+
 ## [0.6.0] – 2026-10-23
 
 ### Breaking Changes

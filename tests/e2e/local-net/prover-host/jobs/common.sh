@@ -9,6 +9,9 @@ GQL=http://nginx0/graphql
 AN_BRIDGE=0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 AN_BRIDGE_ABI=/src/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json
 ARB_RPC=${ARB_RPC:-https://sepolia-rollup.arbitrum.io/rpc}
+# The deposit's RPC also has to serve eth_getRawTransactionByHash: the prover reads every
+# transaction of the deposit's block raw. The Arbitrum Foundation's endpoint answers -32601.
+ARB_DEPOSIT_RPC=${ARB_DEPOSIT_RPC:-https://arbitrum-sepolia-rpc.publicnode.com}
 SEPOLIA_RPC=${SEPOLIA_RPC:-https://ethereum-sepolia-rpc.publicnode.com}
 ARB_USDC=0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d
 log() { printf '[%s] %s\n' "$(date -u +%T)" "$*"; }

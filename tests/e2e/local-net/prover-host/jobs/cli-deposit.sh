@@ -15,7 +15,7 @@ cp /bin-ci/circuit_params.json "$p/configs/"
   downsize_srs --input /params/kzg_bn254_21.srs --output /cache/deposit-srs/kzg_params_18.srs --k 18
 ln -sf /cache/deposit-srs/kzg_params_18.srs "$p/data/kzg_params_18.srs"
 export BRIDGE_DEPOSIT_PRIVATE_KEY; BRIDGE_DEPOSIT_PRIVATE_KEY=$(tr -d '[:space:]' </run/input)
-export BRIDGE_DEPOSIT_FROM=$FROM RPC_URL=$ARB_RPC BRIDGE_ADDRESS BRIDGE_GQL_ENDPOINT=$GQL
+export BRIDGE_DEPOSIT_FROM=$FROM RPC_URL=$ARB_DEPOSIT_RPC BRIDGE_ADDRESS BRIDGE_GQL_ENDPOINT=$GQL
 export USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 export BRIDGE_DEPOSIT_PROVER_DIR=$p BRIDGE_DEPOSIT_CONFIRMATIONS=${CONFIRMATIONS:-1}
 export BRIDGE_DEPOSIT_STATE_DIR=$WORK/deposit-state BRIDGE_WORK_DIR=$WORK/deposit-work

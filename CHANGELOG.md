@@ -30,7 +30,9 @@ assigns it when the release is tagged.
   it after the parent chain's light client with `deployL2Verifier(421614, 11155111,
   0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4)` or `deployL2Verifier(42161, 1,
   0x4dceb440657f21083db8add07665f8ddbe1dcfc0)`; see *Arbitrum blocks* in `contracts/an/README.md`.
-  Rebuilding it needs `sold` 0.81.0 from TVM-Solidity-Compiler `feature/keccak256-builtin`.
+  It accepts an assertion when it is posted, not when the rollup confirms it: on Arbitrum Sepolia
+  only the rollup's validator whitelist backs that, so deploy 421614's verifier on test networks
+  only. Rebuilding it needs `sold` 0.81.0 from TVM-Solidity-Compiler `feature/keccak256-builtin`.
 - `eccUSDCBridge` 1.14.0 (code hash `efd7e735…`): `setL2VerifierCode`, `deployL2Verifier`,
   `getL2Verifier`, `acceptBlockHashFromL2Verifier`, error 237 `ERR_L2_VERIFIER_UNSET`;
   `disableOwnerAnchorsOn` also takes a chain that has an Arbitrum verifier. `updateCode` from

@@ -64,8 +64,9 @@ re-enable function in the current code. A bridge `updateCode` resets the
 owner-anchor flags and recorded clients, so operators must restore configuration
 and repeat the intended flips after upgrading. `setLightClientCode` alone keeps
 recorded clients unchanged, but calling `deployLightClient` afterwards for the
-same chain can replace its writer even while the owner-anchor flag is off.
-The light client's owner also retains `reAnchorCommittee` and `updateCode`.
+same chain can replace its writer even while the owner-anchor flag is off;
+`setL2VerifierCode` followed by `deployL2Verifier` does the same for an
+Arbitrum chain's verifier. The light client's owner also retains `reAnchorCommittee` and `updateCode`.
 An owner who retains `updateCode` can install arbitrary replacement code,
 including code that removes these checks. The current implementation cannot
 constrain owner-selected replacement code, even if a migration preserves the
@@ -138,15 +139,28 @@ per-transaction limit (`scripts/l2-block-proof-bench`). The verifier's
 errors are 300–307 from `EthTrie` and 310–315 from the verifier, named at the
 top of each source file.
 
-The verifier accepts an assertion as soon as it is posted, without the
-challenge period of about 6.4 days. Posting a false assertion locks a bond
-(3 600 ETH on Arbitrum One), and none has ever been posted on Arbitrum One. The
-10 000 USDC per-chain ceiling bounds what one could take.
-
 | Chain | `l2ChainId` | Parent chain | Rollup (`SequencerInbox.rollup()`, 2026-10-25) | Assertions |
 |---|---|---|---|---|
 | Arbitrum Sepolia | 421614 | Sepolia, 11155111 | `0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4` | about every 30 min |
 | Arbitrum One | 42161 | Ethereum, 1 | `0x4dceb440657f21083db8add07665f8ddbe1dcfc0` | about every hour |
+
+**The trust assumption.** The verifier accepts an assertion as soon as it is
+posted, not when the rollup confirms it. A hash it admits stays in the anchor
+set: the verifier has nothing like the light client's
+`forgetBlockHashFromLightClient`, and a successful challenge neither removes
+the hash nor undoes a deposit already finalized. What stands behind an
+assertion is what posting it costs, read from each rollup on 2026-10-26:
+
+| Rollup | Who may post (`validatorWhitelistDisabled()`) | Stake (`baseStake()`) | Confirmed after (`confirmPeriodBlocks()`) |
+|---|---|---|---|
+| Arbitrum One | anyone | 3 600 WETH | 45 818 blocks, about 6.4 days |
+| Arbitrum Sepolia | whitelisted validators only | 36 of a test token (`0xefb383126640fe4a760010c6e59c397d2b6c7141`) | 20 blocks, about 4 minutes |
+
+On Arbitrum One a false assertion locks 3 600 ETH, none has ever been posted,
+and the 10 000 USDC per-chain ceiling bounds what one could take. That holds
+only while the ceiling stays below the stake and a challenged assertion loses
+it. On Arbitrum Sepolia nothing of value backs an assertion, only the
+whitelist: use its verifier on test networks only.
 
 Read the rollup address from the chain's `SequencerInbox.rollup()` rather than
 from a list: Arbitrum Sepolia's rollup moved when it switched to BoLD, and
@@ -171,8 +185,12 @@ than 393 168 blocks past N.
    0x4dceb440657f21083db8add07665f8ddbe1dcfc0)` for Arbitrum One. The bridge
    deploys the verifier at the address of its code salted with `l2ChainId`,
    with 10 vmshell, and initializes it with 2. Without the code it throws
-   `ERR_L2_VERIFIER_UNSET` (237). Re-running it for a chain replaces the
-   recorded verifier.
+   `ERR_L2_VERIFIER_UNSET` (237). Re-running it with the same code reaches
+   the same account: the deploy and `initialize` (311) bounce, so the verifier
+   keeps the rollup and parent chain it was first given, while the bridge
+   records the `parentChainId` of the new call. Re-run it only with the same
+   arguments. A new rollup address needs new verifier code (see above), which
+   deploys at a new address and replaces the recorded verifier.
 4. Check `getL2Verifier(l2ChainId)` on the bridge, which returns the address
    and the parent chain, and `getConfig()` on the verifier.
 5. When the verifier is admitting blocks, `disableOwnerAnchorsOn(l2ChainId)`

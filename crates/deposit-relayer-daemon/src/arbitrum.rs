@@ -436,19 +436,34 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     }
 
     // Batches an earlier tick could not place, oldest first, before the new
-    // events: an assertion can only end at a batch already taken.
-    for (batch, left) in std::mem::take(&mut state.unplaced_batches) {
+    // events: an assertion can only end at a batch already taken. A batch
+    // leaves the list once it is taken or given up, so a failed read keeps
+    // the ones after it for the next tick.
+    let unplaced: Vec<(u64, u32)> = state
+        .unplaced_batches
+        .iter()
+        .map(|(&batch, &left)| (batch, left))
+        .collect();
+    for (batch, left) in unplaced {
         match take_batch(view, state, batch).await? {
-            Taken::Proofs => report.batches_taken += 1,
-            Taken::Nothing => {},
+            Taken::Proofs => {
+                state.unplaced_batches.remove(&batch);
+                report.batches_taken += 1;
+            },
+            Taken::Nothing => {
+                state.unplaced_batches.remove(&batch);
+            },
             Taken::Unplaced if left > 1 => {
                 state.unplaced_batches.insert(batch, left - 1);
             },
-            Taken::Unplaced => warn!(
-                batch,
-                "the Arbitrum node still cannot place this batch; given up, the next batch covers \
-                 the same deposits"
-            ),
+            Taken::Unplaced => {
+                state.unplaced_batches.remove(&batch);
+                warn!(
+                    batch,
+                    "the Arbitrum node still cannot place this batch; given up, the next batch \
+                     covers the same deposits"
+                );
+            },
         }
     }
 
@@ -460,6 +475,12 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
             .await?;
         events.sort_by_key(ParentEvent::position);
         for event in events {
+            // The events of every earlier block are handled: a tick that fails
+            // from here on starts again at this block, not at events whose
+            // proofs it has already taken.
+            state.parent_cursor = state
+                .parent_cursor
+                .max(event.position().0.saturating_sub(1));
             match event {
                 ParentEvent::Batch {
                     batch, ..
@@ -485,15 +506,15 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                         Some(end) => Some(end.number),
                         None => view.arbitrum_number(end_hash).await?,
                     };
-                    // Assertions end further on each time: nothing taken at or
-                    // before this one can be named again.
-                    if let Some(m) = end_number {
-                        state.batch_ends.retain(|&n, _| n > m);
-                    }
                     match found {
                         Some(end) => {
+                            // Read before anything is dropped: if it fails, the
+                            // next tick sees this assertion with its proofs.
                             let (parent_hash, parent_header, receipt_proof) =
                                 view.parent_receipt(block, tx_index).await?;
+                            // Assertions end further on each time: nothing taken
+                            // at or before this one can be named again.
+                            state.batch_ends.retain(|&n, _| n > end.number);
                             info!(
                                 parent_block = block,
                                 m = end.number,
@@ -513,6 +534,9 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                             report.assertions_matched += 1;
                         },
                         None => {
+                            if let Some(m) = end_number {
+                                state.batch_ends.retain(|&n, _| n > m);
+                            }
                             let waiting = state.pending.keys().filter(|&&n| Some(n) < end_number);
                             if waiting.count() > 0 {
                                 warn!(
@@ -532,10 +556,10 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
         state.parent_cursor = parent_head;
     }
 
-    // Proofs.
+    // Proofs. Each stays in `state.ready` until the bridge accepts all its
+    // blocks, so a failed call leaves it for the next tick.
     let now = unix_now();
-    let mut ready = std::mem::take(&mut state.ready);
-    for proof in &mut ready {
+    for proof in &mut state.ready {
         if !an
             .is_accepted(chain.parent_chain_id, proof.parent_hash)
             .await?
@@ -579,8 +603,7 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
             report.proofs_sent += 1;
         }
     }
-    ready.retain(|p| !p.end.slots.is_empty());
-    state.ready = ready;
+    state.ready.retain(|p| !p.end.slots.is_empty());
     Ok(report)
 }
 
@@ -1237,6 +1260,10 @@ mod tests {
         batch_ends: BTreeMap<u64, u64>,
         /// Blocks whose state the node cannot prove.
         missing_state: Vec<u64>,
+        /// Batches whose end the node fails to answer for.
+        failing_batch_ends: Vec<u64>,
+        /// How many parent receipt reads fail before one succeeds.
+        failing_receipts: u32,
     }
 
     #[async_trait]
@@ -1272,7 +1299,13 @@ mod tests {
                 .collect())
         }
         async fn batch_end(&self, batch: u64) -> Result<Option<u64>, RelayerError> {
-            Ok(self.lock().unwrap().batch_ends.get(&batch).copied())
+            let c = self.lock().unwrap();
+            if c.failing_batch_ends.contains(&batch) {
+                return Err(RelayerError::Eth(format!(
+                    "batch {batch}: connection reset"
+                )));
+            }
+            Ok(c.batch_ends.get(&batch).copied())
         }
         async fn arbitrum_header(&self, number: u64) -> Result<(B256, Bytes), RelayerError> {
             Ok((h(number), Bytes::from(number.to_be_bytes().to_vec())))
@@ -1298,6 +1331,13 @@ mod tests {
             block: u64,
             _tx_index: u32,
         ) -> Result<(B256, Bytes, Vec<Bytes>), RelayerError> {
+            let mut c = self.lock().unwrap();
+            if c.failing_receipts > 0 {
+                c.failing_receipts -= 1;
+                return Err(RelayerError::Eth(format!(
+                    "receipt in {block}: connection reset"
+                )));
+            }
             Ok((h(1_000_000 + block), Bytes::from(vec![0xaa]), vec![
                 Bytes::from(vec![0xbb]),
             ]))
@@ -1308,6 +1348,8 @@ mod tests {
     struct FakeBridge {
         accepted: Mutex<Vec<(u64, B256)>>,
         sent: Mutex<Vec<ProveBlock>>,
+        /// How many proveBlock calls fail before one is sent.
+        failing_sends: Mutex<u32>,
     }
 
     #[async_trait]
@@ -1320,6 +1362,11 @@ mod tests {
                 .contains(&(chain_id, block_hash)))
         }
         async fn prove_block(&self, call: &ProveBlock) -> Result<(), RelayerError> {
+            let mut failing = self.failing_sends.lock().unwrap();
+            if *failing > 0 {
+                *failing -= 1;
+                return Err(RelayerError::Eth("Acki Nacki is not reachable".into()));
+            }
             self.sent.lock().unwrap().push(call.clone());
             Ok(())
         }
@@ -1356,7 +1403,7 @@ mod tests {
                 },
             ],
             batch_ends: BTreeMap::from([(7, 150)]),
-            missing_state: vec![],
+            ..FakeChain::default()
         })
     }
 
@@ -1547,6 +1594,73 @@ mod tests {
         state.pending.insert(100, h(100));
         state.deposit_cursor = 200;
         run(&chain, &an, &mut state).await;
+        assert!(state.unplaced_batches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_receipt_read_keeps_the_batch_end_for_the_assertion() {
+        let chain = one_deposit();
+        chain.lock().unwrap().failing_receipts = 1;
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        assert!(tick(ARB, &chain, &an, &mut state, &TickConfig::default())
+            .await
+            .is_err());
+        assert!(
+            state.batch_ends.contains_key(&150),
+            "the proofs at 150 are kept while the assertion is not taken"
+        );
+        assert_eq!(
+            state.parent_cursor, 19,
+            "the next tick starts at the assertion's block"
+        );
+
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!((r.assertions_matched, r.assertions_missed), (1, 0));
+        assert_eq!(state.ready[0].end.number, 150);
+        assert!(state.batch_ends.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_prove_block_keeps_the_proof_for_the_next_tick() {
+        let chain = one_deposit();
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        accept(&an, ARB.parent_chain_id, h(1_000_020));
+        *an.failing_sends.lock().unwrap() = 1;
+        assert!(tick(ARB, &chain, &an, &mut state, &TickConfig::default())
+            .await
+            .is_err());
+        assert_eq!(state.ready.len(), 1, "the proof is still there");
+        assert!(state.ready[0].sent.is_empty());
+
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.proofs_sent, 1);
+        assert_eq!(an.sent.lock().unwrap()[0].block_number, 100);
+    }
+
+    #[tokio::test]
+    async fn a_failed_batch_lookup_keeps_every_unplaced_batch() {
+        let chain = one_deposit();
+        chain.lock().unwrap().failing_batch_ends.push(6);
+        let an = FakeBridge::default();
+        let mut state = AnchorState {
+            parent_cursor: 30,
+            deposit_cursor: 200,
+            unplaced_batches: BTreeMap::from([(6, 5), (7, 5)]),
+            ..AnchorState::default()
+        };
+        state.pending.insert(100, h(100));
+        assert!(tick(ARB, &chain, &an, &mut state, &TickConfig::default())
+            .await
+            .is_err());
+        assert_eq!(state.unplaced_batches, BTreeMap::from([(6, 5), (7, 5)]));
+
+        chain.lock().unwrap().failing_batch_ends.clear();
+        chain.lock().unwrap().batch_ends.insert(6, 120);
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.batches_taken, 2);
         assert!(state.unplaced_batches.is_empty());
     }
 

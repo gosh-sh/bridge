@@ -28,6 +28,8 @@ label before opening the PR, or push once after labelling, and the pipeline runs
 the next push either way.
 
 Trust boundary: the label decides when a network is built, not who may build one. The
+host's ssh key is pinned, so what the runner sources and copies from the host (`.acki/env`,
+the zerostate helpers) comes from that host and no other. The
 pipeline YAML and the host scripts come from the pull request's own tree, so whoever can
 put code on a branch of this repository, or whose fork pipeline a maintainer approves, can
 run code with the `pull_request` secrets. The repository's Woodpecker setting is
@@ -46,7 +48,7 @@ reads two repositories; the same pattern and setting serve the dexdo e2e this fo
 | `acki-clone` | runner | shallow-fetches private gosh-sh/acki-nacki at the resolved commit |
 | `gen-zerostate` | runner | `gen-zerostate.sh`: x86_64 tvm-cli/tvm-debugger/sold (sha256-checked); moves acki-nacki's `BRIDGE_COMMIT` pin (`contracts/scripts/bridge_contracts.py`) to `$CI_COMMIT_SHA` in the disposable checkout and places `contracts/an/*` from `BRIDGE_REPO=$CI_WORKSPACE` (the generator re-places from that pin at import, so the pin is what decides); `make compile_contracts`; `generate_zerostate.py` |
 | `lease-acquire` | host | `host-lease.sh acquire bridge-<pipeline>`: one network per host at a time, dexdo's runs included; a live lease is waited out for up to 30 min |
-| `net-up` | host | asserts the lease; `checkout-acki-on-host.sh` puts acki-nacki at the resolved commit into `acki_dir` and applies `up.sh.patch` (see below); then `dexdo-e2e-up.yml -e target=bridge_e2e -e acki_repo= -e acki_dir=… …` ships `config/` + `docker/.env` and runs `up.sh` with the three images by digest (start, wait for finalization, ext-message probe, and with the patch: node0 serving accounts) |
+| `net-up` | host | asserts the lease; tears down what a cancelled or timed-out run left (`dexdo-e2e-down.yml -e full_cleanup=true`, as `net-down`); `checkout-acki-on-host.sh` puts acki-nacki at the resolved commit into `acki_dir` and applies `up.sh.patch` (see below); then `dexdo-e2e-up.yml -e target=bridge_e2e -e acki_repo= -e acki_dir=… …` ships `config/` + `docker/.env` and runs `up.sh` with the three images by digest (start, wait for finalization, ext-message probe, and with the patch: node0 serving accounts) |
 | `run-test` | host | `run-test-on-host.sh` over ssh: clean bridge checkout at `$CI_COMMIT_SHA`, pinned tvm-cli, a bounded wait for nginx0's node to serve the bridge account (belt and braces over the patched hand-over), then `MODE=local` against `http://127.0.0.1:80` with a lease heartbeat while the test runs |
 | `dump-logs` | host | on failure: `up.sh` log, compose state, each node's container state and `docker compose logs` (both runs of a node that failed its first start), node0's log, block-manager and gql tails |
 | `net-down` | host | after success and after failure: lease owner check, `dexdo-e2e-down.yml -e full_cleanup=true -e dexdo_deploy_dir=…` (our checkout and data removed, dexdo's deploy dir untouched), `~/.netrc` removed, lease released even when the playbook fails. Not after a cancel or a timeout: no step runs then and the lease ages out (90 min) |
@@ -111,9 +113,9 @@ whose `authorized_keys` entry allows only the dispatcher (a copy of
 `tests/e2e/local-net/prover-host/ci-entry` in the CI directory's `bin/`) and the tunnel ports
 127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
-socket and capped memory and CPU (40 GB / 12 cores for the build and the proving jobs, 64 GB /
-32 cores for the light client's step prover, which has an epoch for each proof, 8 GB / 4 cores
-for the rest). It builds each commit once in a `rust:1-bookworm` container
+socket and capped memory and CPU (40 GB / 12 cores for the build and the deposit prover, 64 GB /
+32 cores for the provers that have to keep pace: the light client's step prover, which has an
+epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once in a `rust:1-bookworm` container
 (`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
 set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own
 where `nginx0` and `node0..4` are proxies to the runner's tunnels.
@@ -139,6 +141,7 @@ moves 2 USDC there and back.
 | host, user, port | ansible inventory `ansible/inventory/bridge/e2e/local-net.yml` in the private infrastructure repository (group `bridge_e2e`; cloned by `inventory-clone` from the `LOCAL_NET_INVENTORY_REPO` secret) and the Woodpecker secrets `LOCAL_NET_HOST` / `LOCAL_NET_CI_USER` for the plain ssh steps | the host is not named in this public tree; it is dexdo's e2e host, shared through the lease |
 | `acki_dir`, `dexdo_deploy_dir` on the host | pipeline `variables` `acki_dir_on_host`, `dexdo_deploy_dir_on_host`, passed as `-e` extra vars | `/opt/acki-nacki-bridge`, `/opt/acki-nacki-bridge/.no-dexdo`. The acki-nacki playbooks define both as play vars, which outrank inventory vars; only `-e` wins. `full_cleanup=true` removes both paths |
 | ssh private key | Woodpecker secret `LOCAL_NET_SSH_KEY` | newline-joined with `@` (dexdo convention); public key in the host's `authorized_keys` |
+| host key | `ansible/inventory/bridge/e2e/known_hosts` in the private infrastructure repository (`ssh-keyscan -t ed25519` of the host name and its address) | every ssh/scp step installs it as `~/.ssh/known_hosts` and runs with `StrictHostKeyChecking=yes`; the ansible steps get it through the inventory's `ansible_ssh_common_args`. Refresh the file when the VPS is rebuilt; until then the pipeline stops at `prepare-host` |
 | GitHub token | Woodpecker secret `ACKI_NACKI_GH_TOKEN` | read access to private gosh-sh/acki-nacki and to the inventory repository; used through a temporary `~/.netrc` on the runner and, by `dexdo-e2e-up.yml`, on the host |
 | acki-nacki branch and build | pipeline `variables` `acki_branch` (`dev`), `acki_image_tag` (`br_dev`), `registry` | the branch must carry `tests/dexdo/up.sh`, `ansible/dexdo-e2e-*.yml` and `contracts/scripts/bridge_contracts.py`; the images must carry the `org.opencontainers.image.revision` label (acki-nacki's CI sets it). node and all-bin of the tag must be one build (`block-manager` is rebuilt on its own cadence and runs as found). The resolved commit and digests are printed by `resolve-acki` in every run. `nginx0` is not pinned: acki-nacki's compose names `docker.gosh.sh/ackinacki-nginx` without a tag and `up.sh` does not pull it |
 | tvm-cli / tvm-debugger | `tvm_cli_version`, `tvm_cli_sha256`, `tvm_debugger_sha256` | tvmlabs/tvm-sdk release; acki-nacki's `contracts/compiler/*` are macOS arm64 builds and cannot run in CI. On the host the test uses the host's `tvm-cli` only when `tvm-cli version` reports the pinned version, otherwise the release is fetched and checked |

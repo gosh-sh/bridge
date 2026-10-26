@@ -68,6 +68,10 @@ assigns it when the release is tagged.
 - `disableOwnerAnchorsOn(chainId)` in `eccUSDCBridge` 1.13.0 turns the owner writer off for any
   chain, including one with no light client, which then has no anchor writer until the next
   `updateCode`. 1.14.0 throws 226 for such a chain.
+- A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
+  first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
+  (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`
+  with `BRIDGE_BOOTSTRAP_SEQNO=0` proves its first bundle at seq_no 16384. L2 anchoring only.
 
 ## [0.6.0] – 2026-10-23
 

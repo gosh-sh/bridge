@@ -128,7 +128,9 @@ echo "==> MODE=$MODE NETWORK=$NETWORK GRAPHQL_URL=$GRAPHQL_URL ACKI_NACKI_ROOT=$
 # lease is recorded in a flag file and turns the run red after the test.
 ( while sleep 300; do ( lease_assert ) || { echo "lease lost at $(date -u +%FT%TZ)" > "$WORK_ROOT/lease-lost"; exit 72; }; done ) >/dev/null 2>&1 </dev/null &
 HB=$!
-trap 'pkill -P "$HB" 2>/dev/null; kill "$HB" 2>/dev/null; true' EXIT
+# `|| true` on each: under `set -e` a command that fails in an EXIT trap ends the
+# script with its status, so a `pkill` that found no child turned a green run red.
+trap 'pkill -P "$HB" 2>/dev/null || true; kill "$HB" 2>/dev/null || true' EXIT
 # stdin is this script, still being read by ssh: the test and its tvm-cli children
 # must not inherit it.
 set +e

@@ -169,9 +169,18 @@ steps:
       ACKI_REPO: *acki_repo
       ACKI_IMAGE_TAG: *acki_image_tag
       WORK_ROOT: *work_root_on_host
+      DEXDO_DEPLOY_DIR: *dexdo_deploy_dir_on_host
     commands:
       - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- assert bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
+      # A run that was cancelled or timed out never reached net-down: its network may still be up,
+      # and its root-owned node storage under docker/ton-live/web/storage makes the checkout's
+      # `git clean` fail. net-down's own teardown first, so a run after a killed one comes up the
+      # first time. Nothing to tear down is fine; anything it leaves, the checkout below reports.
+      - >
+        ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e target=bridge_e2e
+        -e acki_dir="$ACKI_DIR" -e dexdo_deploy_dir="$DEXDO_DEPLOY_DIR" -e full_cleanup=true
+        || echo "teardown of a leftover network did not finish; the checkout below reports what is left"
       # The checkout on the host is ours, not the playbook's: acki-nacki at the resolved commit
       # plus tests/e2e/local-net/up.sh.patch (nodes that die on their first start are started
       # again at once, and the hand-over waits for node0 to serve accounts). The playbook then

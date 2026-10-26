@@ -96,6 +96,8 @@ pub struct FakeEvm {
     pub logs: Mutex<Vec<DepositLogRef>>,
     /// `probe_block` fails with this text.
     pub probe_error: Mutex<Option<String>>,
+    /// `probe_block` fails this many more times, then answers.
+    pub probe_failures: AtomicU32,
     /// What `revert_reason` answers.
     pub revert: Mutex<Option<String>>,
     /// What `bridge_paused` answers; `None` is a bridge without `paused()`.
@@ -159,6 +161,7 @@ impl Default for FakeEvm {
             counts_at: Mutex::default(),
             logs: Mutex::default(),
             probe_error: Mutex::default(),
+            probe_failures: AtomicU32::default(),
             revert: Mutex::default(),
             paused: Mutex::new(Some(false)),
             estimate_revert: Mutex::default(),
@@ -416,6 +419,13 @@ impl EvmRead for FakeEvm {
     }
 
     async fn probe_block(&self, _: BlockTag) -> anyhow::Result<usize> {
+        if self
+            .probe_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            anyhow::bail!("error code -32000: connect: connection refused");
+        }
         match self.probe_error.lock().unwrap().clone() {
             Some(e) => anyhow::bail!(e),
             None => Ok(3),

@@ -1289,7 +1289,8 @@ larger value is refused with exit 2.
 
 A read that fails is retried without a limit, backing off from 1 to 60 s,
 and every attempt is logged as `ERROR` — except inside a step with its own
-time limit, which covers the retries too.
+time limit, which covers the retries too. Preflight's EVM reads are tried for
+2 minutes, then refuse the deposit with exit 2: nothing has been sent yet.
 
 **QR code and wallet:**
 

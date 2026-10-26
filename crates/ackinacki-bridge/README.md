@@ -1262,7 +1262,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 
 | Flag | Env var / profile key | Default | Purpose |
 |------|-----------------------|---------|---------|
-| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions) |
+| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions). On Arbitrum Sepolia, `https://sepolia-rollup.arbitrum.io/rpc` does not serve `eth_getRawTransactionByHash` either; `https://arbitrum-sepolia-rpc.publicnode.com` does |
 | `--bridge-address` | `BRIDGE_ADDRESS` | — | `AckiNackiBridge` on the EVM chain |
 | `--gql-endpoint` | `BRIDGE_GQL_ENDPOINT` | — | The Acki Nacki host. GraphQL for reads; `finalizeDeposit` goes to `POST /v2/messages` on the same host, so it has to serve both |
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID` | — | Account id of the Acki Nacki bridge; its dapp is resolved live |

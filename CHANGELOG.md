@@ -70,9 +70,9 @@ assigns it when the release is tagged.
 - The light client's step prover `export_step_vk_blob` keeps its proving key: `STEP_KEYGEN_ONLY=1`
   with `STEP_KEY_DIR` generates it once, and every later run with that `STEP_KEY_DIR` only proves
   (about 2 minutes instead of 6 on 24 cores). `eth-lc-relayer` passes its environment to the
-  prover, so set `STEP_KEY_DIR` in its unit after one keygen run. Run `STEP_KEYGEN_ONLY=1` again
-  after every prover upgrade: a key from the previous step circuit still passes its own check, and
-  the light client then refuses every step proof.
+  prover, so set `STEP_KEY_DIR` in its unit after one keygen run. The key is tied to the binary
+  that generated it: after every prover upgrade the prover refuses the stored key until
+  `STEP_KEYGEN_ONLY=1` is run again.
 - `ackinacki-bridge deposit` tries a failed EVM read in preflight again for 2 minutes instead of
   refusing at once, so a load-balanced public RPC's dropped request no longer ends the run. A call
   that reverts or answers something other than the bridge's reply is refused at once.

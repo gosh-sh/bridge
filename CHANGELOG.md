@@ -88,6 +88,13 @@ assigns it when the release is tagged.
   chain, including one with no light client, which then has no anchor writer until the next
   `updateCode`. 1.14.0 throws 226 for such a chain.
 
+### Changed
+
+- The `shellnet-l2` relayer kit (`crates/bridge-relayer-daemon/deploy/shellnet-l2`) runs against
+  any EVM chain: `EXPECTED_EVM_CHAIN_ID` is the chain the bridge is deployed on (11155111
+  Sepolia, 421614 Arbitrum Sepolia), and every `RPC_URL` / `RPC_FAILOVER_URLS` endpoint must
+  serve it. Before, the entrypoint and the preflight refused any value but 11155111.
+
 ## [0.6.0] – 2026-10-23
 
 ### Breaking Changes

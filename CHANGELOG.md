@@ -24,6 +24,8 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
+  with the deployed bridge, and `release.yaml` publishes the binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
   first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
   (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`

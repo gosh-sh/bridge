@@ -186,9 +186,10 @@ def test_31_deposit_services_started(run):
     run before the deposit: it takes the slot proofs when the deposit's batch lands, a minute or
     two after the deposit."""
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
-    # The ARB_RPC secret, when set: an endpoint that keeps a minute of state.
+    # The ARB_RPC secret, when set, follows the keys on the job's stdin: ci-entry logs every
+    # command line, so a secret never travels as a job argument.
     anchors_rpc = os.environ.get("ANCHORS_ARB_RPC", "")
-    run.job("anchors", stdin=owner_keys(), **({"ARB_RPC": anchors_rpc} if anchors_rpc else {}))
+    run.job("anchors", stdin=owner_keys() + ("\n" + anchors_rpc if anchors_rpc else ""))
     # The texts relayer.rs logs at startup (`startup: bridge bundleStride matches`,
     # `daemon-live starting`); its later proving output pushes them out of a log tail fast.
     wait_for("daemon-live reads the bridge's bundle stride", lambda: "bundleStride matches" in run.log("relayer"),

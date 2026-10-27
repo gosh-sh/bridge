@@ -34,10 +34,10 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The first bridge release that cannot mint one deposit twice whatever
-/// happens to its voucher code. Set when that release exists; until then
-/// this build refuses every bridge unless built with `dev-unfixed-bridge`.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = None;
+/// The oldest bridge this build accepts: 1.14.0, the deployed one. Its
+/// voucher code is not changed by `updateCode` (bridge-audit#107: an upgrade
+/// that changes it brings a block cutoff), so a deposit is not minted twice.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 14, 0));
 /// The newest bridge this build was checked against.
 pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
 /// The first supported bridge with this build's deposit key and mandatory

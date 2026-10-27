@@ -20,7 +20,11 @@ variables:
   # a tag and up.sh does not pull it.
   - &acki_repo "https://github.com/gosh-sh/acki-nacki.git"
   - &acki_branch "dev"
-  - &acki_image_tag "br_dev"
+  # The build shellnet runs: acki-nacki b31c9d8b pins tvm-sdk 8b108bac, which has the
+  # KECCAK256 instruction ArbitrumBlockVerifier needs; br_dev (c8c9e67e, tvm-sdk v3.0.6.an)
+  # does not. gql-server and block-manager fall back to br_dev when the tag lacks them.
+  - &acki_image_tag "b31c9d8bcda724887afb02f0016a3bb305027792"
+  - &acki_aux_fallback_tag "br_dev"
   - &registry "docker.gosh.sh"
   # Contract toolchain for zerostate generation and for the test on the host (the checkout's
   # own contracts/compiler binaries are macOS builds). Every tarball is sha256-verified.
@@ -101,13 +105,14 @@ steps:
       SSH_OPTS: *ssh_opts
       REGISTRY: *registry
       TAG: *acki_image_tag
+      AUX_FALLBACK_TAG: *acki_aux_fallback_tag
       WORK_ROOT: *work_root_on_host
     commands:
       - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
       - rm -rf .acki && mkdir -p .acki/helpers
       - >
         ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
-        "REGISTRY='$REGISTRY' TAG='$TAG' WORK_ROOT=\$HOME/'$WORK_ROOT' bash -s"
+        "REGISTRY='$REGISTRY' TAG='$TAG' AUX_FALLBACK_TAG='$AUX_FALLBACK_TAG' WORK_ROOT=\$HOME/'$WORK_ROOT' bash -s"
         < $CI_WORKSPACE/tests/e2e/local-net/resolve-acki-on-host.sh | grep -E '^[A-Z_]+=' > .acki/env
       - cat .acki/env
       - . ./.acki/env && scp $SSH_OPTS "$E2E_CI_USER@$E2E_HOST:$HELPERS_DIR/node-helper" "$E2E_CI_USER@$E2E_HOST:$HELPERS_DIR/zerostate-helper" .acki/helpers/
@@ -146,7 +151,7 @@ steps:
       - bash tests/e2e/local-net/gen-zerostate.sh
 
   # One network per host at a time, shared with dexdo's e2e through the same lease files;
-  # see tests/e2e/local-net/host-lease.sh. A live lease is waited out for up to 30 minutes.
+  # see tests/e2e/local-net/host-lease.sh. dexdo's live lease is waited out for up to 30 minutes; an earlier bridge run's is taken over at once.
   lease-acquire:
     depends_on: [gen-zerostate]
     image: *ansible_image
@@ -237,8 +242,40 @@ steps:
         BRIDGE_REPO='$CI_REPO_CLONE_URL' TVM_CLI_VERSION='$TVM_CLI_VERSION' TVM_CLI_SHA256='$TVM_CLI_SHA256' bash -s"
         < $CI_WORKSPACE/tests/e2e/local-net/run-test-on-host.sh
 
-  dump-logs:
+  # Arbitrum Sepolia: a fresh AckiNackiBridge every run, 2 USDC deposited from it to this
+  # network with `ackinacki-bridge deposit` and withdrawn back with `ackinacki-bridge
+  # withdraw`, one pytest step per stage (tests/e2e/local-net/arbitrum/). The provers and the
+  # CLI run on a separate prover host through a restricted CI key
+  # (tests/e2e/local-net/prover-host/ci-entry) and reach this network through the runner's ssh
+  # tunnels; every run's logs stay there. The host is a secret too.
+  arbitrum-e2e:
     depends_on: [run-test]
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      KNOWN_HOSTS: *known_hosts
+      ACKI_DIR: *acki_dir_on_host
+      WORK_ROOT: *work_root_on_host
+      PROVER_HOST: { from_secret: PROVER_HOST }
+      PROVER_HOST_PORT: { from_secret: PROVER_HOST_PORT }
+      PROVER_HOST_USER: { from_secret: PROVER_HOST_USER }
+      PROVER_HOST_SSH_KEY: { from_secret: PROVER_HOST_SSH_KEY }
+      ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY: { from_secret: ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY }
+      # Public: the deployer's address, which the test checks the key against.
+      ARBITRUM_SEPOLIA_E2E_ADDRESS: "0xe8e3bfd675cb889e4adf7ed0ec65c3dd09cc9041"
+      # Arbitrum Sepolia RPC for arbitrum-anchors only: it has to serve eth_getProof
+      # on a batch's last block a minute after it, and the public endpoints keep about
+      # 128 blocks (half a minute). Unset, the job falls back to the public endpoint.
+      ANCHORS_ARB_RPC: { from_secret: ARB_RPC }
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - python3 -m pip install --quiet --no-cache-dir --break-system-packages pytest==8.3.4
+      - cd $CI_WORKSPACE/tests/e2e/local-net/arbitrum && ACKI_CONFIG=$CI_WORKSPACE/.acki-nacki/config python3 -m pytest
+
+  dump-logs:
+    depends_on: [run-test, arbitrum-e2e]
     image: *ansible_image
     when:
       - status: [failure]
@@ -267,7 +304,7 @@ steps:
   # step then, and the lease ages out). The lease is released even when the teardown playbook
   # fails: the next up.sh tears the stand down first anyway.
   net-down:
-    depends_on: [run-test, dump-logs]
+    depends_on: [run-test, arbitrum-e2e, dump-logs]
     image: *ansible_image
     directory: .acki-nacki/ansible
     when:

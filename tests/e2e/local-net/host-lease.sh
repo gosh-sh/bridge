@@ -51,6 +51,13 @@ esac
 # is dexdo's value, kept identical on purpose: both pipelines must agree on
 # when a lease is dead, or one could take over a lease the other still
 # considers live. A dead run blocks the host for that long at most.
+#
+# A lease another bridge pipeline holds is taken over at once: the newest
+# bridge run wins. Woodpecker cancels a pull request's running pipeline on a
+# new push, and a cancelled run never releases (no step runs after a cancel),
+# so waiting on a bridge lease only ever waits on a run that is gone. If the
+# older run is still alive, its next `assert` fails and it stops. net-up then
+# tears down what that run left. dexdo's leases keep the full TTL.
 TTL=${3:-5400}
 
 # All state transitions run under this flock. Acquiring, reading the current
@@ -98,10 +105,15 @@ do_acquire() {
   _read
   if [ -n "$L_ID" ] && [ "$L_ID" != "$ID" ]; then
     AGE=$(( $(_now) - L_TS ))
-    if [ "$AGE" -lt "$TTL" ]; then
-      echo "FATAL: live lease held by pipeline $L_ID (age ${AGE}s < TTL ${TTL}s)"
-      exit 71
-    fi
+    case "$L_ID" in
+      bridge-*) echo "lease of $L_ID (age ${AGE}s) belongs to an earlier bridge run: taking it over" ;;
+      *)
+        if [ "$AGE" -lt "$TTL" ]; then
+          echo "FATAL: live lease held by pipeline $L_ID (age ${AGE}s < TTL ${TTL}s)"
+          exit 71
+        fi
+        ;;
+    esac
   fi
   # Reaching here means the lease is ours already, absent, or expired.
   # Takeover of an expired lease happens right here, still under the guard's

@@ -28,8 +28,8 @@ assigns it when the release is tagged.
   `ackinacki-bridge` before upgrading the bridge to 1.14.0.
 - `deposit-relayer arbitrum-anchors` refuses to start without a state file and without
   `--from-block` (`BRIDGE_DEPLOY_BLOCK`), instead of scanning Arbitrum from block 0. It also refuses
-  a verifier whose `getConfig()` names another chain, parent chain or rollup, and a
-  `--parent-rpc-url` without `eth_getBlockReceipts`.
+  a verifier whose `getConfig()` names another chain, parent chain or rollup, a
+  `--parent-rpc-url` without `eth_getBlockReceipts`, and a state file of another `--bridge-address`.
 
 ### New / Improvements
 
@@ -53,8 +53,8 @@ assigns it when the release is tagged.
 - Arbitrum Sepolia (421614) is a deposit chain for the deposit prover and relayer;
   `ackinacki-bridge withdraw --to-chain` accepts 42161 and 421614, and the CLI knows bridge 1.14.0.
 - `deposit-relayer arbitrum-anchors` gets the Arbitrum blocks that hold deposits accepted through
-  `proveBlock`, with ordinary RPCs. Run one per Arbitrum chain next to `daemon`, keep
-  `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
+  `proveBlock`, with an Arbitrum RPC that keeps a few minutes of state (public ones keep ~30 s).
+  Run one per Arbitrum chain next to `daemon`, keep `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
   scans for deposits 240 blocks behind the Arbitrum head; a `proveBlock` Acki Nacki refuses is sent
   again after 5 minutes without holding up the others; a deposit block older than 393 168 blocks is
   logged as an error saying it now needs the bridge owner, and dropped. An RPC failure while it

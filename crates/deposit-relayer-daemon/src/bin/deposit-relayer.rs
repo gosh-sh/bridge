@@ -1146,6 +1146,9 @@ async fn arbitrum_anchors(
                 chain.name,
                 chain.chain_id
             );
+            let mut s = s;
+            s.ensure_bridge(evm_bridge)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", state_path.display()))?;
             s
         },
         // Rolls forward from now: deposits from --from-block on are anchored
@@ -1159,6 +1162,7 @@ async fn arbitrum_anchors(
         ),
         None => arbitrum::AnchorState {
             chain_id: chain.chain_id,
+            evm_bridge: Some(evm_bridge),
             parent_cursor: view.parent.get_block_number().await?,
             deposit_cursor: from_block.saturating_sub(1),
             ..Default::default()

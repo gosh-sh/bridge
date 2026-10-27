@@ -207,11 +207,12 @@ the verifier against `getL2Verifier` (step 4).
 `crates/deposit-relayer-daemon/docs/operator_runbook.md`. It needs the state
 at M, and M is already 30 minutes (Arbitrum Sepolia) or an hour (Arbitrum One)
 old when its assertion lands, which is more state than an ordinary node keeps.
-It does not need an archive node. M is always the last block of a batch, and
-the batch is posted to the parent chain's `SequencerInbox` within a minute of
-M. So the relayer rolls forward: on each `SequencerBatchDelivered` it takes M's
-header and the `eth_getProof` for the slots of the deposits still waiting,
-while that state is seconds old. When an assertion ends at that block, it calls
+M is always the last block of a batch, and the batch is posted to the parent
+chain's `SequencerInbox` within a minute of M. So the relayer rolls forward: on
+each `SequencerBatchDelivered` it takes M's header and one `eth_getProof` for
+the slots of the deposits still waiting, 40–60 s after M. The Arbitrum node has
+to keep M's state that long: public endpoints keep about 128 blocks, half a
+minute, and miss many batches; a free Alchemy key keeps it. When an assertion ends at that block, it calls
 `proveBlock` with the parent-chain receipt.
 
 ## Transfer and network limits

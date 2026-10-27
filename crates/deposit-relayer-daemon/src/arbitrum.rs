@@ -251,10 +251,15 @@ pub struct AnchorState {
     pub batch_txs: BTreeMap<u64, B256>,
 }
 
-/// How many ticks a batch the Arbitrum node cannot place yet is tried again:
-/// about 20 minutes at the default poll, within the ~30 minutes a Nitro node
-/// keeps the state its slot proofs are read from.
-pub const BATCH_RETRIES: u32 = 100;
+/// How many more ticks a batch is tried when the Arbitrum node cannot place
+/// its last block yet, or failed to answer. A public node keeps the state the
+/// slot proofs are read from for about 128 blocks, half a minute on Arbitrum,
+/// so a later try rarely helps; the next batch covers the same deposits.
+pub const BATCH_RETRIES: u32 = 2;
+
+/// Posting transactions kept for the most recent batches: enough for every
+/// batch one tick sees after a long stop, and the ticks that try it again.
+const BATCH_TXS_KEPT: usize = 400;
 
 impl AnchorState {
     pub fn load(path: &Path) -> Result<Option<Self>, RelayerError> {
@@ -475,7 +480,7 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                 state.unplaced_batches.remove(&batch);
                 report.batches_taken += 1;
             },
-            Taken::Nothing => {
+            Taken::Nothing | Taken::Gone => {
                 state.unplaced_batches.remove(&batch);
             },
             Taken::Unplaced if left > 1 => {
@@ -511,7 +516,7 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                     batch, ..
                 } => match take_batch(view, state, batch).await? {
                     Taken::Proofs => report.batches_taken += 1,
-                    Taken::Nothing => {},
+                    Taken::Nothing | Taken::Gone => {},
                     Taken::Unplaced => {
                         state.unplaced_batches.insert(batch, BATCH_RETRIES);
                     },
@@ -655,9 +660,19 @@ enum Taken {
     Proofs,
     /// No waiting deposit block is covered by it.
     Nothing,
-    /// The Arbitrum node cannot place its last block yet, or cannot prove
-    /// it: a load-balanced endpoint answers from a backend without that state.
+    /// The Arbitrum node cannot place its last block yet, or failed to
+    /// answer for it.
     Unplaced,
+    /// The node no longer has the state of its last block: asking again
+    /// cannot help.
+    Gone,
+}
+
+/// The node answered that it no longer keeps that block's state.
+fn state_gone(e: &RelayerError) -> bool {
+    let t = e.to_string();
+    (t.contains("historical state") && t.contains("not available"))
+        || t.contains("missing trie node")
 }
 
 /// Takes the slot proofs of the waiting deposit blocks at the last block of
@@ -709,6 +724,16 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
     // A read that fails here leaves this batch for a later tick, never the
     // whole tick: the tick's other events, and its cursor, go on.
     let unprovable = |e: RelayerError| {
+        if state_gone(&e) {
+            warn!(
+                batch,
+                m,
+                error = %e,
+                "the Arbitrum node no longer has the state of this batch's last block; the next \
+                 batch covers the same deposits"
+            );
+            return Taken::Gone;
+        }
         warn!(
             batch,
             m,
@@ -874,7 +899,7 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
                 let mut txs = self.batch_txs.lock().unwrap_or_else(|p| p.into_inner());
                 txs.insert(batch, tx);
                 // Kept long enough for the retries of an unplaced batch.
-                while txs.len() > 4 * BATCH_RETRIES as usize {
+                while txs.len() > BATCH_TXS_KEPT {
                     txs.pop_first();
                 }
             }
@@ -1368,8 +1393,10 @@ mod tests {
         events: Vec<ParentEvent>,
         /// batch → its last block
         batch_ends: BTreeMap<u64, u64>,
-        /// Blocks whose state the node cannot prove.
+        /// Blocks whose state the node no longer has.
         missing_state: Vec<u64>,
+        /// Blocks whose proof the node fails to answer for once.
+        flaky_state: Vec<u64>,
         /// Batches whose end the node fails to answer for.
         failing_batch_ends: Vec<u64>,
         /// How many parent receipt reads fail before one succeeds.
@@ -1425,11 +1452,19 @@ mod tests {
             Ok(ends.values().copied().find(|&m| h(m) == hash))
         }
         async fn history_slot(&self, n: u64, m: u64) -> Result<(B256, SlotProof), RelayerError> {
-            if self.lock().unwrap().missing_state.contains(&m) {
+            let mut c = self.lock().unwrap();
+            if c.missing_state.contains(&m) {
                 return Err(RelayerError::Eth(format!(
                     "historical state of {m} is not available"
                 )));
             }
+            if let Some(i) = c.flaky_state.iter().position(|&b| b == m) {
+                c.flaky_state.remove(i);
+                return Err(RelayerError::Eth(format!(
+                    "block {m}: 429 Too Many Requests"
+                )));
+            }
+            drop(c);
             let proof = SlotProof {
                 account_proof: vec![Bytes::from(m.to_be_bytes().to_vec())],
                 storage_proof: vec![Bytes::from(n.to_be_bytes().to_vec())],
@@ -1694,7 +1729,31 @@ mod tests {
             state.parent_cursor, 29,
             "the tick went through all its events"
         );
-        assert_eq!(state.unplaced_batches, BTreeMap::from([(6, BATCH_RETRIES)]));
+        assert!(
+            state.unplaced_batches.is_empty(),
+            "a batch whose state is gone is not tried again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_the_node_failed_to_answer_for_is_tried_on_the_next_tick() {
+        // Batch 7 ends at 150; the node fails once on its proof, then answers.
+        let chain = one_deposit();
+        {
+            let mut c = chain.lock().unwrap();
+            c.flaky_state.push(150);
+            c.parent_head = 15;
+        }
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.batches_taken, 0);
+        assert_eq!(state.unplaced_batches, BTreeMap::from([(7, BATCH_RETRIES)]));
+
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.batches_taken, 1);
+        assert!(state.unplaced_batches.is_empty());
+        assert!(state.batch_ends.contains_key(&150));
     }
 
     #[tokio::test]

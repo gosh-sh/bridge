@@ -59,7 +59,9 @@ assigns it when the release is tagged.
   again after 5 minutes without holding up the others; a deposit block older than 393 168 blocks is
   logged as an error saying it now needs the bridge owner, and dropped. An RPC failure while it
   looks up a batch's last block is retried on the next tick instead of being read as "not posted
-  yet".
+  yet". A batch whose last block's state the Arbitrum node no longer keeps ("historical state … is
+  not available") is dropped at once, since the next batch covers the same deposits; any other
+  failure on a batch is tried on at most 2 more ticks.
   `deposit-relayer arbitrum-vector` writes a test vector.
 - `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
   Arbitrum One data.

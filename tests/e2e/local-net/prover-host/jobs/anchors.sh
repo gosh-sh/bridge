@@ -7,7 +7,7 @@
 load evm.env
 cp /run/input "$WORK/an.keys.json"
 exec deposit-relayer arbitrum-anchors \
-  --parent-rpc-url "$SEPOLIA_RPC" --arbitrum-rpc-url "$ARB_RPC" \
+  --parent-rpc-url "$SEPOLIA_RPC" --arbitrum-rpc-url "$ARB_RPC" --arbitrum-log-span 10 \
   --bridge-address "$BRIDGE_ADDRESS" --from-block "$BRIDGE_DEPLOY_BLOCK" \
   --an-graphql-url "$GQL" --an-keys-path "$WORK/an.keys.json" --an-bridge-abi-path "$AN_BRIDGE_ABI" \
   --an-verifier-abi-path /src/contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json \

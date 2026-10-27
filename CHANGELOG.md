@@ -57,7 +57,9 @@ assigns it when the release is tagged.
   `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
   scans for deposits 240 blocks behind the Arbitrum head; a `proveBlock` Acki Nacki refuses is sent
   again after 5 minutes without holding up the others; a deposit block older than 393 168 blocks is
-  logged as an error saying it now needs the bridge owner, and dropped.
+  logged as an error saying it now needs the bridge owner, and dropped. An RPC failure while it
+  looks up a batch's last block is retried on the next tick instead of being read as "not posted
+  yet".
   `deposit-relayer arbitrum-vector` writes a test vector.
 - `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
   Arbitrum One data.

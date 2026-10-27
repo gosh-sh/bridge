@@ -786,16 +786,32 @@ impl<P: Provider, A: Provider> RpcArbitrumView<P, A> {
         Ok(out)
     }
 
-    async fn batch_of(&self, number: u64) -> Option<u64> {
+    /// The batch that holds block `number`; `None` when no posted batch holds
+    /// it yet. Any other failure is an error: read as "not yet", it would
+    /// settle the search below the batch's last block.
+    async fn batch_of(&self, number: u64) -> Result<Option<u64>, RelayerError> {
         let call = findBatchContainingBlockCall {
             blockNum: number,
         };
         let tx = TransactionRequest::default()
             .to(NODE_INTERFACE)
             .input(call.abi_encode().into());
-        let out = self.arbitrum.call(tx).await.ok()?;
-        findBatchContainingBlockCall::abi_decode_returns(&out).ok()
+        match self.arbitrum.call(tx).await {
+            Ok(out) => findBatchContainingBlockCall::abi_decode_returns(&out)
+                .map(Some)
+                .map_err(eth("NodeInterface findBatchContainingBlock")),
+            Err(e) if not_in_a_batch_yet(&e) => Ok(None),
+            Err(e) => Err(eth("NodeInterface findBatchContainingBlock")(e)),
+        }
     }
+}
+
+/// The node refused `findBatchContainingBlock` because no posted batch
+/// holds the block yet: the call reverts. A rate limit, a timeout or a
+/// dropped connection is the RPC's failure, not an answer.
+fn not_in_a_batch_yet(e: &alloy::transports::TransportError) -> bool {
+    e.as_error_resp()
+        .is_some_and(|p| p.message.contains("revert"))
 }
 
 #[async_trait]
@@ -902,17 +918,17 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
         // posted batch yet make the NodeInterface call fail.
         let head = self.arbitrum_head().await?;
         let (mut lo, mut hi) = (head.saturating_sub(50_000), head);
-        if self.batch_of(lo).await.is_none_or(|b| b > batch) {
+        if self.batch_of(lo).await?.is_none_or(|b| b > batch) {
             return Ok(None);
         }
         while lo < hi {
             let mid = lo + (hi - lo).div_ceil(2);
-            match self.batch_of(mid).await {
+            match self.batch_of(mid).await? {
                 Some(b) if b <= batch => lo = mid,
                 _ => hi = mid - 1,
             }
         }
-        Ok((self.batch_of(lo).await == Some(batch)).then_some(lo))
+        Ok((self.batch_of(lo).await? == Some(batch)).then_some(lo))
     }
 
     async fn arbitrum_header(&self, number: u64) -> Result<(B256, Bytes), RelayerError> {
@@ -1901,6 +1917,29 @@ mod tests {
             let selector: [u8; 4] = keccak256(sig.as_bytes())[..4].try_into().unwrap();
             assert!(BATCH_POSTING_CALLS.contains(&(selector, at)), "{sig}");
         }
+    }
+
+    #[test]
+    fn only_a_revert_means_the_block_is_in_no_batch_yet() {
+        use alloy::transports::{RpcError, TransportErrorKind};
+        use alloy_json_rpc::ErrorPayload;
+
+        let reverted = RpcError::ErrorResp(ErrorPayload {
+            code: -32000,
+            message: "execution reverted: requested block 5 is after latest on-chain block 4"
+                .into(),
+            data: None,
+        });
+        assert!(not_in_a_batch_yet(&reverted));
+        let limited = RpcError::ErrorResp(ErrorPayload {
+            code: 429,
+            message: "Too Many Requests".into(),
+            data: None,
+        });
+        assert!(!not_in_a_batch_yet(&limited));
+        assert!(!not_in_a_batch_yet(&TransportErrorKind::custom_str(
+            "connection reset"
+        )));
     }
 
     #[test]

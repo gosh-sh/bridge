@@ -6,7 +6,8 @@ logs go to stderr.
 
   bridge                    BRIDGE_ACTIVE, BRIDGE_VERSION
   verifier <l2> <parent> <rollup>
-                            deployL2Verifier, then wait until getL2Verifier records it:
+                            deployL2Verifier unless getL2Verifier already records one for
+                            that parent (the bridge refuses the same code twice, 238), then
                             VERIFIER, VERIFIER_PARENT, VERIFIER_L2/L1/ROLLUP (its getConfig)
   trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true); TRUSTED=true|false read back
   lightclient               deployLightClient(owner pubkey, 11155111, 0, 0): the Sepolia light
@@ -144,7 +145,9 @@ def main():
                       f"BRIDGE_VERSION={version.get('value0')}"]
         elif cmd == "verifier" and len(args) == 3:
             l2, parent, rollup = args
-            owner_call("deployL2Verifier", {"l2ChainId": l2, "parentChainId": parent, "rollup": rollup})
+            # An earlier test on this network may have deployed it; its getConfig is checked below.
+            if not recorded_verifier(l2, parent):
+                owner_call("deployL2Verifier", {"l2ChainId": l2, "parentChainId": parent, "rollup": rollup})
             got = until(lambda: recorded_verifier(l2, parent)) or {}
             target = common.to_dapp_address(got["verifier"]) if got.get("verifier") else ""
             cfg = (until(lambda: verifier_config(target, l2)) if target else None) or {}

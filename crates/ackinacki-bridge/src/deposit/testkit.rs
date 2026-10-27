@@ -1891,8 +1891,10 @@ impl World {
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
         ]);
+        // None for the deposit chain; then its verifier's parent chain's.
         self.an.getter(W_BRIDGE_ACC, "getLightClient", vec![
             serde_json::json!({ "value0": ":" }),
+            serde_json::json!({ "value0": format!("0:{}", hex::encode(W_LC)) }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
             serde_json::json!({ "value0": false }),

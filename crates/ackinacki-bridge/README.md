@@ -1381,7 +1381,9 @@ cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
 
 ### Networks
 
-Sepolia is the only deposit network in this version. **Ethereum mainnet is
+`deposit --network` takes Sepolia (`sepolia`) and Arbitrum Sepolia
+(`arbitrum-sepolia`) in this version; an Arbitrum Sepolia deposit needs a
+bridge at 1.14.0 or newer with a verifier for 421614. **Ethereum mainnet is
 not a deposit network**: the deposit circuit accepts OP Mainnet, World Chain,
 Mantle, Base, Arbitrum One, Blast, Sepolia and Arbitrum Sepolia
 (`crates/deposit-chain-ids`), so production deposits come from L2s. `bridge_config.mainnet` cannot be used for
@@ -1397,17 +1399,20 @@ after the deposit, plus however long the owner takes to act. The status line
 prints the owner's call to pass on:
 `setAcceptedBlockHash(<chainId>, 0x<blockHash>, true)`.
 
-| Phase | On Sepolia |
-|-------|------------|
-| Preflight | seconds |
-| Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing, and an `approve` that does not show on chain, give up after `--pair-timeout-s` |
-| EVM confirmation, 12 blocks | ~2.5 min |
-| Block anchor, by the owner | **from ~13 min, plus the owner's reaction; no limit by default** |
-| Deposit block finalized on the EVM side | ~13 min, inside the anchor wait |
-| Relayer grace | up to 2 min |
-| Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) |
-| `finalizeDeposit` and the credit | under a minute; at most `--credit-timeout-s` |
-| **End to end** | **~17 min, plus the owner's reaction** — an estimate summed from the rows above, not a measured run |
+| Phase | On Sepolia | On Arbitrum Sepolia |
+|-------|------------|---------------------|
+| Preflight | seconds | seconds |
+| Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing, and an `approve` that does not show on chain, give up after `--pair-timeout-s` | the same |
+| EVM confirmation, 12 blocks | ~2.5 min | seconds |
+| Block anchor | by the owner: **from ~13 min, plus the owner's reaction; no limit by default** | by `arbitrum-anchors` through the verifier: **35–75 min** (the rollup's next assertion on Sepolia, then the Sepolia light client admitting its block; 70 min in one measured run); the owner can anchor it sooner |
+| Deposit block finalized on the EVM side | ~13 min, inside the anchor wait | inside the anchor wait |
+| Relayer grace | up to 2 min | up to 2 min |
+| Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) | the same |
+| `finalizeDeposit` and the credit | under a minute; at most `--credit-timeout-s` | the same |
+| **End to end** | **~17 min, plus the owner's reaction** — an estimate summed from the rows above, not a measured run | **~40–80 min** — an estimate from the rows above |
+
+On Arbitrum One the assertion comes about once an hour and covers blocks up to
+about an hour before it, so the anchor takes about 2–2.5 hours there.
 
 With owner anchors disabled, the light client anchors a block once it is
 finalized and the next checkpoint is proven: at least two epochs (~13 minutes

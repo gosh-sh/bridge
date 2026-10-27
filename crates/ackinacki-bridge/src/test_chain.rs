@@ -1046,10 +1046,11 @@ mod tests {
             .expect("an Active bridge has a code hash")
             .as_hex_string();
         // sold 0.80.0 build of eccUSDCBridge 1.14.0: 1.13.0 plus the Arbitrum
-        // block verifier's deploy and writer path.
+        // block verifier's deploy and writer path, and the refusal to deploy
+        // the recorded verifier again.
         assert_eq!(
             &hash[..8],
-            "efd7e735",
+            "5cada5db",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }
@@ -1204,6 +1205,7 @@ mod l2_verifier_tests {
     const ERR_OWNER_ANCHORS_DISABLED: i64 = 225;
     const ERR_LIGHT_CLIENT_UNSET: i64 = 226;
     const ERR_L2_VERIFIER_UNSET: i64 = 237;
+    const ERR_L2_VERIFIER_DEPLOYED: i64 = 238;
 
     fn ctx() -> Arc<ClientContext> {
         Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"))
@@ -1397,6 +1399,35 @@ mod l2_verifier_tests {
         .await;
         assert_eq!(exit, ERR_L2_VERIFIER_UNSET);
         bridge_with_verifier().await;
+    }
+
+    /// The same code reaches the recorded verifier, which keeps its first
+    /// configuration: the bridge refuses the call rather than record a parent
+    /// chain the verifier does not have.
+    #[tokio::test]
+    async fn the_recorded_verifier_is_not_deployed_again() {
+        let (bridge, boc, verifier) = bridge_with_verifier().await;
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "deployL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA, "parentChainId": 1, "rollup": ROLLUP }),
+        )
+        .await;
+        assert_eq!(exit, ERR_L2_VERIFIER_DEPLOYED);
+        let got = getter(
+            &bridge,
+            &boc,
+            "getL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA }),
+        )
+        .await;
+        assert_eq!(
+            number(&got["parentChainId"]),
+            SEPOLIA,
+            "the parent chain stays"
+        );
+        assert_eq!(got["verifier"].as_str(), Some(verifier.as_str()));
     }
 
     #[tokio::test]

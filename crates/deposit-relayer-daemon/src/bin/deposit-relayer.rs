@@ -1086,6 +1086,12 @@ async fn arbitrum_view(
         chain.name,
         chain.parent_chain_id
     );
+    // `proveBlock`'s receipt proof is built from a whole block's receipts:
+    // an RPC without the call would pin the parent cursor on every assertion.
+    let head = parent.get_block_number().await?;
+    parent.get_block_receipts(head.into()).await.map_err(|e| {
+        anyhow::anyhow!("--parent-rpc-url does not serve eth_getBlockReceipts: {e}")
+    })?;
     Ok(arbitrum::RpcArbitrumView {
         parent,
         arbitrum: arb,
@@ -1144,6 +1150,13 @@ async fn arbitrum_anchors(
         },
         // Rolls forward from now: deposits from --from-block on are anchored
         // by the next batch after the start.
+        None if from_block == 0 => anyhow::bail!(
+            "arbitrum-anchors has no state at {} and no --from-block: pass the bridge's deploy \
+             block (or set {}), or it scans {} from block 0",
+            state_path.display(),
+            BRIDGE_DEPLOY_BLOCK_ENV,
+            chain.name
+        ),
         None => arbitrum::AnchorState {
             chain_id: chain.chain_id,
             parent_cursor: view.parent.get_block_number().await?,
@@ -1151,6 +1164,7 @@ async fn arbitrum_anchors(
             ..Default::default()
         },
     };
+    *view.batch_txs.lock().unwrap_or_else(|p| p.into_inner()) = state.batch_txs.clone();
     info!(
         chain = chain.name,
         parent_cursor = state.parent_cursor,
@@ -1168,6 +1182,11 @@ async fn arbitrum_anchors(
             Ok(_) => {},
             Err(e) => warn!(error = %e, "arbitrum-anchors tick failed; retrying"),
         }
+        state.batch_txs = view
+            .batch_txs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         state.save(state_path)?;
         tokio::select! {
             _ = &mut shutdown => break,

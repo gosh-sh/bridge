@@ -10,8 +10,8 @@ use crate::{
     deposit::{
         args::Network,
         evm::{
-            read_allowance, read_balance, read_decimals, read_usdc, read_volume_limits, BlockTag,
-            EvmRead,
+            read_allowance, read_balance, read_decimals, read_usdc, read_volume_limits, revert_of,
+            BlockTag, EvmRead,
         },
         retry::{deadline_after, until_with},
         ui::Ui,
@@ -40,17 +40,36 @@ fn refuse(reason: String, e: Option<anyhow::Error>) -> CliError {
 pub const READ_WINDOW: Duration = Duration::from_secs(120);
 
 /// `f`, tried again with backoff for [`READ_WINDOW`], every failed attempt
-/// reported through `ui`; the error is the last attempt's.
-async fn read<T, F, Fut>(ui: &dyn Ui, what: &str, f: F) -> anyhow::Result<T>
+/// reported through `ui`; the error is the last attempt's. An answer that
+/// cannot change — a call that reverts, or a reply that does not decode as
+/// the bridge's — is not tried again: a wrong `--bridge-address` says so at
+/// once.
+async fn read<T, F, Fut>(ui: &dyn Ui, what: &str, mut f: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    until_with(Some(deadline_after(READ_WINDOW)), f, |attempt, e| {
-        ui.retry(what, attempt, &format!("{e:#}"))
-    })
+    until_with(
+        Some(deadline_after(READ_WINDOW)),
+        || {
+            let attempt = f();
+            async move {
+                match attempt.await {
+                    Ok(v) => Ok(Ok(v)),
+                    Err(e) if is_final(&e) => Ok(Err(e)),
+                    Err(e) => Err(e),
+                }
+            }
+        },
+        |attempt, e| ui.retry(what, attempt, &format!("{e:#}")),
+    )
     .await
-    .map_err(|e| e.unwrap_or_else(|| anyhow::anyhow!("no answer within {READ_WINDOW:?}")))
+    .map_err(|e| e.unwrap_or_else(|| anyhow::anyhow!("no answer within {READ_WINDOW:?}")))?
+}
+
+/// The node answered, and asking again gets the same answer.
+fn is_final(e: &anyhow::Error) -> bool {
+    revert_of(e).is_some() || e.downcast_ref::<alloy::sol_types::Error>().is_some()
 }
 
 /// Checks the chain, the bridge, its token, the pause, the depositor's
@@ -331,6 +350,32 @@ mod tests {
             .filter(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..)))
             .count();
         assert_eq!(retries, 2);
+    }
+
+    /// `usdc()` on a contract that is not the bridge answers something that
+    /// does not decode: refused at once, not after the read window.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_that_cannot_change_is_not_tried_again() {
+        let f = healthy();
+        f.set_call(BRIDGE, IDeposit::usdcCall::SELECTOR, Bytes::new());
+        let ui = RecordingUi::new(true);
+        let e = run(
+            &f,
+            &ui,
+            Network::Sepolia,
+            BRIDGE,
+            12_500_000,
+            Some(sepolia_sender()),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("is this an AckiNackiBridge"), "{e}");
+        let retries = ui
+            .events()
+            .into_iter()
+            .filter(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..)))
+            .count();
+        assert_eq!(retries, 0);
     }
 
     #[tokio::test(start_paused = true)]

@@ -55,7 +55,7 @@ account is Active. Each client writes only for its own chain:
 `acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient` compare
 the sender against the client of the chain named in the call. An L2 source
 chain on the deposit allowlist keeps the owner writer until it has a verifier. `getLightClient(chainId)` is
-the client of a chain (0 if none), `isOwnerAnchorsEnabled(chainId)` the
+the client of a chain (`addr_none` if none), `isOwnerAnchorsEnabled(chainId)` the
 per-chain writer state, and `getAnchorConfig()` the pair for the chain
 deployed last — with clients on several chains, read the per-chain getters.
 The flip disables `setAcceptedBlockHash` for the selected chain; it does not
@@ -185,21 +185,23 @@ than 393 168 blocks past N.
    0x4dceb440657f21083db8add07665f8ddbe1dcfc0)` for Arbitrum One. The bridge
    deploys the verifier at the address of its code salted with `l2ChainId`,
    with 10 vmshell, and initializes it with 2. Without the code it throws
-   `ERR_L2_VERIFIER_UNSET` (237). Re-running it with the same code reaches
-   the same account: the deploy and `initialize` (311) bounce, so the verifier
-   keeps the rollup and parent chain it was first given, while the bridge
-   records the `parentChainId` of the new call. Re-run it only with the same
-   arguments. A new rollup address needs new verifier code (see above), which
-   deploys at a new address and replaces the recorded verifier.
+   `ERR_L2_VERIFIER_UNSET` (237). Re-running it with the code of the recorded
+   verifier throws `ERR_L2_VERIFIER_DEPLOYED` (238): that code reaches the
+   same account, which keeps the rollup and parent chain it was first given.
+   A new rollup address or parent chain needs new verifier code (see above),
+   which deploys at a new address and replaces the recorded verifier.
 4. Check `getL2Verifier(l2ChainId)` on the bridge, which returns the address
    and the parent chain, and `getConfig()` on the verifier.
 5. When the verifier is admitting blocks, `disableOwnerAnchorsOn(l2ChainId)`
    turns the owner writer off for that chain.
 
 The verifier code and the recorded verifiers are not carried through
-`updateCode`. After a bridge upgrade, repeat steps 1 and 3. The verifier
-account already exists at the same address, so the deploy and `initialize`
-fail on it and bounce, and the bridge records the address again.
+`updateCode`. After a bridge upgrade, repeat steps 1 and 3 with the arguments
+the verifier was first deployed with. The verifier account already exists at
+the same address, so the deploy and `initialize` fail on it and bounce, and the
+bridge records the address again, with the `parentChainId` of this call: the
+upgraded bridge has no record to refuse it against, so check `getConfig()` on
+the verifier against `getL2Verifier` (step 4).
 
 `deposit-relayer arbitrum-anchors` calls `proveBlock`; see section 9 of
 `crates/deposit-relayer-daemon/docs/operator_runbook.md`. It needs the state

@@ -30,7 +30,7 @@ use tracing::{info, warn};
 
 use bridge_gql_fetcher::gql_client::GqlClient;
 use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
-use bridge_prover_lib::chain_proof_builder::{build_tree_and_proof, pad_leaves_to_power_of_2};
+use bridge_prover_lib::chain_proof_builder::build_tree_and_proof;
 use bridge_prover_lib::real_chain_builder;
 
 use gosh_dense_balanced_tree::{DenseChainLink, MAX_CHAIN_LEN};
@@ -577,77 +577,57 @@ pub(crate) async fn build_events_tree_proof(
 /// Build the L1 history-window tree for the given key block and return the
 /// Merkle proof for the block at `block_offset_in_window`, together with
 /// the L1 root we computed.
+///
+/// Leaf 0 comes from [`real_chain_builder::build_layer1_tree`]: the L2 root
+/// of the latest L2 key block strictly before `key_block_seq`, or 32 zero
+/// bytes before the first boundary. A missing layer root is an error. The
+/// rebuilt root must equal layer 1 of `history_proofs` on `key_block_seq`.
 pub(crate) async fn build_block_tree_proof(
     gql: &GqlClient,
     key_block_seq: u64,
     w: u64,
     block_offset_in_window: u64,
 ) -> Result<(MerkleProofData, [u8; 32])> {
-    let l2_step = w * w;
-    let most_recent_l2_block = (key_block_seq / l2_step) * l2_step;
-    let higher_layer_root: [u8; 32] = if most_recent_l2_block == 0 {
-        [0u8; 32]
-    } else {
-        match gql.query_proof_block_by_seqno(most_recent_l2_block).await {
-            Ok(b) => b.history_proofs.get(&2u8).copied().unwrap_or([0u8; 32]),
-            Err(e) => {
-                warn!(
-                    "failed to fetch L2 root from most-recent-L2 key block {}: {} — using zero",
-                    most_recent_l2_block, e
-                );
-                [0u8; 32]
-            }
-        }
-    };
-
     let prev_key_block_seq = key_block_seq.saturating_sub(w);
-    let prev_same_layer_root: [u8; 32] = if prev_key_block_seq == 0 {
+    let prev_same_layer_root = if prev_key_block_seq == 0 {
         [0u8; 32]
     } else {
-        match gql.query_proof_block_by_seqno(prev_key_block_seq).await {
-            Ok(b) => b.history_proofs.get(&1u8).copied().unwrap_or([0u8; 32]),
-            Err(e) => {
-                warn!(
-                    "failed to fetch previous L1 root from key block {}: {} — using zero",
-                    prev_key_block_seq, e
-                );
-                [0u8; 32]
-            }
-        }
+        real_chain_builder::fetch_layer_root(gql, prev_key_block_seq, 1)
+            .await
+            .with_context(|| {
+                format!("fetching previous L1 root from key block {prev_key_block_seq}")
+            })?
     };
 
-    let window_start = key_block_seq - w;
-    let mut block_leaves = Vec::with_capacity(w as usize);
-    for seq in window_start..key_block_seq {
-        let b = gql
-            .query_proof_block_by_seqno(seq)
-            .await
-            .with_context(|| format!("fetching block seq={seq} in L1 window"))?;
-        block_leaves.push(bridge_prover_lib::poseidon_dense::compute_block_leaf_hash(
-            &b.block_id,
-            &b.envelope_hash,
-            &b.tracked_ext_out_messages_root,
-        ));
-    }
-
-    let mut leaves = Vec::with_capacity(2 + block_leaves.len() + 2);
-    leaves.push(higher_layer_root);
-    leaves.push(prev_same_layer_root);
-    leaves.extend_from_slice(&block_leaves);
-    pad_leaves_to_power_of_2(&mut leaves);
+    let tree = real_chain_builder::build_layer1_tree(gql, key_block_seq, prev_same_layer_root, w)
+        .await
+        .with_context(|| format!("building L1 tree at key block {key_block_seq}"))?;
 
     let leaf_position = (2 + block_offset_in_window) as usize;
-    if leaf_position >= leaves.len() {
+    if leaf_position >= tree.leaves.len() {
         bail!(
             "internal: leaf_position {} >= leaves.len() {} (W={}, offset={})",
             leaf_position,
-            leaves.len(),
+            tree.leaves.len(),
             w,
             block_offset_in_window,
         );
     }
 
-    let (root, siblings) = build_tree_and_proof(&leaves, leaf_position);
+    let (root, siblings) = build_tree_and_proof(&tree.leaves, leaf_position);
+    let published = real_chain_builder::fetch_layer_root(gql, key_block_seq, 1)
+        .await
+        .with_context(|| format!("fetching the published L1 root of key block {key_block_seq}"))?;
+    if published != root {
+        bail!(
+            "rebuilt L1 root {} does not match the L1 root key block {} published ({}). \
+             The withdrawal proof would not match the anchor the bridge stores.",
+            hex::encode(root),
+            key_block_seq,
+            hex::encode(published),
+        );
+    }
+
     Ok((
         MerkleProofData {
             position: leaf_position as u32,

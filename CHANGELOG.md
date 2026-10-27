@@ -22,6 +22,21 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A withdrawal in the last 128 blocks before an L2 boundary can be proven.**
+  The Circuit 4 witness put that boundary's own L2 root into leaf 0 of its L1
+  tree (every 16 384 blocks, about 0.8% of withdrawals). The rebuilt root did
+  not match the root the bridge stores, so `withdrawByProof` reverted
+  `UnknownAnchor` on an L1 anchor, and an L2 anchor failed while the witness
+  was built. The USDC was already burned on Acki Nacki. Leaf 0 is now the L2
+  root of the previous L2 boundary, or 32 zero bytes at the first boundary
+  (block 16 384). A missing layer root fails the build instead of becoming a
+  tree of zeros, and the rebuilt L1 root must match the root the key block
+  published. No verification key changes. Re-run the withdrawal prover for an
+  affected withdrawal while that L2 root is still inside the bridge window
+  (about 8 days at 3 blocks/s).
+
 ## [0.6.0] – 2026-10-23
 
 ### Breaking Changes

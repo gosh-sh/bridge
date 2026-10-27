@@ -535,10 +535,27 @@ async fn build_chain_for_new_layer(
     })
 }
 
+/// Seqno of the L2 key block whose layer-2 root belongs in leaf 0 of the L1
+/// tree at `key_block_seqno`.
+///
+/// That root is the latest L2 root emitted strictly before `key_block_seqno`.
+/// At an L2 boundary (`key_block_seqno` divisible by `window_size` squared) the
+/// block's own L2 root is computed from this L1 tree, so it cannot also be
+/// leaf 0. Returns 0 before the first L2 boundary; the caller stores 32 zero
+/// bytes and does not fetch a block.
+pub fn prev_l2_key_block(key_block_seqno: u64, window_size: u64) -> u64 {
+    let l2_step = window_size * window_size;
+    key_block_seqno
+        .checked_sub(1)
+        .map(|s| (s / l2_step) * l2_step)
+        .unwrap_or(0)
+}
+
 /// Build a layer 1 Poseidon tree for a key block.
 ///
 /// Leaf layout (see crate-level docs for the concrete W=128 example):
-///   [0]:         higher_layer_root (layer 2 root from this block, or zero)
+///   [0]:         higher_layer_root (L2 root of [`prev_l2_key_block`], or 32
+///                zero bytes before the first L2 boundary)
 ///   [1]:         prev_same_layer_root = chain_leaf_value (from previous key block)
 ///   [2..W+2]:    Poseidon(block_id || envelope_hash || ext_msg_root) for the
 ///                HISTORY_PROOF_WINDOW_SIZE (W) blocks in the window
@@ -560,11 +577,7 @@ pub async fn build_layer1_tree(
     // verification with an opaque error, mirroring the Case B `prev_same_root`
     // bug that surfaced at shellnet 2,523,136).
     let higher_root = {
-        let l2_step = window_size * window_size;
-        let prev_l2_block = key_block_seqno
-            .checked_sub(1)
-            .map(|s| (s / l2_step) * l2_step)
-            .unwrap_or(0);
+        let prev_l2_block = prev_l2_key_block(key_block_seqno, window_size);
         if prev_l2_block > 0 {
             fetch_layer_root(gql, prev_l2_block, 2)
                 .await
@@ -1099,12 +1112,35 @@ mod tests {
     //! live GQL-consuming paths (`build_event_anchor_chain_l1`/`_l2`) are
     //! covered by the manual E2E in `E2E_RUN_STATE_2026_08_15.md`; adding
     //! a mock GqlClient is deferred (would need a trait refactor).
-    use super::{l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries};
+    use super::{
+        l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries, prev_l2_key_block,
+    };
 
     // W as in production; P = 4 is a smaller stride so the boundary
     // arithmetic is easier to read by hand. `THINNING_FACTOR_P` is 8.
     const W: u64 = 128;
     const P: u64 = 4;
+
+    /// Leaf 0 of an L1 tree is the previous L2 boundary, never the key block
+    /// itself. At block 16384 there is no earlier L2 root, so the caller
+    /// stores 32 zero bytes.
+    #[test]
+    fn l1_leaf0_at_an_l2_boundary_is_the_previous_l2_block() {
+        let l2 = W * W;
+        assert_eq!(prev_l2_key_block(l2, W), 0, "first boundary has no earlier L2 root");
+        assert_eq!(prev_l2_key_block(0, W), 0);
+        for k in 2..8 {
+            let boundary = k * l2;
+            assert_eq!(prev_l2_key_block(boundary, W), (k - 1) * l2);
+            assert_ne!(prev_l2_key_block(boundary, W), boundary);
+        }
+        // Off a boundary the old `(H / L2) * L2` formula agrees.
+        let old = |h: u64| (h / l2) * l2;
+        assert_eq!(prev_l2_key_block(l2 + W, W), l2);
+        assert_eq!(prev_l2_key_block(2 * l2 - W, W), l2);
+        assert_eq!(old(l2 + W), prev_l2_key_block(l2 + W, W));
+        assert_ne!(old(2 * l2), prev_l2_key_block(2 * l2, W));
+    }
 
     // ---- L1 -----------------------------------------------------------
 

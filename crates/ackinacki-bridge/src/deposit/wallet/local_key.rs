@@ -25,6 +25,17 @@ pub struct LocalKeyWallet {
     rpc_url: String,
     chain_id: u64,
     request_timeout: Duration,
+    /// The nonce after the last transaction this wallet broadcast. A
+    /// load-balanced `--rpc-url` can answer the pending nonce from a node
+    /// that has not seen that transaction yet (the deposit right after its
+    /// approve), so the wallet never signs below it.
+    next_nonce: Option<u64>,
+}
+
+/// The nonce to sign at: the node's pending count, but never below the one
+/// after this wallet's own last transaction.
+fn next_nonce(pending: u64, after_last: Option<u64>) -> u64 {
+    pending.max(after_last.unwrap_or(0))
 }
 
 impl LocalKeyWallet {
@@ -40,6 +51,7 @@ impl LocalKeyWallet {
             rpc_url,
             chain_id,
             request_timeout: Duration::from_secs(60),
+            next_nonce: None,
         })
     }
 
@@ -87,7 +99,8 @@ impl Wallet for LocalKeyWallet {
     }
 
     /// Signs `tx` as the type-2 transaction it describes, at the account's
-    /// pending nonce, and broadcasts it. Any failure is `Other`, never
+    /// pending nonce or after this wallet's last transaction, whichever is
+    /// higher, and broadcasts it. Any failure is `Other`, never
     /// `Rejected`: the node may have taken the transaction before the
     /// answer was lost, and the driver searches the chain for it.
     async fn send_transaction(&mut self, _: &dyn Ui, tx: &TxRequest) -> Result<B256, WalletError> {
@@ -107,18 +120,28 @@ impl Wallet for LocalKeyWallet {
         let node = ProviderBuilder::new()
             .wallet(EthereumWallet::from(self.signer.clone()))
             .connect_reqwest(client, url);
+        let pending = node
+            .get_transaction_count(tx.from)
+            .pending()
+            .await
+            .map_err(|e| WalletError::Other(e.to_string()))?;
+        let nonce = next_nonce(pending, self.next_nonce);
         let req = TransactionRequest::default()
             .with_from(tx.from)
             .with_to(tx.to)
             .with_input(tx.data.clone())
+            .with_nonce(nonce)
             .with_gas_limit(tx.gas)
             .with_max_fee_per_gas(tx.fees.max_fee_per_gas)
             .with_max_priority_fee_per_gas(tx.fees.max_priority_fee_per_gas)
             .with_chain_id(self.chain_id);
-        node.send_transaction(req)
+        let hash = node
+            .send_transaction(req)
             .await
             .map(|pending| *pending.tx_hash())
-            .map_err(|e| WalletError::Other(e.to_string()))
+            .map_err(|e| WalletError::Other(e.to_string()))?;
+        self.next_nonce = Some(nonce + 1);
+        Ok(hash)
     }
 
     async fn close(&mut self) {}
@@ -155,6 +178,17 @@ mod tests {
                 amount: U256::from(1u64),
             },
         }
+    }
+
+    #[test]
+    fn a_lagging_node_does_not_take_the_nonce_back() {
+        assert_eq!(next_nonce(5, None), 5, "the first transaction");
+        assert_eq!(
+            next_nonce(5, Some(6)),
+            6,
+            "the deposit after its approve, from a node that missed the approve"
+        );
+        assert_eq!(next_nonce(9, Some(6)), 9, "other transactions since");
     }
 
     #[test]

@@ -342,9 +342,9 @@ pub fn judge(o: &LcObs, chain_id: u64) -> Result<(), LcFailure> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnchorPlan {
     /// Owner anchors are on; `lc_ready` when the light client passed the
-    /// three checks as well.
+    /// three checks as well, or the chain has an Arbitrum verifier.
     Owner {
-        /// The light client can anchor the block too.
+        /// A relayer's proof can anchor the block too.
         lc_ready: bool,
     },
     /// Owner anchors are off; only the light client can anchor the block.
@@ -360,9 +360,10 @@ impl AnchorPlan {
             } => format!("waiting for the bridge owner to accept block {block} (a manual step)"),
             AnchorPlan::Owner {
                 lc_ready: true,
-            } => {
-                format!("waiting for the bridge owner or the light client to accept block {block}")
-            },
+            } => format!(
+                "waiting for the bridge owner or a relayer's proof (light client or Arbitrum \
+                 verifier) to accept block {block}"
+            ),
             AnchorPlan::LightClient => {
                 format!(
                     "waiting for the light client: block {block} must fall under a proven \
@@ -950,7 +951,7 @@ mod tests {
         }
         .status_line(b);
         assert!(
-            either.contains("bridge owner or the light client"),
+            either.contains("bridge owner or a relayer's proof"),
             "{either}"
         );
         let lc = AnchorPlan::LightClient.status_line(b);

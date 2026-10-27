@@ -243,9 +243,18 @@ pub struct AnPreflight {
     /// The Arbitrum verifier that admits the deposit chain's blocks, when
     /// that chain is a rollup the bridge has one for. It takes the light
     /// client's place for that chain.
-    pub l2_verifier: Option<[u8; 32]>,
+    pub l2_verifier: Option<L2Verifier>,
     /// The code hash of the vouchers the bridge deploys.
     pub voucher_code_hash: [u8; 32],
+}
+
+/// The bridge's Arbitrum verifier for the deposit chain (`getL2Verifier`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct L2Verifier {
+    pub account: [u8; 32],
+    /// The chain the rollup posts its assertions on; its light client admits
+    /// the blocks the verifier proves from.
+    pub parent_chain_id: u64,
 }
 
 /// A preflight refusal (exit 2).
@@ -378,6 +387,27 @@ pub async fn run_with(
     } else {
         None
     };
+    // With owner anchors off the verifier is the only writer for this chain,
+    // and its proofs start from a parent-chain block only that chain's light
+    // client admits.
+    if let (Some(v), false) = (l2_verifier, owner_anchors_enabled) {
+        let input = json!({ "l1ChainId": v.parent_chain_id.to_string() });
+        let parent_lc = get("getLightClient", input).await["value0"]
+            .as_str()
+            .and_then(parse_an_address);
+        if parent_lc.is_none() {
+            let msg = format!(
+                "owner anchors are switched off, and chain {chain_id}'s Arbitrum verifier proves \
+                 its blocks from chain {}, which has no light client on the bridge: nothing can \
+                 anchor this deposit",
+                v.parent_chain_id
+            );
+            if !resuming {
+                return Err(refuse(msg));
+            }
+            ui.warn(&msg);
+        }
+    }
     let ch = get("getDepositVoucherCodeHash", json!({})).await;
     let mut voucher_code_hash = [0u8; 32];
     hex::decode_to_slice(
@@ -441,7 +471,7 @@ async fn read_l2_verifier(
     bridge: [u8; 32],
     chain_id: u64,
     ui: &dyn Ui,
-) -> CliResult<Option<[u8; 32]>> {
+) -> CliResult<Option<L2Verifier>> {
     let input = json!({ "l2ChainId": chain_id.to_string() });
     let v = match an
         .run_getter(bridge, BRIDGE_ABI, "getL2Verifier", input.clone())
@@ -462,7 +492,20 @@ async fn read_l2_verifier(
             .await
         },
     };
-    Ok(v["verifier"].as_str().and_then(parse_an_address))
+    let Some(account) = v["verifier"].as_str().and_then(parse_an_address) else {
+        return Ok(None);
+    };
+    let parent_chain_id = v["parentChainId"]
+        .as_str()
+        .and_then(|s| match s.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16).ok(),
+            None => s.parse().ok(),
+        })
+        .ok_or_else(|| refuse(format!("getL2Verifier answered {v}")))?;
+    Ok(Some(L2Verifier {
+        account,
+        parent_chain_id,
+    }))
 }
 
 /// The TVM answer for a getter the deployed code does not have. Retrying
@@ -820,9 +863,39 @@ mod tests {
         ]);
         assert_eq!(
             go(&an, [0; 32]).await.unwrap().l2_verifier,
-            Some([0xa2; 32])
+            Some(L2Verifier {
+                account: [0xa2; 32],
+                parent_chain_id: 11_155_111,
+            })
         );
         assert_eq!(go(&an, [0; 32]).await.unwrap().l2_verifier, None);
+    }
+
+    #[tokio::test]
+    async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
+            json!({ "value0": false }),
+        ]);
+        an.getter(BRIDGE, "getL2Verifier", vec![
+            json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
+        ]);
+        // The deposit chain's client, then the parent chain's.
+        an.getter(BRIDGE, "getLightClient", vec![
+            json!({ "value0": ":" }),
+            json!({ "value0": ":" }),
+        ]);
+        let e = go(&an, [0; 32]).await.unwrap_err();
+        assert!(e.to_string().contains("no light client"), "{e}");
+
+        an.getter(BRIDGE, "getLightClient", vec![
+            json!({ "value0": ":" }),
+            json!({ "value0": format!("0:{}", "20".repeat(32)) }),
+        ]);
+        assert!(go(&an, [0; 32]).await.unwrap().l2_verifier.is_some());
     }
 
     #[tokio::test]

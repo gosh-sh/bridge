@@ -22,6 +22,15 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- A CLI built before this release refuses a 1.14.0 bridge as newer than it knows: install this
+  `ackinacki-bridge` before upgrading the bridge to 1.14.0.
+- `deposit-relayer arbitrum-anchors` refuses to start without a state file and without
+  `--from-block` (`BRIDGE_DEPLOY_BLOCK`), instead of scanning Arbitrum from block 0. It also refuses
+  a verifier whose `getConfig()` names another chain, parent chain or rollup, and a
+  `--parent-rpc-url` without `eth_getBlockReceipts`.
+
 ### New / Improvements
 
 - `ArbitrumBlockVerifier` 1.0.0 (`contracts/an/0.81.0_compiled/exchange/`, code hash `ba8c1342…`):
@@ -33,31 +42,43 @@ assigns it when the release is tagged.
   It accepts an assertion when it is posted, not when the rollup confirms it: on Arbitrum Sepolia
   only the rollup's validator whitelist backs that, so deploy 421614's verifier on test networks
   only. Rebuilding it needs `sold` 0.81.0 from TVM-Solidity-Compiler `feature/keccak256-builtin`.
-- `eccUSDCBridge` 1.14.0 (code hash `efd7e735…`): `setL2VerifierCode`, `deployL2Verifier`,
-  `getL2Verifier`, `acceptBlockHashFromL2Verifier`, error 237 `ERR_L2_VERIFIER_UNSET`;
-  `disableOwnerAnchorsOn` also takes a chain that has an Arbitrum verifier. `updateCode` from
-  1.13.0 keeps balances but not the verifier code or the verifiers: install and deploy them again.
+- `eccUSDCBridge` 1.14.0 (code hash `5cada5db…`): `setL2VerifierCode`, `deployL2Verifier`,
+  `getL2Verifier`, `acceptBlockHashFromL2Verifier`, error 237 `ERR_L2_VERIFIER_UNSET`, error 238
+  `ERR_L2_VERIFIER_DEPLOYED` when `deployL2Verifier` is called again with the recorded verifier's
+  code (a new rollup or parent chain needs new verifier code); `disableOwnerAnchorsOn` also takes a
+  chain that has an Arbitrum verifier. `updateCode` from 1.13.0 keeps balances but not the verifier
+  code or the verifiers: install and deploy them again.
 - The zerostate installs the verifier code, and `place.json` places the verifier, `EthTrie.sol`,
   `ArbitrumBlockVerifierDeploy.sol` and the compiled verifier in acki-nacki.
 - Arbitrum Sepolia (421614) is a deposit chain for the deposit prover and relayer;
   `ackinacki-bridge withdraw --to-chain` accepts 42161 and 421614, and the CLI knows bridge 1.14.0.
 - `deposit-relayer arbitrum-anchors` gets the Arbitrum blocks that hold deposits accepted through
   `proveBlock`, with ordinary RPCs. Run one per Arbitrum chain next to `daemon`, keep
-  `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`.
+  `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
+  scans for deposits 240 blocks behind the Arbitrum head; a `proveBlock` Acki Nacki refuses is sent
+  again after 5 minutes without holding up the others; a deposit block older than 393 168 blocks is
+  logged as an error saying it now needs the bridge owner, and dropped.
   `deposit-relayer arbitrum-vector` writes a test vector.
 - `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
   Arbitrum One data.
 - `ackinacki-bridge deposit --network arbitrum-sepolia` deposits from Arbitrum Sepolia. A bridge
-  whose `getL2Verifier(chainId)` names a verifier for that chain needs no light client there.
+  whose `getL2Verifier(chainId)` names a verifier for that chain needs no light client there. While
+  owner anchors are on, the wait prints the owner's `setAcceptedBlockHash` call, as on Sepolia; with
+  them off, preflight refuses the deposit when the verifier's parent chain has no light client.
 - The light client's step prover `export_step_vk_blob` keeps its proving key: `STEP_KEYGEN_ONLY=1`
   with `STEP_KEY_DIR` generates it once, and every later run with that `STEP_KEY_DIR` only proves
   (about 2 minutes instead of 6 on 24 cores). `eth-lc-relayer` passes its environment to the
-  prover, so set `STEP_KEY_DIR` in its unit after one keygen run.
+  prover, so set `STEP_KEY_DIR` in its unit after one keygen run. Run `STEP_KEYGEN_ONLY=1` again
+  after every prover upgrade: a key from the previous step circuit still passes its own check, and
+  the light client then refuses every step proof.
 - `ackinacki-bridge deposit` tries a failed EVM read in preflight again for 2 minutes instead of
-  refusing at once, so a load-balanced public RPC's dropped request no longer ends the run.
+  refusing at once, so a load-balanced public RPC's dropped request no longer ends the run. A call
+  that reverts or answers something other than the bridge's reply is refused at once.
 - `ackinacki-bridge deposit --qr-mode local-key` signs with the key in `BRIDGE_DEPOSIT_PRIVATE_KEY`
   instead of a wallet, for unattended runs. It needs `--from-address`, which must be the key's
-  address. `--from-address` now also reads `BRIDGE_DEPOSIT_FROM`.
+  address. `--from-address` now also reads `BRIDGE_DEPOSIT_FROM`. It never signs below the nonce
+  after its own last transaction, so a load-balanced `--rpc-url` that missed the `approve` does not
+  make the `deposit` reuse its nonce.
 
 ### Fixes
 

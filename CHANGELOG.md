@@ -20,7 +20,7 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
-## [Unreleased]
+## [0.7.0] – 2026-10-27
 
 ### Breaking Changes
 

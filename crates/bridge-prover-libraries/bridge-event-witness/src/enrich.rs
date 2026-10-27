@@ -642,3 +642,51 @@ pub(crate) async fn fetch_block_observed_height(gql: &GqlClient, seq: u64) -> Re
     let block = gql.query_proof_block_by_seqno(seq).await?;
     Ok(block.height)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_block_tree_proof;
+    use bridge_gql_fetcher::gql_client::create_client;
+    use bridge_prover_lib::real_chain_builder::{fetch_layer_root, prev_l2_key_block};
+
+    /// Reads the public shellnet and rebuilds two L1 trees: the L2 boundary
+    /// at or just below the chain head, and the L1 key block one window
+    /// before it. [`build_block_tree_proof`] returns only when the rebuilt
+    /// root matches the root that key block published.
+    ///
+    /// Left ignored because it needs the network. Point
+    /// `BRIDGE_GQL_ENDPOINT` elsewhere to run it against another chain.
+    #[tokio::test]
+    #[ignore]
+    async fn live_l1_root_matches_published_on_and_off_an_l2_boundary() {
+        let endpoint = std::env::var("BRIDGE_GQL_ENDPOINT")
+            .unwrap_or_else(|_| "https://shellnet.ackinacki.org/graphql".to_string());
+        let gql = create_client(&endpoint).expect("graphql client");
+        let latest = gql.query_latest_blocks(1).await.expect("latest block");
+        let head = latest.iter().map(|(_, seq)| *seq).max().expect("no blocks");
+        let w = 128u64;
+        let l2 = w * w;
+        let boundary = (head / l2) * l2;
+        assert!(
+            boundary >= l2,
+            "chain head {head} is not past the first L2 boundary"
+        );
+        assert_eq!(prev_l2_key_block(boundary, w), boundary - l2);
+        let own = fetch_layer_root(&gql, boundary, 2).await.expect("boundary L2 root");
+        let prev = fetch_layer_root(&gql, boundary - l2, 2)
+            .await
+            .expect("previous L2 root");
+        assert_ne!(
+            own, prev,
+            "L2 root at {boundary} equals the previous one, so the old leaf 0 would still match"
+        );
+
+        for key in [boundary - w, boundary] {
+            let (proof, root) = build_block_tree_proof(&gql, key, w, 0)
+                .await
+                .unwrap_or_else(|err| panic!("key block {key}: {err:#}"));
+            assert_eq!(proof.position, 2, "offset 0 is leaf 2");
+            assert!(root.iter().any(|byte| *byte != 0), "key block {key} rebuilt a zero root");
+        }
+    }
+}

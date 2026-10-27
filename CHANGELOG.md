@@ -22,21 +22,26 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Fixes
+
+- A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
+  first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
+  (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`
+  with `BRIDGE_BOOTSTRAP_SEQNO=0` proves its first bundle at seq_no 16384. L2 anchoring only.
+
+## [0.7.0] – 2026-10-27
+
 ### Breaking Changes
 
 - A CLI built before this release refuses a 1.14.0 bridge as newer than it knows: install this
   `ackinacki-bridge` before upgrading the bridge to 1.14.0.
 - `deposit-relayer arbitrum-anchors` refuses to start without a state file and without
   `--from-block` (`BRIDGE_DEPLOY_BLOCK`), instead of scanning Arbitrum from block 0. It also refuses
-  a verifier whose `getConfig()` names another chain, parent chain or rollup, and a
-  `--parent-rpc-url` without `eth_getBlockReceipts`.
+  a verifier whose `getConfig()` names another chain, parent chain or rollup, a
+  `--parent-rpc-url` without `eth_getBlockReceipts`, and a state file of another `--bridge-address`.
 
 ### New / Improvements
 
-- CI: `.woodpecker/local-net-e2e.yaml` runs for a pull request labelled `local-network`. It bakes
-  the PR's `contracts/an/*` into a fresh acki-nacki zerostate (acki-nacki `dev`, latest build), runs
-  `test_deploy_and_withdraw_only.py` on a whole network on one host, and tears it down. The
-  secrets it needs and the by-hand steps are in `tests/e2e/local-net/README.md`.
 - `ArbitrumBlockVerifier` 1.0.0 (`contracts/an/0.81.0_compiled/exchange/`, code hash `ba8c1342…`):
   proves an Arbitrum block from the assertion its rollup posts on the parent chain and admits the
   block's hash to the bridge's anchor set without the owner; `proveBlock` is permissionless. Deploy
@@ -57,8 +62,8 @@ assigns it when the release is tagged.
 - Arbitrum Sepolia (421614) is a deposit chain for the deposit prover and relayer;
   `ackinacki-bridge withdraw --to-chain` accepts 42161 and 421614, and the CLI knows bridge 1.14.0.
 - `deposit-relayer arbitrum-anchors` gets the Arbitrum blocks that hold deposits accepted through
-  `proveBlock`, with ordinary RPCs. Run one per Arbitrum chain next to `daemon`, keep
-  `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
+  `proveBlock`, with an Arbitrum RPC that keeps a few minutes of state (public ones keep ~30 s).
+  Run one per Arbitrum chain next to `daemon`, keep `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
   scans for deposits 240 blocks behind the Arbitrum head; a `proveBlock` Acki Nacki refuses is sent
   again after 5 minutes without holding up the others; a deposit block older than 393 168 blocks is
   logged as an error saying it now needs the bridge owner, and dropped. An RPC failure while it
@@ -93,10 +98,6 @@ assigns it when the release is tagged.
 - `disableOwnerAnchorsOn(chainId)` in `eccUSDCBridge` 1.13.0 turns the owner writer off for any
   chain, including one with no light client, which then has no anchor writer until the next
   `updateCode`. 1.14.0 throws 226 for such a chain.
-- A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
-  first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
-  (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`
-  with `BRIDGE_BOOTSTRAP_SEQNO=0` proves its first bundle at seq_no 16384. L2 anchoring only.
 
 ### Changed
 

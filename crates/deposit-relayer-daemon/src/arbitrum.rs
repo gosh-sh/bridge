@@ -230,6 +230,11 @@ pub struct ReadyProof {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnchorState {
     pub chain_id: u64,
+    /// `AckiNackiBridge` on the Arbitrum chain whose deposits this state
+    /// tracks: a state file of another bridge would skip the new one's first
+    /// deposits.
+    #[serde(default)]
+    pub evm_bridge: Option<Address>,
     /// Last parent-chain block scanned for batches and assertions.
     pub parent_cursor: u64,
     /// Last Arbitrum block scanned for deposits.
@@ -262,6 +267,21 @@ pub const BATCH_RETRIES: u32 = 2;
 const BATCH_TXS_KEPT: usize = 400;
 
 impl AnchorState {
+    /// Ties the state to `bridge`, the EVM bridge it is run for: a state
+    /// recorded for another bridge is refused, one with none takes `bridge`.
+    pub fn ensure_bridge(&mut self, bridge: Address) -> Result<(), RelayerError> {
+        match self.evm_bridge {
+            Some(b) if b != bridge => Err(RelayerError::other(format!(
+                "the anchor state is for bridge {b}, not {bridge}: move it away to start the new \
+                 bridge from its --from-block"
+            ))),
+            _ => {
+                self.evm_bridge = Some(bridge);
+                Ok(())
+            },
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Option<Self>, RelayerError> {
         match fs::read(path) {
             Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
@@ -338,8 +358,13 @@ pub trait ArbitrumView: Send + Sync {
     /// Hash and header RLP of an Arbitrum block.
     async fn arbitrum_header(&self, number: u64) -> Result<(B256, Bytes), RelayerError>;
     async fn arbitrum_number(&self, hash: B256) -> Result<Option<u64>, RelayerError>;
-    /// The history slot of block `n` in block `m`'s state: its value and proof.
-    async fn history_slot(&self, n: u64, m: u64) -> Result<(B256, SlotProof), RelayerError>;
+    /// The history slots of blocks `ns` in block `m`'s state, read in one
+    /// `eth_getProof`: each block with its slot's value and proof.
+    async fn history_slots(
+        &self,
+        ns: &[u64],
+        m: u64,
+    ) -> Result<Vec<(u64, B256, SlotProof)>, RelayerError>;
     /// Hash, header RLP and receipt proof of transaction `tx_index` of a
     /// parent-chain block.
     async fn parent_receipt(
@@ -698,7 +723,7 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
     let expired: Vec<(u64, B256)> = state
         .pending
         .iter()
-        .filter(|&(&n, _)| n < m && m - n > HISTORY_WINDOW)
+        .filter(|&(&n, _)| n < m && m - n > HISTORY_WINDOW && !proof_held(state, n))
         .map(|(&n, &h)| (n, h))
         .collect();
     for (n, hash) in expired {
@@ -747,11 +772,18 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
         Ok(h) => h,
         Err(e) => return Ok(unprovable(e)),
     };
+    // One read for every waiting slot: the node keeps M's state for seconds,
+    // and reads one after another could straddle its end.
+    let ns: Vec<u64> = wanted.iter().map(|&(n, _)| n).collect();
+    let read = match view.history_slots(&ns, m).await {
+        Ok(v) => v,
+        Err(e) => return Ok(unprovable(e)),
+    };
+    let wanted: BTreeMap<u64, B256> = wanted.into_iter().collect();
     let mut slots = BTreeMap::new();
-    for (n, want) in wanted {
-        let (value, proof) = match view.history_slot(n, m).await {
-            Ok(v) => v,
-            Err(e) => return Ok(unprovable(e)),
+    for (n, value, proof) in read {
+        let Some(&want) = wanted.get(&n) else {
+            continue;
         };
         if value != want {
             warn!(block = n, m, %value, %want, "history slot does not hold the deposit block's hash");
@@ -772,6 +804,13 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
         slots,
     });
     Ok(Taken::Proofs)
+}
+
+/// A slot proof for block `n` is already taken: past the history window it
+/// can no longer be taken again, but the one held stays valid.
+fn proof_held(state: &AnchorState, n: u64) -> bool {
+    state.batch_ends.values().any(|e| e.slots.contains_key(&n))
+        || state.ready.iter().any(|p| p.end.slots.contains_key(&n))
 }
 
 fn unix_now() -> u64 {
@@ -986,22 +1025,38 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
         Ok(block.map(|b| b.header.inner.number))
     }
 
-    async fn history_slot(&self, n: u64, m: u64) -> Result<(B256, SlotProof), RelayerError> {
-        let slot = B256::from(U256::from(n % HISTORY_WINDOW));
+    async fn history_slots(
+        &self,
+        ns: &[u64],
+        m: u64,
+    ) -> Result<Vec<(u64, B256, SlotProof)>, RelayerError> {
+        let keys: Vec<B256> = ns
+            .iter()
+            .map(|&n| B256::from(U256::from(n % HISTORY_WINDOW)))
+            .collect();
         let proof = self
             .arbitrum
-            .get_proof(HISTORY_ADDRESS, vec![slot])
+            .get_proof(HISTORY_ADDRESS, keys)
             .block_id(m.into())
             .await
             .map_err(eth("Arbitrum eth_getProof"))?;
-        let storage =
-            proof.storage_proof.into_iter().next().ok_or_else(|| {
-                RelayerError::Eth("eth_getProof returned no storage proof".into())
-            })?;
-        Ok((B256::from(storage.value), SlotProof {
-            account_proof: proof.account_proof,
-            storage_proof: storage.proof,
-        }))
+        if proof.storage_proof.len() != ns.len() {
+            return Err(RelayerError::Eth(format!(
+                "eth_getProof returned {} storage proofs for {} slots",
+                proof.storage_proof.len(),
+                ns.len()
+            )));
+        }
+        Ok(ns
+            .iter()
+            .zip(proof.storage_proof)
+            .map(|(&n, storage)| {
+                (n, B256::from(storage.value), SlotProof {
+                    account_proof: proof.account_proof.clone(),
+                    storage_proof: storage.proof,
+                })
+            })
+            .collect())
     }
 
     async fn parent_receipt(
@@ -1238,8 +1293,12 @@ impl<V: ArbitrumView> ArbitrumView for OneBlockBehind<V> {
     async fn arbitrum_number(&self, hash: B256) -> Result<Option<u64>, RelayerError> {
         self.inner.arbitrum_number(hash).await
     }
-    async fn history_slot(&self, n: u64, m: u64) -> Result<(B256, SlotProof), RelayerError> {
-        self.inner.history_slot(n, m).await
+    async fn history_slots(
+        &self,
+        ns: &[u64],
+        m: u64,
+    ) -> Result<Vec<(u64, B256, SlotProof)>, RelayerError> {
+        self.inner.history_slots(ns, m).await
     }
     async fn parent_receipt(
         &self,
@@ -1397,6 +1456,8 @@ mod tests {
         missing_state: Vec<u64>,
         /// Blocks whose proof the node fails to answer for once.
         flaky_state: Vec<u64>,
+        /// `eth_getProof` calls made.
+        slot_reads: u32,
         /// Batches whose end the node fails to answer for.
         failing_batch_ends: Vec<u64>,
         /// How many parent receipt reads fail before one succeeds.
@@ -1451,8 +1512,13 @@ mod tests {
             let ends = self.lock().unwrap().batch_ends.clone();
             Ok(ends.values().copied().find(|&m| h(m) == hash))
         }
-        async fn history_slot(&self, n: u64, m: u64) -> Result<(B256, SlotProof), RelayerError> {
+        async fn history_slots(
+            &self,
+            ns: &[u64],
+            m: u64,
+        ) -> Result<Vec<(u64, B256, SlotProof)>, RelayerError> {
             let mut c = self.lock().unwrap();
+            c.slot_reads += 1;
             if c.missing_state.contains(&m) {
                 return Err(RelayerError::Eth(format!(
                     "historical state of {m} is not available"
@@ -1465,11 +1531,15 @@ mod tests {
                 )));
             }
             drop(c);
-            let proof = SlotProof {
-                account_proof: vec![Bytes::from(m.to_be_bytes().to_vec())],
-                storage_proof: vec![Bytes::from(n.to_be_bytes().to_vec())],
-            };
-            Ok((h(n), proof))
+            Ok(ns
+                .iter()
+                .map(|&n| {
+                    (n, h(n), SlotProof {
+                        account_proof: vec![Bytes::from(m.to_be_bytes().to_vec())],
+                        storage_proof: vec![Bytes::from(n.to_be_bytes().to_vec())],
+                    })
+                })
+                .collect())
         }
         async fn parent_receipt(
             &self,
@@ -2033,6 +2103,62 @@ mod tests {
     }
 
     #[test]
+    fn the_state_belongs_to_one_bridge() {
+        let (a, b) = (Address::repeat_byte(0xaa), Address::repeat_byte(0xbb));
+        let mut state = AnchorState::default();
+        state.ensure_bridge(a).unwrap();
+        assert_eq!(
+            state.evm_bridge,
+            Some(a),
+            "a state without one takes the bridge"
+        );
+        state.ensure_bridge(a).unwrap();
+        let e = state.ensure_bridge(b).unwrap_err().to_string();
+        assert!(e.contains("move it away"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn every_waiting_slot_is_read_in_one_call() {
+        let chain = one_deposit();
+        chain.lock().unwrap().deposits.push((120, h(120)));
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        assert_eq!(chain.lock().unwrap().slot_reads, 1);
+        let held: Vec<u64> = state.ready[0].end.slots.keys().copied().collect();
+        assert_eq!(held, vec![100, 120]);
+    }
+
+    #[tokio::test]
+    async fn a_held_proof_outlives_its_deposits_window() {
+        // Batch 7 ends at 150 and its assertion lands, but the parent block
+        // is not accepted yet. A batch past the window then lands.
+        let chain = one_deposit();
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        assert!(state.ready[0].end.slots.contains_key(&100));
+        let late = 100 + HISTORY_WINDOW + 1;
+        {
+            let mut c = chain.lock().unwrap();
+            c.batch_ends.insert(8, late);
+            c.events.push(ParentEvent::Batch {
+                block: 35,
+                log_index: 0,
+                batch: 8,
+            });
+            c.parent_head = 40;
+        }
+        run(&chain, &an, &mut state).await;
+        assert!(state.pending.contains_key(&100), "its proof is still held");
+        assert!(state.ready[0].end.slots.contains_key(&100));
+
+        accept(&an, ARB.parent_chain_id, h(1_000_020));
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.proofs_sent, 1);
+    }
+
+    #[test]
     fn the_state_survives_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("arbitrum-anchors.json");
@@ -2050,6 +2176,7 @@ mod tests {
             ready: vec![],
             unplaced_batches: BTreeMap::from([(7, 3)]),
             batch_txs: BTreeMap::from([(7, h(7))]),
+            evm_bridge: Some(Address::repeat_byte(0x22)),
         };
         state.save(&path).unwrap();
         assert_eq!(AnchorState::load(&path).unwrap(), Some(state));

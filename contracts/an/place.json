@@ -4,6 +4,9 @@
     { "from": "contracts/an/exchange/DepositVoucher.sol", "to": "contracts/exchange/DepositVoucher.sol" },
     { "from": "contracts/an/exchange/EthBeaconLightClient.sol", "to": "contracts/exchange/EthBeaconLightClient.sol" },
     { "from": "contracts/an/exchange/EthKeccak.sol", "to": "contracts/exchange/EthKeccak.sol" },
+    { "from": "contracts/an/exchange/EthTrie.sol", "to": "contracts/exchange/EthTrie.sol" },
+    { "from": "contracts/an/exchange/ArbitrumBlockVerifier.sol", "to": "contracts/exchange/ArbitrumBlockVerifier.sol" },
+    { "from": "contracts/an/exchange/ArbitrumBlockVerifierDeploy.sol", "to": "contracts/exchange/ArbitrumBlockVerifierDeploy.sol" },
     { "from": "contracts/an/exchange/modifiers/replayprotection.sol", "to": "contracts/exchange/modifiers/replayprotection.sol" },
     { "from": "contracts/an/exchange/modifiers/errors.sol", "to": "contracts/exchange/modifiers/errors.sol" },
     { "from": "contracts/an/exchange/modifiers/modifiers.sol", "to": "contracts/exchange/modifiers/modifiers.sol" },
@@ -13,6 +16,8 @@
     { "from": "contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json", "to": "contracts/0.81.0_compiled/exchange/DepositVoucher.abi.json" },
     { "from": "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc", "to": "contracts/0.81.0_compiled/exchange/EthBeaconLightClient.tvc" },
     { "from": "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json", "to": "contracts/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json" },
+    { "from": "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc", "to": "contracts/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc" },
+    { "from": "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json", "to": "contracts/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json" },
     { "from": "contracts/an/zerostate_init.py", "to": "contracts/scripts/bridge_zerostate_init.py" },
     { "from": "contracts/an/zerostate/BridgeZerostateData.tvc", "to": "contracts/zerostate/BridgeZerostateData.tvc" },
     { "from": "contracts/an/zerostate/BridgeZerostateData.abi.json", "to": "contracts/zerostate/BridgeZerostateData.abi.json" }

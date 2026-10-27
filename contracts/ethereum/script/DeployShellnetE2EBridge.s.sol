@@ -30,6 +30,17 @@ contract DeployShellnetE2EBridge is Script {
     // public faucet. Wiring against Circle canonical means the same USDC that
     // Circle's faucet dispenses is the one the bridge's deposit() consumes.
     address constant USDC_SEPOLIA = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
+    // Circle canonical USDC on Arbitrum Sepolia (the same faucet, network "Arbitrum Sepolia").
+    address constant USDC_ARBITRUM_SEPOLIA = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
+
+    /// `USDC_ADDRESS` when set; otherwise Circle's USDC on Sepolia or Arbitrum Sepolia.
+    function _usdc() internal view returns (address) {
+        address fromEnv = vm.envOr("USDC_ADDRESS", address(0));
+        if (fromEnv != address(0)) return fromEnv;
+        if (block.chainid == 11_155_111) return USDC_SEPOLIA;
+        if (block.chainid == 421_614) return USDC_ARBITRUM_SEPOLIA;
+        revert("USDC_ADDRESS required on this chain");
+    }
 
     struct VerifyBlockWiring {
         IPrimaryVerifier primary;
@@ -102,7 +113,7 @@ contract DeployShellnetE2EBridge is Script {
         vm.stopBroadcast();
 
         console.log("AckiNackiBridge (shellnet E2E):", address(bridge));
-        console.log("USDC:", USDC_SEPOLIA);
+        console.log("USDC:", _usdc());
         console.log("withdrawWired:", wireWithdraw);
         console.log("withdraw dappFr:", wd.dappFr);
         console.log("withdraw accFr:", wd.accFr);
@@ -126,7 +137,7 @@ contract DeployShellnetE2EBridge is Script {
     {
         return new AckiNackiBridge(
             oracle,
-            USDC_SEPOLIA,
+            _usdc(),
             address(0),
             address(0),
             AckiNackiBridge.VerifyBlockConfig({

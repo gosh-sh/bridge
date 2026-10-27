@@ -20,6 +20,12 @@ alloy = { version = "2.0", features = [
     "network",
     "sol-types",
     "transport-http",
+    # Arbitrum block anchors (`src/arbitrum.rs`): header RLP, receipt
+    # envelopes and the receipt-trie proof.
+    "consensus",
+    "eips",
+    "rlp",
+    "trie",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

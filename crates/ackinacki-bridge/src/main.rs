@@ -267,7 +267,8 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
 }
 
 /// Registers what a deposit run's output must never print: the secret
-/// parts of its endpoint URLs and its WalletConnect project id.
+/// parts of its endpoint URLs, its WalletConnect project id and the key of
+/// `--qr-mode local-key`.
 fn hide_deposit_secrets(args: &deposit::args::DepositArgs) {
     deposit::ui::hide_url_secrets(
         [
@@ -283,6 +284,11 @@ fn hide_deposit_secrets(args: &deposit::args::DepositArgs) {
             .as_deref()
             .or(deposit::args::DEFAULT_WC_PROJECT_ID),
     );
+    // `--qr-mode local-key`'s key, as given and without its `0x`.
+    if let Ok(key) = std::env::var(deposit::args::LOCAL_KEY_ENV) {
+        let key = key.trim();
+        deposit::ui::hide_secret_values([key, key.trim_start_matches("0x")]);
+    }
 }
 
 /// Tracing → stderr. Respects `RUST_LOG`; defaults to `info` for our crate

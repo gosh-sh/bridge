@@ -1,4 +1,4 @@
-# Docker Compose: shellnet → Sepolia L2 relayer
+# Docker Compose: shellnet → EVM L2 relayer
 
 Production-oriented Compose wrapper for one `relayer daemon-live` instance at
 `BRIDGE_ANCHOR_LEVEL=2`. It packages target-built binaries into an immutable
@@ -16,7 +16,8 @@ deployment and anchor derivation are covered by
   artifacts and checks the EOA, GraphQL endpoint, bridge configuration,
   verifier bytecode, nonce and balance. It never sends a transaction. Its
   chain checks go to the first of `RPC_URL` and `RPC_FAILOVER_URLS` that
-  answers, and every endpoint that answers must serve Sepolia. A transaction
+  answers, and every endpoint that answers must serve the chain `EXPECTED_EVM_CHAIN_ID`
+  names (Sepolia 11155111, Arbitrum Sepolia 421614, ...). A transaction
   waiting unmined from the EOA is a warning, not a failure: the daemon sends
   at the nonce the chain mines next and replaces it.
 - The container runs as a non-root UID/GID, with a read-only root filesystem,
@@ -113,12 +114,12 @@ sudo install -m 0640 -o root -g gosh-relayer \
 Fill every `CHANGEME` value. `deploy-shellnet-l2.env` is consumed only by the
 one-shot contract deployment workflow; `shellnet-l2.env` is mounted into the
 long-running relayer. In particular, pin the full source commit, binary hashes,
-params-manifest hash, fresh bridge address/anchor and a dedicated Sepolia EOA.
+params-manifest hash, fresh bridge address/anchor and a dedicated EOA on the bridge's chain.
 Never use a repository-generated `shellnet.common` as a production secret
 source.
 
 The deployment seed must be W²-aligned (`seqno % 16384 == 0`). Use a stable,
-authenticated Sepolia RPC for both preflight and runtime.
+authenticated RPC of the bridge's chain for both preflight and runtime.
 
 ## Build, verify and start
 

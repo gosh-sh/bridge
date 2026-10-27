@@ -235,8 +235,9 @@ Transfers are limited to 50 USDC. Each L1 bridge caps deposited principal minus
 completed payouts at 10,000 USDC; AN tracks the same capacity separately per
 chain. Limit reads must succeed before an approval, deposit or burn is requested.
 
-Sepolia is the only deposit network in this version; Ethereum mainnet is
-not one at all. The new EVM deployment must expose `deposit(uint256,bytes32)`
+`--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
+mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits
+35–75 minutes for its block to be anchored. The new EVM deployment must expose `deposit(uint256,bytes32)`
 and be paired with an AN bridge at version 1.13.0 or newer using this build's
 key. Older deployment addresses are incompatible. The RPC, Acki Nacki endpoint,
 prover directory and state directory come from the profile. When reusing a

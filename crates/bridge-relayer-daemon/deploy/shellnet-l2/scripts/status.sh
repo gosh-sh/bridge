@@ -39,8 +39,8 @@ else
   printf 'No relayer container exists.\n'
 fi
 
-printf '\n=== Sepolia ===\n'
 chain_id=$(ETH_RPC_URL="$RPC_URL" cast chain-id)
+printf '\n=== EVM chain %s ===\n' "$chain_id"
 cursor=$(ETH_RPC_URL="$RPC_URL" cast call "$BRIDGE_ADDRESS" \
   'storedLastSeenBlockSeqNo()(uint64)' | awk '{print $1}')
 nonce_latest=$(ETH_RPC_URL="$RPC_URL" cast nonce "$RELAYER_ADDRESS" --block latest)

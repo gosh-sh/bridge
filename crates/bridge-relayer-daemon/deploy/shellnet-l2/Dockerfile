@@ -6,7 +6,7 @@ ARG SOURCE_COMMIT=local
 ARG RELAYER_UID=998
 ARG RELAYER_GID=998
 
-LABEL org.opencontainers.image.title="GOSH shellnet to Sepolia L2 relayer" \
+LABEL org.opencontainers.image.title="GOSH shellnet to EVM L2 relayer" \
       org.opencontainers.image.revision="$SOURCE_COMMIT" \
       org.opencontainers.image.source="https://github.com/gosh-sh/bridge"
 

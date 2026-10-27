@@ -31,6 +31,7 @@ BRIDGE_TVC = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc"
 BRIDGE_ABI = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
 VOUCHER_TVC = "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc"
 LIGHT_CLIENT_TVC = "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc"
+L2_VERIFIER_TVC = "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc"
 ENCODER_TVC = "contracts/an/zerostate/BridgeZerostateData.tvc"
 ENCODER_ABI = "contracts/an/zerostate/BridgeZerostateData.abi.json"
 
@@ -175,6 +176,14 @@ def initialize(ctx: dict) -> None:
     _debugger(ctx, abi=ctx["artefact"](BRIDGE_ABI), address=ctx["address"],
               method="setLightClientCode",
               params={"code": ctx["get_code"](ctx["artefact"](LIGHT_CLIENT_TVC))},
+              image=ctx["account_tvc"], keys=ctx["keys"])
+
+    # Nor the Arbitrum block verifier's code, which `deployL2Verifier` salts
+    # with the chain id; installing it here lets the owner deploy a verifier
+    # on a fresh chain without a separate `setL2VerifierCode`.
+    _debugger(ctx, abi=ctx["artefact"](BRIDGE_ABI), address=ctx["address"],
+              method="setL2VerifierCode",
+              params={"code": ctx["get_code"](ctx["artefact"](L2_VERIFIER_TVC))},
               image=ctx["account_tvc"], keys=ctx["keys"])
 
     ctx["run"](f"{ctx['zerostate_helper']} -d -p {ctx['zerostate_path']} add contract "

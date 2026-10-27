@@ -40,10 +40,10 @@ source "$script_dir/container-paths.sh"
 remap_compose_runtime_paths
 
 [[ "${BRIDGE_ANCHOR_LEVEL:-}" == 2 ]] || die "only L2 anchor level 2 is allowed"
-[[ "${EXPECTED_EVM_CHAIN_ID:-}" == 11155111 ]] || die "only Sepolia is allowed"
+[[ "${EXPECTED_EVM_CHAIN_ID:-}" =~ ^[0-9]+$ ]] || die "EXPECTED_EVM_CHAIN_ID must be the decimal chain id the bridge is deployed on"
 
-printf 'Starting shellnet -> Sepolia L2 relayer: source=%s bridge=%s EOA=%s seed=%s\n' \
-  "$EXPECTED_BRIDGE_COMMIT" "$BRIDGE_ADDRESS" \
+printf 'Starting shellnet -> EVM chain %s L2 relayer: source=%s bridge=%s EOA=%s seed=%s\n' \
+  "$EXPECTED_EVM_CHAIN_ID" "$EXPECTED_BRIDGE_COMMIT" "$BRIDGE_ADDRESS" \
   "$RELAYER_ADDRESS" "$BRIDGE_BOOTSTRAP_SEQNO"
 cd /opt/gosh-relayer/prover
 

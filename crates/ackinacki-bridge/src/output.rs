@@ -288,14 +288,15 @@ fn dry_run_lines(s: &crate::deposit::DepositSuccess) -> String {
 
 /// Whom a deposit's anchor wait would wait for, from the dry run's anchor
 /// plan: the light client alone when the owner cannot anchor any more,
-/// otherwise the bridge owner, and the light client too when it is ready.
+/// otherwise the bridge owner, and a relayer's proof too when the light
+/// client is ready or the chain has an Arbitrum verifier.
 /// `None` when the summary does not say.
 fn anchor_decision(s: &crate::deposit::DepositSuccess) -> Option<&'static str> {
     let a = s.anchor.as_ref()?;
     let ready = a.get("light_client_ready").and_then(|v| v.as_bool()) == Some(true);
     match a.get("writer")?.as_str()? {
         "light-client" => Some("waiting for the light client"),
-        "owner" if ready => Some("waiting for the bridge owner or the light client"),
+        "owner" if ready => Some("waiting for the bridge owner or a relayer's proof"),
         "owner" => Some("waiting for the bridge owner"),
         _ => None,
     }
@@ -510,7 +511,7 @@ mod tests {
             (
                 true,
                 true,
-                "waiting for the bridge owner or the light client\n",
+                "waiting for the bridge owner or a relayer's proof\n",
             ),
             (false, true, "waiting for the light client\n"),
         ] {

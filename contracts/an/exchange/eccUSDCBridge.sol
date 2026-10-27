@@ -767,7 +767,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     }
 
     /// @notice Address the light client for `l1ChainId` is deployed at
-    ///         (0 until `deployLightClient` ran for that chain).
+    ///         (`addr_none`, not `address(0)`, until `deployLightClient`
+    ///         ran for that chain).
     function getLightClient(uint256 l1ChainId) external view returns (address) {
         return _lightClients[l1ChainId];
     }
@@ -889,8 +890,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     /// @notice Deploys the block verifier of Arbitrum chain `l2ChainId`. It
     ///         proves that chain's blocks from the assertions `rollup` posts on
     ///         `parentChainId`, whose blocks must reach `_acceptedBlockHash`
-    ///         through that chain's light client. Re-running it for a chain
-    ///         replaces the recorded verifier.
+    ///         through that chain's light client. Re-running it with new
+    ///         verifier code replaces the recorded verifier; with the code of
+    ///         the recorded one it throws `ERR_L2_VERIFIER_DEPLOYED` (238).
     /// @param l2ChainId     — EIP-155 id of the Arbitrum chain (42161, 421614).
     /// @param parentChainId — EIP-155 id of the chain its rollup lives on (1, 11155111).
     /// @param rollup        — the rollup contract that emits `AssertionCreated`.
@@ -899,13 +901,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     {
         require(_l2VerifierCode.depth() != 0, ERR_L2_VERIFIER_UNSET);
         require(l2ChainId != 0 && parentChainId != 0 && rollup != 0, ERR_NOT_LIGHT_CLIENT_CHAIN);
-        ensureBalance();
         TvmCell stateInit = abi.encodeStateInit({
             contr: ArbitrumBlockVerifierDeploy,
             varInit: {},
             code: abi.setCodeSalt(_l2VerifierCode, abi.encode(l2ChainId))
         });
         address verifier = address.makeAddrStd(0, tvm.hash(stateInit));
+        // The same code and chain id reach the recorded verifier, whose
+        // `initialize` refuses a second configuration (311) in a message the
+        // bridge never hears back from: recording this call would leave the
+        // bridge and the verifier on different parent chains.
+        require(!_l2Verifiers.exists(l2ChainId) || _l2Verifiers[l2ChainId] != verifier,
+                ERR_L2_VERIFIER_DEPLOYED);
+        ensureBalance();
         new ArbitrumBlockVerifierDeploy{
             stateInit: stateInit,
             value: 10 vmshell,

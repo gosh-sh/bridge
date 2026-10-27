@@ -80,6 +80,9 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 
 ## Architecture
 
+Every component and the interface each connection goes through, with its call site in the code:
+[`docs/bridge-components.md`](docs/bridge-components.md).
+
 ```
                  Ethereum → Acki Nacki (deposit)
   user ──approve+deposit──▶ AckiNackiBridge ──Deposit event──▶ tx receipt log

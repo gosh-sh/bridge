@@ -393,6 +393,10 @@ pub struct TickConfig {
     /// the same reason: a deposit a lagging backend leaves out would be behind
     /// the cursor for good.
     pub arbitrum_lag: u64,
+    /// Arbitrum blocks scanned for deposits in one tick. The cursor moves
+    /// after each window, so a failed read repeats one window, not the whole
+    /// range since the last run.
+    pub deposit_scan_window: u64,
     /// Seconds before `proveBlock` is sent again for a block the bridge has
     /// not accepted after the first send.
     pub resend_after_secs: u64,
@@ -404,6 +408,8 @@ impl Default for TickConfig {
             parent_lag: 1,
             // About a minute at Arbitrum's 0.25 s blocks.
             arbitrum_lag: 240,
+            // About seven hours of Arbitrum blocks.
+            deposit_scan_window: 100_000,
             resend_after_secs: 300,
         }
     }
@@ -438,6 +444,11 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     // may end past that point; a deposit there is waiting by the next batch.
     let head = view.arbitrum_head().await?.saturating_sub(cfg.arbitrum_lag);
     if head > state.deposit_cursor {
+        let head = head.min(
+            state
+                .deposit_cursor
+                .saturating_add(cfg.deposit_scan_window.max(1)),
+        );
         for (n, hash) in view.deposit_blocks(state.deposit_cursor + 1, head).await? {
             if state.pending.contains_key(&n) || an.is_accepted(chain.chain_id, hash).await? {
                 continue;
@@ -1746,6 +1757,26 @@ mod tests {
         let r = tick(ARB, &chain, &an, &mut state, &again).await.unwrap();
         assert_eq!(r.proofs_sent, 1);
         assert_eq!(an.sent.lock().unwrap()[0].block_number, 100);
+    }
+
+    #[tokio::test]
+    async fn a_long_range_is_scanned_one_window_per_tick() {
+        let chain = one_deposit();
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let window = TickConfig {
+            deposit_scan_window: 60,
+            ..cfg()
+        };
+        tick(ARB, &chain, &an, &mut state, &window).await.unwrap();
+        assert_eq!(state.deposit_cursor, 60);
+        assert!(
+            state.pending.is_empty(),
+            "the deposit at 100 is in the next window"
+        );
+        tick(ARB, &chain, &an, &mut state, &window).await.unwrap();
+        assert_eq!(state.deposit_cursor, 120);
+        assert!(state.pending.contains_key(&100));
     }
 
     #[tokio::test]

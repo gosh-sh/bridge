@@ -340,6 +340,21 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     }
 
     // Local is initialized.
+    if chain_empty && local.stored_last_seen_block_seq_no == 0 && local.num_active_layers() == 0 {
+        // Both at the genesis seed (BRIDGE_BOOTSTRAP_SEQNO=0), before the
+        // first verifyBlock: a restart picks up where it was.
+        return if local.stored_bk_set_commitment == chain.bk_set_commitment {
+            StartupDecision::WarmResume
+        } else {
+            StartupDecision::Stop {
+                reason: format!(
+                    "local genesis BK set commitment {} is not the contract's {}",
+                    hex::encode(local.stored_bk_set_commitment),
+                    hex::encode(chain.bk_set_commitment),
+                ),
+            }
+        };
+    }
     if chain_empty {
         // Local has state but chain does not. We cannot silently rewind
         // a contract to genesis; this is either a wrong-contract config
@@ -536,6 +551,53 @@ mod tests {
                 policy,
             } => assert_eq!(policy, SeedPolicy::Explicit(512)),
             d => panic!("expected Cold, got {d:?}"),
+        }
+    }
+
+    /// A state the driver started at the genesis seed
+    /// (BRIDGE_BOOTSTRAP_SEQNO=0): initialized at seq_no 0, no layer proved
+    /// yet.
+    fn genesis_state(commitment: [u8; 32]) -> BridgeState {
+        let mut s = BridgeState::new(W);
+        s.initialize_bk_set_commitment(commitment).unwrap();
+        s.initialized = true;
+        s.anchor_level = 2;
+        s
+    }
+
+    #[test]
+    fn a_restart_at_the_genesis_seed_resumes() {
+        let local = genesis_state([7u8; 32]);
+        let mut chain = empty_chain();
+        chain.bk_set_commitment = [7u8; 32];
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: Some(0),
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::WarmResume => {},
+            d => panic!("expected WarmResume before the first verifyBlock, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn a_genesis_state_for_another_bk_set_stops() {
+        let local = genesis_state([7u8; 32]);
+        let mut chain = empty_chain();
+        chain.bk_set_commitment = [8u8; 32];
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: Some(0),
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Stop {
+                reason,
+            } => assert!(reason.contains("genesis BK set"), "{reason}"),
+            d => panic!("expected Stop, got {d:?}"),
         }
     }
 

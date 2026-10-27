@@ -47,7 +47,7 @@ use alloy::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
 
 use crate::{error::RelayerError, source::AckiNackiBridge};
@@ -244,6 +244,11 @@ pub struct AnchorState {
     /// place their last block: batch → tries left. Each tick tries them again.
     #[serde(default)]
     pub unplaced_batches: BTreeMap<u64, u32>,
+    /// The parent-chain transaction that posted each recent batch
+    /// ([`RpcArbitrumView::batch_txs`]), so that after a restart an unplaced
+    /// batch's last block still comes from its posting call.
+    #[serde(default)]
+    pub batch_txs: BTreeMap<u64, B256>,
 }
 
 /// How many ticks a batch the Arbitrum node cannot place yet is tried again:
@@ -384,6 +389,10 @@ pub struct TickConfig {
     /// Parent-chain blocks to stay behind its head: a load-balanced RPC can
     /// answer `eth_blockNumber` from a node ahead of the one serving logs.
     pub parent_lag: u64,
+    /// Arbitrum blocks to stay behind its head when scanning for deposits, for
+    /// the same reason: a deposit a lagging backend leaves out would be behind
+    /// the cursor for good.
+    pub arbitrum_lag: u64,
     /// Seconds before `proveBlock` is sent again for a block the bridge has
     /// not accepted after the first send.
     pub resend_after_secs: u64,
@@ -393,6 +402,8 @@ impl Default for TickConfig {
     fn default() -> Self {
         Self {
             parent_lag: 1,
+            // About a minute at Arbitrum's 0.25 s blocks.
+            arbitrum_lag: 240,
             resend_after_secs: 300,
         }
     }
@@ -405,6 +416,9 @@ pub struct TickReport {
     pub assertions_matched: usize,
     pub assertions_missed: usize,
     pub proofs_sent: usize,
+    /// `proveBlock` calls Acki Nacki refused this tick; each is tried again
+    /// after `resend_after_secs`, and the other proofs go on.
+    pub proofs_failed: usize,
     pub accepted: usize,
     pub waiting_for_parent: usize,
 }
@@ -420,9 +434,9 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
 ) -> Result<TickReport, RelayerError> {
     let mut report = TickReport::default();
 
-    // Deposits. The head is read before the parent chain, so every block a
-    // batch seen below ends at is already scanned.
-    let head = view.arbitrum_head().await?;
+    // Deposits, up to `arbitrum_lag` blocks behind the head. A batch seen below
+    // may end past that point; a deposit there is waiting by the next batch.
+    let head = view.arbitrum_head().await?.saturating_sub(cfg.arbitrum_lag);
     if head > state.deposit_cursor {
         for (n, hash) in view.deposit_blocks(state.deposit_cursor + 1, head).await? {
             if state.pending.contains_key(&n) || an.is_accepted(chain.chain_id, hash).await? {
@@ -597,10 +611,26 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                 block_number: n,
                 storage_proof: slot.storage_proof.clone(),
             };
-            an.prove_block(&call).await?;
-            info!(block = n, m = proof.end.number, "proveBlock sent");
+            // Sent or refused, it waits `resend_after_secs` before the next
+            // try, and the proofs after it go on: one proof Acki Nacki keeps
+            // refusing must not hold up every other deposit.
+            match an.prove_block(&call).await {
+                Ok(()) => {
+                    info!(block = n, m = proof.end.number, "proveBlock sent");
+                    report.proofs_sent += 1;
+                },
+                Err(e) => {
+                    warn!(
+                        block = n,
+                        m = proof.end.number,
+                        error = %e,
+                        retry_in_secs = cfg.resend_after_secs,
+                        "proveBlock refused; trying again later, the other proofs go on"
+                    );
+                    report.proofs_failed += 1;
+                },
+            }
             proof.sent.insert(n, now);
-            report.proofs_sent += 1;
         }
     }
     state.ready.retain(|p| !p.end.slots.is_empty());
@@ -637,7 +667,25 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
         );
         return Ok(Taken::Unplaced);
     };
-    // M's state holds the hashes of blocks M - HISTORY_WINDOW ..= M - 1.
+    // M's state holds the hashes of blocks M - HISTORY_WINDOW ..= M - 1. A
+    // deposit block older than that is out of every later batch's reach too.
+    let expired: Vec<(u64, B256)> = state
+        .pending
+        .iter()
+        .filter(|&(&n, _)| n < m && m - n > HISTORY_WINDOW)
+        .map(|(&n, &h)| (n, h))
+        .collect();
+    for (n, hash) in expired {
+        error!(
+            block = n,
+            %hash,
+            m,
+            "deposit block is older than the {HISTORY_WINDOW} blocks an Arbitrum block's state \
+             remembers: arbitrum-anchors can no longer prove it and stops trying; the deposit now \
+             needs the bridge owner"
+        );
+        state.pending.remove(&n);
+    }
     let wanted: Vec<(u64, B256)> = state
         .pending
         .iter()
@@ -732,12 +780,7 @@ impl<P: Provider, A: Provider> RpcArbitrumView<P, A> {
         while start <= to {
             let end = to.min(start + span.max(1) - 1);
             let chunk = filter.clone().from_block(start).to_block(end);
-            out.extend(
-                provider
-                    .get_logs(&chunk)
-                    .await
-                    .map_err(eth("eth_getLogs"))?,
-            );
+            out.extend(crate::source::get_logs_with_retry(provider, &chunk).await?);
             start = end + 1;
         }
         Ok(out)
@@ -953,6 +996,18 @@ pub struct TvmAnchorTarget {
     verifier_address: ExtendedAddress,
 }
 
+/// A uint160 address getter value, hex or decimal.
+fn abi_address(v: &serde_json::Value) -> Option<Address> {
+    let s = v.as_str()?;
+    let n = match s.strip_prefix("0x") {
+        Some(hex) => U256::from_str_radix(hex, 16).ok()?,
+        None => U256::from_str_radix(s, 10).ok()?,
+    };
+    (n >> 160usize)
+        .is_zero()
+        .then(|| Address::from_word(n.to_be_bytes::<32>().into()))
+}
+
 /// A uint the TVM ABI decoder rendered, decimal or `0x` hex.
 fn abi_uint(v: &serde_json::Value) -> Option<u128> {
     let s = v.as_str()?;
@@ -1004,6 +1059,34 @@ impl TvmAnchorTarget {
         }
         let verifier_address =
             ExtendedAddress::from_legacy(account, Some(bridge_address.dapp_id()))?;
+        // A verifier initialized for another rollup or parent chain refuses
+        // every proveBlock (307): say so now, not once per tick.
+        let cfg = verifier
+            .run_getter(
+                &verifier_address.to_string(),
+                "getConfig",
+                serde_json::json!({}),
+            )
+            .await?;
+        let checks = (
+            cfg.get("l2ChainId").and_then(abi_uint),
+            cfg.get("l1ChainId").and_then(abi_uint),
+            cfg.get("rollup").and_then(abi_address),
+        );
+        if checks
+            != (
+                Some(u128::from(chain.chain_id)),
+                Some(u128::from(chain.parent_chain_id)),
+                Some(chain.rollup),
+            )
+        {
+            return Err(RelayerError::other(format!(
+                "the verifier {verifier_address} of {} has getConfig {cfg}, not chain {} on \
+                 parent chain {} with rollup {}: every proveBlock would be refused. Deploy a \
+                 verifier for the rollup {} posts to (SequencerInbox.rollup())",
+                chain.name, chain.chain_id, chain.parent_chain_id, chain.rollup, chain.name
+            )));
+        }
         info!(verifier = %verifier_address, "ArbitrumBlockVerifier of {}", chain.name);
         Ok(Self {
             bridge,
@@ -1376,10 +1459,16 @@ mod tests {
         an.accepted.lock().unwrap().push((chain_id, hash));
     }
 
+    /// The fakes answer from one consistent node: no lag behind the head.
+    fn cfg() -> TickConfig {
+        TickConfig {
+            arbitrum_lag: 0,
+            ..TickConfig::default()
+        }
+    }
+
     async fn run(chain: &Mutex<FakeChain>, an: &FakeBridge, state: &mut AnchorState) -> TickReport {
-        tick(ARB, chain, an, state, &TickConfig::default())
-            .await
-            .unwrap()
+        tick(ARB, chain, an, state, &cfg()).await.unwrap()
     }
 
     /// A deposit at block 100; batch 7 ends at 150 (parent block 10); the
@@ -1603,9 +1692,7 @@ mod tests {
         chain.lock().unwrap().failing_receipts = 1;
         let an = FakeBridge::default();
         let mut state = AnchorState::default();
-        assert!(tick(ARB, &chain, &an, &mut state, &TickConfig::default())
-            .await
-            .is_err());
+        assert!(tick(ARB, &chain, &an, &mut state, &cfg()).await.is_err());
         assert!(
             state.batch_ends.contains_key(&150),
             "the proofs at 150 are kept while the assertion is not taken"
@@ -1622,22 +1709,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_prove_block_keeps_the_proof_for_the_next_tick() {
+    async fn a_refused_prove_block_keeps_the_proof_and_is_sent_again_later() {
         let chain = one_deposit();
         let an = FakeBridge::default();
         let mut state = AnchorState::default();
         run(&chain, &an, &mut state).await;
         accept(&an, ARB.parent_chain_id, h(1_000_020));
         *an.failing_sends.lock().unwrap() = 1;
-        assert!(tick(ARB, &chain, &an, &mut state, &TickConfig::default())
-            .await
-            .is_err());
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!((r.proofs_sent, r.proofs_failed), (0, 1));
         assert_eq!(state.ready.len(), 1, "the proof is still there");
-        assert!(state.ready[0].sent.is_empty());
 
         let r = run(&chain, &an, &mut state).await;
+        assert_eq!(r.proofs_sent, 0, "not sent again before resend_after_secs");
+
+        let again = TickConfig {
+            resend_after_secs: 0,
+            ..cfg()
+        };
+        let r = tick(ARB, &chain, &an, &mut state, &again).await.unwrap();
         assert_eq!(r.proofs_sent, 1);
         assert_eq!(an.sent.lock().unwrap()[0].block_number, 100);
+    }
+
+    #[tokio::test]
+    async fn the_deposit_scan_stays_behind_the_arbitrum_head() {
+        let chain = one_deposit();
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let behind = TickConfig {
+            arbitrum_lag: 150,
+            ..cfg()
+        };
+        tick(ARB, &chain, &an, &mut state, &behind).await.unwrap();
+        assert_eq!(state.deposit_cursor, 50, "head 200 less the lag");
+        assert!(
+            state.pending.is_empty(),
+            "the deposit at 100 is not scanned yet"
+        );
+
+        run(&chain, &an, &mut state).await;
+        assert!(state.pending.contains_key(&100), "the next batch covers it");
     }
 
     #[tokio::test]
@@ -1652,9 +1764,7 @@ mod tests {
             ..AnchorState::default()
         };
         state.pending.insert(100, h(100));
-        assert!(tick(ARB, &chain, &an, &mut state, &TickConfig::default())
-            .await
-            .is_err());
+        assert!(tick(ARB, &chain, &an, &mut state, &cfg()).await.is_err());
         assert_eq!(state.unplaced_batches, BTreeMap::from([(6, 5), (7, 5)]));
 
         chain.lock().unwrap().failing_batch_ends.clear();
@@ -1810,6 +1920,7 @@ mod tests {
             })]),
             ready: vec![],
             unplaced_batches: BTreeMap::from([(7, 3)]),
+            batch_txs: BTreeMap::from([(7, h(7))]),
         };
         state.save(&path).unwrap();
         assert_eq!(AnchorState::load(&path).unwrap(), Some(state));

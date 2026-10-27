@@ -650,7 +650,10 @@ where
     }
 }
 
-async fn get_logs_with_retry<P>(provider: &P, filter: &Filter) -> Result<Vec<Log>, RelayerError>
+pub(crate) async fn get_logs_with_retry<P>(
+    provider: &P,
+    filter: &Filter,
+) -> Result<Vec<Log>, RelayerError>
 where
     P: Provider<Ethereum> + Send + Sync,
 {

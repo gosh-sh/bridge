@@ -24,6 +24,12 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `relayer daemon-live` no longer stalls after a late `applyBkSetUpdate` or `verifyBlock` receipt,
+  or when its bundle cursor is behind a rotation the contract already accepted. If the receipt is
+  not back within 180 seconds, the update counts as applied when the contract already shows that
+  seq_no — and, for a rotation, the new BK-set commitment. A deferred rotation ack no longer fails
+  the tick: the daemon acks the bundles the contract already has, then rotates. Restart the
+  relayer. Do not delete `prover_state.json` because of this stall. Verification keys are unchanged.
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
   with the deployed bridge, and `release.yaml` publishes the binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the

@@ -1,4 +1,4 @@
-//! Arbitrum block anchors (`deposit-relayer arbitrum-anchors`): gets the
+//! Arbitrum block anchors (`eth-lc-relayer arbitrum-anchors`): gets the
 //! Arbitrum blocks that hold deposits into the bridge's anchor set through
 //! `ArbitrumBlockVerifier.proveBlock` on Acki Nacki, without the bridge owner.
 //!
@@ -23,6 +23,9 @@
 //! The parent-chain block with the assertion has to be accepted by the bridge
 //! first (the parent chain's light client, with `submitAncestry` for blocks
 //! between its checkpoints); until it is, the proof waits in the state file.
+//!
+//! The live Acki Nacki side ([`TvmAnchorTarget`]) needs the `live-submit`
+//! feature, as every other call this crate sends to Acki Nacki.
 
 use std::{
     collections::BTreeMap,
@@ -32,15 +35,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "live-submit")]
 use acki_nacki_interface::{
     ContractCallRequest, ExtendedAddress, IAckiNacki, TvmAckiNacki, TvmClientConfig,
 };
 use alloy::{
     consensus::ReceiptEnvelope,
     eips::Encodable2718,
-    primitives::{address, b256, keccak256, Address, Bytes, B256, U256},
+    primitives::{address, b256, Address, Bytes, B256, U256},
     providers::Provider,
-    rpc::types::{Filter, Header as RpcHeader, TransactionReceipt, TransactionRequest},
+    rpc::types::{Filter, TransactionReceipt, TransactionRequest},
     sol,
     sol_types::SolCall,
     trie::{proof::ProofRetainer, HashBuilder, Nibbles},
@@ -48,9 +52,15 @@ use alloy::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+#[cfg(feature = "live-submit")]
 use tvm_client::crypto::KeyPair;
 
-use crate::{error::RelayerError, source::AckiNackiBridge};
+use crate::{error::RelayerError, header_rlp::encode_header_rlp, source::get_logs_with_retry};
+
+/// `Deposit(uint256 indexed depositId, address indexed sender, uint256 amount,
+/// bytes32 anAccount, uint256 timestamp)` of `AckiNackiBridge`. Only the
+/// blocks that hold one are read, not the logs themselves.
+pub const DEPOSIT: B256 = b256!("6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe");
 
 /// The EIP-2935 history contract as ArbOS 40 deploys it, and its window.
 pub const HISTORY_ADDRESS: Address = address!("0000F90827F1C53a10cb7A02335B175320002935");
@@ -148,19 +158,6 @@ pub fn arbitrum_chain(chain_id: u64) -> Option<&'static ArbitrumChain> {
 // ─────────────────────────────────────────────────────────────────────
 // Encoding what `proveBlock` takes
 // ─────────────────────────────────────────────────────────────────────
-
-/// The RLP of a block header, checked against the block's hash.
-pub fn header_rlp(header: &RpcHeader) -> Result<Bytes, RelayerError> {
-    let rlp = alloy::rlp::encode(&header.inner);
-    if keccak256(&rlp) != header.hash {
-        return Err(RelayerError::Eth(format!(
-            "the header of block {} does not encode to its hash {}: the node returns fields this \
-             encoder does not know",
-            header.inner.number, header.hash
-        )));
-    }
-    Ok(rlp.into())
-}
 
 /// The receipt trie of a block: its root, and the nodes from the root to the
 /// receipt of transaction `index`.
@@ -855,7 +852,7 @@ impl<P: Provider, A: Provider> RpcArbitrumView<P, A> {
         while start <= to {
             let end = to.min(start + span.max(1) - 1);
             let chunk = filter.clone().from_block(start).to_block(end);
-            out.extend(crate::source::get_logs_with_retry(provider, &chunk).await?);
+            out.extend(get_logs_with_retry(provider, &chunk).await?);
             start = end + 1;
         }
         Ok(out)
@@ -899,9 +896,9 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
     }
 
     async fn deposit_blocks(&self, from: u64, to: u64) -> Result<Vec<(u64, B256)>, RelayerError> {
-        let filter = Filter::new().address(self.evm_bridge).event_signature(
-            <AckiNackiBridge::Deposit as alloy::sol_types::SolEvent>::SIGNATURE_HASH,
-        );
+        let filter = Filter::new()
+            .address(self.evm_bridge)
+            .event_signature(DEPOSIT);
         let logs = Self::logs(&self.arbitrum, filter, from, to, self.arbitrum_log_span).await?;
         let mut blocks: Vec<(u64, B256)> = logs
             .iter()
@@ -1013,7 +1010,7 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
             .await
             .map_err(eth("Arbitrum eth_getBlockByNumber"))?
             .ok_or_else(|| RelayerError::Eth(format!("Arbitrum block {number} not found")))?;
-        Ok((block.header.hash, header_rlp(&block.header)?))
+        Ok((block.header.hash, encode_header_rlp(&block.header)?))
     }
 
     async fn arbitrum_number(&self, hash: B256) -> Result<Option<u64>, RelayerError> {
@@ -1087,7 +1084,7 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
                 "the receipts of parent block {block} do not build its receiptsRoot"
             )));
         }
-        Ok((header.hash, header_rlp(&header)?, proof))
+        Ok((header.hash, encode_header_rlp(&header)?, proof))
     }
 }
 
@@ -1096,6 +1093,7 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
 // ─────────────────────────────────────────────────────────────────────
 
 /// The bridge's getters and the chain's verifier over tvm_client.
+#[cfg(feature = "live-submit")]
 pub struct TvmAnchorTarget {
     bridge: TvmAckiNacki,
     verifier: TvmAckiNacki,
@@ -1104,6 +1102,7 @@ pub struct TvmAnchorTarget {
 }
 
 /// A uint160 address getter value, hex or decimal.
+#[cfg(feature = "live-submit")]
 fn abi_address(v: &serde_json::Value) -> Option<Address> {
     let s = v.as_str()?;
     let n = match s.strip_prefix("0x") {
@@ -1116,6 +1115,7 @@ fn abi_address(v: &serde_json::Value) -> Option<Address> {
 }
 
 /// A uint the TVM ABI decoder rendered, decimal or `0x` hex.
+#[cfg(feature = "live-submit")]
 fn abi_uint(v: &serde_json::Value) -> Option<u128> {
     let s = v.as_str()?;
     match s.strip_prefix("0x") {
@@ -1124,6 +1124,7 @@ fn abi_uint(v: &serde_json::Value) -> Option<u128> {
     }
 }
 
+#[cfg(feature = "live-submit")]
 impl TvmAnchorTarget {
     /// Connects, and finds the verifier the bridge recorded for `chain`
     /// (`getL2Verifier`). Refuses a chain without one, or one recorded for
@@ -1204,6 +1205,7 @@ impl TvmAnchorTarget {
     }
 }
 
+#[cfg(feature = "live-submit")]
 #[async_trait]
 impl AnchorTarget for TvmAnchorTarget {
     async fn is_accepted(&self, chain_id: u64, block_hash: B256) -> Result<bool, RelayerError> {
@@ -1240,7 +1242,7 @@ impl AnchorTarget for TvmAnchorTarget {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Test vectors (`deposit-relayer arbitrum-vector`)
+// Test vectors (`eth-lc-relayer arbitrum-vector`)
 // ─────────────────────────────────────────────────────────────────────
 
 /// Stands in for the bridge when writing a test vector: no block is accepted,
@@ -1346,6 +1348,8 @@ pub fn vector_json(
 mod tests {
     use std::sync::Mutex;
 
+    use alloy::{primitives::keccak256, rpc::types::Header as RpcHeader};
+
     use super::*;
 
     fn fixture(rel: &str) -> serde_json::Value {
@@ -1365,10 +1369,18 @@ mod tests {
     }
 
     #[test]
+    fn the_deposit_topic_is_the_bridge_event() {
+        assert_eq!(
+            DEPOSIT,
+            keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
+        );
+    }
+
+    #[test]
     fn a_sepolia_header_encodes_to_the_bench_vector() {
-        let f = fixture("tests/fixtures/arbitrum/sepolia_11991511.json");
+        let f = fixture("src/fixtures/arbitrum/sepolia_11991511.json");
         let header: RpcHeader = serde_json::from_value(f["block"].clone()).unwrap();
-        let rlp = header_rlp(&header).unwrap();
+        let rlp = encode_header_rlp(&header).unwrap();
         assert_eq!(
             hex::encode(rlp),
             hex_of(&live_steps()["assertionBlock"]["args"]["l1Header"])
@@ -1377,9 +1389,9 @@ mod tests {
 
     #[test]
     fn an_arbitrum_header_encodes_to_the_bench_vector() {
-        let f = fixture("tests/fixtures/arbitrum/arbitrum_one_518174193.json");
+        let f = fixture("src/fixtures/arbitrum/arbitrum_one_518174193.json");
         let header: RpcHeader = serde_json::from_value(f["block"].clone()).unwrap();
-        let rlp = header_rlp(&header).unwrap();
+        let rlp = encode_header_rlp(&header).unwrap();
         assert_eq!(
             hex::encode(rlp),
             hex_of(&live_steps()["ancestorHash"]["args"]["l2Header"])
@@ -1388,15 +1400,15 @@ mod tests {
 
     #[test]
     fn a_header_that_does_not_hash_to_its_block_is_refused() {
-        let f = fixture("tests/fixtures/arbitrum/sepolia_11991511.json");
+        let f = fixture("src/fixtures/arbitrum/sepolia_11991511.json");
         let mut header: RpcHeader = serde_json::from_value(f["block"].clone()).unwrap();
         header.inner.gas_used += 1;
-        assert!(header_rlp(&header).is_err());
+        assert!(encode_header_rlp(&header).is_err());
     }
 
     #[test]
     fn the_receipt_proof_matches_the_bench_vector_and_the_header() {
-        let f = fixture("tests/fixtures/arbitrum/sepolia_11991511.json");
+        let f = fixture("src/fixtures/arbitrum/sepolia_11991511.json");
         let header: RpcHeader = serde_json::from_value(f["block"].clone()).unwrap();
         let receipts: Vec<TransactionReceipt> =
             serde_json::from_value(f["receipts"].clone()).unwrap();
@@ -1419,7 +1431,7 @@ mod tests {
 
     #[test]
     fn the_assertion_names_the_block_the_bench_vector_proves() {
-        let f = fixture("tests/fixtures/arbitrum/sepolia_11991511.json");
+        let f = fixture("src/fixtures/arbitrum/sepolia_11991511.json");
         let receipts: Vec<TransactionReceipt> =
             serde_json::from_value(f["receipts"].clone()).unwrap();
         let chain = arbitrum_chain(421_614).unwrap();

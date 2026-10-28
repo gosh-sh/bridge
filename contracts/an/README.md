@@ -203,7 +203,7 @@ bridge records the address again, with the `parentChainId` of this call: the
 upgraded bridge has no record to refuse it against, so check `getConfig()` on
 the verifier against `getL2Verifier` (step 4).
 
-`deposit-relayer arbitrum-anchors` calls `proveBlock`; see section 9 of
+`eth-lc-relayer arbitrum-anchors` calls `proveBlock`; see section 9 of
 `crates/deposit-relayer-daemon/docs/operator_runbook.md`. It needs the state
 at M, and M is already 30 minutes (Arbitrum Sepolia) or an hour (Arbitrum One)
 old when its assertion lands, which is more state than an ordinary node keeps.

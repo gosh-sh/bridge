@@ -22,6 +22,12 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
+  (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
+  file; every flag, environment variable and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+
 ### Fixes
 
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works

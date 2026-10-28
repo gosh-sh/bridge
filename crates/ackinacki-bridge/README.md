@@ -1404,7 +1404,7 @@ prints the owner's call to pass on:
 | Preflight | seconds | seconds |
 | Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing, and an `approve` that does not show on chain, give up after `--pair-timeout-s` | the same |
 | EVM confirmation, 12 blocks | ~2.5 min | seconds |
-| Block anchor | by the owner: **from ~13 min, plus the owner's reaction; no limit by default** | by `arbitrum-anchors` through the verifier: **35–75 min** (the rollup's next assertion on Sepolia, then the Sepolia light client admitting its block; 70 min in one measured run); the owner can anchor it sooner |
+| Block anchor | by the owner: **from ~13 min, plus the owner's reaction; no limit by default** | by `eth-lc-relayer arbitrum-anchors` through the verifier: **35–75 min** (the rollup's next assertion on Sepolia, then the Sepolia light client admitting its block; 70 min in one measured run); the owner can anchor it sooner |
 | Deposit block finalized on the EVM side | ~13 min, inside the anchor wait | inside the anchor wait |
 | Relayer grace | up to 2 min | up to 2 min |
 | Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) | the same |

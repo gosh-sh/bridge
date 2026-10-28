@@ -265,7 +265,7 @@ steps:
       ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY: { from_secret: ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY }
       # Public: the deployer's address, which the test checks the key against.
       ARBITRUM_SEPOLIA_E2E_ADDRESS: "0xe8e3bfd675cb889e4adf7ed0ec65c3dd09cc9041"
-      # Arbitrum Sepolia RPC for arbitrum-anchors only: it has to serve eth_getProof
+      # Arbitrum Sepolia RPC for eth-lc-relayer arbitrum-anchors only: it has to serve eth_getProof
       # on a batch's last block a minute after it, and the public endpoints keep about
       # 128 blocks (half a minute). Unset, the job falls back to the public endpoint.
       ANCHORS_ARB_RPC: { from_secret: ARB_RPC }

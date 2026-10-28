@@ -23,10 +23,12 @@ pub const CHAIN_ID_MANTLE: u64 = 5_000;
 pub const CHAIN_ID_BASE: u64 = 8_453;
 /// Arbitrum One.
 pub const CHAIN_ID_ARBITRUM_ONE: u64 = 42_161;
+/// Arbitrum Sepolia (the Arbitrum test network, on Sepolia).
+pub const CHAIN_ID_ARBITRUM_SEPOLIA: u64 = 421_614;
 /// Blast.
 pub const CHAIN_ID_BLAST: u64 = 81_457;
 
-/// Supported deposit-source networks (six L2s + Sepolia).
+/// Supported deposit-source networks (six L2s, Sepolia and Arbitrum Sepolia).
 pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
     CHAIN_ID_OP_MAINNET,
     CHAIN_ID_WORLD_CHAIN,
@@ -35,6 +37,7 @@ pub const SUPPORTED_DEPOSIT_CHAIN_IDS: &[u64] = &[
     CHAIN_ID_ARBITRUM_ONE,
     CHAIN_ID_BLAST,
     CHAIN_ID_SEPOLIA,
+    CHAIN_ID_ARBITRUM_SEPOLIA,
 ];
 
 /// Human-readable name for a supported chain id, if known.
@@ -47,6 +50,7 @@ pub fn supported_deposit_chain_name(chain_id: u64) -> Option<&'static str> {
         CHAIN_ID_ARBITRUM_ONE => Some("Arbitrum One"),
         CHAIN_ID_BLAST => Some("Blast"),
         CHAIN_ID_SEPOLIA => Some("Sepolia"),
+        CHAIN_ID_ARBITRUM_SEPOLIA => Some("Arbitrum Sepolia"),
         _ => None,
     }
 }
@@ -74,8 +78,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allowlist_covers_six_l2s_and_sepolia() {
-        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 7);
+    fn allowlist_covers_six_l2s_and_two_testnets() {
+        assert_eq!(SUPPORTED_DEPOSIT_CHAIN_IDS.len(), 8);
         for id in SUPPORTED_DEPOSIT_CHAIN_IDS {
             assert!(is_supported_deposit_chain(*id));
             assert!(supported_deposit_chain_name(*id).is_some());

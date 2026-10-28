@@ -1,8 +1,8 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.14.0, `DepositVoucher` at 1.4.0 and
-`EthBeaconLightClient` at 1.6.1:
+`exchange/` — `eccUSDCBridge` at version 1.14.0, `DepositVoucher` at 1.4.0,
+`EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -31,24 +31,31 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   pushes the execution block hashes it admits into the bridge's anchor set. Its
   bridge address is a constant, and its constructor accepts only the bridge as
   sender.
+- `ArbitrumBlockVerifier`, with the `EthTrie` library — one per Arbitrum chain,
+  deployed by the bridge (`deployL2Verifier`) from the code the zerostate
+  installs (`setL2VerifierCode`). It proves an Arbitrum block from the state
+  assertion the chain posts on its parent chain, whose block the light client
+  has already admitted, and pushes the block's hash into the anchor set. See
+  *Arbitrum blocks* below.
 
 `finalizeDeposit` is permissionless — the proof is the authorization. It
 rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
 trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
 verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires the proven block hash in the anchor set: the proof places the
-event in a block, but cannot show that the block is canonical. Two writers fill
-the anchor set. The owner admits or retracts hashes with `setAcceptedBlockHash`
+event in a block, but cannot show that the block is canonical. Three writers
+fill the anchor set: the owner, the light clients and the Arbitrum block
+verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
-for one chain and needs a light client deployed for it
-(`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
+for one chain and needs a light client or an Arbitrum block verifier deployed
+for it (`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
 for chain id 0); the no-argument `disableOwnerAnchors()` does the same for the
 chain whose client was deployed last. Neither checks that the light-client
 account is Active. Each client writes only for its own chain:
 `acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient` compare
-the sender against the client of the chain named in the call. L2 source chains
-on the deposit allowlist keep the owner writer. `getLightClient(chainId)` is
-the client of a chain (0 if none), `isOwnerAnchorsEnabled(chainId)` the
+the sender against the client of the chain named in the call. An L2 source
+chain on the deposit allowlist keeps the owner writer until it has a verifier. `getLightClient(chainId)` is
+the client of a chain (`addr_none` if none), `isOwnerAnchorsEnabled(chainId)` the
 per-chain writer state, and `getAnchorConfig()` the pair for the chain
 deployed last — with clients on several chains, read the per-chain getters.
 The flip disables `setAcceptedBlockHash` for the selected chain; it does not
@@ -57,8 +64,9 @@ re-enable function in the current code. A bridge `updateCode` resets the
 owner-anchor flags and recorded clients, so operators must restore configuration
 and repeat the intended flips after upgrading. `setLightClientCode` alone keeps
 recorded clients unchanged, but calling `deployLightClient` afterwards for the
-same chain can replace its writer even while the owner-anchor flag is off.
-The light client's owner also retains `reAnchorCommittee` and `updateCode`.
+same chain can replace its writer even while the owner-anchor flag is off;
+`setL2VerifierCode` followed by `deployL2Verifier` does the same for an
+Arbitrum chain's verifier. The light client's owner also retains `reAnchorCommittee` and `updateCode`.
 An owner who retains `updateCode` can install arbitrary replacement code,
 including code that removes these checks. The current implementation cannot
 constrain owner-selected replacement code, even if a migration preserves the
@@ -69,7 +77,7 @@ flags. Both owner keys therefore remain trusted after a flip.
 | `exchange/` | Sources and a `Makefile` that builds them in place |
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
 | `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
-| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json` |
+| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 | `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
@@ -94,6 +102,118 @@ folders and `contracts/scripts/bridge_*.py`, never
 `contracts/scripts/bridge_contracts.py`, which is acki-nacki's own module and
 the one that does the placing. A change here reaches a network only after that
 pin is moved.
+
+## Arbitrum blocks
+
+A deposit made on an Arbitrum chain is finalized like any other: its block hash
+has to be in the anchor set for that chain. `ArbitrumBlockVerifier` puts it
+there without the owner.
+
+An Arbitrum chain posts state assertions to its rollup contract on the parent
+chain, and each `AssertionCreated` names the hash of the last Arbitrum block it
+covers, M. Arbitrum keeps the hashes of its last 393 168 blocks in the EIP-2935
+history contract `0x0000F90827F1C53a10cb7A02335B175320002935`. So M's state
+holds the hash of every block N up to 393 168 blocks behind M, about 27 hours at
+0.25 s a block. `proveBlock(l1Header, txIndex, receiptProof, l2Header,
+accountProof, blockNumber, storageProof)` checks each piece with `KECCAK256`:
+
+1. The receipt of transaction `txIndex` in the parent-chain block `l1Header`
+   holds an `AssertionCreated` from the verifier's rollup. Its data word 13
+   (`afterState.globalState.bytes32Vals[0]`) is M.
+2. `l2Header` hashes to M. Under M's state root, `accountProof` and
+   `storageProof` (an `eth_getProof` answer at M) give history slot
+   `blockNumber % 393168`, which holds N's hash.
+
+The verifier then sends `acceptBlockHashFromL2Verifier(l2ChainId,
+parentBlockHash, blockHash)` to the bridge. The bridge takes it only from the
+verifier it recorded for that chain (`ERR_INVALID_SENDER` (207) otherwise), and
+only if the parent-chain block is already in that chain's anchor set
+(`ERR_UNKNOWN_BLOCK` (224) otherwise). The message bounces and the verifier
+stores nothing, so after a 224 the same call succeeds once the light client
+has admitted that block.
+
+`proveBlock` is permissionless: the hashes are the authorization. Like the
+light client, the verifier pays its own gas and mints the shell for it. One
+call on Arbitrum One data costs about 0.55M gas against the 10M
+per-transaction limit (`scripts/l2-block-proof-bench`). The verifier's
+errors are 300–307 from `EthTrie` and 310–315 from the verifier, named at the
+top of each source file.
+
+| Chain | `l2ChainId` | Parent chain | Rollup (`SequencerInbox.rollup()`, 2026-10-25) | Assertions |
+|---|---|---|---|---|
+| Arbitrum Sepolia | 421614 | Sepolia, 11155111 | `0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4` | about every 30 min |
+| Arbitrum One | 42161 | Ethereum, 1 | `0x4dceb440657f21083db8add07665f8ddbe1dcfc0` | about every hour |
+
+**The trust assumption.** The verifier accepts an assertion as soon as it is
+posted, not when the rollup confirms it. A hash it admits stays in the anchor
+set: the verifier has nothing like the light client's
+`forgetBlockHashFromLightClient`, and a successful challenge neither removes
+the hash nor undoes a deposit already finalized. What stands behind an
+assertion is what posting it costs, read from each rollup on 2026-10-26:
+
+| Rollup | Who may post (`validatorWhitelistDisabled()`) | Stake (`baseStake()`) | Confirmed after (`confirmPeriodBlocks()`) |
+|---|---|---|---|
+| Arbitrum One | anyone | 3 600 WETH | 45 818 blocks, about 6.4 days |
+| Arbitrum Sepolia | whitelisted validators only | 36 of a test token (`0xefb383126640fe4a760010c6e59c397d2b6c7141`) | 20 blocks, about 4 minutes |
+
+On Arbitrum One a false assertion locks 3 600 ETH, none has ever been posted,
+and the 10 000 USDC per-chain ceiling bounds what one could take. That holds
+only while the ceiling stays below the stake and a challenged assertion loses
+it. On Arbitrum Sepolia nothing of value backs an assertion, only the
+whitelist: use its verifier on test networks only.
+
+Read the rollup address from the chain's `SequencerInbox.rollup()` rather than
+from a list: Arbitrum Sepolia's rollup moved when it switched to BoLD, and
+Arbitrum's docs still name the old one. The verifier keeps the address it was
+initialized with, so a move needs new verifier code: the same code under the
+same salt is the same account, already initialized.
+
+A deposit in block N can be proven once an assertion with M at or after N is
+posted and the light client has admitted the parent-chain block that holds it
+(Ethereum finality, about 13 minutes). It has to be proven before M runs more
+than 393 168 blocks past N.
+
+### Deploying a verifier
+
+1. The zerostate installs the verifier code. On a bridge without it, send
+   `setL2VerifierCode` with the code of
+   `0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc`.
+2. Deploy a light client for the parent chain first: its accepted blocks are
+   what the verifier's assertions are checked against.
+3. `deployL2Verifier(421614, 11155111, 0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4)`
+   for Arbitrum Sepolia, or `deployL2Verifier(42161, 1,
+   0x4dceb440657f21083db8add07665f8ddbe1dcfc0)` for Arbitrum One. The bridge
+   deploys the verifier at the address of its code salted with `l2ChainId`,
+   with 10 vmshell, and initializes it with 2. Without the code it throws
+   `ERR_L2_VERIFIER_UNSET` (237). Re-running it with the code of the recorded
+   verifier throws `ERR_L2_VERIFIER_DEPLOYED` (238): that code reaches the
+   same account, which keeps the rollup and parent chain it was first given.
+   A new rollup address or parent chain needs new verifier code (see above),
+   which deploys at a new address and replaces the recorded verifier.
+4. Check `getL2Verifier(l2ChainId)` on the bridge, which returns the address
+   and the parent chain, and `getConfig()` on the verifier.
+5. When the verifier is admitting blocks, `disableOwnerAnchorsOn(l2ChainId)`
+   turns the owner writer off for that chain.
+
+The verifier code and the recorded verifiers are not carried through
+`updateCode`. After a bridge upgrade, repeat steps 1 and 3 with the arguments
+the verifier was first deployed with. The verifier account already exists at
+the same address, so the deploy and `initialize` fail on it and bounce, and the
+bridge records the address again, with the `parentChainId` of this call: the
+upgraded bridge has no record to refuse it against, so check `getConfig()` on
+the verifier against `getL2Verifier` (step 4).
+
+`deposit-relayer arbitrum-anchors` calls `proveBlock`; see section 9 of
+`crates/deposit-relayer-daemon/docs/operator_runbook.md`. It needs the state
+at M, and M is already 30 minutes (Arbitrum Sepolia) or an hour (Arbitrum One)
+old when its assertion lands, which is more state than an ordinary node keeps.
+M is always the last block of a batch, and the batch is posted to the parent
+chain's `SequencerInbox` within a minute of M. So the relayer rolls forward: on
+each `SequencerBatchDelivered` it takes M's header and one `eth_getProof` for
+the slots of the deposits still waiting, 40–60 s after M. The Arbitrum node has
+to keep M's state that long: public endpoints keep about 128 blocks, half a
+minute, and miss many batches; a free Alchemy key keeps it. When an assertion ends at that block, it calls
+`proveBlock` with the parent-chain receipt.
 
 ## Transfer and network limits
 
@@ -266,17 +386,24 @@ AN identity/history. That migration is not implemented. Amounts above
     make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
 
 The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
-`eccUSDCBridge.tvc` and 0.81.0 for `DepositVoucher.tvc` and
-`EthBeaconLightClient.tvc`, which is why the compiled folders carry those names.
+`eccUSDCBridge.tvc` and 0.81.0 for `DepositVoucher.tvc`,
+`EthBeaconLightClient.tvc` and `ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
 Any other compiler changes the code hash, so the `Makefile` builds each contract
 with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
 unset or the binary reports a different version.
 
 `sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
-but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` needs more than the
-version: the source calls `gosh.keccak256`, so `SOLD_0_81` has to be a `sold`
-built against a tvm-sdk that carries the `KECCAK256` instruction. A stock
-0.81.0 emits the mnemonic its assembler does not know. `sold` 0.82.0 does not
+but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` and
+`ArbitrumBlockVerifier.tvc` need more than the version: their sources call
+`gosh.keccak256`, so `SOLD_0_81` has to be the `sold` 0.81.0 built from
+[gosh-sh/TVM-Solidity-Compiler `feature/keccak256-builtin`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/feature/keccak256-builtin),
+whose tvm-sdk carries the `KECCAK256` instruction. A stock 0.81.0 emits the
+mnemonic its assembler does not know. The bridge does not import the verifier,
+only `ArbitrumBlockVerifierDeploy.sol`, a contract with the verifier's state
+variables and the two calls the bridge makes: importing the verifier would
+compile `EthTrie` into the bridge, which `sold` 0.80.0 cannot build. Keep the
+two contracts' state variables identical: the bridge lays out the verifier's
+initial data, and so its address, from the deploy surface. `sold` 0.82.0 does not
 compile the bridge. The bridge keeps the voucher's code in its data, and the
 zerostate installs the light client's code into the bridge, so replace the
 rebuilt artefacts together.
@@ -342,7 +469,8 @@ it against the tracked artefact before and after an upgrade.
 `zerostate_init.py` brings a premined `eccUSDCBridge` to the state a fresh chain
 needs: it builds the data cell with `BridgeZerostateData`, upgrades the premine
 stub to the bridge's code, seeds the trusted L1 bridge, installs the
-light-client code, and writes the account into the zerostate. acki-nacki places
+light-client and Arbitrum block verifier code, and writes the account into the
+zerostate. acki-nacki places
 it next to the contracts and calls `initialize(ctx)` while generating a
 zerostate, so a new setup call or a new storage field is a change in this
 repository alone.

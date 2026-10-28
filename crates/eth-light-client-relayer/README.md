@@ -51,6 +51,12 @@ eth-lc-relayer prove-one --beacon-url … \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle
 
+# 4a. Keep the step proving key between proves: generate it once per prover
+#     build (STEP_KEY_DIR=<dir> STEP_KEYGEN_ONLY=1 export_step_vk_blob), then
+#     set STEP_KEY_DIR in the relayer's environment, which the prover inherits.
+#     Generate it again after every prover upgrade: the prover refuses a key
+#     another build generated.
+
 # 5. Pin the Gloas fork slot (after deploy, and again on mainnet once Gloas
 #    is scheduled; Sepolia 11296768, mainnet max until then)
 eth-lc-relayer set-gloas-fork-slot --slot 11296768 …

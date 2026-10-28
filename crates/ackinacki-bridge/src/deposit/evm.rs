@@ -619,10 +619,14 @@ impl EvmRead for AlloyEvm {
         let n = hashes.len();
         let results = futures::stream::iter(hashes)
             .map(|h| async move {
-                self.p
-                    .get_transaction_receipt(h)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("no receipt for {h}"))?;
+                // As JSON, not as an Ethereum receipt: an L2 block holds the
+                // rollup's own transaction types (Arbitrum opens every block
+                // with a type-0x6a one), which the prover reads raw as well.
+                let receipt: serde_json::Value = self
+                    .p
+                    .raw_request("eth_getTransactionReceipt".into(), (h,))
+                    .await?;
+                anyhow::ensure!(!receipt.is_null(), "no receipt for {h}");
                 let raw: Bytes = self
                     .p
                     .raw_request("eth_getRawTransactionByHash".into(), (h,))
@@ -867,6 +871,88 @@ mod tests {
                 "case {i}: {err:#}"
             );
         }
+    }
+
+    /// A JSON-RPC node on loopback serving one Arbitrum block whose only
+    /// transaction is the rollup's own type-0x6a one.
+    async fn arbitrum_node() -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let tx = format!("{:#x}", B256::repeat_byte(0x6a));
+        let zero = format!("{:#x}", B256::ZERO);
+        let block = serde_json::json!({
+            "hash": format!("{:#x}", B256::repeat_byte(0xb1)), "parentHash": zero,
+            "sha3Uncles": zero, "miner": format!("{:#x}", Address::ZERO), "stateRoot": zero,
+            "transactionsRoot": zero, "receiptsRoot": zero,
+            "logsBloom": format!("0x{}", "00".repeat(256)), "difficulty": "0x1",
+            "number": "0x10", "gasLimit": "0x4000000000000", "gasUsed": "0x0",
+            "timestamp": "0x1", "extraData": zero, "mixHash": zero, "nonce": "0x0000000000000001",
+            "baseFeePerGas": "0x5f5e100", "l1BlockNumber": "0x1", "sendCount": "0x1",
+            "sendRoot": zero, "size": "0x1", "uncles": [], "transactions": [tx],
+        });
+        let receipt = serde_json::json!({
+            "blockHash": block["hash"], "blockNumber": "0x10", "contractAddress": null,
+            "cumulativeGasUsed": "0x0", "effectiveGasPrice": "0x5f5e100",
+            "from": "0x00000000000000000000000000000000000a4b05", "gasUsed": "0x0",
+            "gasUsedForL1": "0x0", "l1BlockNumber": "0x1", "logs": [],
+            "logsBloom": block["logsBloom"], "status": "0x1",
+            "to": "0x00000000000000000000000000000000000a4b05", "transactionHash": tx,
+            "transactionIndex": "0x0", "type": "0x6a",
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let (block, receipt) = (block.clone(), receipt.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    loop {
+                        let mut chunk = [0u8; 4096];
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .map_or(0, |v| v.trim().parse().unwrap());
+                        if buf.len() < end + 4 + len {
+                            continue;
+                        }
+                        let req: serde_json::Value =
+                            serde_json::from_slice(&buf[end + 4..end + 4 + len]).unwrap();
+                        buf.drain(..end + 4 + len);
+                        let result = match req["method"].as_str() {
+                            Some("eth_getBlockByNumber") => block.clone(),
+                            Some("eth_getTransactionReceipt") => receipt.clone(),
+                            Some("eth_getRawTransactionByHash") => serde_json::json!("0x6a01"),
+                            _ => serde_json::Value::Null,
+                        };
+                        let body =
+                            serde_json::json!({"jsonrpc": "2.0", "id": req["id"], "result": result})
+                                .to_string();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                             {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        sock.write_all(resp.as_bytes()).await.unwrap();
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_block_with_an_l2_transaction_type_passes_the_probe() {
+        let evm = AlloyEvm::connect(&arbitrum_node().await).unwrap();
+        assert_eq!(evm.probe_block(BlockTag::Number(16)).await.unwrap(), 1);
     }
 
     #[tokio::test(start_paused = true)]

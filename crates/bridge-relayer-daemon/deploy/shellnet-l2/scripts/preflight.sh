@@ -110,7 +110,7 @@ for command_name in "${required_commands[@]}"; do
 done
 
 [[ "$BRIDGE_ANCHOR_LEVEL" == 2 ]] || die "only L2 anchor level 2 is allowed"
-[[ "$EXPECTED_EVM_CHAIN_ID" == 11155111 ]] || die "expected Sepolia chain id"
+[[ "$EXPECTED_EVM_CHAIN_ID" =~ ^[0-9]+$ ]] || die "EXPECTED_EVM_CHAIN_ID must be the decimal chain id the bridge is deployed on"
 [[ "$BRIDGE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad bridge address"
 [[ "$BRIDGE_DEPLOY_BLOCK" =~ ^[0-9]+$ ]] || die "BRIDGE_DEPLOY_BLOCK must be a block number"
 BRIDGE_DEPLOY_BLOCK=$((10#$BRIDGE_DEPLOY_BLOCK)) # decimal even with leading zeros
@@ -307,7 +307,7 @@ else
   jq -e '.initialized == true and .anchor_level == 2' "$BRIDGE_STATE_DIR/prover_state.json" >/dev/null ||
     die "existing prover state is not initialized L2 state"
 fi
-ok "Sepolia bridge owner/config/anchors cursor=$last_seen"
+ok "bridge owner/config/anchors on chain $EXPECTED_EVM_CHAIN_ID cursor=$last_seen"
 
 verify_verifier_lane 'primaryVerifier()(address)' 'PrimaryAggregatorVerifier.bin' 'primary'
 verify_verifier_lane 'fallbackVerifier()(address)' 'FallbackAggregatorVerifier.bin' 'fallback'

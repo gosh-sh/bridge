@@ -17,6 +17,15 @@
 //!   backoff and SIGINT/SIGTERM-aware shutdown. Live submit uses tvm_client 3.0
 //!   (`dapp_id::account_id` addresses); pass `--dry-run` to mock the AN side.
 //!
+//! - `arbitrum-anchors` — long-running loop next to `daemon` for a bridge on an
+//!   Arbitrum chain: follows batches and assertions on the parent chain and
+//!   calls `ArbitrumBlockVerifier.proveBlock` on Acki Nacki, so the blocks that
+//!   hold deposits reach the anchor set without the owner.
+//!
+//! - `arbitrum-vector` — writes one `proveBlock` vector from the live chains
+//!   the way `arbitrum-anchors` builds its calls, for the bench and the
+//!   local-network test. Sends nothing.
+//!
 //! - `status` — print the state file path.
 
 use std::{
@@ -28,14 +37,17 @@ use std::{
 };
 
 use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
-use alloy::{primitives::Address, providers::ProviderBuilder};
+use alloy::{
+    primitives::Address,
+    providers::{Provider, ProviderBuilder},
+};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
-    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle, DepositProverBins,
-    DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig,
-    RelayerMetrics, RelayerState, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    arbitrum, fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter,
+    AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle,
+    DepositProverBins, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -273,6 +285,87 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
+    /// Anchor the Arbitrum blocks that hold deposits: follow the parent
+    /// chain's batches and assertions and call `proveBlock` on the chain's
+    /// `ArbitrumBlockVerifier`. Runs next to `daemon`, which finalizes the
+    /// deposits once their blocks are accepted.
+    ArbitrumAnchors {
+        /// Parent-chain RPC: Sepolia for Arbitrum Sepolia, Ethereum for
+        /// Arbitrum One. Must serve `eth_getBlockReceipts`.
+        #[arg(long, env = "PARENT_RPC_URL", hide_env_values = true)]
+        parent_rpc_url: String,
+        /// Arbitrum RPC. No archive node: proofs are taken as each batch
+        /// lands, while its state is seconds old.
+        #[arg(long, env = "ARBITRUM_RPC_URL", hide_env_values = true)]
+        arbitrum_rpc_url: String,
+        /// `AckiNackiBridge` on the Arbitrum chain, whose `Deposit`s are
+        /// anchored.
+        #[arg(long)]
+        bridge_address: Address,
+        /// First Arbitrum block to scan for deposits (the bridge's deploy
+        /// block). When `0`, falls back to `BRIDGE_DEPLOY_BLOCK`.
+        #[arg(long, default_value_t = 0)]
+        from_block: u64,
+        /// tvm_client 3.0 endpoint that serves GraphQL and `/v2/messages`.
+        #[arg(long, env = "AN_GRAPHQL_URL")]
+        an_graphql_url: String,
+        /// tvm-cli keys JSON that signs the `proveBlock` messages (any key:
+        /// the call is permissionless).
+        #[arg(long, env = "AN_KEYS_PATH")]
+        an_keys_path: String,
+        /// `eccUSDCBridge.abi.json` on the AN side.
+        #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
+        an_bridge_abi_path: String,
+        /// `ArbitrumBlockVerifier.abi.json`
+        /// (`contracts/an/0.81.0_compiled/exchange/`).
+        #[arg(long, env = "AN_ARBITRUM_VERIFIER_ABI_PATH")]
+        an_verifier_abi_path: String,
+        /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
+        #[arg(long, env = "AN_TOKEN_BRIDGE")]
+        an_token_bridge: String,
+        /// Where the proofs taken at batch time are kept until their
+        /// assertion lands. They cannot be fetched again later: keep the file
+        /// across restarts.
+        #[arg(
+            long,
+            env = "ARBITRUM_ANCHOR_STATE",
+            default_value = "./arbitrum-anchors-state.json"
+        )]
+        anchor_state: PathBuf,
+        #[arg(long, default_value_t = 12)]
+        poll_secs: u64,
+        /// Blocks per `eth_getLogs` on the parent chain.
+        #[arg(long, default_value_t = 1_000)]
+        parent_log_span: u64,
+        /// Blocks per `eth_getLogs` on the Arbitrum chain.
+        #[arg(long, default_value_t = 10_000)]
+        arbitrum_log_span: u64,
+        /// Allow non-HTTPS GraphQL endpoints (local dev only).
+        #[arg(long)]
+        allow_insecure_graphql: bool,
+    },
+    /// Write one `proveBlock` vector for the block `--behind` blocks before
+    /// the Arbitrum head, built as `arbitrum-anchors` builds its calls. Waits
+    /// for the first assertion that ends at a batch seen after the start:
+    /// about one to two assertion intervals. Sends nothing.
+    ArbitrumVector {
+        #[arg(long, env = "PARENT_RPC_URL", hide_env_values = true)]
+        parent_rpc_url: String,
+        #[arg(long, env = "ARBITRUM_RPC_URL", hide_env_values = true)]
+        arbitrum_rpc_url: String,
+        #[arg(long, default_value_t = 1_000)]
+        behind: u64,
+        #[arg(long, default_value_t = 100)]
+        timeout_mins: u64,
+        /// The vector, in the format of
+        /// `scripts/l2-block-proof-bench/fixtures/`.
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 12)]
+        poll_secs: u64,
+        #[arg(long, default_value_t = 1_000)]
+        parent_log_span: u64,
+    },
     /// Print the state file path and exit.
     Status,
 }
@@ -287,6 +380,64 @@ async fn main() -> anyhow::Result<()> {
             info!("deposit-relayer state file = {}", args.state.display());
             Ok(())
         },
+        Cmd::ArbitrumAnchors {
+            parent_rpc_url,
+            arbitrum_rpc_url,
+            bridge_address,
+            from_block,
+            an_graphql_url,
+            an_keys_path,
+            an_bridge_abi_path,
+            an_verifier_abi_path,
+            an_token_bridge,
+            anchor_state,
+            poll_secs,
+            parent_log_span,
+            arbitrum_log_span,
+            allow_insecure_graphql,
+        } => {
+            let an = AnConfig {
+                graphql_url: an_graphql_url,
+                keys_path: an_keys_path,
+                bridge_abi_path: an_bridge_abi_path,
+                token_bridge: an_token_bridge,
+                ..AnConfig::default()
+            };
+            an.validate_live_graphql_endpoint(allow_insecure_graphql)?;
+            arbitrum_anchors(
+                &parent_rpc_url,
+                &arbitrum_rpc_url,
+                bridge_address,
+                resolve_from_block(from_block),
+                an,
+                &an_verifier_abi_path,
+                &anchor_state,
+                Duration::from_secs(poll_secs.max(1)),
+                parent_log_span,
+                arbitrum_log_span,
+            )
+            .await
+            .map_err(log_err("arbitrum-anchors"))
+        },
+        Cmd::ArbitrumVector {
+            parent_rpc_url,
+            arbitrum_rpc_url,
+            behind,
+            timeout_mins,
+            out,
+            poll_secs,
+            parent_log_span,
+        } => arbitrum_vector(
+            &parent_rpc_url,
+            &arbitrum_rpc_url,
+            behind,
+            Duration::from_secs(timeout_mins * 60),
+            &out,
+            Duration::from_secs(poll_secs.max(1)),
+            parent_log_span,
+        )
+        .await
+        .map_err(log_err("arbitrum-vector")),
         Cmd::Watch {
             rpc_url,
             bridge_address,
@@ -888,6 +1039,231 @@ where
         .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "deposit daemon stopped");
     Ok(())
+}
+
+/// The Arbitrum chain behind `arbitrum_rpc_url`, checked against the parent
+/// chain behind `parent_rpc_url`.
+async fn arbitrum_view(
+    parent_rpc_url: &str,
+    arbitrum_rpc_url: &str,
+    evm_bridge: Address,
+    parent_log_span: u64,
+    arbitrum_log_span: u64,
+) -> anyhow::Result<arbitrum::RpcArbitrumView<impl Provider, impl Provider>> {
+    use alloy::providers::Provider as _;
+    let parent = ProviderBuilder::new().connect_http(parent_rpc_url.parse()?);
+    let arb = ProviderBuilder::new().connect_http(arbitrum_rpc_url.parse()?);
+    let id = arb.get_chain_id().await?;
+    let chain = *arbitrum::arbitrum_chain(id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "chain {id} behind --arbitrum-rpc-url is not an Arbitrum chain the bridge proves"
+        )
+    })?;
+    let parent_id = parent.get_chain_id().await?;
+    anyhow::ensure!(
+        parent_id == chain.parent_chain_id,
+        "--parent-rpc-url is chain {parent_id}; {} posts to {}",
+        chain.name,
+        chain.parent_chain_id
+    );
+    // `proveBlock`'s receipt proof is built from a whole block's receipts:
+    // an RPC without the call would pin the parent cursor on every assertion.
+    let head = parent.get_block_number().await?;
+    parent.get_block_receipts(head.into()).await.map_err(|e| {
+        anyhow::anyhow!("--parent-rpc-url does not serve eth_getBlockReceipts: {e}")
+    })?;
+    Ok(arbitrum::RpcArbitrumView {
+        parent,
+        arbitrum: arb,
+        chain,
+        evm_bridge,
+        parent_log_span,
+        arbitrum_log_span,
+        batch_txs: Default::default(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn arbitrum_anchors(
+    parent_rpc_url: &str,
+    arbitrum_rpc_url: &str,
+    evm_bridge: Address,
+    from_block: u64,
+    an: AnConfig,
+    verifier_abi_path: &str,
+    state_path: &std::path::Path,
+    poll: Duration,
+    parent_log_span: u64,
+    arbitrum_log_span: u64,
+) -> anyhow::Result<()> {
+    use alloy::providers::Provider as _;
+    let view = arbitrum_view(
+        parent_rpc_url,
+        arbitrum_rpc_url,
+        evm_bridge,
+        parent_log_span,
+        arbitrum_log_span,
+    )
+    .await?;
+    let chain = view.chain;
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an.keys_path)?)?;
+    let target = arbitrum::TvmAnchorTarget::connect(
+        &an.graphql_url,
+        keys,
+        &an.bridge_abi_path,
+        verifier_abi_path,
+        an.token_bridge_address()?,
+        &chain,
+    )
+    .await?;
+    let mut state = match arbitrum::AnchorState::load(state_path)? {
+        Some(s) => {
+            anyhow::ensure!(
+                s.chain_id == chain.chain_id,
+                "{} is the state of chain {}, not {} ({})",
+                state_path.display(),
+                s.chain_id,
+                chain.name,
+                chain.chain_id
+            );
+            let mut s = s;
+            s.ensure_bridge(evm_bridge)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", state_path.display()))?;
+            s
+        },
+        // Rolls forward from now: deposits from --from-block on are anchored
+        // by the next batch after the start.
+        None if from_block == 0 => anyhow::bail!(
+            "arbitrum-anchors has no state at {} and no --from-block: pass the bridge's deploy \
+             block (or set {}), or it scans {} from block 0",
+            state_path.display(),
+            BRIDGE_DEPLOY_BLOCK_ENV,
+            chain.name
+        ),
+        None => arbitrum::AnchorState {
+            chain_id: chain.chain_id,
+            evm_bridge: Some(evm_bridge),
+            parent_cursor: view.parent.get_block_number().await?,
+            deposit_cursor: from_block.saturating_sub(1),
+            ..Default::default()
+        },
+    };
+    *view.batch_txs.lock().unwrap_or_else(|p| p.into_inner()) = state.batch_txs.clone();
+    info!(
+        chain = chain.name,
+        parent_cursor = state.parent_cursor,
+        deposit_cursor = state.deposit_cursor,
+        pending = state.pending.len(),
+        ready = state.ready.len(),
+        "arbitrum-anchors starting"
+    );
+    let cfg = arbitrum::TickConfig::default();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        match arbitrum::tick(&chain, &view, &target, &mut state, &cfg).await {
+            Ok(r) if r != arbitrum::TickReport::default() => info!(?r, "arbitrum-anchors tick"),
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "arbitrum-anchors tick failed; retrying"),
+        }
+        state.batch_txs = view
+            .batch_txs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        state.save(state_path)?;
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = tokio::time::sleep(poll) => {},
+        }
+    }
+    info!("arbitrum-anchors stopped");
+    Ok(())
+}
+
+async fn arbitrum_vector(
+    parent_rpc_url: &str,
+    arbitrum_rpc_url: &str,
+    behind: u64,
+    timeout: Duration,
+    out: &std::path::Path,
+    poll: Duration,
+    parent_log_span: u64,
+) -> anyhow::Result<()> {
+    use alloy::providers::Provider as _;
+    let view = arbitrum_view(
+        parent_rpc_url,
+        arbitrum_rpc_url,
+        Address::ZERO,
+        parent_log_span,
+        1,
+    )
+    .await?;
+    let chain = view.chain;
+    let mut state = arbitrum::AnchorState {
+        chain_id: chain.chain_id,
+        parent_cursor: view.parent.get_block_number().await?,
+        deposit_cursor: 0,
+        ..Default::default()
+    };
+    let view = arbitrum::OneBlockBehind {
+        inner: view,
+        behind,
+        taken: Default::default(),
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    let cfg = arbitrum::TickConfig::default();
+    info!(
+        chain = chain.name,
+        behind, "waiting for an assertion that ends at a batch seen from now on"
+    );
+    while tokio::time::Instant::now() < deadline {
+        match arbitrum::tick(&chain, &view, &arbitrum::NoBridge, &mut state, &cfg).await {
+            Ok(r) if r != arbitrum::TickReport::default() => info!(?r, "arbitrum-vector tick"),
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "tick failed; retrying"),
+        }
+        if let Some(proof) = state.ready.first() {
+            let (&n, _) = proof
+                .end
+                .slots
+                .iter()
+                .next()
+                .expect("a ready proof carries a slot");
+            let vector = arbitrum::vector_json(&chain, proof, n, state.pending[&n]);
+            std::fs::write(out, serde_json::to_string_pretty(&vector)? + "\n")?;
+            info!(out = %out.display(), m = proof.end.number, n, "vector written");
+            return Ok(());
+        }
+        tokio::time::sleep(poll).await;
+    }
+    anyhow::bail!(
+        "no assertion ended at a batch seen within {} min",
+        timeout.as_secs() / 60
+    )
+}
+
+/// SIGINT, or SIGTERM on unix.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
+                _ = sigterm.recv() => info!("SIGTERM received"),
+            },
+            Err(e) => {
+                warn!(?e, "failed to install SIGTERM handler; SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("SIGINT received");
+    }
 }
 
 /// Serve the Prometheus text format at `http://<addr>/metrics` for the

@@ -104,9 +104,9 @@ arrangement while GitLab was canonical, and `.gitlab-ci.yml` is what remains of 
 ```
 contracts/ethereum/        Solidity (Foundry): AckiNackiBridge, SHPLONK verifier adapters, oracles.
                            verifiers/ holds the production Yul bytecode (.bin) and its source (.sol)
-contracts/an/              TVM (gosh-solidity): exchange/ has eccUSDCBridge, DepositVoucher and the
-                           Ethereum beacon light client, with the compiled artefacts acki-nacki pins by
-                           commit; zerostate/ assembles the bridge account; place.json tells acki-nacki
+contracts/an/              TVM (gosh-solidity): exchange/ has eccUSDCBridge, DepositVoucher, the
+                           Ethereum beacon light client and the Arbitrum block verifier, with the
+                           compiled artefacts acki-nacki pins by commit; zerostate/ assembles the bridge account; place.json tells acki-nacki
                            what to place where
 deposit-prover/            ETH→AN deposit circuit (Halo2 on axiom-eth), standalone package
 eth-light-client-prover/   Ethereum sync-committee light-client circuits (step, rotate), standalone
@@ -222,6 +222,7 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 | `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
 | `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or the previous release has no `kzg_bn254_21.srs`; builds `ackinacki-bridge`, `aggregate-proof` and `deposit-prover`'s tools; derives `kzg_params_18.srs` from the carried `kzg_bn254_21.srs`; checks the packaged deposit prover outside the tree (`scripts/check_deposit_prover_bundle.sh`: Hermez [s]·G2, the bridge's embedded deposit VK, a fixture proof); publishes the four assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite; needs the `WC_PROJECT_ID` secret for a default `--wc-project-id` |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
+| `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of acki-nacki's `dev`) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
 
 Each pipeline's header comment has the detail. A secret reaches only the events ticked on it, and a
 missing one arrives as an empty string rather than an error.

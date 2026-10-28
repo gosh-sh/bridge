@@ -4,6 +4,7 @@
 
 pub mod account_check;
 pub mod eip681;
+pub mod local_key;
 
 use alloy_primitives::{Address, Bytes, B256, U256};
 use async_trait::async_trait;
@@ -21,6 +22,8 @@ pub enum WalletKind {
     WalletConnect,
     /// Two `ethereum:` URIs shown as QR codes; no session.
     Eip681,
+    /// A private key the CLI signs with itself; no wallet.
+    LocalKey,
 }
 
 /// What a transaction is for, and the values it carries.

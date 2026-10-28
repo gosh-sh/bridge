@@ -19,7 +19,7 @@ import time
 
 from helper import common
 from helper.bridge_e2e import (
-    ECC_ID_FOR_BURN,
+    DST_CHAIN_ID, ECC_ID_FOR_BURN,
     GIVER_ABI, GIVER_ADDRESS, GIVER_KEY_PATH,
     MSIG_ABI, MSIG_TVC_STEM,
     USDC_BRIDGE_ABI, USDC_BRIDGE_ACCOUNT_ID, USDC_BRIDGE_DAPP_ID,
@@ -29,8 +29,15 @@ from helper.bridge_e2e import (
 
 def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
                     usdc_bridge_key_path: str, is_shellnet: bool,
-                    verbose_faucet: bool = False):
+                    verbose_faucet: bool = False, mint_bridged: bool = False,
+                    mint: bool = True):
     """Genaddr → fund → deployx → top-up → mint. Returns `(msig_address, msig_abi_copy)`.
+
+    `mint=False` stops before the mint: the USDC comes from a deposit instead.
+
+    `mint_bridged=True` mints through `mintAndSendBridged` instead of
+    `mintAndSend` (see `mint_usdc`). Only the withdraw-only test on a fresh
+    local network asks for it; the operator scripts keep the plain owner mint.
 
     `verbose_faucet=True` prints tvm-cli output for the giver
     `sendCurrencyWithFlag` calls (useful when diagnosing under-funded
@@ -129,14 +136,27 @@ def deploy_multisig(tracer, gql, *, work_dir: str, msig_key_path: str,
         )
         time.sleep(5)
 
-    mint_usdc(tracer, gql, msig_address_legacy, WITHDRAWAL_AMOUNT,
-              usdc_bridge_key_path=usdc_bridge_key_path)
+    if mint:
+        mint_usdc(tracer, gql, msig_address_legacy, WITHDRAWAL_AMOUNT,
+                  bridged=mint_bridged,
+                  usdc_bridge_key_path=usdc_bridge_key_path)
     return msig_address, msig_abi_copy
 
 
 def mint_usdc(tracer, gql, msig_address_legacy: str, amount: int, *,
-              usdc_bridge_key_path: str):
-    """Fund ECC[3] USDC into the multisig via USDCBridge.mintAndSend.
+              usdc_bridge_key_path: str, bridged: bool = False):
+    """Fund ECC[3] USDC into the multisig via USDCBridge.mintAndSend, or via
+    `mintAndSendBridged` when `bridged` is set.
+
+    `mintAndSend` adds no bridged inventory, so on a fresh network (local
+    devnet, zerostate minted=0) the later `initiateWithdrawal` has nothing to
+    burn against: the driver's headroom check stops before sending, and the
+    contract itself would hand the ECC back without a burn event.
+    `mintAndSendBridged(recipient, value, nonce, chainId)` (eccUSDCBridge
+    1.13.0) books the amount as bridged for `DST_CHAIN_ID`, which is what a
+    finalized deposit would have done. The contract reserves it for that
+    case, so it is opt-in and never the default: shellnet's inventory comes
+    from real deposits.
 
     Resolves the bridge's real on-chain `dapp_id` via GQL (required for
     `callx` routing on shellnet; harmless on local), then polls until
@@ -150,13 +170,18 @@ def mint_usdc(tracer, gql, msig_address_legacy: str, amount: int, *,
 
     nonces = common.run_getter(bridge_addr, USDC_BRIDGE_ABI, "getNonces")
     mint_nonce = int(nonces["mintNonce"])
-    tracer.log(f"  USDCBridge.mintAndSend → ECC[{USDC_TOKEN_ID}]={amount}, nonce={mint_nonce + 1}")
+    method = "mintAndSendBridged" if bridged else "mintAndSend"
+    params = {"recipient": msig_address_legacy,
+              "value":     str(amount),
+              "nonce":     str(mint_nonce + 1)}
+    if bridged:
+        params["chainId"] = str(DST_CHAIN_ID)
+    tracer.log(f"  USDCBridge.{method} → ECC[{USDC_TOKEN_ID}]={amount}, nonce={mint_nonce + 1}"
+               + (f", chainId={DST_CHAIN_ID}" if bridged else ""))
     common.call_contract(
         bridge_addr, USDC_BRIDGE_ABI, usdc_bridge_key_path,
-        "mintAndSend",
-        {"recipient": msig_address_legacy,
-         "value":     str(amount),
-         "nonce":     str(mint_nonce + 1)},
+        method,
+        params,
         True,
     )
 
@@ -172,6 +197,6 @@ def mint_usdc(tracer, gql, msig_address_legacy: str, amount: int, *,
             return
         time.sleep(2)
     raise RuntimeError(
-        f"USDCBridge.mintAndSend did not credit ECC[{USDC_TOKEN_ID}]={amount} "
+        f"USDCBridge.{method} did not credit ECC[{USDC_TOKEN_ID}]={amount} "
         f"to {msig_address_legacy} within 120s"
     )

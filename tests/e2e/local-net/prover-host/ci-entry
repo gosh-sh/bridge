@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# Forced command of the gosh-sh/bridge CI key on the prover host: its authorized_keys
+# entry runs <CI dir>/bin/ci-entry, a copy of this file installed by hand. A pull request
+# cannot change that copy: it is the trust boundary between PR code and a host that also
+# runs other services. PR code runs only inside the containers started below, with the
+# mounts listed here and no docker socket; the verbs and their arguments are fixed here,
+# never taken from the PR.
+#
+#   ping
+#   clean                       remove every earlier deployment: containers, docker networks,
+#                               work directories. Run logs stay (run-logs/)
+#   build <sha>                 fetch the commit, build it in a rust container (build.sh)
+#   net-up <run> <sha>          docker network ci-<run> and the proxies nginx0, node0..4
+#   job <run> <sha> <name> [K=V ...]   start tests/e2e/local-net/prover-host/jobs/<name>.sh
+#                               detached; its input (a key, a BK set) arrives on stdin, never
+#                               as an argument, and is mounted read-only as /run/input. Its
+#                               output goes to run-logs/<run>/<name>.log
+#   wait <run> <name> <secs>    block until the job exits; prints its exit code or "timeout"
+#   log <run> <name> [lines]    the tail of a job's log (also after the run is down)
+#   put-log <run> <name>        append stdin to run-logs/<run>/<name>.log (the runner's own logs)
+#   get <run> <file>            print a file the jobs wrote under runs/<run>/out/
+#   down <run>                  stop the run's containers and remove its network; its work
+#                               directory goes at the next clean, its logs stay
+#
+# A run is named arbitrum-e2e-<UTC timestamp>, e.g. arbitrum-e2e-20261025T213000Z: its work
+# directory is runs/<run>/ and its logs run-logs/<run>/, an external volume every job mounts
+# as /logs, so they outlive the containers and the next run's clean.
+#
+# The proxies give the jobs the local network under its own names: nginx0:80 and
+# nodeN:8600 forward to 127.0.0.1:28080 and 127.0.0.1:2860N, the ports the runner's
+# `ssh -R` tunnel opens here (permitlisten in authorized_keys).
+set -euo pipefail
+# The CI directory: this file sits in its bin/.
+CI=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+REPO=https://github.com/gosh-sh/bridge.git
+RUST_IMAGE=rust:1-bookworm
+SOCAT_IMAGE=alpine/socat:1.8.0.1
+# Every CI container is capped so a run cannot starve the host's other services. The caps
+# are per container: the build and the deposit prover get the large one; the provers that
+# have to keep pace get the prover one: the light client's step prover (keygen and a proof
+# every epoch, ~42 GB at k=19, done within the 6.4-minute epoch or its spans are lost),
+# daemon-live (a bundle within ~10 minutes, peaking near 23 GB) and the withdrawal's Circuit 4;
+# everything else the small one. All four proving jobs at once stay under 240 GB.
+LIMITS_LARGE=(--memory 40g --memory-swap 40g --cpus 12 --pids-limit 4096)
+LIMITS_PROVER=(--memory 64g --memory-swap 64g --cpus 32 --pids-limit 4096)
+LIMITS_SMALL=(--memory 8g --memory-swap 8g --cpus 4 --pids-limit 1024)
+limits() {
+  case "$1" in
+    build|cli-deposit) echo large ;;
+    lc-keygen|lc-prove|lc-relayer|relayer|cli-withdraw) echo prover ;;
+    *) echo small ;;
+  esac
+}
+read -r -a argv <<<"${SSH_ORIGINAL_COMMAND:-${*:-}}"
+verb=${argv[0]:-}
+mkdir -p "$CI/logs" "$CI/run-logs" "$CI/runs"
+printf '%s %s\n' "$(date -u +%FT%TZ)" "${argv[*]:-}" >>"$CI/logs/ci-entry.log"
+
+die() { echo "ci-entry: $*" >&2; exit 64; }
+run_id() { [[ ${1:-} =~ ^arbitrum-e2e-[0-9]{8}T[0-9]{6}Z$ ]] || die "bad run name (arbitrum-e2e-YYYYMMDDTHHMMSSZ)"; echo "$1"; }
+# Docker names: the run name in lower case.
+dname() { tr 'A-Z' 'a-z' <<<"$1"; }
+sha() { [[ ${1:-} =~ ^[0-9a-f]{40}$ ]] || die "bad commit"; echo "$1"; }
+name() { [[ ${1:-} =~ ^[a-z0-9-]{1,32}$ ]] || die "bad job name"; echo "$1"; }
+
+checkout() { # <sha> -> $CI/build/<sha>/src
+  local s=$1 b=$CI/build/$1
+  if [ ! -f "$b/src/.complete" ]; then
+    [ -d "$CI/src/.git" ] || git clone -q "$REPO" "$CI/src"
+    git -C "$CI/src" fetch -q origin "$s"
+    rm -rf "$b/src" && mkdir -p "$b/src"
+    git -C "$CI/src" archive "$s" | tar -x -C "$b/src"
+    touch "$b/src/.complete"
+  fi
+}
+
+gateway() { docker network inspect "ci-$1" -f '{{(index .IPAM.Config 0).Gateway}}'; }
+
+case "$verb" in
+  ping) echo "pong $(date -u +%FT%TZ)" ;;
+
+  clean)
+    containers=$(docker ps -aq --filter 'name=^ci-arbitrum-e2e-' | wc -l)
+    docker ps -aq --filter 'name=^ci-arbitrum-e2e-' | xargs -r docker rm -f >/dev/null
+    networks=$(docker network ls -q --filter 'name=^ci-arbitrum-e2e-' | wc -l)
+    docker network ls -q --filter 'name=^ci-arbitrum-e2e-' | xargs -r docker network rm >/dev/null
+    runs=$(find "$CI/runs" -mindepth 1 -maxdepth 1 | wc -l)
+    find "$CI/runs" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    echo "removed containers=$containers networks=$networks run-dirs=$runs; kept run-logs=$(find "$CI/run-logs" -mindepth 1 -maxdepth 1 -type d | wc -l)" ;;
+
+  build)
+    s=$(sha "${argv[1]:-}"); b=$CI/build/$s
+    # One build per commit at a time: a second caller waits for the first and reuses it.
+    mkdir -p "$CI/build" && exec 8>"$CI/build/$s.lock" && flock 8
+    checkout "$s"
+    mkdir -p "$b/out" "$CI/cache"
+    if [ -f "$b/out/.complete" ]; then echo "built already: $s"; exit 0; fi
+    docker run --rm --name "ci-build-${s:0:12}" "${LIMITS_LARGE[@]}" -u "$(id -u):$(id -g)" -e HOME=/cache \
+      -v "$b/src:/src:ro" -v "$CI/cache:/cache" -v "$b/out:/out" \
+      "$RUST_IMAGE" bash /src/tests/e2e/local-net/prover-host/build.sh
+    touch "$b/out/.complete" ;;
+
+  net-up)
+    r=$(run_id "${argv[1]:-}"); s=$(sha "${argv[2]:-}"); d=$(dname "$r")
+    checkout "$s"
+    mkdir -p "$CI/runs/$r/out" "$CI/runs/$r/work" "$CI/run-logs/$r"
+    docker network inspect "ci-$d" >/dev/null 2>&1 || docker network create "ci-$d" >/dev/null
+    gw=$(gateway "$d")
+    # Host side: the tunnel ends on 127.0.0.1, which the bridge network cannot reach;
+    # this one re-listens on the network's gateway address only.
+    docker rm -f "ci-$d-gw" >/dev/null 2>&1 || true
+    fwd="socat TCP-LISTEN:28080,bind=$gw,fork,reuseaddr TCP:127.0.0.1:28080 &"
+    for n in 0 1 2 3 4; do fwd+=" socat TCP-LISTEN:2860$n,bind=$gw,fork,reuseaddr TCP:127.0.0.1:2860$n &"; done
+    docker run -d --name "ci-$d-gw" --network host --entrypoint sh "$SOCAT_IMAGE" -c "$fwd wait" >/dev/null
+    # Network side: the names and ports the AN client expects.
+    docker rm -f "ci-$d-nginx0" >/dev/null 2>&1 || true
+    docker run -d --name "ci-$d-nginx0" --network "ci-$d" --network-alias nginx0 "$SOCAT_IMAGE" \
+      TCP-LISTEN:80,fork,reuseaddr "TCP:$gw:28080" >/dev/null
+    for n in 0 1 2 3 4; do
+      docker rm -f "ci-$d-node$n" >/dev/null 2>&1 || true
+      docker run -d --name "ci-$d-node$n" --network "ci-$d" --network-alias "node$n" "$SOCAT_IMAGE" \
+        TCP-LISTEN:8600,fork,reuseaddr "TCP:$gw:2860$n" >/dev/null
+    done
+    echo "network ci-$d up (gateway $gw)" ;;
+
+  job)
+    r=$(run_id "${argv[1]:-}"); s=$(sha "${argv[2]:-}"); n=$(name "${argv[3]:-}"); d=$(dname "$r")
+    [ -f "$CI/build/$s/out/.complete" ] || die "commit $s is not built"
+    w=$CI/runs/$r; mkdir -p "$w/out" "$w/work" "$CI/run-logs/$r"
+    (umask 077; cat >"$w/input-$n")
+    envs=()
+    for kv in "${argv[@]:4}"; do
+      [[ $kv =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/@,+-]*$ ]] || die "bad job argument"
+      envs+=(-e "$kv")
+    done
+    docker rm -f "ci-$d-$n" >/dev/null 2>&1 || true
+    case "$(limits "$n")" in
+      large) lim=("${LIMITS_LARGE[@]}") ;;
+      prover) lim=("${LIMITS_PROVER[@]}") ;;
+      *) lim=("${LIMITS_SMALL[@]}") ;;
+    esac
+    docker run -d --name "ci-$d-$n" "${lim[@]}" --network "ci-$d" -u "$(id -u):$(id -g)" -e HOME=/work \
+      -e RUN_ID="$r" -e COMMIT="$s" -e JOB="$n" "${envs[@]}" \
+      -v "$CI/build/$s/src:/src:ro" -v "$CI/build/$s/out:/bin-ci:ro" \
+      -v "$CI/params:/params" -v "$CI/cache:/cache" \
+      -v "$w/out:/out" -v "$w/work:/work" -v "$CI/run-logs/$r:/logs" -v "$w/input-$n:/run/input:ro" \
+      "$RUST_IMAGE" bash -c 'exec >>"/logs/$JOB.log" 2>&1; exec bash "/src/tests/e2e/local-net/prover-host/jobs/$JOB.sh"' \
+      >/dev/null
+    echo "job $n started" ;;
+
+  wait)
+    r=$(run_id "${argv[1]:-}"); n=$(name "${argv[2]:-}"); t=${argv[3]:-600}; d=$(dname "$r")
+    [[ $t =~ ^[0-9]{1,5}$ ]] || die "bad timeout"
+    timeout "$t" docker wait "ci-$d-$n" || { echo "timeout"; exit 124; } ;;
+
+  log)
+    r=$(run_id "${argv[1]:-}"); n=$(name "${argv[2]:-}"); l=${argv[3]:-200}
+    [[ $l =~ ^[0-9]{1,6}$ ]] || die "bad line count"
+    f=$CI/run-logs/$r/$n.log
+    [ -f "$f" ] || die "no log $n for $r"
+    tail -n "$l" "$f" ;;
+
+  put-log)
+    r=$(run_id "${argv[1]:-}"); n=$(name "${argv[2]:-}")
+    mkdir -p "$CI/run-logs/$r" && cat >>"$CI/run-logs/$r/$n.log" ;;
+
+  get)
+    r=$(run_id "${argv[1]:-}"); f=${argv[2]:-}
+    [[ $f =~ ^[A-Za-z0-9._-]{1,64}$ ]] || die "bad file name"
+    cat "$CI/runs/$r/out/$f" ;;
+
+  down)
+    r=$(run_id "${argv[1]:-}"); d=$(dname "$r")
+    docker ps -aq --filter "name=^ci-$d-" | xargs -r docker rm -f >/dev/null
+    docker network rm "ci-$d" >/dev/null 2>&1 || true
+    rm -f "$CI/runs/$r"/input-*
+    echo "run $r down; logs in run-logs/$r" ;;
+
+  *) die "refused: $verb" ;;
+esac

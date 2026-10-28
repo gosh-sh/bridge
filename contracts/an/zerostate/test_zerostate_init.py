@@ -114,12 +114,13 @@ class InitializeTest(unittest.TestCase):
 
     def test_commands_run_in_order(self):
         commands = self.run_initialize()
-        self.assertEqual(len(commands), 5)
+        self.assertEqual(len(commands), 6)
         self.assertIn("-m getBridgeData", commands[0])
         self.assertIn("-m updateCode", commands[1])
         self.assertIn("-m setTrustedL1Bridge", commands[2])
         self.assertIn("-m setLightClientCode", commands[3])
-        self.assertIn("add contract", commands[4])
+        self.assertIn("-m setL2VerifierCode", commands[4])
+        self.assertIn("add contract", commands[5])
 
     def test_encoder_runs_with_the_placed_abi_and_decodes_output(self):
         encoder = self.run_initialize()[0]
@@ -159,11 +160,11 @@ class InitializeTest(unittest.TestCase):
         ctx = self.context(run)
         header = ctx["abi_header"]
         zerostate_init.initialize(ctx)
-        # getBridgeData, updateCode, setTrustedL1Bridge, setLightClientCode:
-        # every call that goes through `_debugger` must carry the caller's
-        # expire header; `add contract` (commands[4]) does not go through
-        # `_debugger` and carries none.
-        for cmd in run.commands[:4]:
+        # getBridgeData, updateCode, setTrustedL1Bridge, setLightClientCode,
+        # setL2VerifierCode: every call that goes through `_debugger` must
+        # carry the caller's expire header; `add contract` (commands[5]) does
+        # not go through `_debugger` and carries none.
+        for cmd in run.commands[:5]:
             self.assertIn(f"--abi-header {header}", cmd)
 
     def test_encoder_params_match_getBridgeData(self):
@@ -196,7 +197,7 @@ class InitializeTest(unittest.TestCase):
 
     def test_owner_calls_are_signed_with_the_bridge_key(self):
         commands = self.run_initialize()
-        for cmd in commands[2:4]:
+        for cmd in commands[2:5]:
             self.assertIn("--sign ./config/USDCBridge.keys.json", cmd)
             self.assertIn("/placed/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json", cmd)
 
@@ -206,8 +207,14 @@ class InitializeTest(unittest.TestCase):
             self.run_initialize()[3],
         )
 
+    def test_l2_verifier_code_comes_from_the_placed_artefact(self):
+        self.assertIn(
+            "code-of:/placed/contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc",
+            self.run_initialize()[4],
+        )
+
     def test_account_is_added_with_balance_and_dapp_id(self):
-        add = self.run_initialize()[4]
+        add = self.run_initialize()[5]
         self.assertIn("/tmp/stub.tvc 1000000000000 0:" + "1a" * 32, add)
         self.assertIn("0x" + "00" * 32, add)
 

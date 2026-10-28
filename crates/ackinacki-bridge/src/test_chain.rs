@@ -1045,11 +1045,15 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 rebuild of eccUSDCBridge 1.14.0 with limits and replay
-        // protection.
+        // sold 0.80.0 build of eccUSDCBridge 1.14.0 carrying both lines of
+        // work this branch merges: main's Arbitrum block verifier (deploy and
+        // writer path, and the refusal to deploy the recorded verifier again),
+        // and this branch's limits, replay protection and the DApp-bound
+        // deposit key. Neither side's hash survives the merge, so this is the
+        // rebuild from the merged source.
         assert_eq!(
             &hash[..8],
-            "0f53fe4c",
+            "4ed1fcc1",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }
@@ -1174,5 +1178,351 @@ mod tests {
             ecc3, "5000000",
             "the balance the withdrawal is checked against"
         );
+    }
+}
+
+#[cfg(test)]
+mod l2_verifier_tests {
+    //! The bridge's half of the Arbitrum block verifier: deploying one from
+    //! `_l2VerifierCode`, and admitting the hashes it sends only from that
+    //! verifier and only once the parent-chain block is accepted. The
+    //! verifier's own proof checks run on real chain data in
+    //! `scripts/l2-block-proof-bench`.
+    use tvm_client::{
+        abi::{encode_internal_message, ParamsOfEncodeInternalMessage},
+        tvm::{run_tvm, ParamsOfRunTvm},
+    };
+
+    use super::*;
+
+    const VERIFIER_TVC: &[u8] =
+        include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc");
+    const ARB_SEPOLIA: u64 = 421_614;
+    const SEPOLIA: u64 = 11_155_111;
+    const ROLLUP: &str = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4";
+    const PARENT: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const BLOCK: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
+
+    const ERR_INVALID_SENDER: i64 = 207;
+    const ERR_UNKNOWN_BLOCK: i64 = 224;
+    const ERR_OWNER_ANCHORS_DISABLED: i64 = 225;
+    const ERR_LIGHT_CLIENT_UNSET: i64 = 226;
+    const ERR_L2_VERIFIER_UNSET: i64 = 237;
+    const ERR_L2_VERIFIER_DEPLOYED: i64 = 238;
+
+    fn ctx() -> Arc<ClientContext> {
+        Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"))
+    }
+
+    fn abi() -> Abi {
+        Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string())
+    }
+
+    fn verifier_code() -> String {
+        let init = tvm_block::StateInit::construct_from_bytes(VERIFIER_TVC)
+            .expect("the verifier TVC parses");
+        let code = init.code.expect("the verifier TVC carries code");
+        tvm_types::base64_encode(tvm_types::write_boc(&code).expect("the code serializes"))
+    }
+
+    fn number(v: &serde_json::Value) -> u64 {
+        let s = v.as_str().expect("a number as a string");
+        match s.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16).expect("hex number"),
+            None => s.parse().expect("decimal number"),
+        }
+    }
+
+    /// Runs `message` on `boc`: the account after it and the compute exit code.
+    async fn exec(boc: &str, message: String) -> (String, i64) {
+        let run = run_executor(ctx(), ParamsOfRunExecutor {
+            message,
+            account: AccountForExecutor::Account {
+                boc: boc.to_string(),
+                unlimited_balance: Some(true),
+            },
+            skip_transaction_check: Some(true),
+            return_updated_account: Some(true),
+            ..Default::default()
+        })
+        .await;
+        match run {
+            Ok(run) => {
+                let exit = run
+                    .transaction
+                    .pointer("/compute/exit_code")
+                    .and_then(|v| v.as_i64());
+                (run.account, exit.expect("the compute phase ran"))
+            },
+            Err(error) => (
+                boc.to_string(),
+                error
+                    .data()
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .expect("an exit code"),
+            ),
+        }
+    }
+
+    async fn owner_call(
+        address: &str,
+        boc: &str,
+        function: &str,
+        input: serde_json::Value,
+    ) -> (String, i64) {
+        let encoded = encode_message(ctx(), ParamsOfEncodeMessage {
+            abi: abi(),
+            address: Some(address.to_string()),
+            call_set: Some(CallSet {
+                function_name: function.to_string(),
+                input: Some(input),
+                ..Default::default()
+            }),
+            signer: Signer::Keys {
+                keys: KeyPair {
+                    public: PAIR_PUBLIC.to_string(),
+                    secret: PAIR_SECRET.to_string(),
+                },
+            },
+            ..Default::default()
+        })
+        .await
+        .expect("the owner call encodes offline");
+        exec(boc, encoded.message).await
+    }
+
+    async fn internal_call(
+        address: &str,
+        src: &str,
+        boc: &str,
+        function: &str,
+        input: serde_json::Value,
+    ) -> (String, i64) {
+        let encoded = encode_internal_message(ctx(), ParamsOfEncodeInternalMessage {
+            abi: Some(abi()),
+            address: Some(address.to_string()),
+            src_address: Some(src.to_string()),
+            deploy_set: None,
+            call_set: Some(CallSet {
+                function_name: function.to_string(),
+                header: None,
+                input: Some(input),
+            }),
+            value: "2000000000".into(),
+            bounce: Some(false),
+            enable_ihr: None,
+        })
+        .expect("the internal message encodes offline");
+        exec(boc, encoded.message).await
+    }
+
+    async fn getter(
+        address: &str,
+        boc: &str,
+        function: &str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        let encoded = encode_message(ctx(), ParamsOfEncodeMessage {
+            abi: abi(),
+            address: Some(address.to_string()),
+            call_set: Some(CallSet {
+                function_name: function.to_string(),
+                input: Some(input),
+                ..Default::default()
+            }),
+            signer: Signer::None,
+            ..Default::default()
+        })
+        .await
+        .expect("the getter call encodes offline");
+        run_tvm(ctx(), ParamsOfRunTvm {
+            message: encoded.message,
+            account: boc.to_string(),
+            abi: Some(abi()),
+            execution_options: None,
+            boc_cache: None,
+            return_updated_account: Some(false),
+        })
+        .await
+        .expect("the getter runs")
+        .decoded
+        .and_then(|d| d.output)
+        .expect("the getter output decodes")
+    }
+
+    /// A bridge with the Arbitrum Sepolia verifier deployed, and that
+    /// verifier's address.
+    async fn bridge_with_verifier() -> (String, String, String) {
+        let (id, boc) = deployed_usdc_bridge(false).await;
+        let bridge = format!("0:{id}");
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "setL2VerifierCode",
+            json!({ "code": verifier_code() }),
+        )
+        .await;
+        assert_eq!(exit, 0, "setL2VerifierCode");
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "deployL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA, "parentChainId": SEPOLIA, "rollup": ROLLUP }),
+        )
+        .await;
+        assert_eq!(exit, 0, "deployL2Verifier");
+        let got = getter(
+            &bridge,
+            &boc,
+            "getL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA }),
+        )
+        .await;
+        assert_eq!(number(&got["parentChainId"]), SEPOLIA);
+        let verifier = got["verifier"].as_str().expect("an address").to_string();
+        assert_ne!(
+            verifier,
+            format!("0:{}", "00".repeat(32)),
+            "a verifier is recorded"
+        );
+        (bridge, boc, verifier)
+    }
+
+    #[tokio::test]
+    async fn a_verifier_is_deployed_only_from_installed_code() {
+        let (id, boc) = deployed_usdc_bridge(false).await;
+        let bridge = format!("0:{id}");
+        let (_, exit) = owner_call(
+            &bridge,
+            &boc,
+            "deployL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA, "parentChainId": SEPOLIA, "rollup": ROLLUP }),
+        )
+        .await;
+        assert_eq!(exit, ERR_L2_VERIFIER_UNSET);
+        bridge_with_verifier().await;
+    }
+
+    /// The same code reaches the recorded verifier, which keeps its first
+    /// configuration: the bridge refuses the call rather than record a parent
+    /// chain the verifier does not have.
+    #[tokio::test]
+    async fn the_recorded_verifier_is_not_deployed_again() {
+        let (bridge, boc, verifier) = bridge_with_verifier().await;
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "deployL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA, "parentChainId": 1, "rollup": ROLLUP }),
+        )
+        .await;
+        assert_eq!(exit, ERR_L2_VERIFIER_DEPLOYED);
+        let got = getter(
+            &bridge,
+            &boc,
+            "getL2Verifier",
+            json!({ "l2ChainId": ARB_SEPOLIA }),
+        )
+        .await;
+        assert_eq!(
+            number(&got["parentChainId"]),
+            SEPOLIA,
+            "the parent chain stays"
+        );
+        assert_eq!(got["verifier"].as_str(), Some(verifier.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_verifier_hash_is_admitted_from_the_verifier_after_its_parent_block() {
+        let (bridge, boc, verifier) = bridge_with_verifier().await;
+        let input =
+            json!({ "l2ChainId": ARB_SEPOLIA, "parentBlockHash": PARENT, "blockHash": BLOCK });
+
+        let stranger = format!("0:{}", "ab".repeat(32));
+        let (boc, exit) = internal_call(
+            &bridge,
+            &stranger,
+            &boc,
+            "acceptBlockHashFromL2Verifier",
+            input.clone(),
+        )
+        .await;
+        assert_eq!(
+            exit, ERR_INVALID_SENDER,
+            "only the recorded verifier may write"
+        );
+
+        let (boc, exit) = internal_call(
+            &bridge,
+            &verifier,
+            &boc,
+            "acceptBlockHashFromL2Verifier",
+            input.clone(),
+        )
+        .await;
+        assert_eq!(
+            exit, ERR_UNKNOWN_BLOCK,
+            "the parent-chain block is not accepted yet"
+        );
+
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "setAcceptedBlockHash",
+            json!({ "chainId": SEPOLIA, "blockHash": PARENT, "accepted": true }),
+        )
+        .await;
+        assert_eq!(
+            exit, 0,
+            "the parent block stands in for the light client here"
+        );
+
+        let (boc, exit) = internal_call(
+            &bridge,
+            &verifier,
+            &boc,
+            "acceptBlockHashFromL2Verifier",
+            input,
+        )
+        .await;
+        assert_eq!(exit, 0);
+        let on = |chain: u64| json!({ "chainId": chain, "blockHash": BLOCK });
+        let arb = getter(&bridge, &boc, "isAcceptedBlockHash", on(ARB_SEPOLIA)).await;
+        assert_eq!(arb["value0"], json!(true), "admitted for Arbitrum Sepolia");
+        let sep = getter(&bridge, &boc, "isAcceptedBlockHash", on(SEPOLIA)).await;
+        assert_eq!(sep["value0"], json!(false), "and for no other chain");
+    }
+
+    #[tokio::test]
+    async fn owner_anchors_turn_off_for_a_chain_with_a_verifier() {
+        let (id, boc) = deployed_usdc_bridge(false).await;
+        let bridge = format!("0:{id}");
+        let (_, exit) = owner_call(
+            &bridge,
+            &boc,
+            "disableOwnerAnchorsOn",
+            json!({ "chainId": ARB_SEPOLIA }),
+        )
+        .await;
+        assert_eq!(exit, ERR_LIGHT_CLIENT_UNSET, "no verifier, no light client");
+
+        let (bridge, boc, _) = bridge_with_verifier().await;
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "disableOwnerAnchorsOn",
+            json!({ "chainId": ARB_SEPOLIA }),
+        )
+        .await;
+        assert_eq!(exit, 0);
+        let (_, exit) = owner_call(
+            &bridge,
+            &boc,
+            "setAcceptedBlockHash",
+            json!({ "chainId": ARB_SEPOLIA, "blockHash": BLOCK, "accepted": true }),
+        )
+        .await;
+        assert_eq!(exit, ERR_OWNER_ANCHORS_DISABLED);
     }
 }

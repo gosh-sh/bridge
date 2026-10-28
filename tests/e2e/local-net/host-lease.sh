@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Host-wide pipeline lease for the local-net e2e host. The host is shared with
+# gosh-sh/dexdo's e2e, which arbitrates the SAME guard and lease files with the
+# same protocol (tests/e2e/host-lease.sh there): a bridge run and a dexdo run
+# never hold the host at once. Bridge ids are `bridge-<pipeline>`, so they can
+# never collide with dexdo's numeric ones.
+#
+# More than one CI pipeline can reach this host, but only one may hold the
+# network at a time: `up.sh` tears down and recreates the whole stand as its
+# first step, so a second pipeline starting while a first is still testing
+# would wipe the network out from under it. This lease is the arbitration
+# between pipelines; it says nothing about processes within a single run.
+#
+# The guard is a fixed path outside any checkout: /var/lock/dexdo-e2e.lock.
+# It is never renamed, replaced, or removed, so every acquire/renew/assert/
+# release/takeover always flocks the SAME inode. A lock held on a file that
+# gets replaced (e.g. by a config-delivery step overwriting a checkout)
+# protects nothing, because the next process just opens a different inode
+# and never contends with the first lock at all.
+#
+# The lease data lives in a separate file, /var/lock/dexdo-e2e.lease, holding
+# "pipeline_id timestamp". Keeping the mutable data out of the guard file
+# means the guard's own inode never has to be touched to update the lease.
+#
+# Usage: host-lease.sh acquire|renew|assert|release <pipeline_id> [ttl_secs]
+set -euo pipefail
+
+GUARD=/var/lock/dexdo-e2e.lock
+LEASE=/var/lock/dexdo-e2e.lease
+
+CMD=${1:?usage: host-lease.sh acquire|renew|assert|release <pipeline_id> [ttl_secs]}
+ID=${2:?pipeline_id is required}
+# A whitespace-bearing id corrupts the "id timestamp" line on write: reading
+# it back splits on the whitespace, so the id we compare against later is
+# only the first token, never matching the id that was actually passed in.
+# The lease would then be un-renewable and un-releasable by its own owner
+# until it aged out on its own. Reject before it's ever written.
+case "$ID" in
+  *[[:space:]]*) echo "FATAL: pipeline_id must not contain whitespace: '$ID'"; exit 64 ;;
+esac
+# TTL only guards against a DEAD pipeline (cancelled, timed out or killed
+# without releasing). A LIVE one never hits it: the net-up, run-test,
+# dump-logs and net-down steps call `assert` before touching the host,
+# `assert` renews the timestamp as it checks it (see do_assert below), and
+# run-test-on-host.sh renews every 300 s in the background while the test
+# runs. Two steps reach the host before lease-acquire and do not assert:
+# prepare-host (package install, docker group: idempotent) and resolve-acki
+# (`docker pull` of branch tags and `docker cp` into the CI user's home);
+# neither touches a stand, and both pipelines run their nodes by digest, so a
+# moved tag changes nothing for a network another run holds. 5400 s (90 min)
+# is dexdo's value, kept identical on purpose: both pipelines must agree on
+# when a lease is dead, or one could take over a lease the other still
+# considers live. A dead run blocks the host for that long at most.
+#
+# A lease another bridge pipeline holds is taken over at once: the newest
+# bridge run wins. Woodpecker cancels a pull request's running pipeline on a
+# new push, and a cancelled run never releases (no step runs after a cancel),
+# so waiting on a bridge lease only ever waits on a run that is gone. If the
+# older run is still alive, its next `assert` fails and it stops. net-up then
+# tears down what that run left. dexdo's leases keep the full TTL.
+TTL=${3:-5400}
+
+# All state transitions run under this flock. Acquiring, reading the current
+# lease, deciding whether it is free/ours/expired, and writing the new owner
+# are one atomic unit here — never separate operations a second process could
+# interleave with. A naive check-then-write (read lease, decide, THEN flock)
+# would let two pipelines both observe the same expired lease and both
+# conclude they're allowed to take it.
+with_guard() {
+  exec 9>"$GUARD"
+  flock -w 30 9 || { echo "FATAL: guard busy (flock on $GUARD not acquired within 30s)"; exit 70; }
+  "$@"
+}
+
+_now() { date +%s; }
+
+_read() {
+  # An empty lease file (a write that died before its first byte) reads as
+  # free: without `|| true`, `read` hitting EOF would end the script under
+  # `set -e` with no message, and the host would stay wedged until the file
+  # was removed by hand.
+  L_ID=""
+  L_TS=0
+  if [ -f "$LEASE" ]; then
+    read -r L_ID L_TS < "$LEASE" || true
+  fi
+  # An id with no valid numeric timestamp (e.g. a write torn mid-`echo`, or
+  # any other corruption that leaves a bare id on the line) must not be
+  # treated as merely "free": bash arithmetic reads an empty or non-numeric
+  # L_TS as 0, which would make do_acquire's age computation come out
+  # enormous and take it over as if it were simply long expired. That is
+  # this lease's one way to fail OPEN instead of closed. Refuse instead of
+  # guessing what a malformed record meant.
+  if [ -n "$L_ID" ]; then
+    case "$L_TS" in
+      ''|*[!0-9]*)
+        echo "FATAL: malformed lease file $LEASE (id '$L_ID' has no valid timestamp)"
+        exit 73
+        ;;
+    esac
+  fi
+}
+
+do_acquire() {
+  _read
+  if [ -n "$L_ID" ] && [ "$L_ID" != "$ID" ]; then
+    AGE=$(( $(_now) - L_TS ))
+    case "$L_ID" in
+      bridge-*) echo "lease of $L_ID (age ${AGE}s) belongs to an earlier bridge run: taking it over" ;;
+      *)
+        if [ "$AGE" -lt "$TTL" ]; then
+          echo "FATAL: live lease held by pipeline $L_ID (age ${AGE}s < TTL ${TTL}s)"
+          exit 71
+        fi
+        ;;
+    esac
+  fi
+  # Reaching here means the lease is ours already, absent, or expired.
+  # Takeover of an expired lease happens right here, still under the guard's
+  # flock, with the freshness re-checked above after acquiring it (not
+  # before) -- so a second pipeline racing to take over the same expired
+  # lease cannot also see it as free: whichever one gets the flock first
+  # writes and wins, and the second sees the new owner once it gets its turn.
+  echo "$ID $(_now)" > "$LEASE"
+  echo "lease acquired by $ID"
+}
+
+do_renew() {
+  _read
+  [ "$L_ID" = "$ID" ] || { echo "FATAL: lease is not ours (held by ${L_ID:-nobody})"; exit 72; }
+  echo "$ID $(_now)" > "$LEASE"
+}
+
+do_assert() {
+  _read
+  [ "$L_ID" = "$ID" ] || { echo "FATAL: owner check failed ($L_ID != $ID)"; exit 72; }
+  # assert IS the heartbeat: every pipeline step that touches the stand calls
+  # this before doing anything (see the TTL note above for the two pre-lease
+  # steps that do not), and this write is what keeps the lease from aging past
+  # TTL while the pipeline that owns it is still alive and taking steps.
+  # Without this renew, a long step would let the lease go stale out from
+  # under a run that is still very much in progress.
+  echo "$ID $(_now)" > "$LEASE"
+}
+
+do_release() {
+  _read
+  [ "$L_ID" = "$ID" ] || { echo "FATAL: refusing to release a lease this pipeline doesn't own"; exit 72; }
+  rm -f "$LEASE"
+}
+
+case "$CMD" in
+  acquire|renew|assert|release) with_guard "do_$CMD" ;;
+  *) echo "FATAL: unknown command '$CMD' (want acquire|renew|assert|release)"; exit 64 ;;
+esac

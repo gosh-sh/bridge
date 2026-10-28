@@ -14,7 +14,7 @@ verifiers deployed as Yul bytecode.
 
 ## The current deployment
 
-Sepolia ↔ shellnet, deployed from tag [`v0.6.0`](https://github.com/gosh-sh/bridge/releases/tag/v0.6.0).
+Arbitrum Sepolia ↔ shellnet, deployed from tag `v0.7.0`.
 The CLI, relayers and web form take their addresses from configuration.
 
 This deployment uses the previous deposit event and verification key. The
@@ -23,31 +23,35 @@ and the matching AN bridge key. Finish pending transfers with the old binaries
 and old key before switching; do not use these legacy addresses with the new
 deposit clients.
 
-### Ethereum (Sepolia, chain id 11155111)
+### Arbitrum Sepolia (chain id 421614)
 
 | | |
 |---|---|
-| `AckiNackiBridge` | `0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b` |
-| deployment block | `11971217` |
-| USDC | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+| `AckiNackiBridge` | `0x3FB082a905a895151224F6d93bD074E816338638` |
+| deployment block | `323405848` |
+| USDC | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` |
 
 ### Acki Nacki (shellnet)
 
 | | |
 |---|---|
 | `eccUSDCBridge` | `0:1a1a…1a1a` |
-| version | `1.13.0`, code hash `66d15d49…` |
-| beacon light client | `0:9121fc37c8ac55a4fc42a73bccaf725cb0d87b9a8c7dfbc6dd2be7d1690d8462` |
+| version | `1.14.0`, code hash `5cada5db…` |
+| Arbitrum block verifier (421614, parent chain Sepolia) | `0:f1def367fa6bc245589bfa7bcf54937f5c926624d29e59e19826ee9033f14108` |
+| Sepolia beacon light client | `0:9121fc37c8ac55a4fc42a73bccaf725cb0d87b9a8c7dfbc6dd2be7d1690d8462` |
 | GraphQL | `https://shellnet.ackinacki.org/graphql` |
 
 ### What to set
 
 ```bash
-BRIDGE_ADDRESS=0x6957a8719f1afe3e9131c0f9dedee7f76d7d4c9b
-BRIDGE_DEPLOY_BLOCK=11971217
-FROM_BLOCK=11971217
-RPC_URL=https://rpc.sepolia.ethpandaops.io
+BRIDGE_ADDRESS=0x3FB082a905a895151224F6d93bD074E816338638
+BRIDGE_DEPLOY_BLOCK=323405848
+FROM_BLOCK=323405848
+RPC_URL=https://arbitrum-sepolia-rpc.publicnode.com
 ```
+
+`deposit-relayer arbitrum-anchors` needs an Arbitrum RPC that keeps a few minutes of state; the
+public endpoints do not (`crates/deposit-relayer-daemon/docs/operator_runbook.md`, section 9).
 
 ---
 
@@ -85,6 +89,9 @@ collect it do not appear in the principal-accounting equation at all. Contract d
 ---
 
 ## Architecture
+
+Every component and the interface each connection goes through, with its call site in the code:
+[`docs/bridge-components.md`](docs/bridge-components.md).
 
 ```
                  Ethereum → Acki Nacki (deposit)

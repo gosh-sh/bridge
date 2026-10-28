@@ -1,0 +1,329 @@
+# Local acki-nacki network e2e (BRI-133): one dedicated host runs a whole acki-nacki
+# network (5 nodes + aerospike + nginx0 + block_manager, one docker compose) with THIS
+# commit's contracts/an/* baked into the zerostate, then
+# crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py runs there.
+# Pattern and host scripts: tests/e2e/local-net/README.md (after gosh-sh/dexdo .woodpecker/e2e.yml).
+#
+# Runs for a pull request labelled `local-network`, or when started by hand.
+when:
+  - event: pull_request
+    evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS | split(",") | any(# == "local-network")'
+  - event: manual
+
+variables:
+  - &ansible_image "docker.gosh.sh/ansible-ubuntu:24-fix"
+  # The network follows a branch of acki-nacki, not a commit: resolve-acki pulls the
+  # branch-tagged images on the host, reads the commit they were built from (OCI label
+  # org.opencontainers.image.revision) and their digests, and takes the zerostate helpers
+  # out of that all-bin image; the checkout, the helpers and the nodes are then one build.
+  # nginx0 is not pinned: acki-nacki's compose names docker.gosh.sh/ackinacki-nginx without
+  # a tag and up.sh does not pull it.
+  - &acki_repo "https://github.com/gosh-sh/acki-nacki.git"
+  - &acki_branch "dev"
+  # The build shellnet runs: acki-nacki b31c9d8b pins tvm-sdk 8b108bac, which has the
+  # KECCAK256 instruction ArbitrumBlockVerifier needs; br_dev (c8c9e67e, tvm-sdk v3.0.6.an)
+  # does not. gql-server and block-manager fall back to br_dev when the tag lacks them.
+  - &acki_image_tag "b31c9d8bcda724887afb02f0016a3bb305027792"
+  - &acki_aux_fallback_tag "br_dev"
+  - &registry "docker.gosh.sh"
+  # Contract toolchain for zerostate generation and for the test on the host (the checkout's
+  # own contracts/compiler binaries are macOS builds). Every tarball is sha256-verified.
+  - &tvm_cli_version "v3.0.4-rc.an"
+  - &tvm_cli_sha256 "d5c0427237a4ccf06e7ec352ecda31c51f2be6f44bb680a36b5d8375db355cd0"
+  - &tvm_debugger_sha256 "328d63ea196b5a79f59dee790c5211b84eca0bf750fe2cc22b034da72015e727"
+  - &sold_version "gosh_0.81.0"
+  - &sold_sha256 "79b43aab6ae2fdc35c1cb3b486453aa2cf4f2718c58b69ccefab1122c704853c"
+  # L1 bridge address baked as the trusted pair; nothing in the withdraw-only test uses it.
+  - &bridge_zs_l1_bridge "0x0000000000000000000000000000000000000001"
+  # The host is named only in the private infrastructure repository (ansible inventory,
+  # cloned below) and in the Woodpecker secrets LOCAL_NET_HOST / LOCAL_NET_CI_USER for
+  # the plain ssh steps; nothing in this public tree carries it. It is shared with dexdo's
+  # e2e: both pipelines take the same host lease (ids here are bridge-<pipeline>), each
+  # keeps its own acki-nacki checkout. The acki-nacki playbooks keep their own play vars
+  # for the two paths below, so they travel as -e extra vars.
+  - &inventory_branch "main"
+  - &inventory ".inventory/ansible/inventory/bridge/e2e/local-net.yml"
+  # The host's ssh key, pinned: ssh-keyscan output kept next to the inventory (refreshed when
+  # the VPS is rebuilt). Every ssh/scp step installs it as ~/.ssh/known_hosts and checks
+  # strictly; the ansible steps get the same file through the inventory's ssh args.
+  - &known_hosts ".inventory/ansible/inventory/bridge/e2e/known_hosts"
+  - &acki_dir_on_host "/opt/acki-nacki-bridge"
+  - &dexdo_deploy_dir_on_host "/opt/acki-nacki-bridge/.no-dexdo"
+  - &work_root_on_host "bridge-e2e"
+  - &ssh_opts "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -o TCPKeepAlive=yes"
+
+steps:
+  remember-ssh-key:
+    image: *ansible_image
+    environment:
+      SSH_NET_KEY: { from_secret: LOCAL_NET_SSH_KEY }
+    commands:
+      - mkdir -p ~/.ssh
+      - echo "$SSH_NET_KEY" | tr '@' '\n' > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+      - cp -ar ~/.ssh ./.ssh
+
+  inventory-clone:
+    image: *ansible_image
+    environment:
+      GITHUB_TOKEN: { from_secret: ACKI_NACKI_GH_TOKEN }
+      INVENTORY_REPO: { from_secret: LOCAL_NET_INVENTORY_REPO }
+      INVENTORY_BRANCH: *inventory_branch
+      INV: *inventory
+      KNOWN_HOSTS: *known_hosts
+    commands:
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .inventory
+      - git clone -q --depth 1 --branch "$INVENTORY_BRANCH" "$INVENTORY_REPO" .inventory
+      - rm -f ~/.netrc
+      - test -f "$CI_WORKSPACE/$INV" && test -s "$CI_WORKSPACE/$KNOWN_HOSTS"
+
+  prepare-host:
+    depends_on: [remember-ssh-key, inventory-clone]
+    image: *ansible_image
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      INV: *inventory
+      GITHUB_TOKEN: { from_secret: ACKI_NACKI_GH_TOKEN }
+      ACKI_REPO: *acki_repo
+      ACKI_BRANCH: *acki_branch
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts
+      # the playbooks come from the branch head; the network itself from the branch's latest BUILD (next step)
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .acki-playbooks && git clone -q --depth 1 --branch "$ACKI_BRANCH" "$ACKI_REPO" .acki-playbooks
+      - rm -f ~/.netrc
+      - cd .acki-playbooks/ansible && ansible-playbook dexdo-e2e-prepare.yml -i "$CI_WORKSPACE/$INV" -e target=bridge_e2e
+
+  # Which build of the branch: resolved where the registry login lives.
+  resolve-acki:
+    depends_on: [prepare-host]
+    image: *ansible_image
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      REGISTRY: *registry
+      TAG: *acki_image_tag
+      AUX_FALLBACK_TAG: *acki_aux_fallback_tag
+      WORK_ROOT: *work_root_on_host
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - rm -rf .acki && mkdir -p .acki/helpers
+      - >
+        ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
+        "REGISTRY='$REGISTRY' TAG='$TAG' AUX_FALLBACK_TAG='$AUX_FALLBACK_TAG' WORK_ROOT=\$HOME/'$WORK_ROOT' bash -s"
+        < $CI_WORKSPACE/tests/e2e/local-net/resolve-acki-on-host.sh | grep -E '^[A-Z_]+=' > .acki/env
+      - cat .acki/env
+      - . ./.acki/env && scp $SSH_OPTS "$E2E_CI_USER@$E2E_HOST:$HELPERS_DIR/node-helper" "$E2E_CI_USER@$E2E_HOST:$HELPERS_DIR/zerostate-helper" .acki/helpers/
+      - chmod +x .acki/helpers/node-helper .acki/helpers/zerostate-helper
+
+  acki-clone:
+    depends_on: [resolve-acki]
+    image: *ansible_image
+    environment:
+      GITHUB_TOKEN: { from_secret: ACKI_NACKI_GH_TOKEN }
+      ACKI_REPO: *acki_repo
+    commands:
+      - . ./.acki/env
+      - printf 'machine github.com\nlogin x-access-token\npassword %s\n' "$GITHUB_TOKEN" > ~/.netrc && chmod 600 ~/.netrc
+      - rm -rf .acki-nacki && git init -q .acki-nacki
+      - git -C .acki-nacki remote add origin "$ACKI_REPO"
+      - git -C .acki-nacki fetch -q --depth 1 origin "$ACKI_SHA" && git -C .acki-nacki checkout -q -f FETCH_HEAD
+      - rm -f ~/.netrc
+
+  gen-zerostate:
+    depends_on: [acki-clone]
+    image: *ansible_image
+    environment:
+      BRIDGE_SHA: ${CI_COMMIT_SHA}
+      TVM_CLI_VERSION: *tvm_cli_version
+      TVM_CLI_SHA256: *tvm_cli_sha256
+      TVM_DEBUGGER_SHA256: *tvm_debugger_sha256
+      SOLD_VERSION: *sold_version
+      SOLD_SHA256: *sold_sha256
+      BRIDGE_ZS_L1_BRIDGE: *bridge_zs_l1_bridge
+      # presence disables the blacklist indexer, as acki-nacki's own ci_test does
+      DISABLE_BLACKLIST: "true"
+    commands:
+      - apt-get update -qq && apt-get install -yqq --no-install-recommends make curl ca-certificates git >/dev/null
+      - export ACKI_DIR="$CI_WORKSPACE/.acki-nacki" HELPERS_DIR="$CI_WORKSPACE/.acki/helpers" BRIDGE_REPO="$CI_WORKSPACE"
+      - bash tests/e2e/local-net/gen-zerostate.sh
+
+  # One network per host at a time, shared with dexdo's e2e through the same lease files;
+  # see tests/e2e/local-net/host-lease.sh. dexdo's live lease is waited out for up to 30 minutes; an earlier bridge run's is taken over at once.
+  lease-acquire:
+    depends_on: [gen-zerostate]
+    image: *ansible_image
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        for i in $(seq 1 30); do
+        ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- acquire bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh && exit 0;
+        echo "lease busy, retry $i/30 in 60 s"; sleep 60;
+        done; echo "could not acquire the host lease in 30 minutes"; exit 1
+
+  net-up:
+    depends_on: [lease-acquire]
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      INV: *inventory
+      ACKI_DIR: *acki_dir_on_host
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      GITHUB_TOKEN: { from_secret: ACKI_NACKI_GH_TOKEN }
+      ACKI_REPO: *acki_repo
+      ACKI_IMAGE_TAG: *acki_image_tag
+      WORK_ROOT: *work_root_on_host
+      DEXDO_DEPLOY_DIR: *dexdo_deploy_dir_on_host
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- assert bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
+      # A run that was cancelled or timed out never reached net-down: its network may still be up,
+      # and its root-owned node storage under docker/ton-live/web/storage makes the checkout's
+      # `git clean` fail. net-down's own teardown first, so a run after a killed one comes up the
+      # first time. Nothing to tear down is fine; anything it leaves, the checkout below reports.
+      - >
+        ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e target=bridge_e2e
+        -e acki_dir="$ACKI_DIR" -e dexdo_deploy_dir="$DEXDO_DEPLOY_DIR" -e full_cleanup=true
+        || echo "teardown of a leftover network did not finish; the checkout below reports what is left"
+      # The checkout on the host is ours, not the playbook's: acki-nacki at the resolved commit
+      # plus tests/e2e/local-net/up.sh.patch (nodes that die on their first start are started
+      # again at once, and the hand-over waits for node0 to serve accounts). The playbook then
+      # ships the generated config/ + docker/.env and runs up.sh with the resolved image
+      # digests (-e args win over docker/.env interpolation); its own clone is skipped
+      # (acki_repo empty).
+      - scp $SSH_OPTS $CI_WORKSPACE/tests/e2e/local-net/up.sh.patch "$E2E_CI_USER@$E2E_HOST:$WORK_ROOT/up.sh.patch"
+      - >
+        . $CI_WORKSPACE/.acki/env &&
+        ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
+        "ACKI_REPO='$ACKI_REPO' ACKI_SHA='$ACKI_SHA' ACKI_DIR='$ACKI_DIR' GITHUB_TOKEN='$GITHUB_TOKEN' PATCH=\$HOME/'$WORK_ROOT'/up.sh.patch bash -s"
+        < $CI_WORKSPACE/tests/e2e/local-net/checkout-acki-on-host.sh
+      - >
+        . $CI_WORKSPACE/.acki/env &&
+        ansible-playbook dexdo-e2e-up.yml
+        -i "$CI_WORKSPACE/$INV"
+        -e target=bridge_e2e
+        -e acki_repo=
+        -e acki_dir="$ACKI_DIR"
+        -e config_src="$CI_WORKSPACE/.acki-nacki/config"
+        -e env_src="$CI_WORKSPACE/.acki-nacki/docker/.env"
+        -e dexdo_net_image_tag="$ACKI_IMAGE_TAG"
+        -e dexdo_node_image="$NODE_IMG"
+        -e dexdo_gql_image="$GQL_IMG"
+        -e dexdo_bm_image="$BM_IMG"
+        -e dex_test_notes_cnt=0
+
+  run-test:
+    depends_on: [net-up]
+    image: *ansible_image
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      ACKI_DIR: *acki_dir_on_host
+      WORK_ROOT: *work_root_on_host
+      TVM_CLI_VERSION: *tvm_cli_version
+      TVM_CLI_SHA256: *tvm_cli_sha256
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - >
+        ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
+        "PIPELINE_ID='bridge-$CI_PIPELINE_NUMBER' BRIDGE_SHA='$CI_COMMIT_SHA' ACKI_DIR='$ACKI_DIR' WORK_ROOT=\$HOME/'$WORK_ROOT'
+        BRIDGE_REPO='$CI_REPO_CLONE_URL' TVM_CLI_VERSION='$TVM_CLI_VERSION' TVM_CLI_SHA256='$TVM_CLI_SHA256' bash -s"
+        < $CI_WORKSPACE/tests/e2e/local-net/run-test-on-host.sh
+
+  # Arbitrum Sepolia: a fresh AckiNackiBridge every run, 2 USDC deposited from it to this
+  # network with `ackinacki-bridge deposit` and withdrawn back with `ackinacki-bridge
+  # withdraw`, one pytest step per stage (tests/e2e/local-net/arbitrum/). The provers and the
+  # CLI run on a separate prover host through a restricted CI key
+  # (tests/e2e/local-net/prover-host/ci-entry) and reach this network through the runner's ssh
+  # tunnels; every run's logs stay there. The host is a secret too.
+  arbitrum-e2e:
+    depends_on: [run-test]
+    image: *ansible_image
+    environment:
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      KNOWN_HOSTS: *known_hosts
+      ACKI_DIR: *acki_dir_on_host
+      WORK_ROOT: *work_root_on_host
+      PROVER_HOST: { from_secret: PROVER_HOST }
+      PROVER_HOST_PORT: { from_secret: PROVER_HOST_PORT }
+      PROVER_HOST_USER: { from_secret: PROVER_HOST_USER }
+      PROVER_HOST_SSH_KEY: { from_secret: PROVER_HOST_SSH_KEY }
+      ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY: { from_secret: ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY }
+      # Public: the deployer's address, which the test checks the key against.
+      ARBITRUM_SEPOLIA_E2E_ADDRESS: "0xe8e3bfd675cb889e4adf7ed0ec65c3dd09cc9041"
+      # Arbitrum Sepolia RPC for arbitrum-anchors only: it has to serve eth_getProof
+      # on a batch's last block a minute after it, and the public endpoints keep about
+      # 128 blocks (half a minute). Unset, the job falls back to the public endpoint.
+      ANCHORS_ARB_RPC: { from_secret: ARB_RPC }
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - python3 -m pip install --quiet --no-cache-dir --break-system-packages pytest==8.3.4
+      - cd $CI_WORKSPACE/tests/e2e/local-net/arbitrum && ACKI_CONFIG=$CI_WORKSPACE/.acki-nacki/config python3 -m pytest
+
+  dump-logs:
+    depends_on: [run-test, arbitrum-e2e]
+    image: *ansible_image
+    when:
+      - status: [failure]
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+      ACKI_DIR: *acki_dir_on_host
+      WORK_ROOT: *work_root_on_host
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- assert bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
+      - >
+        ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST"
+        "set +e; cd $ACKI_DIR;
+        echo '===== up.sh log (tail 80) ====='; tail -n 80 dexdo-e2e-up.log 2>/dev/null;
+        echo '===== docker compose ps -a ====='; docker compose -f docker/dexdo-e2e.compose.yaml ps -a 2>/dev/null;
+        for n in node0 node1 node2 node3 node4; do echo \"===== \$n: \$(docker inspect dexdo_e2e-\$n-1 --format '{{.State.Status}} since {{.State.StartedAt}}, created {{.Created}}' 2>/dev/null) =====\"; docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=40 \$n 2>/dev/null | grep -vE ' TRACE | DEBUG '; done;
+        echo '===== node0 (logs/node0/node.log, non-trace tail 60) ====='; grep -vE ' TRACE | DEBUG ' logs/node0/node.log 2>/dev/null | tail -n 60;
+        echo '===== block_manager (logs/bm0/bm.log, tail 120) ====='; tail -n 120 logs/bm0/bm.log 2>/dev/null;
+        echo '===== q_server0 (docker logs, tail 80) ====='; docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=80 q_server0 2>/dev/null;
+        echo '===== test work dir ====='; ls -la ~/$WORK_ROOT/work_dir 2>/dev/null; true"
+
+  # Runs after success and after failure (not after a cancel or a timeout: Woodpecker runs no
+  # step then, and the lease ages out). The lease is released even when the teardown playbook
+  # fails: the next up.sh tears the stand down first anyway.
+  net-down:
+    depends_on: [run-test, arbitrum-e2e, dump-logs]
+    image: *ansible_image
+    directory: .acki-nacki/ansible
+    when:
+      - status: [success, failure]
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      INV: *inventory
+      ACKI_DIR: *acki_dir_on_host
+      DEXDO_DEPLOY_DIR: *dexdo_deploy_dir_on_host
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      # Owner check first: a lease that expired and was taken over belongs to someone else's network.
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- assert bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
+      # dexdo_deploy_dir MUST travel: full_cleanup removes it, and the playbook's own default is dexdo's deploy dir on this shared host
+      - rc=0; ansible-playbook dexdo-e2e-down.yml -i "$CI_WORKSPACE/$INV" -e target=bridge_e2e -e acki_dir="$ACKI_DIR" -e dexdo_deploy_dir="$DEXDO_DEPLOY_DIR" -e full_cleanup=true || rc=$?
+      # the up playbook leaves ~/.netrc on the host when its clone fails; never keep a token there
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "rm -f ~/.netrc" || true
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- release bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
+      - exit $rc

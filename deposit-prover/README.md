@@ -24,16 +24,19 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
    proof), with `max_key_byte_len: 3` (`impl ToMPTInput for ReceiptProof` in `src/circuit_v2.rs`;
    the leaf bound is `receipt_max_byte_len`).
 2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
-3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
-   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Five fields: the event carries the Acki Nacki destination.
+3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256,address)")`
+   (`get_deposit_event_signature` in `src/circuit_v2.rs`). Six fields: the event carries the Acki
+   Nacki destination and the deposited ERC-20.
 4. **Contract address** — the event was emitted by the expected bridge contract.
-5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
-   as public inputs.
+5. **Event data** — `depositId`, `sender`, `amount`, the AN destination and the deposited `token`
+   are extracted and exposed as public inputs. The log's data length is constrained to 128 bytes
+   (four words) and the `token` word's twelve leading bytes to zero, so the address cannot be
+   read out of padding or folded from a wider word.
 6. **Block hash binding** — the proof is tied to a specific Ethereum block hash.
 7. **Chain binding** — the source chain id is a public input, so a proof from one chain cannot be
    replayed as another.
 
-### Public inputs (12 field elements)
+### Public inputs (13 field elements)
 
 One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
 `NUM_PUBLIC_INPUTS` derives from it (`src/types.rs:11`).
@@ -42,7 +45,7 @@ One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
 |---:|---|---|
 | 0 | `depositId` | Unique deposit identifier |
 | 1 | `sender` | Depositor's Ethereum address |
-| 2 | `amount` | Deposit amount in USDC base units (6 decimals) |
+| 2 | `amount` | Deposit amount in the token's base units |
 | 3 | `contractAddress` | Bridge contract address |
 | 4 | `chainId` | Source chain id, proven in-circuit |
 | 5 | `dappIdHigh` | Destination dapp id, upper half |
@@ -51,7 +54,8 @@ One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
 | 8 | `anAccountLow` | AN destination account, lower 128 bits |
 | 9 | `blockHashHigh` | Upper 128 bits of the block hash |
 | 10 | `blockHashLow` | Lower 128 bits of the block hash |
-| 11 | `promiseCommit` | Keccak-coprocessor promise commitment |
+| 11 | `token` | The deposited ERC-20, proven from the event |
+| 12 | `promiseCommit` | Keccak-coprocessor promise commitment |
 
 *Earlier revisions of this file documented seven inputs ending at `promiseCommit`; the destination
 and chain-binding inputs were added later.*

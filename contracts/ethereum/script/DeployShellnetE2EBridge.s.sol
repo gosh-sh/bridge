@@ -56,7 +56,7 @@ contract DeployShellnetE2EBridge is Script {
         uint256 accFr;
         uint256 altDstChainId;
         uint256 altDstHostChainId;
-        uint256 altTokenId;
+        uint32 usdcTokenId;
     }
 
     function run() external {
@@ -83,7 +83,7 @@ contract DeployShellnetE2EBridge is Script {
             altDstHostChainId: wireWithdraw
                 ? vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111))
                 : uint256(0),
-            altTokenId: wireWithdraw ? vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)) : uint256(0)
+            usdcTokenId: wireWithdraw ? uint32(vm.envOr("USDC_TOKEN_ID", uint256(3))) : uint32(0)
         });
         if (wireWithdraw) {
             require(wd.accFr != 0, "WITHDRAW_ACC_FR required for Shplonk C4 wiring");
@@ -119,7 +119,7 @@ contract DeployShellnetE2EBridge is Script {
         console.log("withdraw accFr:", wd.accFr);
         console.log("altDstChainId:", wd.altDstChainId);
         console.log("altDstHostChainId:", wd.altDstHostChainId);
-        console.log("altTokenId:", wd.altTokenId);
+        console.log("usdcTokenId:", wd.usdcTokenId);
     }
 
     function _deployProductionVerifyBlockTriple()
@@ -160,7 +160,7 @@ contract DeployShellnetE2EBridge is Script {
                 accFr: wd.accFr,
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
-                altTokenId: wd.altTokenId
+                usdcTokenId: wd.usdcTokenId
             })
         );
     }

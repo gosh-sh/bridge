@@ -22,6 +22,116 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The bridge takes any allowlisted ERC-20, not only USDC. `deposit` is now
+  `deposit(address token, uint256 amount, bytes32 anAccount)` and the `Deposit`
+  event carries the token as a sixth field, so its signature and topic0 change:
+  integrators and indexers must update. The EVM bridge is redeployed — `usdc`
+  and `aUSDC` are immutable and cannot be migrated in place.
+- **The deposit verification key rotates.** Proofs from the previous circuit
+  stop verifying and the Acki Nacki bridge needs the new key. **A deposit made
+  under the old EVM bridge cannot be re-proven after the switch**: that bridge
+  emitted the five-field `Deposit`, and this circuit constrains the six-field
+  signature and 128 bytes of log data, so the same receipt can never acquire a
+  token word. Finalize every in-flight deposit under the old key before
+  retiring that lane; a deposit left unfinalized needs an explicit recovery
+  path, not a second proof. The deposit circuit now carries 13 public inputs: `token` is
+  appended at slot 11, ahead of `promiseCommit`, so slots 0–10 keep their
+  positions and the Acki Nacki public-input parser is unchanged — it reads the
+  first nine scalars and walks eleven for the block hash, and checks no total
+  length. The new key is `deposit_vk_blob.bin`, sha256
+  `f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9`
+  (13071 bytes, Hermez SRS, reproducible: two keygen runs produced it byte for
+  byte), and the ten fixture proofs under
+  `deposit-prover/fixtures/deposit_10proofs/` were regenerated against it and
+  verify under it.
+- **`eccUSDCBridge` goes to 1.15.0**, code hash `618e77a2…` (sold 0.80.0),
+  carrying the new key. The compiled ABI is unchanged. `ackinacki-bridge`
+  refuses an older deployment before anything leaves L1: `MIN_BRIDGE_VERSION`
+  and the deposit-key floor both move to 1.15.0, so a 1.14.0 bridge — which
+  still holds the twelve-input key — is rejected at preflight rather than
+  failing after the deposit. The opcode fixtures in `tvm-sdk`
+  (`tvm_vm/halo2_test_data/deposit_10proofs`) should be synced with
+  `scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh` so the SDK's own
+  regression tests exercise the new key — that sync is **not** a runtime
+  requirement: `finalizeDeposit` hands `ZKHALO2VERIFYWITHVK` the `VK_BLOB`
+  embedded in the contract, and the opcode verifies against that operand, not
+  against the SDK's test data.
+- **A second listed ERC-20 cannot be credited yet, and the clients refuse it.**
+  `finalizeDeposit` mints `USDC_ECC_ID` for every proof it accepts, whatever
+  token the proof carries, and measures the amount against its
+  USDC-denominated `MAX_TRANSFER_AMOUNT`. Until an Acki Nacki bridge carries a
+  token registry (1.16.0 in the CLI's constant), `ackinacki-bridge deposit`
+  refuses `--token` pointing at anything but the EVM bridge's own `usdc()`.
+  **`listToken` creates the listing with deposits closed**, so there is no
+  window between listing and closing in which a direct EVM deposit could be
+  made — a CLI-side refusal alone would not cover that caller. Open deposits
+  with `setTokenDepositsEnabled(tokenId, true)` once an Acki Nacki deployment
+  credits that id. Withdrawals by proof work from the moment the listing
+  exists, so a token can be paid out before it can be deposited.
+- `BridgeWithdrawConfig.altTokenId` is now `usdcTokenId`, and the deploy
+  scripts read `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`. It is no
+  longer an optional alias accepted alongside `tokenId == 0`: it is the single
+  Acki Nacki ECC currency id that pays out USDC, and the id the constructor
+  lists USDC under. Carry the old value over — a deployment that passed
+  `WITHDRAW_ALT_TOKEN_ID=3` passes `USDC_TOKEN_ID=3`; one that left it unset
+  keeps `0`.
+
+### Added
+
+- Owner calls to manage the token allowlist: `listToken(token, tokenId,
+  decimals, maxTransfer, tvlCap)`, `setTokenLimits`,
+  `setTokenDepositsEnabled` and `delistToken`, with the events `TokenListed`
+  (which carries the deposits switch), `TokenLimitsSet`,
+  `TokenDepositsEnabledSet` and `TokenDelisted`. `tokenId` is the Acki Nacki
+  ECC currency id the withdrawal proof carries; it is assigned on the Acki
+  Nacki side, and listing an id that side does not mint leaves deposits
+  provable but uncredited — which is why a new listing starts with deposits
+  closed. The constructor's own USDC listing is the exception and is open.
+- Per-token caps replace the USDC-denominated constants. `MAX_TRANSFER_AMOUNT`
+  and `MAX_BRIDGE_TVL` stay as the defaults the constructor lists USDC with.
+  `listToken` refuses a `maxTransfer` above `MAX_DEPOSIT_AMOUNT`
+  (`type(uint64).max`), the ceiling the Acki Nacki mint path imposes — for an
+  18-decimal token that bounds one deposit at roughly 18.44 whole tokens until
+  the Acki Nacki side carries a per-token scale.
+- Views `tokenInfo(tokenId)`, `tokenIdOf(token)`, `listedTokenIds()` and
+  `liabilitiesOf(tokenId)`. Liabilities are tracked per token;
+  `treasuryBalance` remains the USDC figure that the AAVE and yield accounting
+  is written against.
+- `ackinacki-bridge deposit` and `deposit-relayer` carry the token: the CLI
+  takes it as an argument and the relayer reads it from the event. `--token`
+  (`DEPOSIT_TOKEN`) names the ERC-20 to deposit and defaults to the bridge's
+  own `usdc()`. The balance the preflight checks, the allowance it reads and
+  the approve it asks the wallet for are all that token's — a wallet holding
+  the deposited token but no USDC is no longer refused.
+- The relayer refuses a proof whose `token` public input disagrees with the
+  `Deposit` event it was built from, the same way it already refuses a
+  mismatched amount, recipient or block hash.
+
+### Changed
+
+- `--amount` is read in the deposited token's own precision, taken from the
+  bridge's listing. USDC is unchanged: `--amount 1.5` is still 1,500,000 base
+  units. For an 18-decimal token the same flag now means one and a half whole
+  tokens, not 1.5 micro-units; for a token with fewer than six decimals an
+  amount its precision cannot hold is refused instead of being truncated. The
+  `uint64` ceiling still applies, so one deposit of an 18-decimal token is
+  bounded near 18.44 whole tokens.
+- The deposit preflight refuses a token whose on-chain `decimals()` disagrees
+  with the decimals the owner listed it with: the amount would otherwise be
+  scaled by one number and moved by another.
+- AAVE stays USDC-only: only USDC is supplied, and only a USDC payout pulls
+  liquidity back. Other tokens sit liquid in the bridge.
+- The exact-balance custody check applies to every listed token, so
+  fee-on-transfer and rebasing tokens are still refused rather than quietly
+  mis-booking the ledger.
+- `withdrawByProof` pays out the token the proof's `tokenId` maps to and
+  reverts `UnsupportedTokenId` for an id that is not listed or does not fit a
+  uint32. Deposits for a token whose deposits are closed revert
+  `TokenDepositsDisabled`; `delistToken` refuses while the bridge still owes
+  that token, and refuses for USDC outright.
+
 ### Fixes
 
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works

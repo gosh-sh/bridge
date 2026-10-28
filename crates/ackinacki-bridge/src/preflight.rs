@@ -2684,18 +2684,26 @@ pub async fn check_bridge_deploy(
         });
     }
 
+    // The cap `withdrawByProof` enforces is the USDC listing's `maxTransfer`,
+    // which the owner moves with `setTokenLimits`; `MAX_TRANSFER_AMOUNT` is
+    // only what the constructor listed USDC with and never changes. Reading
+    // the constant would pass a withdrawal the payout always reverts
+    // `TransferTooLarge` — after the ECC is burned, and no retry recovers it.
     let max_transfer = client
-        .max_transfer_amount()
+        .usdc_payout_cap()
         .await
         .map_err(|e| CliError::Preflight {
-            reason: format!("--bridge-address {bridge}: MAX_TRANSFER_AMOUNT() failed: {e}"),
+            reason: format!(
+                "--bridge-address {bridge}: cannot read the USDC listing's maxTransfer \
+                 (usdcTokenId()/tokenInfo()): {e}"
+            ),
             source: Some(anyhow::Error::new(e)),
         })?;
     if U256::from(amount.0) > max_transfer {
         return Err(CliError::Preflight {
             reason: format!(
-                "withdrawal exceeds MAX_TRANSFER_AMOUNT ({max_transfer} micro-USDC); reduce the \
-                 amount before burning ECC"
+                "withdrawal exceeds the bridge's current payout cap for USDC ({max_transfer} \
+                 micro-USDC); reduce the amount before burning ECC"
             ),
             source: None,
         });
@@ -3451,6 +3459,8 @@ pub(crate) mod tests {
     /// loudly on an empty decode rather than silently pass.
     const SEL_TREASURY: &str = "313dab20"; // treasuryBalance()
     const SEL_MAX_TRANSFER: &str = "fc1b3113";
+    const SEL_USDC_TOKEN_ID: &str = "11bd3c3d"; // usdcTokenId()
+    const SEL_TOKEN_INFO: &str = "68fb1109"; // tokenInfo(uint32)
     const SEL_VERIFIER: &str = "1792b9fe"; // bridgeWithdrawalVerifier()
     pub(crate) const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
     pub(crate) const SEL_ACC_FR: &str = "5c987786"; // bridgeWithdrawalAccFr()
@@ -3693,6 +3703,11 @@ pub(crate) mod tests {
             (SEL_ACC_FR, ZERO_WORD.to_string()),
             (SEL_TREASURY, MAX_WORD.to_string()),
             (SEL_MAX_TRANSFER, format!("0x{:064x}", 50_000_000u64)),
+            // The listing USDC is registered under. `withdrawByProof`
+            // enforces its `maxTransfer`, not the constant above, so the
+            // happy path answers the same 50 USDC from both.
+            (SEL_USDC_TOKEN_ID, format!("0x{:064x}", 3u64)),
+            (SEL_TOKEN_INFO, token_info_word(50_000_000)),
             // Not paused: the last check `check_bridge_deploy` makes.
             (SEL_PAUSED, ZERO_WORD.to_string()),
             // Matches the zero digest tests write into their tempdir's
@@ -3712,6 +3727,20 @@ pub(crate) mod tests {
             m.insert(k, v.clone());
         }
         m
+    }
+
+    /// `tokenInfo(uint32)` as six ABI words: token, decimals, deposits
+    /// switch, `maxTransfer`, `tvlCap`, liabilities.
+    pub(crate) fn token_info_word(max_transfer: u64) -> String {
+        format!(
+            "0x{}{:064x}{:064x}{:064x}{:064x}{:064x}",
+            &word_addr(5)[2..],
+            6u64,
+            1u64,
+            max_transfer,
+            u64::from(u32::MAX),
+            0u64,
+        )
     }
 
     /// The four addresses of [`full_walk`], all carrying code.
@@ -4998,10 +5027,10 @@ pub(crate) mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("MAX_TRANSFER_AMOUNT"), "{err}");
+        assert!(err.to_string().contains("payout cap"), "{err}");
         let broken = mock_rpc_code_for(
             &full_walk_code(),
-            full_walk(&[(SEL_MAX_TRANSFER, "0x".to_string())]),
+            full_walk(&[(SEL_TOKEN_INFO, "0x".to_string())]),
         )
         .await;
         let err = check_bridge_deploy(
@@ -5014,8 +5043,49 @@ pub(crate) mod tests {
         .await
         .unwrap_err();
         assert!(
-            err.to_string().contains("MAX_TRANSFER_AMOUNT() failed"),
-            "{err}"
+            err.to_string()
+                .contains("cannot read the USDC listing's maxTransfer"),
+            "a bridge that cannot answer the listing is not one to burn ECC against: {err}"
+        );
+    }
+
+    /// The cap `withdrawByProof` enforces is the USDC listing's
+    /// `maxTransfer`, which `setTokenLimits` can lower below the
+    /// deployment-time `MAX_TRANSFER_AMOUNT`. Reading the constant would
+    /// pass a withdrawal whose payout always reverts `TransferTooLarge`,
+    /// and the ECC is burned by then — no retry recovers that amount.
+    #[tokio::test]
+    async fn a_lowered_listing_cap_refuses_before_the_burn() {
+        let bridge = Address::repeat_byte(1);
+        let url = mock_rpc_code_for(
+            &full_walk_code(),
+            // The constant still says 50 USDC; the listing says 1.
+            full_walk(&[(SEL_TOKEN_INFO, token_info_word(1_000_000))]),
+        )
+        .await;
+
+        check_bridge_deploy(
+            &url,
+            bridge,
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .expect("a withdrawal at the listing's cap still passes");
+
+        let err = check_bridge_deploy(
+            &url,
+            bridge,
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(5_000_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("payout cap") && err.to_string().contains("1000000"),
+            "the refusal names the cap the payout enforces, not the constant: {err}"
         );
     }
 

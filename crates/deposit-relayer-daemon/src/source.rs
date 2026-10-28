@@ -122,7 +122,8 @@ mod sol_bindings {
                 address indexed sender,
                 uint256 amount,
                 bytes32 anAccount,
-                uint256 timestamp
+                uint256 timestamp,
+                address token
             );
 
             function depositCounter() external view returns (uint256);
@@ -394,6 +395,7 @@ where
         sender: ev.sender,
         amount: ev.amount,
         an_account: ev.anAccount,
+        token: ev.token,
         timestamp: ev.timestamp,
         tx_hash,
         log_index,
@@ -447,6 +449,7 @@ where
                 sender: ev.sender,
                 amount: ev.amount,
                 an_account: ev.anAccount,
+                token: ev.token,
                 timestamp: ev.timestamp,
                 tx_hash,
                 log_index: receipt_log_index,
@@ -544,9 +547,9 @@ where
         Err(RelayerError::eth(format!(
             "depositCounter() at block {safe_head} is {counter}, so depositId {deposit_id} is at \
              or below that block, but eth_getLogs found no Deposit log for it in blocks \
-             {scan_from}..={scan_end}: either the RPC returned incomplete logs, or the deposit \
-             is below block {scan_from} (lower --from-block, or remove scan_done_through_block \
-             from the state file)"
+             {scan_from}..={scan_end}: either the RPC returned incomplete logs, or the deposit is \
+             below block {scan_from} (lower --from-block, or remove scan_done_through_block from \
+             the state file)"
         )))
     }
 
@@ -706,6 +709,7 @@ mod tests {
             sender: Address::repeat_byte(0x11),
             amount: U256::from(deposit_id * 1000),
             an_account: B256::repeat_byte(0x33),
+            token: Address::repeat_byte(0x7c),
             timestamp: U256::from(1_700_000_000u64),
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 0,

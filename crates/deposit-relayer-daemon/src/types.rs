@@ -24,10 +24,14 @@ use serde::{Deserialize, Serialize};
 use crate::error::RelayerError;
 
 /// Number of public inputs the deposit circuit commits to. Matches
-/// `deposit-prover`'s `num_instance() == vec![12]`:
+/// `deposit-prover`'s `num_instance() == vec![13]`:
 /// `[depositId, sender, amount, contractAddress, chainId, dappIdHigh,
 /// dappIdLow, anAccountHigh, anAccountLow, blockHashHigh, blockHashLow,
-/// promiseCommit]`.
+/// token, promiseCommit]`.
+///
+/// `token` is the deposited ERC-20, proven from the event's fourth data word.
+/// It sits at slot 11, ahead of `promiseCommit`, so slots 0..=10 keep the
+/// offsets the Acki Nacki parser reads them at.
 ///
 /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559) bound via
 /// the enclosing tx MPT proof (not VK-baked). `anAccount{High,Low}` bind the
@@ -38,7 +42,7 @@ use crate::error::RelayerError;
 /// check the proven halves. AN always credits workchain 0.
 /// `eccUSDCBridge` allowlists trusted L1 bridges per chain
 /// (`_trustedL1Bridge[chainId][bridge]`).
-pub const NUM_PUBLIC_INPUTS: usize = 12;
+pub const NUM_PUBLIC_INPUTS: usize = 13;
 
 /// Each public input is a 32-byte little-endian `Fr` (`Fr::to_repr()`).
 pub const PUBLIC_INPUT_BYTES: usize = NUM_PUBLIC_INPUTS * 32;
@@ -67,6 +71,10 @@ pub struct DepositEvent {
     pub an_account: B256,
     /// Block timestamp recorded in the event (event data word 2).
     pub timestamp: U256,
+    /// The ERC-20 the depositor named (event data word 3). The circuit binds
+    /// it as the `token` public input, so the Acki Nacki side credits the
+    /// currency that matches a proven token rather than one the prover chose.
+    pub token: Address,
     /// Hash of the transaction that emitted the event. Drives the prover's
     /// receipt + MPT witness fetch.
     pub tx_hash: B256,
@@ -85,7 +93,7 @@ pub struct DepositEvent {
     pub source_chain_id: u64,
 }
 
-/// The twelve public inputs the deposit proof commits to, decoded from the
+/// The thirteen public inputs the deposit proof commits to, decoded from the
 /// `public_inputs` opcode operand. Each is a full `U256` (the field element
 /// re-interpreted as an integer); the submitter forwards these as the
 /// `finalizeDeposit(...)` `bytes publicInputs` blob.
@@ -109,6 +117,8 @@ pub struct DepositPublicInputs {
     pub an_account_low: U256,
     pub block_hash_high: U256,
     pub block_hash_low: U256,
+    /// The deposited ERC-20, folded from its 20 address bytes (slot 11).
+    pub token: U256,
     pub promise_commit: U256,
 }
 
@@ -142,7 +152,8 @@ impl DepositPublicInputs {
             an_account_low: field(8),
             block_hash_high: field(9),
             block_hash_low: field(10),
-            promise_commit: field(11),
+            token: field(11),
+            promise_commit: field(12),
         })
     }
 
@@ -163,6 +174,7 @@ impl DepositPublicInputs {
             self.an_account_low,
             self.block_hash_high,
             self.block_hash_low,
+            self.token,
             self.promise_commit,
         ] {
             out.extend_from_slice(&fr.to_le_bytes::<32>());
@@ -319,6 +331,17 @@ impl DepositProofBundle {
                 self.parsed.contract_address, event.source_contract
             )));
         }
+        let expected_token = U256::from_be_bytes::<32>({
+            let mut buf = [0u8; 32];
+            buf[12..].copy_from_slice(event.token.as_slice());
+            buf
+        });
+        if self.parsed.token != expected_token {
+            return Err(RelayerError::ProofGeneration(format!(
+                "proof token {:#x} != event token {}",
+                self.parsed.token, event.token
+            )));
+        }
         let exp_bh_hi = U256::from_be_slice(&event.block_hash.as_slice()[0..16]);
         let exp_bh_lo = U256::from_be_slice(&event.block_hash.as_slice()[16..32]);
         if self.parsed.block_hash_high != exp_bh_hi || self.parsed.block_hash_low != exp_bh_lo {
@@ -340,6 +363,7 @@ mod tests {
     fn public_inputs_roundtrip() {
         let pi = DepositPublicInputs {
             deposit_id: U256::from(7u64),
+            token: U256::from(0x7cu64),
             sender: U256::from(0x1234u64),
             amount: U256::from(1_000_000u64),
             contract_address: U256::from(0xabcdu64),
@@ -377,6 +401,11 @@ mod tests {
     fn bundle_binding_check() {
         let pi = DepositPublicInputs {
             deposit_id: U256::from(3u64),
+            token: U256::from_be_bytes::<32>({
+                let mut b = [0u8; 32];
+                b[12..].copy_from_slice(Address::repeat_byte(0x7c).as_slice());
+                b
+            }),
             sender: U256::from_be_bytes::<32>({
                 let mut b = [0u8; 32];
                 b[12..].copy_from_slice(Address::repeat_byte(0x11).as_slice());
@@ -401,6 +430,7 @@ mod tests {
         };
         let event = DepositEvent {
             deposit_id: 3,
+            token: Address::repeat_byte(0x7c),
             sender: Address::repeat_byte(0x11),
             amount: U256::from(5u64),
             an_account: B256::repeat_byte(0x55),
@@ -434,6 +464,12 @@ mod tests {
         let mut wrong_block = event.clone();
         wrong_block.block_hash = B256::repeat_byte(0x88);
         assert!(bundle.check_binds_to(&wrong_block).is_err());
+
+        // A proof of a deposit in another ERC-20 must be rejected: the AN
+        // side pays the currency the token id maps to.
+        let mut wrong_token = event.clone();
+        wrong_token.token = Address::repeat_byte(0x77);
+        assert!(bundle.check_binds_to(&wrong_token).is_err());
 
         // Proven chainId must match the RPC eth_chainId used to fetch.
         let mut wrong_chain = event.clone();

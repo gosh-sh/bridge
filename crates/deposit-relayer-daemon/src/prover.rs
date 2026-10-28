@@ -105,6 +105,7 @@ impl MockProofGenerator {
         };
         let dapp_be = dapp_id.to_be_bytes::<32>();
         DepositPublicInputs {
+            token: addr_to_field(event.token.as_slice()),
             deposit_id: U256::from(event.deposit_id),
             sender: addr_to_field(event.sender.as_slice()),
             amount: event.amount,
@@ -458,6 +459,7 @@ mod tests {
     fn event(id: u64) -> DepositEvent {
         DepositEvent {
             deposit_id: id,
+            token: Address::repeat_byte(0x7c),
             sender: Address::repeat_byte(0x11),
             amount: U256::from(1_000_000u64),
             an_account: B256::repeat_byte(0x33),

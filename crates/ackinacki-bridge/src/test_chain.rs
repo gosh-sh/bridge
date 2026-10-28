@@ -1045,12 +1045,12 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 build of eccUSDCBridge 1.14.0: 1.13.0 plus the Arbitrum
-        // block verifier's deploy and writer path, and the refusal to deploy
-        // the recorded verifier again.
+        // sold 0.80.0 build of eccUSDCBridge 1.15.0: 1.14.0 plus the rotated
+        // deposit verification key, which the token public input forces, and
+        // the version constant that goes with it. The ABI is unchanged.
         assert_eq!(
             &hash[..8],
-            "5cada5db",
+            "618e77a2",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

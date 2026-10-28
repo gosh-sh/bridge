@@ -615,7 +615,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
                 ACC_FR,
                 SHELLNET_LOGICAL_DST_CHAIN_ID,
                 SEPOLIA_CHAIN_ID,
-                SHELLNET_USDC_TOKEN_ID
+                uint32(SHELLNET_USDC_TOKEN_ID)
             )
         );
 
@@ -995,7 +995,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         vm.startPrank(funder);
         usdc.approve(address(bridge), 1);
         vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
-        bridge.deposit(1, bytes32(uint256(1)));
+        bridge.deposit(address(usdc), 1, bytes32(uint256(1)));
         vm.stopPrank();
         assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
         assertTrue(bridge.isNullifierUsed(100));

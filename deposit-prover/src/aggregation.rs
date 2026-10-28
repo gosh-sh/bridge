@@ -174,6 +174,7 @@ pub fn aggregate_proof(
         deposit_proof.amount,
         deposit_proof.dapp_id,
         deposit_proof.an_account,
+        deposit_proof.token,
         deposit_proof.contract_address,
         deposit_proof.block_hash,
         deposit_proof.chain_id,

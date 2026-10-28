@@ -202,7 +202,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, bytes32(uint256(uint160(user))));
+        bridge.deposit(address(usdc), amount, bytes32(uint256(uint160(user))));
         vm.stopPrank();
 
         assertEq(bridge.depositCounter(), counterBefore + 1, "Counter must increment by 1");
@@ -227,7 +227,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         } else {
             vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
         }
-        bridge.deposit(amount, bytes32(uint256(1)));
+        bridge.deposit(address(usdc), amount, bytes32(uint256(1)));
         vm.stopPrank();
     }
 

@@ -258,6 +258,7 @@ mod tests {
                 bridge: BRIDGE,
                 to: "x".into(),
                 amount_units: 1,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: "1a".repeat(32),
                 an_network: "https://shellnet.ackinacki.org:443".into(),
             },
@@ -339,7 +340,8 @@ mod tests {
         let mut a = op("A", 7);
         a.stage = OpStage::Abandoned;
         a.abandoned_ever = true;
-        let b = op("B", 7); // B requested with the same nonce_before and died before the hash
+        let b = op("B", 7); // B requested with the same nonce_before and died
+                            // before the hash
         let t = cand(9, 7);
         assert!(matches!(
             decide(&a, std::slice::from_ref(&t), &Claims::default()),

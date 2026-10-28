@@ -51,6 +51,13 @@ pub struct OpParams {
     pub bridge: Address,
     pub to: String,
     pub amount_units: u64,
+    /// The ERC-20 this deposit moves, pinned at creation so a resume rebuilds
+    /// the same calldata. A record written before the bridge took a token
+    /// parameter has no value here and reads back as the zero address; such a
+    /// deposit belongs to a bridge deployment that predates the token
+    /// parameter and has to be finished with the CLI it was started with.
+    #[serde(default)]
+    pub token: Address,
     /// The Acki Nacki bridge account id (hex) and the network it was reached
     /// on (`an_network_id` of `--gql-endpoint`). Pinned at creation: a resume
     /// under another profile must not finalize this deposit through another
@@ -476,6 +483,7 @@ mod tests {
             bridge: address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
             to: format!("{}::{}", "00".repeat(32), "a3".repeat(32)),
             amount_units: 12_500_000,
+            token: alloy_primitives::Address::repeat_byte(0x7c),
             an_bridge: "1a".repeat(32),
             an_network: "https://shellnet.ackinacki.org:443".into(),
         }

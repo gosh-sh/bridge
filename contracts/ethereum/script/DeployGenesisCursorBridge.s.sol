@@ -76,7 +76,7 @@ contract DeployGenesisCursorBridge is Script {
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
-            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
+            usdcTokenId: uint32(vm.envOr("USDC_TOKEN_ID", uint256(3)))
         });
 
         uint64 genesisLastSeen = uint64(vm.envUint("GENESIS_LAST_SEEN_BLOCK_SEQ_NO"));

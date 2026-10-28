@@ -9,10 +9,7 @@ use alloy_primitives::{Address, U256};
 use crate::{
     deposit::{
         args::Network,
-        evm::{
-            read_allowance, read_balance, read_decimals, read_usdc, read_volume_limits, revert_of,
-            BlockTag, EvmRead,
-        },
+        evm::{read_allowance, read_balance, read_decimals, revert_of, BlockTag, EvmRead},
         retry::{deadline_after, until_with},
         ui::Ui,
     },
@@ -22,8 +19,11 @@ use crate::{
 /// What the EVM preflight learned.
 #[derive(Debug, Clone)]
 pub struct EvmPreflight {
-    /// The token the bridge takes deposits in.
-    pub usdc: Address,
+    /// The ERC-20 this deposit moves: `--token`, or the bridge's own
+    /// `usdc()` when it was left out.
+    pub token: Address,
+    /// The token's own `decimals()`, as the chain answered.
+    pub decimals: u8,
 }
 
 /// A preflight refusal (exit 2).
@@ -72,13 +72,17 @@ fn is_final(e: &anyhow::Error) -> bool {
     revert_of(e).is_some() || e.downcast_ref::<alloy::sol_types::Error>().is_some()
 }
 
-/// Checks the chain, the bridge, its token, the pause, the depositor's
-/// balance and that the RPC can serve what the prover fetches.
+/// Checks the chain, the bridge, the pause, the deposited token's
+/// precision, the depositor's balance in that token and that the RPC can
+/// serve what the prover fetches. The per-token caps are the caller's: it
+/// read the listing to resolve `token` and `listed_decimals`.
 pub async fn run(
     evm: &dyn EvmRead,
     ui: &dyn Ui,
     net: Network,
     bridge: Address,
+    token: Address,
+    listed_decimals: u8,
     amount: u64,
     from: Option<Address>,
 ) -> CliResult<EvmPreflight> {
@@ -107,16 +111,6 @@ pub async fn run(
             None,
         ));
     }
-    let usdc = read(ui, "reading the EVM bridge's token", || {
-        read_usdc(evm, bridge)
-    })
-    .await
-    .map_err(|e| {
-        refuse(
-            format!("{bridge}.usdc() failed: is this an AckiNackiBridge?"),
-            Some(e),
-        )
-    })?;
     let paused = read(ui, "reading the EVM bridge's pause", || {
         evm.bridge_paused(bridge)
     })
@@ -128,69 +122,43 @@ pub async fn run(
             None,
         ));
     }
-    let limits = read(ui, "reading the EVM bridge's limits", || {
-        read_volume_limits(evm, bridge)
-    })
-    .await
-    .map_err(|e| {
-        refuse(
-            format!("{bridge}: required deposit volume-limit getters failed"),
-            Some(e),
-        )
-    })?;
-    let requested = U256::from(amount);
-    if requested > limits.max_transfer {
-        return Err(refuse(
-            format!(
-                "deposit amount {amount} micro-USDC exceeds MAX_TRANSFER_AMOUNT ({})",
-                limits.max_transfer
-            ),
-            None,
-        ));
-    }
-    if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
-        return Err(refuse(
-            format!(
-                "deposit would exceed MAX_BRIDGE_TVL ({} micro-USDC); outstanding is {}. Wait for \
-                 withdrawals and retry",
-                limits.max_tvl, limits.outstanding
-            ),
-            None,
-        ));
-    }
     let dec = read(ui, "reading the token's decimals", || {
-        read_decimals(evm, usdc)
+        read_decimals(evm, token)
     })
     .await
-    .map_err(|e| refuse(format!("{usdc}.decimals() failed"), Some(e)))?;
-    if dec != 6 {
+    .map_err(|e| refuse(format!("{token}.decimals() failed"), Some(e)))?;
+    if dec != listed_decimals {
         return Err(refuse(
             format!(
-                "the bridge's token {usdc} has {dec} decimals, not 6: this is not the USDC the \
-                 bridge is built for"
+                "{token} answers {dec} decimals, but the bridge listed it with {listed_decimals}: \
+                 the amount would be scaled wrongly. The owner relists the token with its real \
+                 precision"
             ),
             None,
         ));
     }
     if let Some(f) = from {
         let b = read(ui, "reading the sender's balance", || {
-            read_balance(evm, usdc, f)
+            read_balance(evm, token, f)
         })
         .await
-        .map_err(|e| refuse(format!("{usdc}.balanceOf failed"), Some(e)))?;
+        .map_err(|e| refuse(format!("{token}.balanceOf failed"), Some(e)))?;
         if b < U256::from(amount) {
             return Err(refuse(
-                format!("{f} holds {b} USDC units, the deposit needs {amount}: balance too low"),
+                format!(
+                    "{f} holds {b} base units of {token}, the deposit needs {amount}: balance too \
+                     low"
+                ),
                 None,
             ));
         }
         // The approve step reads it: a token that cannot answer is refused
         // here, before the wallet is asked for anything.
         read(ui, "reading the sender's allowance", || {
-            read_allowance(evm, usdc, f, bridge, BlockTag::Latest)
+            read_allowance(evm, token, f, bridge, BlockTag::Latest)
         })
         .await
-        .map_err(|e| refuse(format!("{usdc}.allowance failed"), Some(e)))?;
+        .map_err(|e| refuse(format!("{token}.allowance failed"), Some(e)))?;
     }
     let head = read(ui, "reading the latest EVM block", || {
         evm.header(BlockTag::Latest)
@@ -212,7 +180,8 @@ pub async fn run(
         )
     })?;
     Ok(EvmPreflight {
-        usdc,
+        token,
+        decimals: dec,
     })
 }
 
@@ -270,12 +239,59 @@ mod tests {
             &RecordingUi::new(true),
             Network::Sepolia,
             BRIDGE,
+            USDC,
+            6,
             12_500_000,
             Some(sepolia_sender()),
         )
         .await
         .unwrap();
-        assert_eq!(p.usdc, USDC);
+        assert_eq!(p.token, USDC);
+        assert_eq!(p.decimals, 6);
+    }
+
+    /// A second listed ERC-20 is read in its own balance and precision.
+    /// The sender holds no USDC here: the bridge's own token says nothing
+    /// about whether this deposit can be made.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_token_is_read_in_its_own_balance_and_precision() {
+        const DAI: Address = address!("68194a729c2450ad26072b3d33adacbcef39d574");
+        const ONE: u64 = 1_000_000_000_000_000_000;
+        let f = healthy();
+        f.set_call(
+            USDC,
+            IErc20::balanceOfCall::SELECTOR,
+            U256::ZERO.abi_encode().into(),
+        );
+        f.set_call(
+            DAI,
+            IErc20::decimalsCall::SELECTOR,
+            U256::from(18u8).abi_encode().into(),
+        );
+        f.set_call(
+            DAI,
+            IErc20::balanceOfCall::SELECTOR,
+            U256::from(ONE).abi_encode().into(),
+        );
+        f.set_call(
+            DAI,
+            IErc20::allowanceCall::SELECTOR,
+            U256::ZERO.abi_encode().into(),
+        );
+        let p = run(
+            &f,
+            &RecordingUi::new(true),
+            Network::Sepolia,
+            BRIDGE,
+            DAI,
+            18,
+            ONE,
+            Some(sepolia_sender()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(p.token, DAI);
+        assert_eq!(p.decimals, 18);
     }
 
     #[tokio::test(start_paused = true)]
@@ -284,8 +300,10 @@ mod tests {
         wrong_chain.chain_id = 1;
         let no_code = healthy();
         no_code.codes.lock().unwrap().clear();
-        let not_six = healthy();
-        not_six.set_call(
+        // The token answers a precision the owner did not list it with: the
+        // amount the caller scaled is not the amount the token would move.
+        let relisted = healthy();
+        relisted.set_call(
             USDC,
             IErc20::decimalsCall::SELECTOR,
             U256::from(18u8).abi_encode().into(),
@@ -304,8 +322,8 @@ mod tests {
         for (fake, needle) in [
             (wrong_chain, "chain id 1"),
             (no_code, "no contract"),
-            (not_six, "decimals"),
-            (poor, "balance"),
+            (relisted, "the bridge listed it with 6"),
+            (poor, "balance too low"),
             (no_probe, "eth_getRawTransactionByHash"),
             (
                 paused,
@@ -317,6 +335,8 @@ mod tests {
                 &RecordingUi::new(true),
                 Network::Sepolia,
                 BRIDGE,
+                USDC,
+                6,
                 12_500_000,
                 Some(sepolia_sender()),
             )
@@ -339,6 +359,8 @@ mod tests {
             &ui,
             Network::Sepolia,
             BRIDGE,
+            USDC,
+            6,
             12_500_000,
             Some(sepolia_sender()),
         )
@@ -352,24 +374,26 @@ mod tests {
         assert_eq!(retries, 2);
     }
 
-    /// `usdc()` on a contract that is not the bridge answers something that
-    /// does not decode: refused at once, not after the read window.
+    /// `decimals()` on something that is not an ERC-20 answers what does
+    /// not decode: refused at once, not after the read window.
     #[tokio::test(start_paused = true)]
     async fn an_answer_that_cannot_change_is_not_tried_again() {
         let f = healthy();
-        f.set_call(BRIDGE, IDeposit::usdcCall::SELECTOR, Bytes::new());
+        f.set_call(USDC, IErc20::decimalsCall::SELECTOR, Bytes::new());
         let ui = RecordingUi::new(true);
         let e = run(
             &f,
             &ui,
             Network::Sepolia,
             BRIDGE,
+            USDC,
+            6,
             12_500_000,
             Some(sepolia_sender()),
         )
         .await
         .unwrap_err();
-        assert!(e.to_string().contains("is this an AckiNackiBridge"), "{e}");
+        assert!(e.to_string().contains("decimals() failed"), "{e}");
         let retries = ui
             .events()
             .into_iter()
@@ -387,6 +411,8 @@ mod tests {
             &RecordingUi::new(true),
             Network::Sepolia,
             BRIDGE,
+            USDC,
+            6,
             12_500_000,
             Some(sepolia_sender()),
         )
@@ -403,110 +429,12 @@ mod tests {
             &RecordingUi::new(true),
             Network::Sepolia,
             BRIDGE,
+            USDC,
+            6,
             12_500_000,
             Some(sepolia_sender()),
         )
         .await
         .unwrap();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn transfer_ceiling_and_tvl_headroom_are_inclusive() {
-        let f = healthy();
-        f.set_call(
-            BRIDGE,
-            IDeposit::treasuryBalanceCall::SELECTOR,
-            U256::from(9_950_000_000u64).abi_encode().into(),
-        );
-        run(
-            &f,
-            &RecordingUi::new(true),
-            Network::Sepolia,
-            BRIDGE,
-            50_000_000,
-            None,
-        )
-        .await
-        .unwrap();
-        let err = run(
-            &f,
-            &RecordingUi::new(true),
-            Network::Sepolia,
-            BRIDGE,
-            50_000_001,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("MAX_TRANSFER_AMOUNT"), "{err}");
-        f.set_call(
-            BRIDGE,
-            IDeposit::treasuryBalanceCall::SELECTOR,
-            U256::from(9_950_000_001u64).abi_encode().into(),
-        );
-        let err = run(
-            &f,
-            &RecordingUi::new(true),
-            Network::Sepolia,
-            BRIDGE,
-            50_000_000,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("MAX_BRIDGE_TVL"), "{err}");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn missing_or_malformed_limit_getters_refuse_before_wallet_use() {
-        for selector in [
-            IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR,
-            IDeposit::MAX_BRIDGE_TVLCall::SELECTOR,
-            IDeposit::treasuryBalanceCall::SELECTOR,
-        ] {
-            for malformed in [false, true] {
-                let f = healthy();
-                if malformed {
-                    f.set_call(BRIDGE, selector, Bytes::new());
-                } else {
-                    f.calls.lock().unwrap().remove(&(BRIDGE, selector));
-                }
-                let err = run(
-                    &f,
-                    &RecordingUi::new(true),
-                    Network::Sepolia,
-                    BRIDGE,
-                    1,
-                    None,
-                )
-                .await
-                .unwrap_err();
-                assert_eq!(err.exit_code(), crate::errors::ExitCode::PreflightRefused);
-                assert!(
-                    err.to_string().contains("volume-limit getters failed"),
-                    "{err}"
-                );
-            }
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn transport_failure_while_reading_limits_never_skips_them() {
-        let f = healthy();
-        *f.calls_before_failing.lock().unwrap() = Some(1);
-        let err = run(
-            &f,
-            &RecordingUi::new(true),
-            Network::Sepolia,
-            BRIDGE,
-            1,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("volume-limit getters failed"),
-            "{err}"
-        );
     }
 }

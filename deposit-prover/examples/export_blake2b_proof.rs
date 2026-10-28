@@ -9,7 +9,7 @@
 //! prover circuit + PK, emitting:
 //!   * `--proof-out`    : raw SHPLONK proof bytes (Blake2b, no header) — the
 //!     `proof_cell` operand.
-//!   * `--pubin-out`    : the 12 public inputs as `N × 32` LE `Fr` — the
+//!   * `--pubin-out`    : the circuit's public inputs as `N × 32` LE `Fr` — the
 //!     `public_inputs_cell` operand.
 //!
 //! It then verifies the (vk, instances, proof) triple in-process with
@@ -31,7 +31,10 @@ use axiom_eth::utils::{
 };
 use clap::Parser;
 use deposit_prover::{
-    circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    circuit_v2::{
+        DepositEventCircuitV2, DEPOSIT_NUM_PUBLIC_INPUTS, PRODUCTION_MAX_DATA_BYTE_LEN,
+        PRODUCTION_MAX_LOG_NUM,
+    },
     provable::exit_if_unprovable,
     prover::{
         get_or_create_proving_key, load_kzg_params_from_trusted_setup, CircuitConfig,
@@ -131,8 +134,8 @@ fn main() -> anyhow::Result<()> {
 
     let instances: Vec<Vec<Fr>> = circuit.instances();
     anyhow::ensure!(
-        instances.len() == 1 && instances[0].len() == 12,
-        "expected 1 instance column of 12 inputs, got {:?}",
+        instances.len() == 1 && instances[0].len() == DEPOSIT_NUM_PUBLIC_INPUTS,
+        "expected 1 instance column of {DEPOSIT_NUM_PUBLIC_INPUTS} inputs, got {:?}",
         instances.iter().map(|c| c.len()).collect::<Vec<_>>()
     );
     let inst0 = instances[0].clone();

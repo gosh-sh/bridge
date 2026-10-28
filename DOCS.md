@@ -74,7 +74,7 @@ covering one genre for one audience. The archive exists so that step loses no kn
 |---|---|---|---|
 | `docs/EVM-contracts-spec.md` | reference (exists) | Contract system, ABI, storage, deploy, tests, security observations | — already verified |
 | `docs/architecture.md` | design | Four circuits, cross-circuit binding, the two directions end to end, trust assumptions | `four_circuit_architecture.md`, `audit_trail_v2.md`, `integration_analysis.md`, `storage_v2_abi_note.md` |
-| `docs/deposit-direction.md` | design + reference | ETH → AN: 12 public inputs, proven `chainId`, MPT depth, VK reproducibility, the AN-side consumer | `deposit_*.md` (7 files), `verifying_eth_proof_on_an.md`, `zk_halo2_an_side_design.md`, `zkhalo2verifywithvk_reference.md` |
+| `docs/deposit-direction.md` | design + reference | ETH → AN: 13 public inputs, proven `chainId`, MPT depth, VK reproducibility, the AN-side consumer | `deposit_*.md` (7 files), `verifying_eth_proof_on_an.md`, `zk_halo2_an_side_design.md`, `zkhalo2verifywithvk_reference.md` |
 | `docs/withdrawal-direction.md` | design + reference | AN → ETH: `verifyBlock`, `applyBkSetUpdate`, Circuit 4 payout, anchors and windows | `circuit_4_open_questions.md`, `an_eth_daemon_withdraw_e2e_*.md`, `shellnet_an_eth_relayer_wiring.md` |
 | `docs/operations.md` | operations | Running the daemons, the two live lanes, deploy timing, failure modes actually hit, monitoring queries | `archive/crates/bridge-prover-libraries/docs/live_*_runbook.md` (the freshest material in the archive), `archive/audit/*runbook*.md`, `bridge_verification.md` §11 |
 | `docs/verification.md` | verification | How to convince yourself a proof and a deployment are correct, stage by stage. The **contract-side** invariants of that material — DEP-#, CUST-#, CEI-# — were re-derived early, in answer to audit question QC-A1-4, and now live in `EVM-custody-and-accounting.md`; what remains here is the proof pipeline (LH-#, CC-#, OR-#, FORK-#) | `verifying_an_proof.md`, `bridge_verification.md`, `manual_verification_runbook.md` |
@@ -84,8 +84,11 @@ covering one genre for one audience. The archive exists so that step loses no kn
 **Known traps in the source material** — carry these into the rewrite, they are verified against the
 code and were wrong in the old docs:
 
-* Deposits take **USDC** via `transferFrom`, signature `deposit(uint256,bytes32)`, cap
-  50 USDC (with `type(uint64).max` retained as a width guard). Any archive text with `msg.value`, ETH deposits or a `100 ether` cap is dead.
+* Deposits take **any listed ERC-20** via `transferFrom`, signature
+  `deposit(address,uint256,bytes32)`; the per-transaction cap is the owner's per-token
+  `maxTransfer` (USDC is listed with 50 USDC), and `type(uint64).max` is retained as a width
+  guard — it is the ceiling `gosh.mintecc` imposes. Any archive text with `msg.value`, ETH
+  deposits, a `100 ether` cap or a USDC-only deposit path is dead.
   The contract has no `receive()`/`fallback()` — it cannot hold native ETH at all.
 * Verification is **SHPLONK aggregator Yul** for four circuits. 
 * BK-set rotation **shipped** as `applyBkSetUpdate` (16-leaf, depth-4). Archive text calling it

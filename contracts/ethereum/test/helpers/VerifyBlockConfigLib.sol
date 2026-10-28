@@ -93,7 +93,7 @@ library VerifyBlockConfigLib {
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            usdcTokenId: 0
         });
     }
 
@@ -112,7 +112,7 @@ library VerifyBlockConfigLib {
             accFr: accFr,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            usdcTokenId: 0
         });
     }
 
@@ -125,7 +125,7 @@ library VerifyBlockConfigLib {
         uint256 accFr,
         uint256 altDstChainId,
         uint256 altDstHostChainId,
-        uint256 altTokenId
+        uint32 usdcTokenId
     ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory) {
         return AckiNackiBridge.BridgeWithdrawConfig({
                 bridgeWithdrawalVerifier: verifier,
@@ -133,7 +133,7 @@ library VerifyBlockConfigLib {
                 accFr: accFr,
                 altDstChainId: altDstChainId,
                 altDstHostChainId: altDstHostChainId,
-                altTokenId: altTokenId
+                usdcTokenId: usdcTokenId
             });
     }
 }

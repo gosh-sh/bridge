@@ -51,7 +51,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.14.0";
+    string constant version = "1.15.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -189,7 +189,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // `export_deposit_proof_set`:
     //   deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin
     // Magic "VKBLOB\x00\x00" + version 2, shape "Rlc". 13071 bytes;
-    // sha256 = 0180ee5af41ba3f408d38bf0c10c005c6618ad379d38da97a7ccc07ab1c3efa1.
+    // sha256 = f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9.
     // To rotate: regenerate the fixture above, then rewrite the constant
     // below and the sha256 above with
     //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol
@@ -252,8 +252,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"66b91f8eaa063b1dcb8263572e565a392762af7e10c1a75f60adcaab233e81d4577b02051aed3a59139e595f0fee4df313cb9e32a57d8cd3be419442"
         hex"c219636bbede02b7584519a3f203f288fecab4cd3589be5de2b8ce1b739668b15e0a39267337188a16a452596d540bcc309b374d6a1c879da69d3093"
         hex"0a763aaa7cd640741495170cd8977572f2eb7c9c4ab0ed27e774ee6599ee29d4bfb2c90cb63926aeab7e134070fade585255c8c481ae77e7f1d3cf95"
-        hex"fa8b84842d2a1dd7e74ab627f620240a867967f5c37d58de35fe349547563c2e62422bdf337e9886d9fc3c20d9612b5be025f10381ca2c870ccc3813"
-        hex"8d34b3458a4dd39bf2bdebb89a5ba6943639307a14f2386df5e65efaeea8d550bb3abdd45acc4ed5f2a396bc776f9b6c2dd107983c910153fb861095"
+        hex"fa8b84842d2a1dd7e74ab627f620240a867967f5c37d58de35fe349547563c2e62422bdf337e9886d9fc3c20d9612b631c36a63d749dc8ce40b126b9"
+        hex"bd5d8f40cdd2e84d83122f979763b18757bb0d9a66b1df416482e868648b611f629529665b6f294d81e08405c890a04adb071c983c910153fb861095"
         hex"216c8581742d360343a4369294de9bfe9b3dfefbe05821072e19499fed491d7d84261ffac9a40273033a83d14278cd2be543f40f6e8c07983c910153"
         hex"fb861095216c8581742d360343a4369294de9bfe9b3dfefbe05821072e19499fed491d7d84261ffac9a40273033a83d14278cd2be543f40f6e8c0701"
         hex"38047bef994ac89b33d2d22877e299b4b953e117a595c963f014988a6df023137f3d82569ee78160eda14f861989cccb81b5bd09499e45547d589ba2"
@@ -299,22 +299,22 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"8b13047c959483a42bf42773c145af3b2560ad3a59fafb06b2436a299d8005ee2b537d356a9a7fde0a98c3898f839c18f596249ae78e4711a78069e8"
         hex"61ae027c21fbbb7cf089485974df19440fc85eeed0ce89c85ff4d1de5a3a2e8bab1914bd465b5daa8814d9dac1d849034b4963492ed0959e06811c1d"
         hex"77530d35e30e1b3d92719ecfed99a60e0409a768270a27a77936b19249ff52c9ad47b72855900dea38d68353dc4f0bbc88d27496312e1381962af702"
-        hex"f079bb0468f1f628c5e72227b45e9baafbdad7e47552f1cb2f3fbc5f7a65c112311710940794f8e48c4a23da3f0c3b24c1d6ac27d4113944e7365beb"
-        hex"de52dedbdeef4a05e826bc1886ff19d145d38314eace47377b514427185de0f1595909c06c9511e92db0bae350751f19c9bffae66ab757783261a72b"
+        hex"f079bb0468f1f628c5e72227b45e9baafbdad7e47552f1cb2f3fbc5f7a65c112311710940794f8e48c4a23bc86fe6e8e80055299006af6fe3b4f058c"
+        hex"697eed86122cf206fd73b10e1db10fa38bcc14c75cff1e3d19b270316a805caeaa851c37485fb365e881bd40c7410c19c9bffae66ab757783261a72b"
         hex"ee496613ce11bd33acde9a00fc649ca9e8120e54a4c280b68062953be8357771215a1ee257286bf60f23cc963ee40feeb4552a2f97c7f77bccfb41b1"
         hex"1377ca4ecc290f0d318c4ec7926530168add94603f0b0caef62ffbb14bac7876f835cc98a5afe7310125dc961bb3c5412c7d00ef19191fdb5812f977"
         hex"f08666c3a71f02bd19460c1c7c3ba4e3b086b2bae3f8667861e621ad78dec8f77c8d5d90de8af113f652766e170af9c064abc9884c94a749e3ce2e59"
         hex"22d00a7c29dac6456000e7f9e7bd3a170e8869a951cce817f8543a7e289714c64c52befff5c7c3a536cecd7919508c0f972e9805f0b149289ccf3ad8"
         hex"bb6114d31e29efd3a7e2a0a5d4280fa122df22cc658f0be9f8377bd2710a020a08b329d7482da8182e039f960fb00432c97839b5aa4ac146655cfce1"
-        hex"28eb06b783871de66b196f555eef7404fae9bee37681e50b5d4561310e0af56a55421c30f0961ce209af5d81cdb4e66e9f2b0e35e3d83cb27faf3c59"
-        hex"dd56342fd53e1261a7b10f0abe06b740f731b579fccc903632faf7f8931ff2f582cca23533172e3a124607eb8dc9da549f8eac94550d8c7bb3d96111"
+        hex"28eb06b783871d3463db686d48f75db0d7b94958d0974b14b72f4b89f658f0d9c1268c4ce71d277357c6ab366ea5c21ba528ab8c912b61ddd4edd187"
+        hex"49c41bf2acad139a0b830d0abe06b740f731b579fccc903632faf7f8931ff2f582cca23533172e3a124607eb8dc9da549f8eac94550d8c7bb3d96111"
         hex"8b9d2cf51101bf9a4a8532ec87ee27d4623d45171d711e90c3c2511e0c035e3fb9c58cef960e6e509dcc18d3f06c25a061407752ca6df979dd80fd1d"
         hex"46fc9617a9f3c965440ecf1e254f81ad66702a281f1bb7e64b22ac8f50e38784ff19c32a10e05ea8a58ffa297415cb3c9b720d12c1fc75c1f55aefc8"
         hex"836c93c22ea32eff0e902d7ebc52bfa30ece20b4260816d029cb5d84d0aaa3fc735bcd743ee2af3e1aba03feceeed928c1c71ac14ec02fea416c9591"
         hex"026099029b9a942736fd83d108358b00a718193ca83b767a4058271d2a69a1601c197de486dca412aa4f935f697bf09e4e52a4205efa591034c20cf9"
         hex"be6a5fa397c85103f66377376f5ed488303d7649cefe49b68f6d9d6914e922e2a0ea13f8acd7c3a02df4ccfc89d7ea260ed0e706eee819f7166d7b85"
-        hex"c4602e479808271e10ffb881b49801cc41c85b2a05b073ee8352166c65cf46d31efe1138c2710da7c5e670b29275566500638029bbf7a1097cda6572"
-        hex"d2131551d6f61fc06da01a1150988cd000454f40c18dffeb06ec8e424bb3c9e32d02b7a4d58629076d3b73308444214bd6c0f04d52586d15a438607c"
+        hex"c4602e479808271e10ffb881b49801cc41c85b2a05b073ee8352166c65cf46d31efe11e331b82817601d1221f6b1e40f3f9db58b4c06345a5675719f"
+        hex"5f29638790432985bb5bfaeac993323628bc53b36255018b6876259bbdb9e7d64fbac5eb13ad21076d3b73308444214bd6c0f04d52586d15a438607c"
         hex"c4457d6fbd886fcc3cbb2c6d12d90c5fde8fc55c277abd3ec5c921d65508990ec4a820939cfcdd028c40246cfbf5d04d5c4116259993b92dfa492c35"
         hex"9b105f25b8f64359fba41941eb541e976b4a33decca5ea60351f0fa5e91bc76036feaf7466c39ee76076541426402746d234868875a13f37ca016e8f"
         hex"a5e0e3a25e7743b8f90eb07cb57cd3842547271bda27e0dc5e6099216ecd59eb8bffc52352c5477784f441575aa08f4cc32426aa4a1d8417bf0bc281"
@@ -349,15 +349,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"2c1cb84450c329387ccabd4b438bd5f14d47fb552f5161af7ce44ccac8370c32914ebb500e961d6a034aa3ba0bb407ca4141813c560ba450b7677bea"
         hex"c937567a4e0bc38864f127b8a625002a7545f9d52a5e4c3f793faeddf3d7bbef60e25e38fcc9986aa6c701a01f93edf508914a41df954482110521e8"
         hex"f9ce26a048ad53b1798202a41ddf1c55116fc79d38814b6a130657ac956febd1c1314513b1dfec1296fafe833b75049726f717a6c8a85cea8ffb9b9b"
-        hex"c0609d2207d167f8a7256aa0e5e6f1509c8115c790c745f609da4e2f530a91b2dd7313588d01e6ed049261d9822e4b3a993e2c2ead8df6db5a9e5cc7"
-        hex"e2299ccdb28e98f67e2f0c0cb3c14802f49f484c7a76077881f00b8d8242ac305426db16e6ddc007fa2f354bd4245f90064e7c1fe9e627dde36b2feb"
+        hex"c0609d2207d167f8a7256aa0e5e6f1509c8115c790c745f609da4e2f530a91b2dd7313588d01e6ed049261d9822e4b3a993e2cf8246b8245e296d3a7"
+        hex"5e6907342354823365c8a594f2fad722bcfd7f052762130e8009b6da2577788a2a9ee54a763915a776e11e85a4ab68c85b06ffe1a74d1ddde36b2feb"
         hex"ba8e3b26fcc98cb7da744a58bf4812f97147ef2fd91326db33211e290ae71096724237558a869a554e85481aeae4e4e761668a92cfd3c3d7b1d604d8"
         hex"eed396409cea570ce176fbd4375d58072ef64cc56e13b46bf4f26a90a6f92724d9fb9b9cc3b440d6f1a145f8cc75f152caf45bc31788c2110dc46ff8"
         hex"4d4c1769aa78d729cba3c4dba49bffbc23914fc10165b2af51a30132371e15051b120e9055c36e5dc14dc076dc58a84de7f66e7d9aeb1663dddb92db"
         hex"3f80c3ce1bdb0722f7def545ad07c1097d7131f5d52ca54e8363877d2acbf12998e5ac1314241d896775bb506426a0f1ca42a7ac370f658daf51fb61"
-        hex"c6d024170a488fde8e2a30dd07f27b61acf881ee1754315448da55089e5d4626a5e29ae5c6af57504cf11da09733da8d159c2108a39c108364ddf6f3"
-        hex"3e78bb7396a5c8c409d5cebfa7d00d2918172fe471773aea7ceae20f7c8c2caa27e0c50f2e935ffbfbff350bd7ce04ae4dd4f35e60ae6ee9c2f994e3"
-        hex"eaa601f3f9f588fc0666da73157b8bbc488d29435da78ece60b9cb75e5b580578d089ab56dad740a02582faf40afff2c87162b64b87406dc182cee61"
+        hex"c6d024170a488fde8e2a306208558b989daaea987dc78d9e8078f463029b3e748de23d09cfd9a62fae5e2400c5d9a2b42cd01fa7cdf3d36a5f66ad86"
+        hex"16f30369ccfc95429513cd04ab1a02a178447495fbd9149459cc2ac6c3749e782bc1c48e6da9ef5bdf18698679d92d298eb2eb953e67b31830ae29c0"
+        hex"3849d9ea9b251c6c534e3404e2c0f1c88fb00a435da78ece60b9cb75e5b580578d089ab56dad740a02582faf40afff2c87162b64b87406dc182cee61"
         hex"d330071a3c33a71ffc4acf6b55aaf3cecd40fc922ace1633fbcb5fbd70e94f5ce63ec4d1ae4ab80233d14fb118970cb9b0404fa594a60141498ec1ca"
         hex"8ce5118f520d50a691f5fa302b4d765c39febcb0e511c5e384f02dced05c7c3196414b285851c00f6783df72eb2e9729fd935536e70c76aa51522af0"
         hex"d45002b51af308e68a16ed27a32bd97b780a3ac79220d1d0b56be97b1b031a55e1708f472ee01844c9ccc5d22192f2fafa057216eff5b461b5185076"
@@ -402,11 +402,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"d84eceb02b47e2601a60a6d68a08862f003fb3ce589bef87acba0204fa2fc43509b3486dba281d9595692f0645e92857219db2991b3d481f0da01553"
         hex"4b2a53ba784bb34c29311b827a8188c8334380d2abf3a1c3bcb39ff621a90ed8f53a069d3ad23ced2e46b4df9b1f08063cbd2a9094b3008d14106d2e"
         hex"0da820c68f7c36e9ee4d5e2db0e064c51ecb9a70a9c201835907c14bbf6e7d960b6325ac131cf65b8449ca44f71934cf8b72df7fa403ee2565032d36"
-        hex"fc2e5a323ea0274b682fd30d3cd5242398fec5efaa3485aa80772cac5e3f8ea388596145e932021dbb988e00221d3f6869b53ce3165e6c022f89ccdd"
-        hex"b62ceb5d5eca6eff670b13984f26834cd7c115a01c1e38de8eb4dd523d1d434f7ef1f079c8eea06eeaa52f02131fd98ced959705bcd57e8a788648d5"
-        hex"78b7f7884e0818b8109a5aad6b6511ffaee0c9ab1f4015758710dbaa380c0be46b1e06dd2f9b4d31cdbbe4ec037f065461d06173cbeb0a7e1d5a9ff7"
-        hex"5e8d155d69d3cd26314060a0f0a8f8b517f90c758ce1ea61c8d877913d4475a27adc25bd206cfa6107786bda9b71c3a0c81c27e3ff58bb08268cbaec"
-        hex"b8fb98e48f41744a059785b0068fc2aa41cbe3a553690edb0fe34eec06e875bddc319f962b743a77361b940343f7eb552e64356bc8652d036464628c"
+        hex"fc2e5a323ea027f439041b39b4be99124ed94aad2349d33cc114b2e62fff3eec0b191090dc8412c6f3489d48b86a49aa621ce22f6a79983e3bc38a79"
+        hex"3f1dbd798392b20677f21396959cec6110d2fdf4e0fcf9ea6ad57a8a531722954cf5fbf9cb61fc38096f0da3d8889a5402c80f2449e4368cfedea7d2"
+        hex"4ed5bb03f434b2140f3850c9ffdf03ffaee0c9ab1f4015758710dbaa380c0be46b1e06dd2f9b4d31cdbbe4ec037f065461d06173cbeb0a7e1d5a9ff7"
+        hex"5e8d155d69d3cd26314060a0f0a8f8b517f90cd510105effb57389a5a3bd8f6024fe4644505a6c053872f8858a63f972b23b022bf1d356cfbeedd2bc"
+        hex"759a514a5cead10a32535539fcf6e2cf47319177e32028db0fe34eec06e875bddc319f962b743a77361b940343f7eb552e64356bc8652d036464628c"
         hex"0b940aa594e1f7c65fe9d8dfbd8229ef50601a7d5840b9f00f0f2b81867cc2ba295c607e48d86f84ba289122cc18bcc9d4758664d78cb3c1416e018e"
         hex"4a2bbf39cd75262d286dfc295a63629105ec51297fdc40e70473280c31df1c21f4cd8178df9f24a09653effa15d6b9380ae30f72fac78bae7a2aa154"
         hex"5b042a38d2583972c4c44b799a858a616c7a5cd86dd696ad80892f23aab1cc881ee012719ca5c118067ea6024211c712b71940d55405455554cd59da"
@@ -991,12 +991,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
     ///                         `proof_cell` operand of TVM opcode
     ///                         ZKHALO2VERIFYWITHVK (0xC7 0x4A).
-    /// @param publicInputs  — the circuit instance column: 12 × 32-byte LE Fr
+    /// @param publicInputs  — the circuit instance column: 13 × 32-byte LE Fr
     ///                         (deposit_id, sender, amount, contract, chain_id,
     ///                         dapp_hi, dapp_lo, an_account_hi, an_account_lo,
-    ///                         + 2 block-hash halves + promise commit). Verified
-    ///                         verbatim; business fields read at fixed offsets —
-    ///                         see `_parsePublicInputs`.
+    ///                         + 2 block-hash halves + token + promise commit).
+    ///                         Verified verbatim; business fields read at fixed
+    ///                         offsets — see `_parsePublicInputs`. `token` is
+    ///                         appended at Fr #11 so Fr #0..#10 keep their
+    ///                         positions: this side reads them positionally and
+    ///                         stops before #11. Nothing here reads the token,
+    ///                         so every accepted deposit still mints
+    ///                         `USDC_ECC_ID`; the CLI refuses a deposit of any
+    ///                         other listed ERC-20 until this side carries a
+    ///                         token registry.
     function finalizeDeposit(bytes proof, bytes publicInputs) public {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         require(!_paused, ERR_PAUSED);

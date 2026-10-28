@@ -35,7 +35,10 @@ use axiom_eth::utils::{
 };
 use clap::Parser;
 use deposit_prover::{
-    circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    circuit_v2::{
+        DepositEventCircuitV2, DEPOSIT_NUM_PUBLIC_INPUTS, PRODUCTION_MAX_DATA_BYTE_LEN,
+        PRODUCTION_MAX_LOG_NUM,
+    },
     halo2_tvm_bundle::{CircuitShape, VkBlob},
     prover::{
         get_default_params, load_kzg_params_from_trusted_setup, CircuitConfig,
@@ -170,8 +173,8 @@ fn main() -> anyhow::Result<()> {
 
         let instances = circuit.instances();
         anyhow::ensure!(
-            instances.len() == 1 && instances[0].len() == 12,
-            "proof_{i:02}: expected 12 public inputs, got {:?}",
+            instances.len() == 1 && instances[0].len() == DEPOSIT_NUM_PUBLIC_INPUTS,
+            "proof_{i:02}: expected {DEPOSIT_NUM_PUBLIC_INPUTS} public inputs, got {:?}",
             instances.iter().map(|c| c.len()).collect::<Vec<_>>()
         );
         let inst0 = instances[0].clone();

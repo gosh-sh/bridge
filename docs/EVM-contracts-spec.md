@@ -136,8 +136,8 @@ There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface c
 |---|---|---:|---|
 | `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
 | `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | First deposit width guard (`DepositTooLarge`); the product limit below is lower. |
-| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 57 | 50 USDC per deposit or withdrawal (`TransferTooLarge`). |
-| `MAX_BRIDGE_TVL` | `10_000 * USDC_UNIT` | 58 | Per-contract cap on `treasuryBalance`, including Aave principal (`TvlCapReached`). |
+| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 57 | The per-transaction cap the constructor **lists USDC with**. Not enforced directly any more: `deposit` and `withdrawByProof` read the listing's `maxTransfer`, which `setTokenLimits` can move (`TransferTooLarge`). |
+| `MAX_BRIDGE_TVL` | `10_000 * USDC_UNIT` | 58 | The outstanding-liability cap the constructor lists USDC with, including Aave principal; per listing thereafter (`TvlCapReached`). |
 | `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
 | `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
 | `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
@@ -159,23 +159,34 @@ relying on them for a storage-level migration.
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
-| 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
-| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
-| 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
-| 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
-| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
-| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
-| 7 | 20 | `paused` | `bool` | 149 | `pause`, `unpause` |
-| 8 | 0 | `_reentrancyStatus` | `uint256` | 154 | `nonReentrant` |
-| 9 | 0 | `storedBkSetCommitment` | `uint256` | 182 | constructor, `applyBkSetUpdate` |
-| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
-| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
-| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
-| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 284 | `withdrawByProof` |
-| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 303 | `_appendLayer` |
+| 0 | 0 | `depositCounter` | `uint256` | 117 | `deposit` |
+| 1 | 0 | `treasuryBalance` | `uint256` | 126 | `deposit` (+ USDC only), `withdrawByProof` (− USDC only) |
+| 2 | — | `_tokens` | `mapping(uint32 ⇒ TokenInfo)` | 158 | constructor, `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`, `delistToken`, `_creditLiabilities`, `_debitLiabilities` |
+| 3 | — | `_tokenIdOf` | `mapping(address ⇒ uint32)` | 162 | `listToken`, `delistToken` |
+| 4 | — | `_tokenRegistered` | `mapping(address ⇒ bool)` | 165 | `listToken`, `delistToken` |
+| 5 | 0 | `_listedTokenIds` | `uint32[]` | 169 | `listToken`, `delistToken` |
+| 6 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 175 | constructor only |
+| 6 | 20 | `aaveEnabled` | `bool` | 191 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
+| 7 | 0 | `suppliedPrincipal` | `uint256` | 194 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
+| 8 | 0 | `liquidReserveBps` | `uint256` | 199 | constructor (`1_000`), `setLiquidReserveBps` |
+| 9 | 0 | `owner` | `address` | 202 | constructor, `acceptOwnership` |
+| 10 | 0 | `pendingOwner` | `address` | 205 | `transferOwnership`, `acceptOwnership` |
+| 11 | 0 | `yieldRecipient` | `address` | 208 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
+| 11 | 20 | `paused` | `bool` | 214 | `pause`, `unpause` |
+| 12 | 0 | `_reentrancyStatus` | `uint256` | 219 | `nonReentrant` |
+| 13 | 0 | `storedBkSetCommitment` | `uint256` | 247 | constructor, `applyBkSetUpdate` |
+| 14 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 254 | `applyBkSetUpdate` |
+| 14 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 258 | constructor, `verifyBlock` |
+| 15 | 0 | `storedPrevBkSetCommitment` | `uint256` | 265 | `applyBkSetUpdate` |
+| 16 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 351 | `withdrawByProof` |
+| 17 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 370 | `_appendLayer` |
+
+Regenerated from this tree with `forge inspect src/AckiNackiBridge.sol:AckiNackiBridge
+storageLayout`. **The token registry took slots 2–5**, so everything from
+`blockHeaderOracle` on moved four slots down: any tool that reads this contract's storage by
+slot number — an indexer, a fork-state fixture, a hand-written `eth_getStorageAt` — has to be
+regenerated against the new deployment. Nothing upgrades in place: `usdc` and `aUSDC` are
+immutable, so this is a fresh deployment either way.
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -191,7 +202,8 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `storedPrevMaxLevelLayerHash` | `uint256` | 204 | **Genesis seed only** since storage v2.0 (2026-08-04). Read exclusively by `_expectedPrevAnchor` when no layer window is populated (`:1118`). |
 | `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
-| `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId`, `bridgeWithdrawalAltTokenId` | `uint256` | 232, 236, 239 | Shellnet/testnet aliases (§7.2). |
+| `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId` | `uint256` | 232, 236 | Shellnet/testnet destination-chain aliases (§7.2). |
+| `usdcTokenId` | `uint32` | 241 | The AN ECC currency id USDC is listed under, and the id the constructor lists it with. **Replaces `bridgeWithdrawalAltTokenId`**: a payout is no longer accepted for `tokenId == 0` *or* an alias — it is accepted for whatever id the registry lists, and this one is the id whose book is `treasuryBalance`. A deployment that passed `WITHDRAW_ALT_TOKEN_ID=3` passes `USDC_TOKEN_ID=3`. |
 
 ### 4.3 `HistoryWindow` (`:259-271`)
 
@@ -236,7 +248,7 @@ wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); whe
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
-`altDstHostChainId`, `altTokenId`.
+`altDstHostChainId`, `usdcTokenId`.
 
 Validation performed (and *not* performed):
 
@@ -246,7 +258,7 @@ Validation performed (and *not* performed):
 | `_usdc != 0` | 581 | else `InvalidUsdc` |
 | AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
-| C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
+| C4 verifier set ⇒ `dappFr`, `accFr` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr`. `usdcTokenId` is a `uint32` and needs no range check. |
 | `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:141`). |
 | verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
 
@@ -259,41 +271,57 @@ emitted (`:637-643`).
 ## 6. ETH → AN: deposits
 
 ```solidity
-function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused  // :774
+function deposit(address token, uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused  // :906
 ```
 
 `whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
 
-Sequence (`:774-785`):
+Sequence (`:906-929`):
 
 1. `amount != 0` else `InvalidAmount`.
-2. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge`, then
-   `amount <= MAX_TRANSFER_AMOUNT` else `TransferTooLarge`.
-3. `anAccount != 0` else `InvalidAnAccount` — an EVM address is not a valid AN recipient, so the
+2. `anAccount != 0` else `InvalidAnAccount` — an EVM address is not a valid AN recipient, so the
    256-bit TVM destination is supplied explicitly.
-4. `treasuryBalance + amount <= MAX_BRIDGE_TVL` else `TvlCapReached`, before any token call.
-5. `_pullExactUsdc(amount)` calls `usdc.transferFrom`; a `false` return ⇒ `TransferFromFailed`.
-   The received balance delta must equal `amount`, else `TransferAmountMismatch` (`:1538-1547`).
-6. `depositId = depositCounter++`, `treasuryBalance += credited`.
-7. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp)`.
+3. `_requireDepositableToken(token)` (`:1118`) resolves the token's id: `TokenNotListed(token)`
+   when the owner never listed it, `TokenDepositsDisabled(tokenId)` when deposits are closed for
+   it. Withdrawals ignore that switch.
+4. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge` — still `type(uint64).max`, the ceiling
+   `gosh.mintecc` imposes on the AN side — then `amount <= info.maxTransfer` else
+   `TransferTooLarge`. The cap is **per listing**, not the global `MAX_TRANSFER_AMOUNT` constant,
+   which is only the value the constructor lists USDC with.
+5. `liabilitiesOf(tokenId) + amount <= info.tvlCap` else `TvlCapReached`, before any token call.
+   `liabilitiesOf` (`:1055`) answers `treasuryBalance` for `usdcTokenId` and the listing's own
+   counter for every other token, so USDC keeps one book and the Aave accounting is untouched.
+6. `_pullExact(IERC20(token), amount)` (`:1911`) calls `transferFrom`; a `false` return ⇒
+   `TransferFromFailed`. The received balance delta must equal `amount`, else
+   `TransferAmountMismatch` — the exact-balance check now applies to **every** token, so a
+   fee-on-transfer token is rejected whichever id it is listed under.
+7. `depositId = depositCounter++`, then `_creditLiabilities(tokenId, credited)` (`:1126`).
+8. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token)` (`:386`).
 
 Notes that matter downstream:
 
-* Funds stay as plain USDC in the contract; batching into AAVE is a separate owner action (§10).
+* Funds stay as the plain ERC-20 in the contract; batching into AAVE is a separate owner action
+  (§10) and stays **USDC-only** — the yield invariants are single-asset. Listing an aToken is
+  refused outright (`CannotListAToken`), because its rebasing balance would make depositor
+  principal look like harvestable yield.
 * The received amount must match the requested amount exactly; a fee-on-transfer token is
-  rejected before `depositCounter` or `treasuryBalance` changes (`:1538-1547`).
+  rejected before `depositCounter` or the listing's liabilities change (`:1911`).
 * The `Deposit` **event layout is a hard cross-repo ABI**: the off-chain prover parses
-  `topics[1] = depositId`, `topics[2] = sender`, and reads three data words:
-  `amount` at bytes 0..32, `anAccount` at 32..64, and `timestamp` at 64..96.
-  Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`. The circuit constrains
-  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:834-835`) and binds the
-  account from word 1 (`:1009-1011`).
-  This format requires the matching deposit VK; the earlier workchain-bearing
-  event and its proofs are incompatible.
-* The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
-  dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
-  (`crates/deposit-relayer-daemon/src/types.rs:98-110`). The DApp ID remains a
-  config-supplied tag; removing workchain does not change its meaning or PI slots.
+  `topics[1] = depositId`, `topics[2] = sender`, and reads four data words:
+  `amount` at bytes 0..32, `anAccount` at 32..64, `timestamp` at 64..96 and `token` at 96..128,
+  the address in the low 20 bytes with the 12 padding bytes constrained to zero.
+  Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`, which rejects any other data
+  length (`:110`) and any non-zero padding (`:145`). The circuit constrains the 128-byte data
+  length (`deposit-prover/src/circuit_v2.rs:880`), binds the account from word 1 and the token
+  from word 3 (`:1078`, `:1159`).
+  This format requires the matching deposit VK; the earlier five-field event and its proofs are
+  incompatible.
+* The proof's 13 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
+  dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, token, promise_commit`
+  (`deposit-prover/src/circuit_v2.rs:74-90`,
+  `crates/deposit-relayer-daemon/src/types.rs:45,155-156`). `token` is **appended** at slot 11 so
+  that slots 0..10 keep their positions: the AN side reads public inputs positionally. The DApp ID
+  remains a config-supplied tag.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The
@@ -304,9 +332,11 @@ Notes that matter downstream:
 
 ## 7. AN → ETH
 
-`withdrawByProof` also refuses `pub.amount > MAX_TRANSFER_AMOUNT` with
-`TransferTooLarge` before proof verification or nullifier consumption. The
-10,000 USDC cap applies to each funded L1 bridge separately. Pair it with AN
+`withdrawByProof` also refuses `pub.amount` above the **current** `maxTransfer` of the listing
+the proof's `tokenId` names, with `TransferTooLarge`, before proof verification or nullifier
+consumption. That cap is owner-movable through `setTokenLimits`, so a client must read
+`tokenInfo(tokenId).maxTransfer` rather than the `MAX_TRANSFER_AMOUNT` constant before burning
+ECC. The outstanding-liability cap applies per listing and per funded L1 bridge separately. Pair it with AN
 1.13.0 chain accounting and complete old transfers before activating a fresh
 pair; see [the deployment procedure](../contracts/an/README.md#deployment).
 No EVM storage slots or deposit/withdrawal argument shapes change with these limits.
@@ -407,23 +437,36 @@ finalRoot, anchorLayer`.
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | C4 verifier wired | 1299 | `WithdrawByProofDisabled` |
-| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1304 | `WithdrawIdentityMismatch` |
-| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1307-1314 | `DstChainIdMismatch` |
-| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1315-1319 | `UnsupportedTokenId` |
-| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1320-1325 | `RecipientHalfOutOfRange` |
-| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1328 | `InvalidRecipient` |
-| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1338 | `NullifierAlreadyUsed` |
-| 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1341-1345 | `LayerOutOfRange` |
-| 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
-| 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
-| 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
+| 1 | C4 verifier wired | 1806 | `WithdrawByProofDisabled` |
+| 2 | `pub.tokenId ≤ type(uint32).max` **and** that id is listed (`_tokens[id].token != 0`) | 1814-1817 | `UnsupportedTokenId` |
+| 3 | `pub.amount ≤` that listing's **current** `maxTransfer` | 1819 | `TransferTooLarge` |
+| 4 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1822 | `WithdrawIdentityMismatch` |
+| 5 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1826-1833 | `DstChainIdMismatch` |
+| 6 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1834-1839 | `RecipientHalfOutOfRange` |
+| 7 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1842 | `InvalidRecipient` |
+| 8 | `nullifier`, `finalRoot`, `anchorLayer` canonical Fr | 1847-1849 | `FieldElementOutOfRange` |
+| 9 | `!_nullifiers[bytes32(pub.nullifier)]` | 1852 | `NullifierAlreadyUsed` |
+| 10 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1855 | `LayerOutOfRange` |
+| 11 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1860 | `UnknownAnchor` |
+| 12 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1868 | `WithdrawalProofRejected` |
+| 13 | `pub.amount ≤ liabilitiesOf(tokenId)` | 1871-1873 | `WithdrawTreasuryShortfall` |
 
-Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
-then, if liquid USDC < `amount`, pull exactly the shortfall back from AAVE through `_pullFromAave`
-— bounded by `aUsdcBalance()`, not by `suppliedPrincipal`, so interest above the book can fund a
-payout; an aToken balance below the shortfall reverts `InsufficientTreasury`; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
-`emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
+**The payout cap is the listing's, not `MAX_TRANSFER_AMOUNT`.** The constant is only the value the
+constructor lists USDC with; `setTokenLimits` moves the enforced cap afterwards. A client that
+preflights a withdrawal against the constant can burn ECC for an amount the payout then always
+reverts — read `tokenInfo(usdcTokenId()).maxTransfer` instead (`ackinacki-bridge` does, through
+`BridgeClient::usdc_payout_cap`).
+
+Effects then interactions (`:1875-1900`): mark the nullifier used, debit the token's book —
+`treasuryBalance` for `usdcTokenId`, the listing's own `liabilities` for every other id, both
+through `_debitLiabilities`; then, **for USDC only**, if liquid USDC < `amount`, pull exactly the
+shortfall back from AAVE through `_pullFromAave` — bounded by `aUsdcBalance()`, not by
+`suppliedPrincipal`, so interest above the book can fund a payout; an aToken balance below the
+shortfall reverts `InsufficientTreasury`. Another token sits liquid in the bridge and is paid
+straight out. Then `_pushExact(IERC20(payoutInfo.token), recipient, amount)` — the exact-balance
+check applies to the payout as well, so a fee-on-transfer token reverts rather than short-paying;
+then `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`.
+Returns `true`.
 
 Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1430-1434`).
 
@@ -670,7 +713,7 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 
 | Event | topic0 | Indexed |
 |---|---|---|
-| `Deposit(uint256,address,uint256,bytes32,uint256)` | `0x6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe` | `depositId`, `sender` |
+| `Deposit(uint256,address,uint256,bytes32,uint256,address)` | `0x935bca73ba823197b8e5564da08c2c294de3811fc4a4cb482e6af4fd08623c0e` | `depositId`, `sender` |
 | `BlockVerified(uint256,uint64,uint8,uint8)` | `0x4a5fe28cf677e5cbd58dbc0d09f8786dcc5203154f0a44ca08de71802838e301` | `blockId`, `blockSeqNo` |
 | `LayerAnchorAppended(uint8,uint256,uint64)` | `0xa107038a79964f3eb528acbade584d60e11790b79033d6ca561747c916e2522d` | `layer` |
 | `BkSetUpdated(uint256,uint256,uint64)` | `0x3b61abb5642de7c0408ea1d76cdc9a7f26020b2b511a5a0698fc238172674dd1` | `oldCommitment`, `newCommitment`, `blockSeqNo` |
@@ -686,7 +729,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 
 | Selector | Signature |
 |---|---|
-| `0xc9630cb0` | `deposit(uint256,bytes32)` |
+| `0x26b3293f` | `deposit(address,uint256,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
 | `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
 | `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
@@ -701,7 +744,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0x3f4ba83a` | `unpause()` |
 | `0x5c975abb` | `paused()` |
 
-(Computed from the signatures above; `0xc9630cb0` and `0xecb3dc88` cross-check against
+(Computed from the signatures above; `0x26b3293f` and `0xecb3dc88` cross-check against
 `deposit_calldata` and `get_deposit_counter` in `frontend/src/web3.rs`.)
 
 ### 11.3 Custom errors
@@ -737,7 +780,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | Script | Purpose |
 |---|---|
 | `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
+| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `USDC_TOKEN_ID=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
@@ -759,7 +802,8 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `BUNDLE_STRIDE` | same | Immutable `bundleStride`: the relayer's bundle width in block seq-nos, 16384 (W²) for L2. `vm.envUint` with no default, so the deploy fails without it; `0` with the verifier triple wired reverts `InvalidBundleStride`. Must equal the relayer's anchor-level stride. `deploy_bridge_bundle.sh` takes it from `compute_bridge_anchors` (`AnchorMode::stride()` for the level); the other scripts take it as set. `daemon-live` refuses to start when the deployed `bundleStride()` differs from its stride, and only a redeploy fixes such a bridge. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
-| `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
+| `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID` | same | Shellnet destination aliases (§7.2). `DeployRealBridge` on mainnet requires both 0. |
+| `USDC_TOKEN_ID` | same | The ECC currency id USDC is listed under (**was** `WITHDRAW_ALT_TOKEN_ID`); carry the old value over. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
@@ -844,8 +888,8 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 | `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
 | `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. |
 | `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:58-153`), emits the 12-PI SHPLONK proof. |
-| `frontend/` (WASM) | Calls `deposit(uint256,bytes32)` = `0xc9630cb0` and `depositCounter()` — **current**. |
-| `crates/eth-frontend` | ⚠️ **Stale ABI.** Declares `deposit(uint256)` and a 4-field `Deposit` event (`src/contract.rs:42,47`) and calls `.deposit(amount)` at `src/contract.rs:133-137`. No such selector exists on the deployed bridge, so that call path cannot succeed against any current deployment. |
+| `frontend/` (WASM) | Calls `deposit(address,uint256,bytes32)` = `0x26b3293f` and `depositCounter()` — **current**. |
+| `crates/eth-frontend` | Declares `deposit(address,uint256,bytes32)` and the six-field `Deposit` event (`src/contract.rs:42,47`); its wrapper approves and deposits the named token (`src/contract.rs:133-162`). |
 
 **The contract is the only gate.** Until `a69ba36` the relayer polled a `proof_event_*.result.json`
 ACK written by `bridge-verifier-daemon` — a dev scaffold that imitated this contract — before
@@ -967,8 +1011,8 @@ The root `README.md` and much of `docs/` predate the current code. Concretely, a
 code contradicts them on:
 
 * `deposit()` takes **USDC via `transferFrom`**, not ETH; the signature is
-  `deposit(uint256, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
-* The `Deposit` event carries five fields including the AN destination, not four.
+  `deposit(address, uint256, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
+* The `Deposit` event carries six fields including the AN destination and the token, not four.
 * Verification is **SHPLONK aggregator Yul** for all four circuits; the gnark Groth16 wrappers and
   the `*Groth16VerifierGenerated.sol` files described in the README no longer exist in `src/`.
 * `verifyBlock`'s anchor check is the per-layer `expectedPrevAnchor(numLayers)` pick, not a flat

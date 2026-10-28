@@ -180,6 +180,7 @@ pub mod tests_support {
                 bridge: Address::repeat_byte(0xb1),
                 to: format!("{}::{}", "00".repeat(32), "a3".repeat(32)),
                 amount_units: 12_500_000,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: "1a".repeat(32),
                 an_network: "https://shellnet.ackinacki.org:443".into(),
             },

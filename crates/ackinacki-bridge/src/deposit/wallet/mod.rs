@@ -38,11 +38,13 @@ pub enum TxPurpose {
         /// The allowance, in token units.
         amount: U256,
     },
-    /// `bridge.deposit(amount, 0, account)`.
+    /// `bridge.deposit(token, amount, account)`.
     Deposit {
         /// The bridge.
         bridge: Address,
-        /// The deposit, in token units.
+        /// The ERC-20 being deposited.
+        token: Address,
+        /// The deposit, in token base units.
         amount: u64,
         /// The Acki Nacki account that is credited.
         account: B256,
@@ -83,9 +85,10 @@ impl TxRequest {
             } => (*token, approve_calldata(*spender, *amount)),
             TxPurpose::Deposit {
                 bridge,
+                token,
                 amount,
                 account,
-            } => (*bridge, deposit_calldata(*amount, *account)),
+            } => (*bridge, deposit_calldata(*token, *amount, *account)),
         };
         let estimate = evm.estimate_gas_at(from, to, data.clone(), at).await?;
         Ok(TxRequest {
@@ -188,6 +191,7 @@ mod tests {
             sepolia_sender(),
             TxPurpose::Deposit {
                 bridge,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 amount: 12_500_000,
                 account: B256::repeat_byte(0xa3),
             },
@@ -204,8 +208,8 @@ mod tests {
         assert_eq!(j["to"], format!("{bridge:#x}"));
         assert_eq!(
             j["data"].as_str().unwrap().len(),
-            2 + 136,
-            "68 bytes of calldata"
+            2 + 200,
+            "100 bytes of calldata: the selector and three words"
         );
     }
 }

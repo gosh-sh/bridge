@@ -53,6 +53,7 @@ async fn live_voucher_precheck_finds_a_finalized_deposit() {
     // Finalized on shellnet by bridge tx 4b722bbe… (voucher 0:ffd5c4e7…).
     let finalized = DepositEvent {
         deposit_id: 1,
+        token: alloy::primitives::Address::repeat_byte(0x7c),
         sender: Default::default(),
         amount: Default::default(),
         an_account: Default::default(),
@@ -70,6 +71,7 @@ async fn live_voucher_precheck_finds_a_finalized_deposit() {
 
     let never = DepositEvent {
         deposit_id: u64::MAX,
+        token: alloy::primitives::Address::repeat_byte(0x7c),
         ..finalized
     };
     assert!(!sub.is_finalized(&never).await.unwrap());

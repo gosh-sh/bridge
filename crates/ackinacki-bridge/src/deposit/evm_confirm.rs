@@ -422,7 +422,11 @@ mod tests {
         Expect {
             bridge: BRIDGE,
             from: sepolia_sender(),
-            calldata: deposit_calldata(12_500_000, ACC),
+            calldata: deposit_calldata(
+                alloy_primitives::Address::repeat_byte(0x7c),
+                12_500_000,
+                ACC,
+            ),
             amount: 12_500_000,
             account: ACC,
             confirmations: 12,
@@ -587,7 +591,7 @@ mod tests {
             true,
             other_amount,
             2,
-            deposit_calldata(1, ACC),
+            deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 1, ACC),
             111,
             Some(100),
         );
@@ -607,7 +611,11 @@ mod tests {
             true,
             other_account,
             2,
-            deposit_calldata(12_500_000, B256::repeat_byte(1)),
+            deposit_calldata(
+                alloy_primitives::Address::repeat_byte(0x7c),
+                12_500_000,
+                B256::repeat_byte(1),
+            ),
             111,
             Some(99),
         );
@@ -627,7 +635,14 @@ mod tests {
             ACC,
             Some(41),
         )];
-        let o = obs(true, logs, 2, deposit_calldata(1, ACC), 111, Some(100));
+        let o = obs(
+            true,
+            logs,
+            2,
+            deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 1, ACC),
+            111,
+            Some(100),
+        );
         let Verdict::Final(Negative::Mismatch(m)) = judge(&o, Some(B256::repeat_byte(1)), &exp())
         else {
             panic!()

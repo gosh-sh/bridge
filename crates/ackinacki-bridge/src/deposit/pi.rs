@@ -1,4 +1,4 @@
-//! The deposit proof's twelve public inputs: 12 × 32 bytes, each a BN254
+//! The deposit proof's thirteen public inputs: 13 × 32 bytes, each a BN254
 //! field element in little-endian order, in the order the circuit
 //! exposes them. The same layout the relayer decodes; the fixture test
 //! holds this copy to the prover's own output.
@@ -6,11 +6,11 @@
 use alloy_primitives::{Address, B256, U256};
 
 /// How many public inputs the circuit exposes.
-pub const NUM_PUBLIC_INPUTS: usize = 12;
+pub const NUM_PUBLIC_INPUTS: usize = 13;
 /// The encoded size of all public inputs.
 pub const PUBLIC_INPUT_BYTES: usize = NUM_PUBLIC_INPUTS * 32;
 
-/// The twelve public inputs, in circuit order; 256-bit values are split
+/// The thirteen public inputs, in circuit order; 256-bit values are split
 /// into high and low 128-bit halves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepositPublicInputs {
@@ -36,6 +36,8 @@ pub struct DepositPublicInputs {
     pub block_hash_hi: U256,
     /// Low half of the block hash.
     pub block_hash_lo: U256,
+    /// The deposited ERC-20, as the `Deposit` event's token word.
+    pub token: U256,
     /// The promise commitment; zero for a plain proof.
     pub promise_commit: U256,
 }
@@ -66,7 +68,8 @@ impl DepositPublicInputs {
             account_lo: fr(8),
             block_hash_hi: fr(9),
             block_hash_lo: fr(10),
-            promise_commit: fr(11),
+            token: fr(11),
+            promise_commit: fr(12),
         })
     }
 
@@ -86,6 +89,7 @@ impl DepositPublicInputs {
             self.account_lo,
             self.block_hash_hi,
             self.block_hash_lo,
+            self.token,
             self.promise_commit,
         ] {
             out.extend_from_slice(&fr.to_le_bytes::<32>());
@@ -114,6 +118,7 @@ impl DepositPublicInputs {
             account_lo,
             block_hash_hi,
             block_hash_lo,
+            token: addr_as_u256(e.token),
             promise_commit: U256::ZERO,
         }
     }
@@ -141,8 +146,10 @@ pub struct ExpectedInputs {
     pub deposit_id: U256,
     /// The depositor's EVM address.
     pub sender: Address,
-    /// The amount in micro-USDC.
+    /// The amount, in the deposited token's base units.
     pub amount: u64,
+    /// The deposited ERC-20.
+    pub token: Address,
     /// The bridge contract address.
     pub contract: Address,
     /// The EVM chain id.
@@ -181,13 +188,14 @@ fn addr_as_u256(a: Address) -> U256 {
     U256::from_be_slice(a.as_slice())
 }
 
-/// Checks the eight deposit-bound inputs against `want`; the first
+/// Checks the nine deposit-bound inputs against `want`; the first
 /// disagreement is named.
 pub fn verify(pi: &DepositPublicInputs, want: &ExpectedInputs) -> Result<(), PiMismatch> {
-    let checks: [(&'static str, U256, U256); 8] = [
+    let checks: [(&'static str, U256, U256); 9] = [
         ("depositId", pi.deposit_id, want.deposit_id),
         ("sender", pi.sender, addr_as_u256(want.sender)),
         ("amount", pi.amount, U256::from(want.amount)),
+        ("token", pi.token, addr_as_u256(want.token)),
         ("contract", pi.contract, addr_as_u256(want.contract)),
         ("chainId", pi.chain_id, U256::from(want.chain_id)),
         ("dappId", pi.dapp_id(), U256::from_be_bytes(want.dapp_id)),
@@ -218,17 +226,20 @@ pub fn verify(pi: &DepositPublicInputs, want: &ExpectedInputs) -> Result<(), PiM
 /// tests and for the prover and driver tests that fake a prover.
 #[cfg(test)]
 pub mod tests_support {
-    use alloy_primitives::{keccak256, Address, U256};
+    use alloy_primitives::{address, keccak256, Address, U256};
 
     use super::ExpectedInputs;
 
-    /// The fixture's public inputs, as the prover wrote them.
-    pub const PI: &[u8] = include_bytes!(
+    /// The fixture's public inputs, as the prover wrote them: thirteen
+    /// scalars, regenerated with the rotated verification key.
+    const PI: &[u8] = include_bytes!(
         "../../../../deposit-prover/fixtures/deposit_10proofs/proof_00/public_inputs.bin"
     );
     /// The witness the fixture proof was built from.
     const INPUT: &str =
         include_str!("../../../../deposit-prover/fixtures/deposit_10proofs/proof_00/input.json");
+    /// The token the fixture deposits, as its witness names it.
+    pub const FIXTURE_TOKEN: Address = address!("4444444444444444444444444444444444444444");
 
     /// A fresh copy of the fixture's public inputs.
     pub fn fixture_pi() -> Vec<u8> {
@@ -255,6 +266,7 @@ pub mod tests_support {
             deposit_id: U256::from(ev["deposit_id"].as_u64().unwrap()),
             sender: Address::from_slice(&bytes(&ev["sender"])),
             amount: U256::from_be_slice(&bytes(&ev["amount"])).to::<u64>(),
+            token: Address::from_slice(&bytes(&ev["token"])),
             contract: Address::from_slice(&bytes(&ev["contract_address"])),
             chain_id: ev["chain_id"].as_u64().unwrap(),
             dapp_id: [0u8; 32],
@@ -272,31 +284,61 @@ mod tests {
 
     #[test]
     fn the_fixture_decodes_to_its_own_witness() {
-        let pi = DepositPublicInputs::decode(PI).unwrap();
+        let pi = DepositPublicInputs::decode(&fixture_pi()).unwrap();
         verify(&pi, &expected_from_witness()).unwrap();
         assert_eq!(pi.amount, U256::from(42u64));
         assert_eq!(pi.chain_id, U256::from(11_155_111u64));
     }
 
+    /// The token is the twelfth scalar and the promise commitment the
+    /// thirteenth: the circuit appends, so the ten inputs before the token
+    /// keep their slots.
+    #[test]
+    fn the_token_is_slot_eleven_and_the_promise_follows_it() {
+        assert_eq!(NUM_PUBLIC_INPUTS, 13);
+        assert_eq!(PUBLIC_INPUT_BYTES, 416);
+        let bytes = fixture_pi();
+        let pi = DepositPublicInputs::decode(&bytes).unwrap();
+        let fr = |i: usize| {
+            let mut le = [0u8; 32];
+            le.copy_from_slice(&bytes[i * 32..(i + 1) * 32]);
+            U256::from_le_bytes(le)
+        };
+        assert_eq!(pi.token, fr(11));
+        assert_eq!(pi.promise_commit, fr(12));
+        assert_eq!(
+            pi.token,
+            U256::from_be_slice(FIXTURE_TOKEN.as_slice()),
+            "the token slot reads the token, not a neighbour"
+        );
+        assert_eq!(pi.block_hash_lo, fr(10));
+    }
+
     #[test]
     fn encode_is_the_inverse_of_decode() {
-        let pi = DepositPublicInputs::decode(PI).unwrap();
-        assert_eq!(pi.encode(), PI);
+        let bytes = fixture_pi();
+        let pi = DepositPublicInputs::decode(&bytes).unwrap();
+        assert_eq!(pi.encode(), bytes);
         let e = expected_from_witness();
         verify(&DepositPublicInputs::from_expected(&e), &e).unwrap();
     }
 
     #[test]
     fn a_wrong_length_is_refused() {
-        assert!(DepositPublicInputs::decode(&PI[..383]).is_err());
-        let mut long = PI.to_vec();
+        let bytes = fixture_pi();
+        assert!(DepositPublicInputs::decode(&bytes[..PUBLIC_INPUT_BYTES - 1]).is_err());
+        let mut long = bytes.clone();
         long.push(0);
         assert!(DepositPublicInputs::decode(&long).is_err());
+        assert!(
+            DepositPublicInputs::decode(&bytes[..12 * 32]).is_err(),
+            "the retired twelve-scalar layout is not accepted"
+        );
     }
 
     #[test]
     fn each_field_is_named_when_it_disagrees() {
-        let pi = DepositPublicInputs::decode(PI).unwrap();
+        let pi = DepositPublicInputs::decode(&fixture_pi()).unwrap();
         let base = expected_from_witness();
         let cases: Vec<(&str, ExpectedInputs)> = vec![
             ("depositId", ExpectedInputs {
@@ -309,6 +351,10 @@ mod tests {
             }),
             ("amount", ExpectedInputs {
                 amount: 2,
+                ..base.clone()
+            }),
+            ("token", ExpectedInputs {
+                token: Address::ZERO,
                 ..base.clone()
             }),
             ("contract", ExpectedInputs {

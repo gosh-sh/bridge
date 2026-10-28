@@ -229,6 +229,11 @@ pub struct DepositArgs {
     /// USDC amount, at most 6 fractional digits (never rounded).
     #[arg(long, value_name = "USDC")]
     pub amount: Option<String>,
+    /// ERC-20 to deposit. Defaults to the bridge's `usdc()`. The token must
+    /// be listed on the bridge (`tokenIdOf`), and the amount is read in that
+    /// token's base units.
+    #[arg(long, env = "DEPOSIT_TOKEN", hide_env_values = true)]
+    pub token: Option<Address>,
     /// Acki Nacki recipient, `dapp_id::account_id`.
     #[arg(long, value_name = "dapp_id::account_id")]
     pub to: Option<String>,
@@ -386,6 +391,9 @@ pub struct DepositParams {
     pub globals: GlobalFlags,
     pub network: Option<Network>,
     pub amount: Option<UsdcAmount>,
+    /// The ERC-20 to deposit, when `--token` named one. `None` means the
+    /// run resolves the bridge's `usdc()` and deposits that.
+    pub token: Option<Address>,
     pub to: Option<AnTarget>,
     pub rpc_url: Option<String>,
     pub bridge: Option<Address>,
@@ -574,6 +582,7 @@ impl DepositArgs {
             globals: *g,
             network: self.network,
             amount,
+            token: self.token,
             to,
             rpc_url: self.rpc_url.clone(),
             bridge: self.bridge_address,

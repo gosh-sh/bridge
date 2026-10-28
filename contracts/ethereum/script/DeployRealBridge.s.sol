@@ -47,7 +47,7 @@ contract DeployRealBridge is Script {
         uint256 withdrawAccFr;
         uint256 altDstChainId;
         uint256 altDstHostChainId;
-        uint256 altTokenId;
+        uint32 usdcTokenId;
     }
 
     struct DeployResult {
@@ -91,12 +91,12 @@ contract DeployRealBridge is Script {
         if (mainnet) {
             require(useAxiomOracle, "mainnet forbids MockBlockHeaderOracle");
             require(w.wireVerifyBlock, "mainnet requires WIRE_VERIFY_BLOCK=true");
-            require(w.altTokenId == 0, "mainnet altTokenId must be 0");
+            require(w.usdcTokenId == 0, "mainnet usdcTokenId must be 0");
             require(w.altDstChainId == 0, "mainnet altDstChainId must be 0");
             require(w.altDstHostChainId == 0, "mainnet altDstHostChainId must be 0");
             // Owner 2026-09-08 (sauin Q5): this script-level require is the
             // intended guarantee. The contract does not enforce the alias
-            // pair. Same class as altTokenId: envOr defaults to 0, then
+            // pair. Same class as usdcTokenId: envOr defaults to 0, then
             // immutable.
         }
 
@@ -148,7 +148,7 @@ contract DeployRealBridge is Script {
         w.withdrawDappFr = vm.envOr("WITHDRAW_DAPP_FR", uint256(0));
         w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
         w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
-        w.altTokenId = vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(0));
+        w.usdcTokenId = uint32(vm.envOr("USDC_TOKEN_ID", uint256(0)));
     }
 
     function _deployBridge(address oracleAddr, WireInputs memory w)
@@ -161,7 +161,7 @@ contract DeployRealBridge is Script {
             w.wireVerifyBlock, w.genesisBkSetCommitment, w.genesisPrevAnchor
         );
         AckiNackiBridge.BridgeWithdrawConfig memory bw = _buildWithdrawConfig(
-            w.withdrawDappFr, w.withdrawAccFr, w.altDstChainId, w.altDstHostChainId, w.altTokenId
+            w.withdrawDappFr, w.withdrawAccFr, w.altDstChainId, w.altDstHostChainId, w.usdcTokenId
         );
 
         if (w.wireVerifyBlock) {
@@ -300,7 +300,7 @@ contract DeployRealBridge is Script {
         uint256 accFr,
         uint256 altDstChainId,
         uint256 altDstHostChainId,
-        uint256 altTokenId
+        uint32 usdcTokenId
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");
         IBridgeWithdrawalVerifier w =
@@ -313,7 +313,7 @@ contract DeployRealBridge is Script {
             accFr: accFr,
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
-            altTokenId: altTokenId
+            usdcTokenId: usdcTokenId
         });
     }
 

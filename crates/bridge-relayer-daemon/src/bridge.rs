@@ -945,6 +945,12 @@ mod sol_bindings {
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
             function MAX_TRANSFER_AMOUNT() external view returns (uint256);
+            /// The id USDC is listed under, and that listing. The payout cap
+            /// `withdrawByProof` enforces is the listing's `maxTransfer`,
+            /// which the owner can move with `setTokenLimits`; the constant
+            /// above is only the value the constructor listed USDC with.
+            function usdcTokenId() external view returns (uint32);
+            function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 maxTransfer, uint256 tvlCap, uint256 liabilities);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
@@ -1551,12 +1557,39 @@ where
     }
 
     /// Maximum amount the bridge pays in one withdrawal, in micro-USDC.
+    ///
+    /// This is the deployment-time constant, not the cap `withdrawByProof`
+    /// enforces. Use [`Self::usdc_payout_cap`] before burning ECC.
     pub async fn max_transfer_amount(&self) -> Result<U256, RelayerError> {
         self.contract
             .MAX_TRANSFER_AMOUNT()
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    /// The cap `withdrawByProof` actually enforces on a USDC payout: the
+    /// current `maxTransfer` of the listing USDC is registered under.
+    ///
+    /// Two reads, both propagated on failure: a bridge that cannot answer
+    /// them is not one to burn ECC against. `MAX_TRANSFER_AMOUNT` is the
+    /// value the constructor listed USDC with and stays put while
+    /// `setTokenLimits` moves the real cap, so reading the constant would
+    /// let a burn through that the payout always reverts.
+    pub async fn usdc_payout_cap(&self) -> Result<U256, RelayerError> {
+        let token_id = self
+            .contract
+            .usdcTokenId()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        let info = self
+            .contract
+            .tokenInfo(token_id)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok(info.maxTransfer)
     }
 
     /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`

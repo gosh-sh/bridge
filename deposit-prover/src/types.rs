@@ -33,6 +33,11 @@ pub struct DepositEventData {
     pub an_account: [u8; 32],
     /// Timestamp (from log data)
     pub timestamp: u64,
+    /// ERC-20 deposited, from log data word 3. The depositor names it in the
+    /// `deposit` call and the bridge echoes it into the event, so the circuit
+    /// proves the destination token from the receipt instead of taking it on
+    /// trust from whoever builds the proof.
+    pub token: [u8; 20],
     /// Contract address that emitted the event
     pub contract_address: [u8; 20],
     /// EIP-155 chain id of the source L1/L2 network. Committed as public
@@ -169,6 +174,8 @@ pub struct DepositProofOutput {
     pub dapp_id: [u8; 32],
     /// Acki Nacki destination account (256-bit TVM address).
     pub an_account: [u8; 32],
+    /// ERC-20 deposited, proven from the event (public input `token`).
+    pub token: [u8; 20],
     pub contract_address: [u8; 20],
     /// Block hash (32 bytes) - proves the deposit is from a real Ethereum block
     pub block_hash: [u8; 32],
@@ -188,6 +195,7 @@ impl DepositProofOutput {
         amount: [u8; 32],
         dapp_id: [u8; 32],
         an_account: [u8; 32],
+        token: [u8; 20],
         contract_address: [u8; 20],
         block_hash: [u8; 32],
         chain_id: u64,
@@ -201,6 +209,7 @@ impl DepositProofOutput {
             amount,
             dapp_id,
             an_account,
+            token,
             contract_address,
             block_hash,
             chain_id,
@@ -220,6 +229,19 @@ mod tests {
         ))
         .unwrap();
         legacy["event_data"]["an_workchain"] = serde_json::json!(-1);
+        // This fixture is a historical Sepolia deposit under the five-field
+        // event, so it predates the token parameter and keeps doing so: it
+        // cannot be regenerated, only replaced by a deposit through a bridge
+        // that emits the six-field event. The token is supplied here because
+        // the test is about the retired `an_workchain` field, not about
+        // loading a pre-token witness. `token` is deliberately required
+        // rather than `#[serde(default)]`: a witness with no token would
+        // otherwise prove the zero address, which no bridge lists, and the
+        // failure would surface as an unprovable deposit instead of a
+        // refused input. `[u8; 20]`, so a JSON array of twenty bytes — the
+        // same shape the fixtures already use for `sender` and
+        // `contract_address`.
+        legacy["event_data"]["token"] = serde_json::json!(vec![0x7cu8; 20]);
         let before = legacy["event_data"]["an_account"].clone();
         let input: DepositProofInput = serde_json::from_value(legacy).unwrap();
         let current = serde_json::to_value(input).unwrap();
@@ -242,6 +264,7 @@ mod tests {
                 amount: [0u8; 32],
                 an_account: [0u8; 32],
                 timestamp: 0,
+                token: [0u8; 20],
                 contract_address: [0u8; 20],
                 chain_id,
             },

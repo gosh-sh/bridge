@@ -331,11 +331,17 @@ pub async fn approve_usdc(amount: u128) -> Result<String, String> {
     send_tx(USDC_CONTRACT_ADDRESS, &data).await
 }
 
+/// `deposit(address token, uint256 amount, bytes32 anAccount)` = 0x26b3293f.
+///
+/// This UI deposits USDC only, so the token word is always
+/// [`USDC_CONTRACT_ADDRESS`]; the bridge accepts any token its owner has
+/// listed, and a caller that wants another one uses the CLI's `--token`.
 fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
     validate_transfer_amount(amount)?;
     let recipient = validate_an_account(an_account)?;
     Ok(format!(
-        "0xc9630cb0{}{}",
+        "0x26b3293f{}{}{}",
+        encode_address(USDC_CONTRACT_ADDRESS),
         encode_uint256(amount),
         encode_bytes32(&recipient)
     ))
@@ -376,19 +382,28 @@ mod deposit_tests {
     use super::deposit_calldata;
 
     #[test]
-    fn deposit_encodes_amount_and_account() {
+    fn deposit_encodes_token_amount_and_account() {
         let account = "a3".repeat(32);
         let data = deposit_calldata(12_500_000, &account).unwrap();
-        assert_eq!(data.len(), 2 + 2 * 68);
-        assert_eq!(&data[..10], "0xc9630cb0");
-        assert_eq!(u128::from_str_radix(&data[10..74], 16).unwrap(), 12_500_000);
-        assert_eq!(&data[74..], account);
+        assert_eq!(data.len(), 2 + 2 * 100);
+        assert_eq!(&data[..10], "0x26b3293f");
+        // Word 0 is the token, left-padded to 32 bytes.
+        let token = super::USDC_CONTRACT_ADDRESS
+            .trim_start_matches("0x")
+            .to_lowercase();
+        assert_eq!(&data[10..34], &"0".repeat(24));
+        assert_eq!(&data[34..74], token);
+        assert_eq!(
+            u128::from_str_radix(&data[74..138], 16).unwrap(),
+            12_500_000
+        );
+        assert_eq!(&data[138..], account);
     }
 
     #[test]
     fn deposit_normalises_the_recipient_before_encoding() {
         let data = deposit_calldata(1, &format!("0x{}", "AB".repeat(32))).unwrap();
-        assert_eq!(&data[74..], "ab".repeat(32));
+        assert_eq!(&data[138..], "ab".repeat(32));
     }
 
     fn rejects_before_wallet_access(

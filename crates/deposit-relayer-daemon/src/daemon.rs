@@ -466,6 +466,7 @@ mod tests {
     fn deposit(id: u64) -> DepositEvent {
         DepositEvent {
             deposit_id: id,
+            token: Address::repeat_byte(0x7c),
             sender: Address::repeat_byte(0x11),
             amount: U256::from(id * 100 + 1),
             an_account: B256::repeat_byte(0x33),

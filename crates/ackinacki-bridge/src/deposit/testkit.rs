@@ -202,6 +202,60 @@ impl FakeEvm {
     }
 
     /// Set the limits of an empty bridge implementing the volume-cap ABI.
+    /// What `tokenIdOf` and `tokenInfo` answer for one listed ERC-20.
+    /// The fake keys answers by selector, not by argument, so one listing
+    /// is what every `tokenIdOf` of a test sees.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_token_listing(
+        &self,
+        bridge: Address,
+        token: Address,
+        token_id: u32,
+        decimals: u8,
+        deposits_enabled: bool,
+        max_transfer: u128,
+        tvl_cap: u128,
+        liabilities: u128,
+    ) {
+        use alloy::sol_types::SolCall;
+        self.set_call(
+            bridge,
+            IDeposit::tokenIdOfCall::SELECTOR,
+            IDeposit::tokenIdOfCall::abi_encode_returns(&IDeposit::tokenIdOfReturn {
+                listed: true,
+                tokenId: token_id,
+            })
+            .into(),
+        );
+        self.set_call(
+            bridge,
+            IDeposit::tokenInfoCall::SELECTOR,
+            IDeposit::tokenInfoCall::abi_encode_returns(&IDeposit::tokenInfoReturn {
+                token,
+                decimals,
+                depositsEnabled: deposits_enabled,
+                maxTransfer: U256::from(max_transfer),
+                tvlCap: U256::from(tvl_cap),
+                liabilities: U256::from(liabilities),
+            })
+            .into(),
+        );
+    }
+
+    /// What `tokenIdOf` answers when the token is not listed at all.
+    pub fn set_token_unlisted(&self, bridge: Address) {
+        use alloy::sol_types::SolCall;
+        self.set_call(
+            bridge,
+            IDeposit::tokenIdOfCall::SELECTOR,
+            IDeposit::tokenIdOfCall::abi_encode_returns(&IDeposit::tokenIdOfReturn {
+                listed: false,
+                tokenId: 0,
+            })
+            .into(),
+        );
+    }
+
     pub fn set_volume_limits(&self, bridge: Address) {
         use alloy::sol_types::{SolCall, SolValue};
         for (selector, value) in [
@@ -499,6 +553,7 @@ pub fn deposit_log(
 ) -> LogLite {
     use alloy::sol_types::SolEvent;
     let ev = IDeposit::Deposit {
+        token: W_USDC,
         depositId: id,
         sender,
         amount: U256::from(amount),
@@ -1730,6 +1785,9 @@ impl World {
             IDeposit::usdcCall::SELECTOR,
             W_USDC.abi_encode().into(),
         );
+        // The bridge's own USDC, listed as the constructor lists it: ECC
+        // currency id 3, six decimals, deposits open.
+        evm.set_token_listing(W_BRIDGE, W_USDC, 3, 6, true, 50_000_000, 10_000_000_000, 0);
         evm.set_call(
             W_USDC,
             IErc20::decimalsCall::SELECTOR,
@@ -1759,7 +1817,7 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getDepositLimits", vec![
             serde_json::json!({"maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
@@ -1772,6 +1830,10 @@ impl World {
         ]);
         an.getter(W_BRIDGE_ACC, "getAnchorConfig", vec![
             serde_json::json!({ "lightClient": format!("0:{}", hex::encode(W_LC)), "ownerAnchorsEnabled": true }),
+        ]);
+        // 1.15.0 answers getL2Verifier; this world's chain is not a rollup.
+        an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
+            serde_json::json!({ "verifier": ":", "parentChainId": "0" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getLightClient", vec![
             serde_json::json!({ "value0": format!("0:{}", hex::encode(W_LC)) }),
@@ -1815,6 +1877,7 @@ impl World {
     ) -> crate::deposit::args::DepositParams {
         use std::time::Duration;
         crate::deposit::args::DepositParams {
+            token: None,
             mode,
             globals: Default::default(),
             network: Some(crate::deposit::args::Network::Sepolia),
@@ -1882,11 +1945,11 @@ impl World {
         ]);
     }
 
-    /// The bridge as a 1.14.0 one with an Arbitrum verifier for the deposit
+    /// The bridge as a 1.15.0 one with an Arbitrum verifier for the deposit
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -2035,6 +2098,7 @@ impl World {
             deposit_id: m.deposit_id,
             sender: m.from,
             amount: W_AMOUNT,
+            token: W_USDC,
             contract: W_BRIDGE,
             chain_id: 11_155_111,
             dapp_id: [0; 32],
@@ -2059,7 +2123,7 @@ impl World {
     ) -> B256 {
         let from = self.wallet.account;
         let tx = B256::from(U256::from(0xdead_0000u64 + nonce));
-        let calldata = crate::deposit::evm::deposit_calldata(amount, B256::from(W_ACC));
+        let calldata = crate::deposit::evm::deposit_calldata(W_USDC, amount, B256::from(W_ACC));
         let dlog = deposit_log(
             W_BRIDGE,
             deposit_id,
@@ -2378,6 +2442,7 @@ impl World {
                 bridge: W_BRIDGE,
                 to: Self::target().extended(),
                 amount_units: W_AMOUNT,
+                token: W_USDC,
                 an_bridge: hex::encode(W_BRIDGE_ACC),
                 an_network: "http://gql.invalid:80".into(),
             },
@@ -2389,7 +2454,7 @@ impl World {
         r.request = Some(RequestInfo {
             nonce_before,
             from_block: 800,
-            calldata: crate::deposit::evm::deposit_calldata(W_AMOUNT, B256::from(W_ACC)),
+            calldata: crate::deposit::evm::deposit_calldata(W_USDC, W_AMOUNT, B256::from(W_ACC)),
             wallet_hash: None,
         });
         r

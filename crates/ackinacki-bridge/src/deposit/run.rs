@@ -74,8 +74,8 @@ pub struct RunCx {
     pub prover: ProverDir,
     /// `--rpc-url`, for the prover's fetcher.
     pub rpc_url: String,
-    /// The token the EVM bridge takes.
-    pub usdc: Address,
+    /// The ERC-20 this deposit moves.
+    pub token: Address,
 }
 
 /// A new deposit that did not succeed: its error, and whether that error
@@ -191,7 +191,7 @@ fn close(store: &Store, rec: &mut OpRecord, reason: FailReason, exit: ExitCode, 
 }
 
 /// A refusal before the deposit was requested: the operation is closed,
-/// no USDC moved, and `e` is the answer. An interrupt from here on answers
+/// no tokens moved, and `e` is the answer. An interrupt from here on answers
 /// with the closed record, as `e` does.
 fn closed_before_request(
     d: &Deps,
@@ -482,7 +482,7 @@ pub async fn run_fresh(
         light_client: checked.an.light_client,
         prover: checked.prover,
         rpc_url,
-        usdc: checked.evm.usdc,
+        token: checked.evm.token,
     };
 
     // Step 2.
@@ -579,14 +579,16 @@ async fn request(
     }
     rec.from = Some(from);
     store.write(rec).map_err(nothing_sent)?;
-    let bal = transient(ui, "reading the USDC balance", || {
-        read_balance(evm, cx.usdc, from)
+    let bal = transient(ui, "reading the deposited token's balance", || {
+        read_balance(evm, cx.token, from)
     })
     .await;
     if bal < U256::from(units) {
         let e = CliError::Preflight {
             reason: format!(
-                "{from} holds {bal} USDC units and the deposit needs {units} (nothing was sent)"
+                "{from} holds {bal} base units of {} and the deposit needs {units} (nothing was \
+                 sent)",
+                cx.token
             ),
             source: None,
         };
@@ -605,7 +607,7 @@ async fn request(
         evm,
         wallet,
         ui,
-        cx.usdc,
+        cx.token,
         bridge,
         from,
         units,
@@ -873,7 +875,7 @@ fn deposited(receipt: Option<&ReceiptLite>, bridge: Address) -> String {
         .filter_map(parse_deposit_log)
         .map(|e| {
             format!(
-                "depositId {}, {} USDC units to account {:#x}",
+                "depositId {}, {} base units to account {:#x}",
                 e.deposit_id, e.amount, e.an_account
             )
         })
@@ -912,7 +914,11 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
                         .map(|q| q.calldata.clone())
                         .or_else(|| {
                             AnTarget::parse(&rec.params.to).ok().map(|t| {
-                                deposit_calldata(rec.params.amount_units, t.account_b256())
+                                deposit_calldata(
+                                    rec.params.token,
+                                    rec.params.amount_units,
+                                    t.account_b256(),
+                                )
                             })
                         });
                     match call {
@@ -928,8 +934,8 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
                 FailReason::Reverted,
                 ExitCode::DepositReverted,
                 format!(
-                    "the deposit transaction reverted on the EVM side{}: no USDC was taken, only \
-                     gas was spent. Likely causes: InvalidAmount, DepositTooLarge, \
+                    "the deposit transaction reverted on the EVM side{}: no tokens were taken, \
+                     only gas was spent. Likely causes: InvalidAmount, DepositTooLarge, \
                      InvalidAnAccount, the allowance or the balance changed after the preflight, \
                      TransferAmountMismatch, BridgePaused (the owner paused the bridge after the \
                      check before the request)",
@@ -941,7 +947,7 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
             FailReason::Reverted,
             ExitCode::DepositReverted,
             "the transaction succeeded without a Deposit event of the bridge: nothing was \
-             deposited and no USDC was taken, only gas was spent. The wallet signed something \
+             deposited and no tokens were taken, only gas was spent. The wallet signed something \
              other than the requested deposit"
                 .to_string(),
         ),
@@ -949,16 +955,16 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
             FailReason::Mismatch,
             ExitCode::DepositUnprovable,
             format!(
-                "{m}. The CLI does not finalize a deposit other than the one requested; the USDC \
-                 is in the EVM bridge, and its operator can finalize or return it"
+                "{m}. The CLI does not finalize a deposit other than the one requested; the \
+                 deposit is in the EVM bridge, and its operator can finalize or return it"
             ),
         ),
         Negative::Unprovable(v) => (
             FailReason::Unprovable,
             ExitCode::DepositUnprovable,
             format!(
-                "the deposit is on chain but cannot be proven: {v}. The USDC is in the EVM bridge \
-                 and only its operator can return it"
+                "the deposit is on chain but cannot be proven: {v}. The deposit is in the EVM \
+                 bridge and only its operator can return it"
             ),
         ),
     };
@@ -1088,7 +1094,7 @@ async fn walk(
             return Err(CliError::Preflight {
                 reason: format!(
                     "operation {op} ended before its deposit was requested (an approve may have \
-                     been sent; no USDC moved); there is nothing to continue"
+                     been sent; no tokens moved); there is nothing to continue"
                 ),
                 source: None,
             })
@@ -1109,7 +1115,9 @@ async fn walk(
             .request
             .as_ref()
             .map(|q| q.calldata.clone())
-            .unwrap_or_else(|| deposit_calldata(rec.params.amount_units, to.account_b256())),
+            .unwrap_or_else(|| {
+                deposit_calldata(rec.params.token, rec.params.amount_units, to.account_b256())
+            }),
         amount: rec.params.amount_units,
         account: to.account_b256(),
         confirmations: p.confirmations,
@@ -1381,6 +1389,7 @@ async fn walk(
                     deposit_id: dep.deposit_id,
                     sender: from,
                     amount: rec.params.amount_units,
+                    token: rec.params.token,
                     contract: rec.params.bridge,
                     chain_id: rec.params.chain_id,
                     dapp_id: to.dapp_id,
@@ -1829,7 +1838,7 @@ fn lock_unusable(op: &str, rec: &OpRecord, why: &str) -> CliError {
         ExitCode::PreflightRefused => CliError::Preflight {
             reason: format!(
                 "{why}; operation {op} ended before its deposit was requested (an approve may \
-                 have been sent; no USDC moved)"
+                 have been sent; no tokens moved)"
             ),
             source: None,
         },
@@ -1917,7 +1926,7 @@ async fn open_for_resume(
         return Err(CliError::Preflight {
             reason: format!(
                 "operation {op} ended before its deposit was requested (an approve may have been \
-                 sent; no USDC moved), so there is nothing to continue; it is closed now"
+                 sent; no tokens moved), so there is nothing to continue; it is closed now"
             ),
             source: None,
         });
@@ -2407,6 +2416,7 @@ mod tests {
                 bridge: W_BRIDGE,
                 to: World::target().extended(),
                 amount_units: W_AMOUNT,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: hex::encode(W_BRIDGE_ACC),
                 an_network: "http://gql.invalid:80".into(),
             },
@@ -2417,7 +2427,11 @@ mod tests {
             rec.request = Some(RequestInfo {
                 nonce_before: 7,
                 from_block: 800,
-                calldata: crate::deposit::evm::deposit_calldata(W_AMOUNT, B256::from(W_ACC)),
+                calldata: crate::deposit::evm::deposit_calldata(
+                    alloy_primitives::Address::repeat_byte(0x7c),
+                    W_AMOUNT,
+                    B256::from(W_ACC),
+                ),
                 wallet_hash: None,
             });
             rec.tx = Some(TxClaim {
@@ -2475,7 +2489,7 @@ mod tests {
         assert_eq!(j["deposit"]["tx_hash"], format!("{h:#x}"));
         assert_eq!(j["anchor"]["writer"], "owner");
         assert_eq!(j["tx"]["type"], 2);
-        assert_eq!(j["tx"]["calldata_len"], 68);
+        assert_eq!(j["tx"]["calldata_len"], 100);
         assert_eq!(j["confirmation"]["confirm_tx"], "btx");
         assert_eq!(j["confirmation"]["delivery_tx"], "rtx");
         assert_eq!(j["confirmation"]["via_events"], false);
@@ -2678,7 +2692,7 @@ mod tests {
         assert_eq!(
             deposited(Some(&r), W_BRIDGE),
             format!(
-                "deposited: depositId 5, 1 USDC units to account {:#x}; depositId 6, 2 USDC units \
+                "deposited: depositId 5, 1 base units to account {:#x}; depositId 6, 2 base units \
                  to account {:#x}",
                 B256::repeat_byte(1),
                 B256::repeat_byte(2)
@@ -2705,7 +2719,7 @@ mod tests {
         let m = e.to_string();
         let (_, line) = m.split_once("Give the bridge operator: ").expect(&m);
         let deposited = format!(
-            "deposited: depositId 6, {} USDC units to account {:#x}",
+            "deposited: depositId 6, {} base units to account {:#x}",
             W_AMOUNT / 2,
             B256::from(W_ACC)
         );
@@ -2726,7 +2740,8 @@ mod tests {
         let h = w.mined_deposit(7);
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
-        w.reorg_after_confirmation(h, 2); // new block, depositId 8; only the new block gets anchored
+        w.reorg_after_confirmation(h, 2); // new block, depositId 8; only the
+                                          // new block gets anchored
         w.credit_chain_for_mined_deposit();
         let (p, d) = on_the_real_clock(&w);
         let s = run_with(&p, &d, &mut w.wallet).await.unwrap();
@@ -2741,7 +2756,8 @@ mod tests {
         let mut w = World::healthy();
         let op = w.left_requested_operation_from(w.wallet.account);
         w.mined_deposit(7);
-        *w.evm.vanish_tx_after.lock().unwrap() = Some(1); // the search's one read, then gone
+        *w.evm.vanish_tx_after.lock().unwrap() = Some(1); // the search's one
+                                                          // read, then gone
         let p = w.params(RunMode::Fresh);
         let store = Store::open(&p.state_dir).unwrap();
         let mut rec = store.load(&op).unwrap();
@@ -3469,7 +3485,8 @@ mod tests {
             target: target.clone(),
             tx_hash: None,
         });
-        p.prover_dir = Some("/nonexistent/prover".into()); // not needed: the voucher is there
+        p.prover_dir = Some("/nonexistent/prover".into()); // not needed: the
+                                                           // voucher is there
         let s = resume(&p, &w.deps(), &target, None).await.unwrap();
         assert!(s.confirmation.is_some());
         assert_eq!(w.prover_runs(), 0);
@@ -3563,7 +3580,7 @@ mod tests {
         // Its run may have sent an approve before it died.
         assert!(
             e.to_string()
-                .contains("(an approve may have been sent; no USDC moved)"),
+                .contains("(an approve may have been sent; no tokens moved)"),
             "{e}"
         );
         assert!(!e.to_string().contains("nothing was sent"), "{e}");
@@ -3904,7 +3921,7 @@ mod tests {
             light_client: None,
             prover: w.prover.1.clone(),
             rpc_url: "http://rpc.invalid".into(),
-            usdc: W_USDC,
+            token: W_USDC,
         };
         let p = w.params(RunMode::Fresh);
         let e = drive(&p, &w.deps(), &store, &mut rec, &cx, None, None, op_lock)
@@ -3987,7 +4004,7 @@ mod tests {
         // Its run may have sent an approve before it died.
         assert!(
             e.to_string().contains(
-                "before its deposit was requested (an approve may have been sent; no USDC moved)"
+                "before its deposit was requested (an approve may have been sent; no tokens moved)"
             ),
             "{e}"
         );
@@ -4016,8 +4033,7 @@ mod tests {
         // come). Derived from the constant, not written out, so a contract
         // bump cannot turn this into an equality and stop testing anything.
         let newest = crate::deposit::an_preflight::NEWEST_KNOWN_BRIDGE_VERSION;
-        let too_new =
-            crate::deposit::an_preflight::BridgeVersion(newest.0, newest.1, newest.2 + 1);
+        let too_new = crate::deposit::an_preflight::BridgeVersion(newest.0, newest.1, newest.2 + 1);
         d.min_bridge = Some(too_new);
         let e = resume(&p, &d, &target, None).await.unwrap_err();
         assert!(e.to_string().contains(&too_new.to_string()), "{e}");
@@ -4583,7 +4599,11 @@ mod tests {
         let from = w.wallet.account;
         let replacement = w.mined_deposit_in_block(7, W_AMOUNT, BELOW_THE_HEAD, 0x95);
         let original = B256::repeat_byte(0x55);
-        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC));
+        let calldata = deposit_calldata(
+            alloy_primitives::Address::repeat_byte(0x7c),
+            W_AMOUNT,
+            B256::from(W_ACC),
+        );
         w.evm.txs.lock().unwrap().insert(
             original,
             deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),
@@ -4691,7 +4711,11 @@ mod tests {
         let from = w.wallet.account;
         let replacement = w.mined_deposit_in_block(7, W_AMOUNT / 2, BELOW_THE_HEAD, 0x95);
         let original = B256::repeat_byte(0x55);
-        let calldata = deposit_calldata(W_AMOUNT, B256::from(W_ACC));
+        let calldata = deposit_calldata(
+            alloy_primitives::Address::repeat_byte(0x7c),
+            W_AMOUNT,
+            B256::from(W_ACC),
+        );
         w.evm.txs.lock().unwrap().insert(
             original,
             deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),

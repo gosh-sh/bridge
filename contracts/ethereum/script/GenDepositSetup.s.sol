@@ -43,7 +43,7 @@ contract GenDepositSetup is Script {
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            usdcTokenId: 0
         });
 
         AckiNackiBridge bridge = new AckiNackiBridge(

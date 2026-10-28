@@ -531,7 +531,7 @@ mod tests {
     use super::*;
     use crate::deposit::{
         locks::{DirLock, OpLock},
-        pi::tests_support::{expected_from_witness, PI},
+        pi::tests_support::{expected_from_witness, fixture_pi},
         testkit::fake_prover_dir,
         ui::RecordingUi,
     };
@@ -595,7 +595,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(p.public_inputs, PI);
+        assert_eq!(p.public_inputs, fixture_pi());
         assert_eq!(load(w.path()).unwrap(), p);
         assert_eq!(load(w.path()).unwrap().proof, b"proof");
         let left: Vec<_> = std::fs::read_dir(w.path())
@@ -632,7 +632,7 @@ mod tests {
         let (_d, dir) = fake_prover_dir("exit 1");
         let w = tempfile::tempdir().unwrap();
         std::fs::write(w.path().join(PROOF_FILE), b"old proof").unwrap();
-        std::fs::write(w.path().join(PUBIN_FILE), PI).unwrap();
+        std::fs::write(w.path().join(PUBIN_FILE), fixture_pi()).unwrap();
         prove(
             &dir,
             &req(w.path()),

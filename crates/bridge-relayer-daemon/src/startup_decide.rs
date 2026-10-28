@@ -93,11 +93,12 @@ fn hold_window_unacked(local: &BridgeState, chain: &EthBridgeContractState) -> b
 /// **Genesis prepend.** Cold-start bootstrap
 /// (`bootstrap::BootstrapSeed::apply`, documented at `bootstrap.rs:17-18` as a
 /// Phase 1 fix ensuring verifier daemon does not lag prover) calls
-/// `append_bundle` with every seed `history_proofs` entry. This prepends one
-/// genesis entry to each active local layer window. The contract does **not**
-/// copy those entries into `_layerWindows`; it exposes only the configured
-/// anchor layer's seed root in immutable `storedPrevMaxLevelLayerHash`. So
-/// chronologically:
+/// `append_bundle` with the seed's `history_proofs` entries for layers
+/// `1..=anchor_level`. This prepends one genesis entry to each of those local
+/// layer windows; layers above `anchor_level` get none. The contract does
+/// **not** copy those entries into `_layerWindows`; it exposes only the
+/// configured anchor layer's seed root in immutable
+/// `storedPrevMaxLevelLayerHash`. So chronologically:
 ///
 /// - **Pre-wrap** (local data_len ≤ W): each bootstrapped local layer window is
 ///   `[genesis_layer_root, vb_1, vb_2, …, vb_N]`; chain is `[vb_1, …, vb_N]`.
@@ -176,8 +177,10 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState, anchor_lev
         // `expectedPrevAnchor(numLayers)` cross-check, per
         // `history_consistency.rs:38-47`) is the authoritative gate for
         // deeper layers — startup routing only ensures we do not
-        // silently resurrect on a mismatched cursor.
-        if local_chrono.len() == chain_chrono.len() + 1 {
+        // silently resurrect on a mismatched cursor. Layers above the
+        // anchor layer never carry a seed entry (bridge-audit#122), so a
+        // prepend there is a divergence.
+        if i <= anchor_index && local_chrono.len() == chain_chrono.len() + 1 {
             if i == anchor_index && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash {
                 return false;
             }
@@ -190,6 +193,35 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState, anchor_lev
         return false;
     }
     true
+}
+
+/// Lowest layer above `anchor_level` that holds a hash locally while the
+/// contract's window for it is empty.
+///
+/// Relayers built before bridge-audit#122 seeded every layer of the seed
+/// block, so a seed on a boundary of higher order left the seed's root in a
+/// layer the contract never stored. That raises the prover's active-layer
+/// count above the contract's and stalls `verifyBlock` at the next boundary
+/// of that layer on `prevMaxLevelLayerHash != expectedPrevAnchor`.
+fn seed_layer_above_anchor(
+    local: &BridgeState,
+    chain: &EthBridgeContractState,
+    anchor_level: u8,
+) -> Option<u8> {
+    (usize::from(anchor_level)..MAX_LAYERS)
+        .find(|&i| local.layer_windows[i].data_len > 0 && chain.layer_windows[i].data_len == 0)
+        .map(|i| (i + 1) as u8)
+}
+
+fn stale_seed_layer_stop(layer: u8, anchor_level: u8) -> StartupDecision {
+    StartupDecision::Stop {
+        reason: format!(
+            "local layer {layer} holds a hash the contract's layer {layer} does not: the state \
+             was seeded above --anchor-level {anchor_level} by an older relayer and would stall \
+             verifyBlock at the next layer-{layer} boundary. Remove the local state (rm \
+             prover_state.json) and restart; it is rebuilt from the contract.",
+        ),
+    }
 }
 
 /// The routing table.
@@ -383,8 +415,15 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         };
     }
 
+    // Checked ahead of the hold-window resumes below, which keep the local
+    // state as it is. A plain Resurrect replaces it, so needs no check.
+    let stale_seed_layer = seed_layer_above_anchor(local, chain, anchor_level);
+
     if local_seq < chain_seq {
         if hold_window_unacked(local, chain) {
+            if let Some(layer) = stale_seed_layer {
+                return stale_seed_layer_stop(layer, anchor_level);
+            }
             // Chain applied N; local still holds the outgoing set and
             // has not acked. Catch up with that set — do not resurrect
             // into the new commitment (that would desync prover_bk_set).
@@ -411,6 +450,9 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     // per the convention in `history_consistency.rs:59` and memory
     // `bridge_genesis_anchor_endianness.md`.
     let chain_commit = chain.bk_set_commitment;
+    if let Some(layer) = stale_seed_layer {
+        return stale_seed_layer_stop(layer, anchor_level);
+    }
     if hold_window_unacked(local, chain) {
         return StartupDecision::WarmResume;
     }
@@ -688,6 +730,87 @@ mod tests {
                 );
             },
             d => panic!("expected L2 Stop, got {d:?}"),
+        }
+    }
+
+    /// A relayer built before bridge-audit#122 seeded every layer of an L2
+    /// seed that sat on a W³ boundary: local layer 3 holds the seed root, the
+    /// contract's layer 3 is empty. Startup must stop with the remedy instead
+    /// of warm-resuming into a `verifyBlock` that stalls at the next W³.
+    #[test]
+    fn stop_when_local_holds_a_seed_layer_above_the_anchor_level() {
+        let (mut local, chain) = l2_prepend_state();
+        local.window_mut(3).append([0x55; 32], 100);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Stop {
+                reason,
+            } => {
+                assert!(reason.contains("local layer 3"), "reason: {reason}");
+                assert!(reason.contains("rm prover_state.json"), "reason: {reason}");
+            },
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    /// The hold-window resume keeps local state as it is, so it must not
+    /// carry a stale seed layer past startup either.
+    #[test]
+    fn stop_on_a_seed_layer_above_the_anchor_level_inside_the_hold_window() {
+        let (mut local, mut chain) = l2_prepend_state();
+        local.window_mut(3).append([0x55; 32], 100);
+        chain.prev_bk_set_commitment = local.stored_bk_set_commitment;
+        chain.bk_set_commitment = [0xAB; 32];
+        chain.last_bk_set_update_seq_no = 150;
+        assert!(hold_window_unacked(&local, &chain));
+        for chain_seq in [200, 300] {
+            chain.last_seen_block_seq_no = chain_seq;
+            match decide(DecideInputs {
+                local: &local,
+                chain: &chain,
+                bootstrap_seqno: None,
+                window_size: W,
+                anchor_level: 2,
+            }) {
+                StartupDecision::Stop {
+                    reason,
+                } => assert!(reason.contains("local layer 3"), "reason: {reason}"),
+                d => panic!("expected Stop at chain last_seen={chain_seq}, got {d:?}"),
+            }
+        }
+    }
+
+    /// Only layers `1..=anchor_level` carry a seed entry, so an extra leading
+    /// slot above the anchor layer is a divergence even where the contract's
+    /// window is populated.
+    #[test]
+    fn stop_when_a_layer_above_the_anchor_level_has_a_genesis_prepend() {
+        let (mut local, mut chain) = l2_prepend_state();
+        local.window_mut(3).append([0x55; 32], 100);
+        local.window_mut(3).append([0x66; 32], 200);
+        chain.layer_windows[2] = empty_lw();
+        chain.layer_windows[2].append([0x66; 32], 200);
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 2,
+        }) {
+            StartupDecision::Stop {
+                reason,
+            } => {
+                assert!(
+                    reason.contains("per-layer windows diverge"),
+                    "reason: {reason}"
+                );
+            },
+            d => panic!("expected Stop, got {d:?}"),
         }
     }
 

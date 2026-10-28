@@ -623,7 +623,8 @@ All deploy scripts except `DeployRealBridge` with `USE_AXIOM_ORACLE=true` wire t
 Idle USDC can be routed into the AAVE V3 USDC market; user principal accounting (`treasuryBalance`)
 is independent of the aToken balance. For the operator's view of this module — which collector
 applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` divergence — see
-[`aave-yield.md`](aave-yield.md).
+[`aave-yield.md`](aave-yield.md). That page also lists the three markets `DeployRealBridge` can
+wire (Ethereum, Ethereum Sepolia, Arbitrum Sepolia). `aavePool` and `aUSDC` are immutables.
 
 | Function | Line | Behaviour |
 |---|---:|---|

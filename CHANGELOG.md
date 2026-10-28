@@ -22,6 +22,17 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Added
+
+- `DeployRealBridge` on Arbitrum Sepolia (chain id 421614) wires the AAVE V3 pool
+  `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
+  `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` and its aToken
+  `0x460b97BD498E1157530AEb3086301d5225b91216`. `USE_AXIOM_ORACLE` stays limited to
+  Ethereum mainnet and Ethereum Sepolia; this chain gets `MockBlockHeaderOracle`.
+  `aavePool` and `aUSDC` are constructor immutables, so a bridge already deployed with a
+  zero pool cannot be pointed at this market — deploy a new one. `setAaveEnabled(true)`
+  on a zero pool still reverts `InvalidAaveAddress`.
+
 ### Fixes
 
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works

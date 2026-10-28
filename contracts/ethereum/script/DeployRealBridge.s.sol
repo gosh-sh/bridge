@@ -18,7 +18,8 @@ import "./ShplonkDeployLib.sol";
  *
  * Oracle mode:
  *   - chainid 1: USE_AXIOM_ORACLE must be set true (Mock forbidden).
- *   - other nets: USE_AXIOM_ORACLE=true → Axiom; default → Mock (testing).
+ *   - chainid 11155111: USE_AXIOM_ORACLE=true → Axiom; default → Mock.
+ *   - any other chain, including 421614: Mock. Axiom is not deployed by this script.
  *
  * verifyBlock wiring:
  *   - chainid 1: WIRE_VERIFY_BLOCK must be set true.
@@ -82,6 +83,14 @@ contract DeployRealBridge is Script {
     address constant AAVE_V3_POOL_SEPOLIA = 0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951;
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
     address constant AAVE_V3_aUSDC_SEPOLIA = 0x16dA4541aD1807f4443d92D26044C1147406EB80;
+
+    /// Arbitrum Sepolia (421614). This market's underlying is Circle's USDC,
+    /// not the Aave faucet token used on Ethereum Sepolia. Read 2026-10-28:
+    /// aToken `UNDERLYING_ASSET_ADDRESS` is `USDC_ARBITRUM_SEPOLIA` and
+    /// `POOL` is `AAVE_V3_POOL_ARBITRUM_SEPOLIA`.
+    address constant AAVE_V3_POOL_ARBITRUM_SEPOLIA = 0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff;
+    address constant USDC_ARBITRUM_SEPOLIA = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
+    address constant AAVE_V3_aUSDC_ARBITRUM_SEPOLIA = 0x460b97BD498E1157530AEb3086301d5225b91216;
 
     function run() external {
         bool mainnet = block.chainid == 1;
@@ -246,7 +255,17 @@ contract DeployRealBridge is Script {
             }
             return (usdcAddr, aavePool, aUSDC);
         }
-        revert("USDC/AAVE wiring only supported on mainnet (1) or Sepolia (11155111)");
+        if (block.chainid == 421614) {
+            usdcAddr = USDC_ARBITRUM_SEPOLIA;
+            if (useAave) {
+                aavePool = AAVE_V3_POOL_ARBITRUM_SEPOLIA;
+                aUSDC = AAVE_V3_aUSDC_ARBITRUM_SEPOLIA;
+            }
+            return (usdcAddr, aavePool, aUSDC);
+        }
+        revert(
+            "USDC/AAVE wiring only supported on mainnet (1), Sepolia (11155111) or Arbitrum Sepolia (421614)"
+        );
     }
 
     function _buildVerifyBlockConfig(

@@ -27,7 +27,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::bridge_state::BridgeState;
+use crate::bridge_state::{BridgeState, MAX_LAYERS};
 
 /// Current schema version of the on-disk seed file. Bump when the layout of
 /// `BootstrapSeed` changes in a non-additive way.
@@ -113,18 +113,28 @@ impl BootstrapSeed {
     /// Apply this seed to `state` — genesis-stamp the BK-set commitment
     /// (via `initialize_bk_set_commitment`, matching the Solidity
     /// constructor's one-shot write) and then append the seed's layer
-    /// hashes + cursors via `append_bundle`.
+    /// hashes `1..=anchor_level` + cursors via `append_bundle`.
+    ///
+    /// Layers above `anchor_level` are left out. The contract knows the seed
+    /// block only through its layer-`anchor_level` root
+    /// (`storedPrevMaxLevelLayerHash`); a seed on a boundary of higher order
+    /// would otherwise lift `num_active_layers` above the contract's
+    /// `_highestActiveLayer`, and the next boundary of that order would be
+    /// proved from an anchor the contract does not expect
+    /// (bridge-audit#122).
     ///
     /// Errors if `state` is already initialized: the commitment stamp is
     /// a genesis-only operation and callers must guard with
     /// `!state.initialized`.
     pub fn apply(&self, state: &mut BridgeState) -> anyhow::Result<()> {
         state.initialize_bk_set_commitment(self.bk_set_commitment)?;
-        state.append_bundle(
-            &self.layer_hashes,
-            self.block_height,
-            self.block_seq_no,
-        )?;
+        let anchored_layers: Vec<([u8; 32], u8)> = self
+            .layer_hashes
+            .iter()
+            .copied()
+            .filter(|(_, layer)| *layer <= self.anchor_level)
+            .collect();
+        state.append_bundle(&anchored_layers, self.block_height, self.block_seq_no)?;
         // Stamp the anchor level onto the state at genesis. Must happen
         // AFTER `initialize_bk_set_commitment` (which requires the state be
         // uninitialized) but before any subsequent bundle append could
@@ -136,6 +146,29 @@ impl BootstrapSeed {
         // (one-shot write at genesis).
         state.stored_last_bk_set_update_seq_no = self.last_bk_set_update_seq_no;
         Ok(())
+    }
+
+    /// Lowest layer above `anchor_level` whose window in `state` still holds
+    /// this seed's root at the seed height.
+    ///
+    /// Only an [`Self::apply`] from before bridge-audit#122 put it there: no
+    /// verified bundle shares the seed's height. Such a state proves the next
+    /// boundary of that layer from a root the contract never stored, and
+    /// `verifyBlock` stalls there on `PrevAnchorMismatch`.
+    pub fn layer_seeded_above_anchor_level(&self, state: &BridgeState) -> Option<u8> {
+        self.layer_hashes
+            .iter()
+            .filter(|(_, layer)| {
+                *layer > self.anchor_level && (1..=MAX_LAYERS as u8).contains(layer)
+            })
+            .filter(|(root, layer)| {
+                state
+                    .window(*layer)
+                    .iter_chronological()
+                    .any(|(hash, height)| hash == *root && height == self.block_height)
+            })
+            .map(|(_, layer)| *layer)
+            .min()
     }
 
     /// Atomically persist the seed to `path` (write `.tmp`, then `rename`).
@@ -402,6 +435,58 @@ mod tests {
         // And the L2 slot got populated verbatim.
         assert_eq!(state.window(2).data_len, 1);
         assert_eq!(state.window(2).latest(), Some([7u8; 32]));
+    }
+
+    /// A seed on a W³ boundary carries layers 1..=3; under L2 only layers 1
+    /// and 2 reach the state, so `num_active_layers` matches what the
+    /// contract builds from its first bundle (bridge-audit#122).
+    #[test]
+    fn apply_leaves_out_layers_above_the_anchor_level() {
+        let mut state = BridgeState::new(8);
+        let seed = BootstrapSeed {
+            schema_version: SEED_SCHEMA_VERSION,
+            layer_hashes: vec![([0x11; 32], 1), ([0x12; 32], 2), ([0x13; 32], 3)],
+            block_height: 512,
+            block_seq_no: 512,
+            bk_set_commitment: [9u8; 32],
+            anchor_level: 2,
+            last_bk_set_update_seq_no: 0,
+        };
+        seed.apply(&mut state).unwrap();
+        assert_eq!(state.window(1).latest(), Some([0x11; 32]));
+        assert_eq!(state.window(2).latest(), Some([0x12; 32]));
+        assert_eq!(state.window(3).data_len, 0, "layer 3 is above the anchor level");
+        assert_eq!(state.num_active_layers(), 2);
+        assert_eq!(state.stored_last_seen_block_seq_no, 512);
+        assert_eq!(seed.layer_seeded_above_anchor_level(&state), None);
+    }
+
+    /// A state an earlier `apply` seeded with every layer is recognised by
+    /// the seed's own root at the seed height; a later bundle's root in the
+    /// same layer is not mistaken for it.
+    #[test]
+    fn layer_seeded_above_anchor_level_finds_a_pre_fix_seed_entry() {
+        let seed = BootstrapSeed {
+            schema_version: SEED_SCHEMA_VERSION,
+            layer_hashes: vec![([0x11; 32], 1), ([0x12; 32], 2), ([0x13; 32], 3)],
+            block_height: 512,
+            block_seq_no: 512,
+            bk_set_commitment: [9u8; 32],
+            anchor_level: 2,
+            last_bk_set_update_seq_no: 0,
+        };
+        let mut pre_fix = BridgeState::new(8);
+        pre_fix.initialize_bk_set_commitment(seed.bk_set_commitment).unwrap();
+        pre_fix.append_bundle(&seed.layer_hashes, 512, 512).unwrap();
+        pre_fix.append_bundle(&[([0x21; 32], 1), ([0x22; 32], 2)], 576, 576).unwrap();
+        assert_eq!(seed.layer_seeded_above_anchor_level(&pre_fix), Some(3));
+
+        let mut fixed = BridgeState::new(8);
+        seed.apply(&mut fixed).unwrap();
+        fixed
+            .append_bundle(&[([0x21; 32], 1), ([0x22; 32], 2), ([0x23; 32], 3)], 1024, 1024)
+            .unwrap();
+        assert_eq!(seed.layer_seeded_above_anchor_level(&fixed), None);
     }
 
     #[test]

@@ -26,9 +26,15 @@ assigns it when the release is tagged.
 
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
-  file; every flag, environment variable and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+  file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
+  flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
 
 ### Fixes
+
+- `eth-lc-relayer daemon` and `arbitrum-anchors` take a plain-HTTP `--an-graphql-url` without
+  `--allow-insecure-graphql` only when its host is `localhost`, a `127.0.0.0/8` address or `::1`;
+  `localhost` or `127.0.0.1` anywhere else in the URL no longer passes.
+- `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
   with the deployed bridge, and `release.yaml` publishes the binaries again.

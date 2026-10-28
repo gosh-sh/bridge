@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use alloy::{
     primitives::B256,
     providers::{Provider, ProviderBuilder, RootProvider},
-    rpc::types::{Filter, Log},
+    rpc::types::{Filter, Header as RpcHeader, Log},
 };
 use async_trait::async_trait;
 use reqwest::Client;
@@ -428,7 +428,7 @@ impl EthExecutionRpc {
         let url: String = url.into();
         let url = url
             .parse()
-            .map_err(|e| RelayerError::eth(format!("ETH_RPC_URL {url}: {e}")))?;
+            .map_err(|e| RelayerError::eth(format!("ETH_RPC_URL: {e}")))?;
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -440,15 +440,17 @@ impl EthExecutionRpc {
         })
     }
 
+    /// Reads only the header fields of the block: the transaction hashes,
+    /// uncles and withdrawals beside them are not parsed.
     pub async fn header_rlp(&self, block_hash: [u8; 32]) -> Result<Vec<u8>, RelayerError> {
         let hash = B256::from(block_hash);
-        let block = self
+        let header: RpcHeader = self
             .provider
-            .get_block_by_hash(hash)
+            .raw_request::<_, Option<RpcHeader>>("eth_getBlockByHash".into(), (hash, false))
             .await
             .map_err(|e| RelayerError::eth(format!("eth_getBlockByHash: {e}")))?
             .ok_or_else(|| RelayerError::eth(format!("unknown block {hash}")))?;
-        Ok(crate::header_rlp::encode_header_rlp(&block.header)?.to_vec())
+        Ok(crate::header_rlp::encode_header_rlp(&header)?.to_vec())
     }
 
     /// The span from `older` to `newer` inclusive, oldest first, at most `max`
@@ -622,6 +624,20 @@ impl BeaconSource for InMemoryBeaconSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `header_rlp` parses the `eth_getBlockByHash` answer as a header: the
+    /// block body beside it is never read, whatever shape it has.
+    #[test]
+    fn a_block_answer_parses_as_its_header() {
+        let mut v: Value =
+            serde_json::from_str(include_str!("fixtures/sepolia_amsterdam.json")).unwrap();
+        v["transactions"] = serde_json::json!([format!("0x{}", "11".repeat(32))]);
+        v["uncles"] = serde_json::json!([]);
+        v["withdrawals"] = serde_json::json!("a shape no block type knows");
+        let header: RpcHeader = serde_json::from_value(v).unwrap();
+        let rlp = crate::header_rlp::encode_header_rlp(&header).unwrap();
+        assert_eq!(crate::header_rlp::keccak256(&rlp), header.hash.0);
+    }
 
     #[test]
     fn is_retryable_detects_429() {

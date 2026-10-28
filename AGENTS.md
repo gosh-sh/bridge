@@ -115,7 +115,8 @@ crates/
   deposit-chain-ids/       the EVM chains the deposit bridge accepts — single source of truth
   eth-frontend/            Ethereum client (alloy)
   deposit-relayer-daemon/  ETH→AN relayer: Deposit logs → deposit-prover → finalizeDeposit on AN
-  eth-light-client-relayer/ finality_update → step/rotate proofs → EthBeaconLightClient on AN
+  eth-light-client-relayer/ finality_update → step/rotate proofs → EthBeaconLightClient on AN;
+                           arbitrum-anchors: Arbitrum deposit blocks → proveBlock on AN
   bridge-prover-libraries/ AN→ETH prover workspace (gosh halo2 fork): prover lib and live driver,
                            GraphQL fetcher, prover and verifier daemons, Circuit 4 event witness
                            and prover, snark wrap

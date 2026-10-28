@@ -41,13 +41,14 @@ use eth_light_client_relayer::AnInterfaceSubmitter;
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::RelayerState;
 use eth_light_client_relayer::{
-    arbitrum, AnConfig, AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc,
-    HttpBeaconSource, MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig,
-    RelayerMetrics, StateLock, SubprocessProofGenerator, SubprocessProverConfig,
+    arbitrum, validate_live_graphql_url, AnConfig, AnSubmitter, BackoffConfig, BeaconSource,
+    EthExecutionRpc, HttpBeaconSource, MockAnSubmitter, MockProofGenerator, ProofGenerator,
+    Relayer, RelayerConfig, RelayerMetrics, StateLock, SubprocessProofGenerator,
+    SubprocessProverConfig,
 };
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 #[cfg(feature = "live-submit")]
 use tvm_client::crypto::KeyPair;
 
@@ -657,12 +658,8 @@ async fn main() -> anyhow::Result<()> {
             arbitrum_log_span,
             allow_insecure_graphql,
         } => {
-            AnConfig {
-                graphql_url: an_graphql_url.clone(),
-                ..AnConfig::default()
-            }
-            .validate_live_graphql_endpoint(allow_insecure_graphql)
-            .map_err(|e| anyhow::anyhow!(e))?;
+            validate_live_graphql_url(&an_graphql_url, allow_insecure_graphql)
+                .map_err(log_err("arbitrum-anchors"))?;
             arbitrum_anchors(
                 &parent_rpc_url,
                 &arbitrum_rpc_url,
@@ -681,6 +678,7 @@ async fn main() -> anyhow::Result<()> {
                 arbitrum_log_span,
             )
             .await
+            .map_err(log_err("arbitrum-anchors"))
         },
         Cmd::ArbitrumVector {
             parent_rpc_url,
@@ -690,18 +688,27 @@ async fn main() -> anyhow::Result<()> {
             out,
             poll_secs,
             parent_log_span,
-        } => {
-            arbitrum_vector(
-                &parent_rpc_url,
-                &arbitrum_rpc_url,
-                behind,
-                Duration::from_secs(timeout_mins * 60),
-                &out,
-                Duration::from_secs(poll_secs.max(1)),
-                parent_log_span,
-            )
-            .await
-        },
+        } => arbitrum_vector(
+            &parent_rpc_url,
+            &arbitrum_rpc_url,
+            behind,
+            Duration::from_secs(timeout_mins * 60),
+            &out,
+            Duration::from_secs(poll_secs.max(1)),
+            parent_log_span,
+        )
+        .await
+        .map_err(log_err("arbitrum-vector")),
+    }
+}
+
+/// Puts the error of a long-running command in the service log next to its
+/// other lines, before `main` prints it to stderr.
+fn log_err<E: Into<anyhow::Error>>(stage: &'static str) -> impl Fn(E) -> anyhow::Error {
+    move |e| {
+        let e = e.into();
+        error!(stage, ?e, "command failed");
+        e
     }
 }
 
@@ -1522,13 +1529,19 @@ const BRIDGE_DEPLOY_BLOCK_ENV: &str = "BRIDGE_DEPLOY_BLOCK";
 
 /// `--from-block` when non-zero, else `BRIDGE_DEPLOY_BLOCK`, else `0`.
 fn resolve_from_block(cli_from_block: u64) -> u64 {
+    from_block_or(
+        cli_from_block,
+        std::env::var(BRIDGE_DEPLOY_BLOCK_ENV).ok().as_deref(),
+    )
+}
+
+/// `cli_from_block` when non-zero, else `deploy_block` when it parses, else
+/// `0`.
+fn from_block_or(cli_from_block: u64, deploy_block: Option<&str>) -> u64 {
     if cli_from_block != 0 {
         return cli_from_block;
     }
-    std::env::var(BRIDGE_DEPLOY_BLOCK_ENV)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0)
+    deploy_block.and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
 /// The Arbitrum chain behind `arbitrum_rpc_url`, checked against the parent
@@ -1700,7 +1713,6 @@ async fn arbitrum_anchors(
 }
 
 /// SIGINT, or SIGTERM on unix.
-#[cfg(feature = "live-submit")]
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1795,11 +1807,8 @@ where
         "starting light-client daemon"
     );
     let metrics = RelayerMetrics::new();
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
     relayer
-        .run_until_shutdown(backoff, metrics, shutdown)
+        .run_until_shutdown(backoff, metrics, shutdown_signal())
         .await
         .map_err(Into::into)
 }
@@ -1911,5 +1920,101 @@ mod tests {
         let srs = dir.path().join("hermez-raw-19");
         std::fs::write(&srs, "srs").unwrap();
         subprocess_prover_config(Some(step), None, None, Some(srs), false, 1, logs).unwrap();
+    }
+
+    /// The long flags of a subcommand with their environment variables and
+    /// defaults, `--help` left out.
+    fn flags(sub: &str) -> Vec<(String, Option<String>, Vec<String>)> {
+        use clap::CommandFactory;
+        let mut cli = Args::command();
+        cli.build();
+        let mut flags: Vec<_> = cli
+            .find_subcommand(sub)
+            .unwrap_or_else(|| panic!("no subcommand {sub}"))
+            .get_arguments()
+            .filter_map(|a| {
+                let long = a.get_long()?;
+                (long != "help").then(|| {
+                    (
+                        long.to_string(),
+                        a.get_env().map(|e| e.to_string_lossy().into_owned()),
+                        a.get_default_values()
+                            .iter()
+                            .map(|d| d.to_string_lossy().into_owned())
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
+        flags.sort();
+        flags
+    }
+
+    fn want(table: &[(&str, Option<&str>, &[&str])]) -> Vec<(String, Option<String>, Vec<String>)> {
+        let mut want: Vec<_> = table
+            .iter()
+            .map(|(long, env, default)| {
+                (
+                    long.to_string(),
+                    env.map(str::to_string),
+                    default.iter().map(|d| d.to_string()).collect(),
+                )
+            })
+            .collect();
+        want.sort();
+        want
+    }
+
+    /// `arbitrum-anchors` and `arbitrum-vector` came over from
+    /// `deposit-relayer`: a unit file written for it needs only the binary
+    /// changed, so every flag keeps its name, environment variable and
+    /// default.
+    #[test]
+    fn the_arbitrum_subcommands_keep_the_deposit_relayer_flags() {
+        assert_eq!(
+            flags("arbitrum-anchors"),
+            want(&[
+                ("parent-rpc-url", Some("PARENT_RPC_URL"), &[]),
+                ("arbitrum-rpc-url", Some("ARBITRUM_RPC_URL"), &[]),
+                ("bridge-address", None, &[]),
+                ("from-block", None, &["0"]),
+                ("an-graphql-url", Some("AN_GRAPHQL_URL"), &[]),
+                ("an-keys-path", Some("AN_KEYS_PATH"), &[]),
+                ("an-bridge-abi-path", Some("AN_BRIDGE_ABI_PATH"), &[]),
+                (
+                    "an-verifier-abi-path",
+                    Some("AN_ARBITRUM_VERIFIER_ABI_PATH"),
+                    &[]
+                ),
+                ("an-token-bridge", Some("AN_TOKEN_BRIDGE"), &[]),
+                ("anchor-state", Some("ARBITRUM_ANCHOR_STATE"), &[
+                    "./arbitrum-anchors-state.json"
+                ]),
+                ("poll-secs", None, &["12"]),
+                ("parent-log-span", None, &["1000"]),
+                ("arbitrum-log-span", None, &["10000"]),
+                ("allow-insecure-graphql", None, &["false"]),
+            ])
+        );
+        assert_eq!(
+            flags("arbitrum-vector"),
+            want(&[
+                ("parent-rpc-url", Some("PARENT_RPC_URL"), &[]),
+                ("arbitrum-rpc-url", Some("ARBITRUM_RPC_URL"), &[]),
+                ("behind", None, &["1000"]),
+                ("timeout-mins", None, &["100"]),
+                ("out", None, &[]),
+                ("poll-secs", None, &["12"]),
+                ("parent-log-span", None, &["1000"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn from_block_falls_back_to_the_deploy_block() {
+        assert_eq!(from_block_or(42, Some("7")), 42);
+        assert_eq!(from_block_or(0, Some("7")), 7);
+        assert_eq!(from_block_or(0, None), 0);
+        assert_eq!(from_block_or(0, Some("not a block")), 0);
     }
 }

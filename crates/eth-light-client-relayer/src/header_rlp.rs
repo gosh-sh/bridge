@@ -3,16 +3,12 @@
 //! behind [`encode_header_rlp`].
 
 use alloy::{primitives::Bytes, rpc::types::Header as RpcHeader};
-use tiny_keccak::{Hasher, Keccak};
 
 use crate::error::RelayerError;
 
+/// alloy's keccak256 as the plain array the light-client code keys on.
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut h = Keccak::v256();
-    h.update(data);
-    let mut out = [0u8; 32];
-    h.finalize(&mut out);
-    out
+    alloy::primitives::keccak256(data).0
 }
 
 /// First RLP item of an Ethereum block header is `parentHash` (32 bytes).
@@ -46,7 +42,7 @@ pub fn rlp_parent_hash(header: &[u8]) -> Result<[u8; 32], RelayerError> {
 /// or a refused `proveBlock`.
 pub fn encode_header_rlp(header: &RpcHeader) -> Result<Bytes, RelayerError> {
     let rlp = alloy::rlp::encode(&header.inner);
-    if alloy::primitives::keccak256(&rlp) != header.hash {
+    if keccak256(&rlp) != header.hash.0 {
         return Err(RelayerError::eth(format!(
             "the header of block {} does not encode to its hash {}: the node returns fields this \
              encoder does not know",

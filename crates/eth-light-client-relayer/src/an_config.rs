@@ -75,20 +75,7 @@ impl AnConfig {
     }
 
     pub fn validate_live_graphql_endpoint(&self, allow_insecure: bool) -> Result<(), RelayerError> {
-        if self.graphql_url.is_empty() {
-            return Ok(());
-        }
-        let lower = self.graphql_url.to_ascii_lowercase();
-        if lower.starts_with("https://") {
-            return Ok(());
-        }
-        let loopback = lower.contains("127.0.0.1") || lower.contains("localhost");
-        if loopback || allow_insecure {
-            return Ok(());
-        }
-        Err(RelayerError::other(
-            "AN GraphQL must be HTTPS (or loopback / --allow-insecure-graphql)",
-        ))
+        validate_live_graphql_url(&self.graphql_url, allow_insecure)
     }
 
     /// The flip disables `USDCBridge` owner anchors and `EthBeaconLightClient`
@@ -104,9 +91,61 @@ impl AnConfig {
     }
 }
 
+/// A GraphQL endpoint live submit may use: HTTPS, plain HTTP whose host is
+/// `localhost`, `127.0.0.0/8` or `::1`, or anything with `allow_insecure`. An
+/// empty URL passes: the caller reports a missing endpoint.
+pub fn validate_live_graphql_url(url: &str, allow_insecure: bool) -> Result<(), RelayerError> {
+    if url.is_empty() || allow_insecure {
+        return Ok(());
+    }
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| RelayerError::other(format!("AN GraphQL URL does not parse: {e}")))?;
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        _ => Err(RelayerError::other(
+            "AN GraphQL must be HTTPS (or loopback / --allow-insecure-graphql)",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_http_graphql_only_to_this_host() {
+        for ok in [
+            "https://example.org/graphql",
+            "http://127.0.0.1:8080/graphql",
+            "http://127.1.2.3/graphql",
+            "http://localhost/graphql",
+            "http://LOCALHOST:80/graphql",
+            "http://[::1]:8080/graphql",
+            "",
+        ] {
+            assert!(validate_live_graphql_url(ok, false).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://example.org/graphql",
+            "http://example.org/localhost",
+            "http://127.0.0.1.example.org/graphql",
+            "http://localhost.example.org/graphql",
+            "http://example.org/?next=http://127.0.0.1",
+            "ftp://localhost/graphql",
+            "not a url",
+        ] {
+            assert!(validate_live_graphql_url(bad, false).is_err(), "{bad}");
+            assert!(validate_live_graphql_url(bad, true).is_ok(), "{bad}");
+        }
+    }
 
     #[test]
     fn flip_owner_requires_usdc_bridge() {

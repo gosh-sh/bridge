@@ -24,7 +24,7 @@
 //! first (the parent chain's light client, with `submitAncestry` for blocks
 //! between its checkpoints); until it is, the proof waits in the state file.
 //!
-//! The live Acki Nacki side ([`TvmAnchorTarget`]) needs the `live-submit`
+//! The live Acki Nacki side (`TvmAnchorTarget`) needs the `live-submit`
 //! feature, as every other call this crate sends to Acki Nacki.
 
 use std::{

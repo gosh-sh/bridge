@@ -3038,7 +3038,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "tiny-keccak",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.23",

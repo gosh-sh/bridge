@@ -23,6 +23,14 @@ Arbitrum Sepolia is the testnet market whose underlying is Circle's USDC. Read o
 aToken's `UNDERLYING_ASSET_ADDRESS()` was that USDC, its `POOL()` was that pool, and the reserve was
 active, not frozen and not paused, with a supply cap of 10_500_000. Testnet markets move. Before a
 deploy, call those two views again and confirm `getReserveData(usdc)` still returns this aToken.
+`AckiNackiBridgeAaveArbSepoliaForkTest` does that check and then calls `supplyToAave`,
+`harvestYield` (the reserve already has a borrower), `withdrawFromAave`, `emergencyWithdrawAll`
+and a `withdrawByProof` that tops the payout up from the pool:
+
+```bash
+FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
+  forge test --match-contract AckiNackiBridgeAaveArbSepoliaForkTest -vv
+```
 
 `USE_AXIOM_ORACLE` deploys `AxiomBlockHeaderOracle` only on chain ids 1 and 11155111. On 421614 the
 script deploys `MockBlockHeaderOracle`. The bridge stores that address and does not call it on the

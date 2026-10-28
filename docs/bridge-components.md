@@ -1,6 +1,6 @@
 # Bridge components
 
-> **Verified against `447aa635`** (branch `feature/l2-block-proof`). Every connection below is drawn
+> **Verified against `fc3718d8`** (`main`). Every connection below is drawn
 > from the call site that makes it, not from prose; the table gives each one's `file:line` at that
 > commit.
 
@@ -12,7 +12,7 @@ three chains, the relayers and the end-user CLI between them, and the interfaces
 ## Notation
 
 - **«component»** — a program: a relayer, the CLI, a prover, an RPC node. **«component, contract»**
-  — a smart contract on a chain.
+  — a smart contract on a chain. **«external»** — a third-party service.
 - **Frame with a tab** — a chain. The contracts sit inside their chain; the relayers and the CLI sit
   between the chains.
 - **Ball** — an interface a component provides, labelled with its name. **Socket** (the half circle
@@ -20,8 +20,10 @@ three chains, the relayers and the end-user CLI between them, and the interfaces
   own ball with the same label.
 - **Color** — each relayer and the CLI has its own: its box and every connection it makes.
 - **Dashed arrow** — a dependency: a process the component starts, or a contract that reads another.
-- Writes are drawn to the contract interface they call. Reads go through the chain's RPC node
-  (Arbitrum, Sepolia) or GraphQL node (Acki Nacki).
+- Writes are drawn to the contract interface they call; physically they go through the chain's node:
+  the RPC node on Arbitrum, the Block Manager's `REST /v2/messages` on Acki Nacki. Reads go through the
+  RPC node (Arbitrum, Sepolia) or the Block Manager (Acki Nacki). A getter called through the SDK
+  downloads the account over `REST /v2/account` and runs locally; it does not go through GraphQL.
 - `verify*` — the four verifiers `AckiNackiBridge` calls: `verifyPrimaryAttestation`,
   `verifyFallbackAttestation` and `verifyLayerHashesMovement` for `verifyBlock`, `verifyWithdrawal`
   for `withdrawByProof`. `transfer*` — `transferFrom` on deposit, `transfer` on payout.
@@ -37,19 +39,23 @@ Paths are relative to the repository root.
 | `ackinacki-bridge` (CLI) | `deposit-prover` | process | `crates/ackinacki-bridge/src/deposit/prover.rs:206` |
 | `ackinacki-bridge` (CLI) | `eccUSDCBridge` | `finalizeDeposit` | `crates/ackinacki-bridge/src/deposit/an.rs:754` |
 | `ackinacki-bridge` (CLI) | user multisig | `sendTransaction` carrying `initiateWithdrawal` | `crates/ackinacki-bridge/src/burn.rs:267`, payload `burn.rs:497` |
-| `ackinacki-bridge` (CLI) | Acki Nacki node | GraphQL getters | `crates/ackinacki-bridge/src/deposit/an_preflight.rs:69`, `:288`, `:340` |
+| `ackinacki-bridge` (CLI) | Block Manager | `REST /v2/account`, `/v2/messages`: getters, `finalizeDeposit`, `sendTransaction` | getters `crates/ackinacki-bridge/src/deposit/an.rs:484`, `deposit/an_preflight.rs:69`, `:297`, `:349`; messages `deposit/an.rs:837`, `burn.rs:359` |
+| `ackinacki-bridge` (CLI) | Block Manager | GraphQL: account data, withdrawal events | `crates/ackinacki-bridge/src/deposit/an.rs:510`, `orchestrator.rs:864` |
+| `ackinacki-bridge` (CLI) | WalletConnect relay | wss | `crates/ackinacki-bridge/src/deposit/args.rs:290`, `deposit/wc/mod.rs:168` |
 | `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1394`, called from `crates/ackinacki-bridge/src/orchestrator.rs:1104` |
 | `ackinacki-bridge` (CLI), `relayer daemon-live` | `aggregate-proof` | process | started at `crates/bridge-relayer-daemon/src/aggregator.rs:606`; the CLI hands it the binary at `crates/ackinacki-bridge/src/orchestrator.rs:973`, the daemon at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2525` |
 | `deposit-relayer daemon` | `deposit-prover` | process | `crates/deposit-relayer-daemon/src/prover.rs:313` |
+| `deposit-prover` | Arbitrum RPC node | JSON-RPC | `deposit-prover/src/ethereum_fetcher.rs:32`; the URL from `crates/deposit-relayer-daemon/src/prover.rs:382` and `crates/ackinacki-bridge/src/deposit/prover.rs:450` |
 | `deposit-relayer daemon` | `eccUSDCBridge` | `finalizeDeposit` | `crates/acki-nacki-interface/src/tvm_client.rs:130` |
-| `deposit-relayer daemon` | Acki Nacki node | GraphQL: `isAcceptedBlockHash`, voucher state | `crates/deposit-relayer-daemon/src/submitter.rs:713`, `submitter.rs:725` |
+| `deposit-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: `isAcceptedBlockHash`, voucher state, `finalizeDeposit` | `crates/deposit-relayer-daemon/src/submitter.rs:713`, `submitter.rs:725`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
 | `relayer daemon-live` | `AckiNackiBridge` | `verifyBlock` | `crates/bridge-relayer-daemon/src/bridge.rs:1350` |
 | `relayer daemon-live` | `AckiNackiBridge` | `applyBkSetUpdate` | `crates/bridge-relayer-daemon/src/bridge.rs:1490` |
-| `relayer daemon-live` | Acki Nacki node | GraphQL | `crates/bridge-relayer-daemon/src/bin/relayer.rs:2241` |
-| `deposit-relayer arbitrum-anchors` | `ArbitrumBlockVerifier` | `proveBlock` | `crates/deposit-relayer-daemon/src/arbitrum.rs:1044` |
-| `deposit-relayer arbitrum-anchors` | Acki Nacki node | GraphQL: `isAcceptedBlockHash` and verifier getters | `crates/deposit-relayer-daemon/src/arbitrum.rs:987`, `arbitrum.rs:1022` |
+| `relayer daemon-live` | Block Manager | GraphQL: blocks, events, `bkSetUpdates` | `crates/bridge-relayer-daemon/src/bin/relayer.rs:2241`, `crates/bridge-prover-libraries/bridge-prover-lib/src/live_driver/bk_update.rs:47`, `crates/bridge-prover-libraries/bridge-gql-fetcher/src/gql_client.rs:580` |
+| `deposit-relayer arbitrum-anchors` | `ArbitrumBlockVerifier` | `proveBlock` | `crates/deposit-relayer-daemon/src/arbitrum.rs:1234` |
+| `deposit-relayer arbitrum-anchors` | Block Manager | `REST /v2/account`, `/v2/messages`: `getL2Verifier`, `getConfig`, `isAcceptedBlockHash`, `proveBlock` | `crates/deposit-relayer-daemon/src/arbitrum.rs:1149`, `:1172`, `:1212`, `:1234`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
 | `eth-lc-relayer` | `EthBeaconLightClient` | `submitUpdate`, `submitAncestry` | `crates/eth-light-client-relayer/src/submitter.rs:789`, `submitter.rs:812` |
-| `eth-lc-relayer` | Acki Nacki node | GraphQL: light-client getters | `crates/eth-light-client-relayer/src/submitter.rs:841`, `submitter.rs:944` |
+| `eth-lc-relayer` | Block Manager | `REST /v2/account`, `/v2/messages`: light-client getters, `submitUpdate`, `submitAncestry` | `crates/eth-light-client-relayer/src/submitter.rs:841`, `:944`, `:789`, `:812`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
+| `eth-lc-relayer` | `eth-light-client-prover` | process: step, rotate | `crates/eth-light-client-relayer/src/prover.rs:201`, `:327` |
 | `AckiNackiBridge` | verifiers | `verify*` | `contracts/ethereum/src/AckiNackiBridge.sol:931`, `:939`, `:951`, `:1503` |
 | `ArbitrumBlockVerifier` | `eccUSDCBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
 | `EthBeaconLightClient` | `eccUSDCBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
@@ -57,10 +63,11 @@ Paths are relative to the repository root.
 
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
 a no-op, because the `DepositVoucher` address is derived from the deposit's identity
-(`contracts/an/exchange/eccUSDCBridge.sol:1040`) and a voucher is deployed once.
+(`contracts/an/exchange/eccUSDCBridge.sol:1048`) and a voucher is deployed once.
 
 ## Not on the diagram
 
-- The wallet the CLI signs the deposit with (WalletConnect or a local key).
+- The user's wallet itself (a WalletConnect app or a local key); only the WalletConnect relay the CLI
+  talks to is drawn.
 - `BlockHeaderOracle`, the Aave module, and the prover's helper daemons.
 - `finalizeDeposit` deploying the `DepositVoucher`: the creation arrow is left out.

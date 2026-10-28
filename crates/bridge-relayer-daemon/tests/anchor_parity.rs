@@ -13,9 +13,12 @@
 //! contract and compares `expectedPrevAnchor(n)` with the same file, so a
 //! change on either side that breaks parity fails one of the two.
 //!
-//! After an intended change of the prover's pick, regenerate the file with
-//! `ANCHOR_PARITY_WRITE=1 cargo test --locked -p bridge-prover-lib --test
-//! anchor_parity` and check that the forge test still passes.
+//! It lives in the relayer, which submits the prover's anchor, so that
+//! `make relayer-test` (part of `make pre-push`) runs it. After an intended
+//! change of the prover's pick, regenerate the file from
+//! `crates/bridge-prover-libraries` with `ANCHOR_PARITY_WRITE=1 cargo test
+//! --locked -p bridge-relayer-daemon --test anchor_parity` and check that the
+//! forge test still passes.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -208,9 +211,12 @@ fn run(scenario: &Scenario) -> ScenarioFixture {
     }
 }
 
+/// The crate is a symlinked member of the prover workspace, so the manifest
+/// directory is canonicalized before walking up to the repository root.
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../contracts/ethereum/test/fixtures/anchor_parity.json")
+    std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .unwrap()
+        .join("../../contracts/ethereum/test/fixtures/anchor_parity.json")
 }
 
 #[test]
@@ -230,7 +236,7 @@ fn prover_anchors_match_the_contract_fixture() {
     let data = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "read {}: {e}. Generate it with ANCHOR_PARITY_WRITE=1 cargo test --locked -p \
-             bridge-prover-lib --test anchor_parity",
+             bridge-relayer-daemon --test anchor_parity",
             path.display()
         )
     });

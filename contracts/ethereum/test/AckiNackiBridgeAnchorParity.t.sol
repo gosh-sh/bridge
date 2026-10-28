@@ -19,7 +19,7 @@ import "./mocks/MockERC20.sol";
 /// @notice Prover ↔ contract parity of the chain anchor (bridge-audit#122).
 ///
 ///         `test/fixtures/anchor_parity.json` is written by the prover's own
-///         `BootstrapSeed::apply` / `BridgeState` (`bridge-prover-lib/tests/
+///         `BootstrapSeed::apply` / `BridgeState` (`bridge-relayer-daemon/tests/
 ///         anchor_parity.rs`, which also fails when the prover drifts from the
 ///         file). Each scenario seeds the prover from a key block — some on a
 ///         boundary of higher order than the anchor level — and appends a run

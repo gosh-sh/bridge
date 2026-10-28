@@ -27,7 +27,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::bridge_state::BridgeState;
+use crate::bridge_state::{BridgeState, MAX_LAYERS};
 
 /// Current schema version of the on-disk seed file. Bump when the layout of
 /// `BootstrapSeed` changes in a non-additive way.
@@ -146,6 +146,29 @@ impl BootstrapSeed {
         // (one-shot write at genesis).
         state.stored_last_bk_set_update_seq_no = self.last_bk_set_update_seq_no;
         Ok(())
+    }
+
+    /// Lowest layer above `anchor_level` whose window in `state` still holds
+    /// this seed's root at the seed height.
+    ///
+    /// Only an [`Self::apply`] from before bridge-audit#122 put it there: no
+    /// verified bundle shares the seed's height. Such a state proves the next
+    /// boundary of that layer from a root the contract never stored, and
+    /// `verifyBlock` stalls there on `PrevAnchorMismatch`.
+    pub fn layer_seeded_above_anchor_level(&self, state: &BridgeState) -> Option<u8> {
+        self.layer_hashes
+            .iter()
+            .filter(|(_, layer)| {
+                *layer > self.anchor_level && (1..=MAX_LAYERS as u8).contains(layer)
+            })
+            .filter(|(root, layer)| {
+                state
+                    .window(*layer)
+                    .iter_chronological()
+                    .any(|(hash, height)| hash == *root && height == self.block_height)
+            })
+            .map(|(_, layer)| *layer)
+            .min()
     }
 
     /// Atomically persist the seed to `path` (write `.tmp`, then `rename`).
@@ -435,6 +458,35 @@ mod tests {
         assert_eq!(state.window(3).data_len, 0, "layer 3 is above the anchor level");
         assert_eq!(state.num_active_layers(), 2);
         assert_eq!(state.stored_last_seen_block_seq_no, 512);
+        assert_eq!(seed.layer_seeded_above_anchor_level(&state), None);
+    }
+
+    /// A state an earlier `apply` seeded with every layer is recognised by
+    /// the seed's own root at the seed height; a later bundle's root in the
+    /// same layer is not mistaken for it.
+    #[test]
+    fn layer_seeded_above_anchor_level_finds_a_pre_fix_seed_entry() {
+        let seed = BootstrapSeed {
+            schema_version: SEED_SCHEMA_VERSION,
+            layer_hashes: vec![([0x11; 32], 1), ([0x12; 32], 2), ([0x13; 32], 3)],
+            block_height: 512,
+            block_seq_no: 512,
+            bk_set_commitment: [9u8; 32],
+            anchor_level: 2,
+            last_bk_set_update_seq_no: 0,
+        };
+        let mut pre_fix = BridgeState::new(8);
+        pre_fix.initialize_bk_set_commitment(seed.bk_set_commitment).unwrap();
+        pre_fix.append_bundle(&seed.layer_hashes, 512, 512).unwrap();
+        pre_fix.append_bundle(&[([0x21; 32], 1), ([0x22; 32], 2)], 576, 576).unwrap();
+        assert_eq!(seed.layer_seeded_above_anchor_level(&pre_fix), Some(3));
+
+        let mut fixed = BridgeState::new(8);
+        seed.apply(&mut fixed).unwrap();
+        fixed
+            .append_bundle(&[([0x21; 32], 1), ([0x22; 32], 2), ([0x23; 32], 3)], 1024, 1024)
+            .unwrap();
+        assert_eq!(seed.layer_seeded_above_anchor_level(&fixed), None);
     }
 
     #[test]

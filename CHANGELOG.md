@@ -31,10 +31,11 @@ assigns it when the release is tagged.
   (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`
   with `BRIDGE_BOOTSTRAP_SEQNO=0` proves its first bundle at seq_no 16384. L2 anchoring only.
 - A bridge seeded on a key block of higher order than its anchor level (L2 on a W³ boundary, L1 on
-  a W² boundary) no longer stalls `verifyBlock` at the next boundary of that order: the prover now
-  seeds only layers `1..=anchor_level`, as the contract does. `relayer` stops at startup on a
-  `prover_state.json` an earlier build seeded that way, naming the extra layer: remove the file and
-  restart to rebuild it from the contract.
+  a W² boundary) no longer stalls `verifyBlock` at the next boundary of that order. On a
+  `prover_state.json` an earlier build seeded that way, `relayer daemon-live` and
+  `bridge-prover-daemon` refuse to start and name the layer: for `relayer daemon-live` remove the
+  file and restart; for `bridge-prover-daemon` move it and `prover_bk_set.json` aside and restart
+  with `BRIDGE_BOOTSTRAP_SEQNO` set to the bridge's seed seq_no.
 
 ## [0.7.0] – 2026-10-27
 

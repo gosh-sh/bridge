@@ -213,6 +213,17 @@ fn seed_layer_above_anchor(
         .map(|i| (i + 1) as u8)
 }
 
+fn stale_seed_layer_stop(layer: u8, anchor_level: u8) -> StartupDecision {
+    StartupDecision::Stop {
+        reason: format!(
+            "local layer {layer} holds a hash the contract's layer {layer} does not: the state \
+             was seeded above --anchor-level {anchor_level} by an older relayer and would stall \
+             verifyBlock at the next layer-{layer} boundary. Remove the local state (rm \
+             prover_state.json) and restart; it is rebuilt from the contract.",
+        ),
+    }
+}
+
 /// The routing table.
 ///
 /// | local state          | chain state                        | decision                     |
@@ -404,8 +415,15 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
         };
     }
 
+    // Checked ahead of the hold-window resumes below, which keep the local
+    // state as it is. A plain Resurrect replaces it, so needs no check.
+    let stale_seed_layer = seed_layer_above_anchor(local, chain, anchor_level);
+
     if local_seq < chain_seq {
         if hold_window_unacked(local, chain) {
+            if let Some(layer) = stale_seed_layer {
+                return stale_seed_layer_stop(layer, anchor_level);
+            }
             // Chain applied N; local still holds the outgoing set and
             // has not acked. Catch up with that set — do not resurrect
             // into the new commitment (that would desync prover_bk_set).
@@ -432,6 +450,9 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     // per the convention in `history_consistency.rs:59` and memory
     // `bridge_genesis_anchor_endianness.md`.
     let chain_commit = chain.bk_set_commitment;
+    if let Some(layer) = stale_seed_layer {
+        return stale_seed_layer_stop(layer, anchor_level);
+    }
     if hold_window_unacked(local, chain) {
         return StartupDecision::WarmResume;
     }
@@ -450,16 +471,6 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
             reason: format!(
                 "cursor match (last_seen={}) but bk-update seq_no diverges: local={} chain={}",
                 local_seq, local.stored_last_bk_set_update_seq_no, chain.last_bk_set_update_seq_no,
-            ),
-        };
-    }
-    if let Some(layer) = seed_layer_above_anchor(local, chain, anchor_level) {
-        return StartupDecision::Stop {
-            reason: format!(
-                "local layer {layer} holds a hash the contract's layer {layer} does not: the \
-                 state was seeded above --anchor-level {anchor_level} by an older relayer and \
-                 would stall verifyBlock at the next layer-{layer} boundary. Remove the local \
-                 state (rm prover_state.json) and restart; it is rebuilt from the contract.",
             ),
         };
     }
@@ -744,6 +755,33 @@ mod tests {
                 assert!(reason.contains("rm prover_state.json"), "reason: {reason}");
             },
             d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    /// The hold-window resume keeps local state as it is, so it must not
+    /// carry a stale seed layer past startup either.
+    #[test]
+    fn stop_on_a_seed_layer_above_the_anchor_level_inside_the_hold_window() {
+        let (mut local, mut chain) = l2_prepend_state();
+        local.window_mut(3).append([0x55; 32], 100);
+        chain.prev_bk_set_commitment = local.stored_bk_set_commitment;
+        chain.bk_set_commitment = [0xAB; 32];
+        chain.last_bk_set_update_seq_no = 150;
+        assert!(hold_window_unacked(&local, &chain));
+        for chain_seq in [200, 300] {
+            chain.last_seen_block_seq_no = chain_seq;
+            match decide(DecideInputs {
+                local: &local,
+                chain: &chain,
+                bootstrap_seqno: None,
+                window_size: W,
+                anchor_level: 2,
+            }) {
+                StartupDecision::Stop {
+                    reason,
+                } => assert!(reason.contains("local layer 3"), "reason: {reason}"),
+                d => panic!("expected Stop at chain last_seen={chain_seq}, got {d:?}"),
+            }
         }
     }
 

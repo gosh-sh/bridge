@@ -68,33 +68,34 @@ a no-op, because the `DepositVoucher` address is derived from the deposit's iden
 ## Executables and state files
 
 A UML deployment diagram at specification level: which executable manifests which process, and
-which files each process keeps its state in. Servers and containers are not drawn.
+which files and directories each process keeps its state in. Servers and containers are not drawn.
 
 ![UML deployment diagram at specification level: executables, the processes they manifest and their state files](bridge-executables.svg)
 
-- **«executable»** — a UML artifact: the binary file. **«file»** — a file or directory on disk; its
-  label gives the flag and environment variable that set the path, and what the file holds.
+- **«executable»** — a UML artifact: the binary file. **«file»** — one file on disk.
+  **«directory»** — a directory, with the files it holds drawn as artifacts inside it; `{op}` and
+  `<key>` stand for one file per deposit or per withdrawal.
+- **`{flag = …, env = …}`** — tagged values: the command-line flag and the environment variable that
+  set the path. What each file holds is in the table below.
 - **«manifest»** — the executable implements the process. **«use»** — the process reads and writes
   the file.
 - One `eth-lc-relayer` executable runs two processes, the `daemon` and `arbitrum-anchors` commands.
   `deposit-prover` is three executables from `deposit-prover/examples`, `eth-light-client-prover`
   two from `eth-light-client-prover/examples`.
-- `deposit-relayer daemon`, `eth-lc-relayer daemon` and `eth-lc-relayer arbitrum-anchors` hold an
-  exclusive lock on `<state file>.lock` next to their state file and refuse to start while another
-  process holds it. The CLI locks each deposit (`{op}.lock`) and each withdrawal (`<key>.lock`) beside
-  its record, and holds `deposit.lock` from asking the wallet until the deposit is on chain, so one
-  run does that at a time.
-- Paths are the defaults. Not drawn: the provers' own state, and the read-only inputs — SRS and
-  keys (`--params-dir`), verifier bytecode, ABIs.
+- Not drawn: the provers' own state, and the read-only inputs — SRS and keys (`--params-dir`),
+  verifier bytecode, ABIs.
 
-| File | Default path | Contents |
-|---|---|---|
-| `~/.bridge-deposit-state/` | `crates/ackinacki-bridge/src/deposit/args.rs:555` | `{op}.json` `crates/ackinacki-bridge/src/deposit/store.rs:278`; `{op}.lock` `deposit/locks.rs:182`; `deposit.lock` `deposit/locks.rs:153` |
-| `~/.bridge-withdraw-state/` | `crates/ackinacki-bridge/src/orchestrator.rs:2399` | `<key>.json` `crates/ackinacki-bridge/src/idempotency.rs:919`; `<key>.lock` `idempotency.rs:1079` |
-| `deposit-relayer-state.json` | `crates/deposit-relayer-daemon/src/bin/deposit-relayer.rs:54` | `crates/deposit-relayer-daemon/src/state.rs:105`; lock `state.rs:580` |
-| `./state/` | `crates/bridge-relayer-daemon/src/bin/relayer.rs:401` | `crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs:157`, `paths.rs:83` |
-| `eth-lc-relayer-state.json` | `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:236` | `crates/eth-light-client-relayer/src/state.rs:30`; lock `state.rs:124` |
-| `arbitrum-anchors-state.json` | `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:364` | `crates/eth-light-client-relayer/src/arbitrum.rs:228`; lock `crates/eth-light-client-relayer/src/state.rs:124` |
+| File | Holds | Default path | Code |
+|---|---|---|---|
+| `~/.bridge-deposit-state/` | `{op}.json`, the record of one deposit; `{op}.lock`, held while a run works on that deposit; `deposit.lock`, held from asking the wallet until the deposit is on chain, so one run does that at a time | `crates/ackinacki-bridge/src/deposit/args.rs:555` | `crates/ackinacki-bridge/src/deposit/store.rs:278`, `deposit/locks.rs:182`, `:153` |
+| `~/.bridge-withdraw-state/` | `<key>.json`, the record of one withdrawal; `<key>.lock`, held while a run works on it | `crates/ackinacki-bridge/src/orchestrator.rs:2399` | `crates/ackinacki-bridge/src/idempotency.rs:919`, `:1079` |
+| `deposit-relayer-state.json` | deposit ids processed and finalized (or parked), the outstanding ones, the scan cursor | `crates/deposit-relayer-daemon/src/bin/deposit-relayer.rs:54` | `crates/deposit-relayer-daemon/src/state.rs:105` |
+| `deposit-relayer-state.json.lock` | an exclusive lock held while the daemon runs; a second one refuses to start | beside the state file | `crates/deposit-relayer-daemon/src/state.rs:580` |
+| `./state/` | `prover_state.json`: the layer windows, the BK-set commitment, the last key block applied; `prover_bk_set.json`; `bootstrap_seed.json` | `crates/bridge-relayer-daemon/src/bin/relayer.rs:401` | `crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs:157`, `paths.rs:83`, `:87`, `:95` |
+| `eth-lc-relayer-state.json` | the last finalized slot, the committee period, the header spans still owed, a rotation in flight | `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:236` | `crates/eth-light-client-relayer/src/state.rs:30` |
+| `eth-lc-relayer-state.json.lock` | an exclusive lock held while the daemon runs; a second one refuses to start | beside the state file | `crates/eth-light-client-relayer/src/state.rs:124` |
+| `arbitrum-anchors-state.json` | the parent-chain and deposit cursors, the deposit blocks still pending, the slot proofs taken per batch, the proofs ready to send | `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:364` | `crates/eth-light-client-relayer/src/arbitrum.rs:228` |
+| `arbitrum-anchors-state.json.lock` | an exclusive lock held while the process runs; a second one refuses to start | beside the state file | `crates/eth-light-client-relayer/src/state.rs:124` |
 
 ## Not on the diagram
 

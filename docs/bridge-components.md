@@ -1,8 +1,8 @@
 # Bridge components
 
-> **Verified against `fc3718d8`** (`main`). Every connection below is drawn
-> from the call site that makes it, not from prose; the table gives each one's `file:line` at that
-> commit.
+> **Verified against `b651b093`** (PR 139). Every connection and every state file below is drawn
+> from the code that makes or names it, not from prose; the tables give each one's `file:line` at
+> that commit.
 
 A UML component diagram of the whole bridge as deployed on Arbitrum Sepolia: the contracts on the
 three chains, the relayers and the end-user CLI between them, and the interfaces that connect them.
@@ -53,9 +53,9 @@ Paths are relative to the repository root.
 | `relayer daemon-live` | Block Manager | GraphQL: `blocks`, `blockByHeight`, `bkSetUpdates` | `crates/bridge-prover-libraries/bridge-prover-lib/src/live_driver/mod.rs:733`, `live_driver/bundle.rs:261`, `live_driver/bk_update.rs:47`, `crates/bridge-prover-libraries/bridge-gql-fetcher/src/bk_set_fetcher.rs:62`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2241` |
 | `eth-lc-relayer arbitrum-anchors` | `ArbitrumBlockVerifier` | `proveBlock` | `crates/eth-light-client-relayer/src/arbitrum.rs:1236` |
 | `eth-lc-relayer arbitrum-anchors` | Block Manager | `REST /v2/account`, `/v2/messages`: `getL2Verifier`, `getConfig`, `isAcceptedBlockHash`, `proveBlock` | `crates/eth-light-client-relayer/src/arbitrum.rs:1150`, `:1173`, `:1214`, `:1236`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
-| `eth-lc-relayer` | `EthBeaconLightClient` | `submitUpdate`, `submitAncestry` | `crates/eth-light-client-relayer/src/submitter.rs:789`, `submitter.rs:812` |
-| `eth-lc-relayer` | Block Manager | `REST /v2/account`, `/v2/messages`: light-client getters, `submitUpdate`, `submitAncestry` | `crates/eth-light-client-relayer/src/submitter.rs:841`, `:944`, `:789`, `:812`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
-| `eth-lc-relayer` | `eth-light-client-prover` | process: step, rotate | `crates/eth-light-client-relayer/src/prover.rs:201`, `:327` |
+| `eth-lc-relayer daemon` | `EthBeaconLightClient` | `submitUpdate`, `submitAncestry` | `crates/eth-light-client-relayer/src/submitter.rs:789`, `submitter.rs:812` |
+| `eth-lc-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: light-client getters, `submitUpdate`, `submitAncestry` | `crates/eth-light-client-relayer/src/submitter.rs:841`, `:944`, `:789`, `:812`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
+| `eth-lc-relayer daemon` | `eth-light-client-prover` | process: step, rotate | `crates/eth-light-client-relayer/src/prover.rs:201`, `:327` |
 | `AckiNackiBridge` | verifiers | `verify*` | `contracts/ethereum/src/AckiNackiBridge.sol:931`, `:939`, `:951`, `:1503` |
 | `ArbitrumBlockVerifier` | `eccUSDCBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
 | `EthBeaconLightClient` | `eccUSDCBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
@@ -64,6 +64,35 @@ Paths are relative to the repository root.
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
 a no-op, because the `DepositVoucher` address is derived from the deposit's identity
 (`contracts/an/exchange/eccUSDCBridge.sol:1048`) and a voucher is deployed once.
+
+## Executables and state files
+
+A UML deployment diagram at specification level: which executable manifests which process, and
+which files each process keeps its state in. Servers and containers are not drawn.
+
+![UML deployment diagram at specification level: executables, the processes they manifest and their state files](bridge-executables.svg)
+
+- **«executable»** — a UML artifact: the binary file. **«file»** — a file or directory on disk; its
+  label gives the flag and environment variable that set the path, and what the file holds.
+- **«manifest»** — the executable implements the process. **«use»** — the process reads and writes
+  the file.
+- One `eth-lc-relayer` executable runs two processes, the `daemon` and `arbitrum-anchors` commands.
+  `deposit-prover` is three executables from `deposit-prover/examples`, `eth-light-client-prover`
+  two from `eth-light-client-prover/examples`.
+- `deposit-relayer daemon`, `eth-lc-relayer daemon` and `eth-lc-relayer arbitrum-anchors` hold an
+  exclusive lock on `<state file>.lock` next to their state file and refuse to start while another
+  process holds it.
+- Paths are the defaults. Not drawn: the provers' own state, and the read-only inputs — SRS and
+  keys (`--params-dir`), verifier bytecode, ABIs.
+
+| File | Default path | Contents |
+|---|---|---|
+| `~/.bridge-deposit-state/` | `crates/ackinacki-bridge/src/deposit/args.rs:555` | `crates/ackinacki-bridge/src/deposit/store.rs:278`; `deposit.lock` `deposit/locks.rs:153` |
+| `~/.bridge-withdraw-state/` | `crates/ackinacki-bridge/src/orchestrator.rs:2399` | `crates/ackinacki-bridge/src/idempotency.rs:919` |
+| `deposit-relayer-state.json` | `crates/deposit-relayer-daemon/src/bin/deposit-relayer.rs:54` | `crates/deposit-relayer-daemon/src/state.rs:105`; lock `state.rs:580` |
+| `./state/` | `crates/bridge-relayer-daemon/src/bin/relayer.rs:401` | `crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs:157`, `paths.rs:83` |
+| `eth-lc-relayer-state.json` | `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:236` | `crates/eth-light-client-relayer/src/state.rs:30`; lock `state.rs:124` |
+| `arbitrum-anchors-state.json` | `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:364` | `crates/eth-light-client-relayer/src/arbitrum.rs:228`; lock `crates/eth-light-client-relayer/src/state.rs:124` |
 
 ## Not on the diagram
 

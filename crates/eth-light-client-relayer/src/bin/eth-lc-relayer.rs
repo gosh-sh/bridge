@@ -1544,6 +1544,12 @@ fn from_block_or(cli_from_block: u64, deploy_block: Option<&str>) -> u64 {
     deploy_block.and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
+/// The longest one parent-chain or Arbitrum RPC request may take. Without it a
+/// node that accepts the connection and never answers stalls the tick, and the
+/// anchors with it, without a line in the log; with it the tick fails and the
+/// next one retries.
+const ARBITRUM_RPC_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// The Arbitrum chain behind `arbitrum_rpc_url`, checked against the parent
 /// chain behind `parent_rpc_url`.
 async fn arbitrum_view(
@@ -1553,8 +1559,11 @@ async fn arbitrum_view(
     parent_log_span: u64,
     arbitrum_log_span: u64,
 ) -> anyhow::Result<arbitrum::RpcArbitrumView<impl Provider, impl Provider>> {
-    let parent = ProviderBuilder::new().connect_http(parent_rpc_url.parse()?);
-    let arb = ProviderBuilder::new().connect_http(arbitrum_rpc_url.parse()?);
+    let http = reqwest::Client::builder()
+        .timeout(ARBITRUM_RPC_TIMEOUT)
+        .build()?;
+    let parent = ProviderBuilder::new().connect_reqwest(http.clone(), parent_rpc_url.parse()?);
+    let arb = ProviderBuilder::new().connect_reqwest(http, arbitrum_rpc_url.parse()?);
     let id = arb.get_chain_id().await?;
     let chain = *arbitrum::arbitrum_chain(id).ok_or_else(|| {
         anyhow::anyhow!(

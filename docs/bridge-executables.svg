@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1090" role="img" aria-label="UML deployment diagram, specification level: which executable manifests which process, and the files each process keeps its state in"><style>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1090" viewBox="0 0 1200 1090" role="img" aria-label="UML deployment diagram, specification level: which executable manifests which process, and the files each process keeps its state in"><style>
 svg { --bg:#f6f7f9; --surface:#ffffff; --fg:#1b2230; --muted:#5b6577;
           --k-cli:#1f6fd1; --k-dr:#1a8a4a; --k-dl:#c76a00; --k-aa:#8a3fc2; --k-lc:#0e8a8a;
           --font: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); }

@@ -79,6 +79,18 @@ eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
 # 9. One-shot owner flip (the daemon does it only with --flip-owner)
 eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' \
   --an-usdc-abi-path ./abi/USDCBridge.abi.json …
+
+# 10. Bridge on an Arbitrum chain: anchor the blocks that hold deposits through
+#     ArbitrumBlockVerifier.proveBlock (live-submit), next to deposit-relayer
+#     daemon. Keep --anchor-state across restarts: the proofs in it cannot be
+#     fetched again.
+eth-lc-relayer arbitrum-anchors --parent-rpc-url … --arbitrum-rpc-url … \
+  --bridge-address 0x… --from-block <bridge deploy block> \
+  --an-graphql-url … --an-keys-path … --an-bridge-abi-path ./abi/eccUSDCBridge.abi.json \
+  --an-verifier-abi-path ./abi/ArbitrumBlockVerifier.abi.json --an-token-bridge 'dapp::account'
+
+# 11. One proveBlock vector from the live chains, for the bench (sends nothing)
+eth-lc-relayer arbitrum-vector --parent-rpc-url … --arbitrum-rpc-url … --out ./vector.json
 ```
 
 `--no-rotate` opts out of even the fixture auto-rotate. A live period

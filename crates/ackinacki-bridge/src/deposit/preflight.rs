@@ -234,9 +234,9 @@ fn writable_work_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// The anchor plan on a chain the bridge has an Arbitrum verifier for:
-/// `arbitrum-anchors` proves the block through the verifier, and while owner
-/// anchors are on the owner can anchor it too, so the wait names the owner's
-/// call as it does on a chain with a light client.
+/// `eth-lc-relayer arbitrum-anchors` proves the block through the verifier,
+/// and while owner anchors are on the owner can anchor it too, so the wait
+/// names the owner's call as it does on a chain with a light client.
 fn verifier_plan(an: &AnPreflight) -> AnchorPlan {
     if an.owner_anchors_enabled {
         AnchorPlan::Owner {

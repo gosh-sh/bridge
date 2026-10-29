@@ -44,7 +44,7 @@ FROM_BLOCK=323405848
 RPC_URL=https://arbitrum-sepolia-rpc.publicnode.com
 ```
 
-`deposit-relayer arbitrum-anchors` needs an Arbitrum RPC that keeps a few minutes of state; the
+`eth-lc-relayer arbitrum-anchors` needs an Arbitrum RPC that keeps a few minutes of state; the
 public endpoints do not (`crates/deposit-relayer-daemon/docs/operator_runbook.md`, section 9).
 
 ---

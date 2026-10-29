@@ -294,6 +294,10 @@ Notes that matter downstream:
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
   (`crates/deposit-relayer-daemon/src/types.rs:98-110`). The DApp ID remains a
   config-supplied tag; removing workchain does not change its meaning or PI slots.
+  Those 12 values are the only deposit data the proof can change. The private witness is
+  longer: the receipt and the log sit in fixed-length buffers with an unused tail, and a
+  different tail is another witness of the same public inputs, not another deposit.
+  [`deposit-prover/README.md`](../deposit-prover/README.md) names the buffers.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The

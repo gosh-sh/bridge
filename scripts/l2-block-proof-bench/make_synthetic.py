@@ -12,7 +12,7 @@ the same file.
 
 Use it where no archive node is at hand: the bench runs the real verifier on
 it end to end, and the parent block hash it names can be owner-anchored on a
-test bridge before the verifier is called. `deposit-relayer arbitrum-vector`
+test bridge before the verifier is called. `eth-lc-relayer arbitrum-vector`
 writes the same format from live chains.
 """
 import argparse

@@ -182,8 +182,8 @@ def test_30_sender_keys_funded(run, arb):
 
 
 def test_31_deposit_services_started(run):
-    """daemon-live and arbitrum-anchors start and say so in their logs. arbitrum-anchors has to
-    run before the deposit: it takes the slot proofs when the deposit's batch lands, a minute or
+    """daemon-live and eth-lc-relayer arbitrum-anchors start and say so in their logs.
+    arbitrum-anchors has to run before the deposit: it takes the slot proofs when the deposit's batch lands, a minute or
     two after the deposit."""
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     # The ARB_RPC secret, when set, follows the keys on the job's stdin: ci-entry logs every

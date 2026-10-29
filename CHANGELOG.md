@@ -22,6 +22,13 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
+  (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
+  file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
+  flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+
 ### Fixes
 
 - `relayer daemon-live` no longer stalls after a late `applyBkSetUpdate` or `verifyBlock` receipt,
@@ -30,6 +37,11 @@ assigns it when the release is tagged.
   seq_no — and, for a rotation, the new BK-set commitment. A deferred rotation ack no longer fails
   the tick: the daemon acks the bundles the contract already has, then rotates. Restart the
   relayer. Do not delete `prover_state.json` because of this stall. Verification keys are unchanged.
+- `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
+- `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
+  retry on the next tick, instead of waiting forever on a node that does not answer.
+- `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
+  refuses to start while another instance holds it.
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
   with the deployed bridge, and `release.yaml` publishes the binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the

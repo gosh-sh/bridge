@@ -22,6 +22,16 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Deposits now use `deposit(uint256 amount, uint256 dappId, bytes32 anAccount)` and a six-field
+  `Deposit` event; upgrade the EVM contract, AN bridge 1.14.0 (`contracts/an/0.80.0_compiled/
+  exchange/`, code hash `4ed1fcc1…`), prover and deposit clients together, and finish old-key
+  deposits before switching because the deposit verification key has rotated.
+- The web form and `AN_RECEIVER` now require `dapp_id::account_id`, with 64 hex characters per part.
+- Remove deposit-daemon `AN_DAPP_ID` / `--dapp-id`: the Ethereum event supplies each destination.
+  Relayer deployment state uses `event-bound`; finish the old queue before using a fresh state.
+
 ### Fixes
 
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works

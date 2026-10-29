@@ -13,7 +13,7 @@
 
 use alloy::{
     network::Network,
-    primitives::{Address, U256},
+    primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::TransactionReceipt,
     sol,
@@ -39,12 +39,12 @@ sol! {
 
     #[sol(rpc)]
     contract AckiNackiBridge {
-        function deposit(uint256 amount) external;
+        function deposit(uint256 amount, uint256 dappId, bytes32 anAccount) external;
         function treasuryBalance() external view returns (uint256);
         function depositCounter() external view returns (uint256);
         function usdc() external view returns (address);
 
-        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
+        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp, uint256 dappId);
     }
 }
 
@@ -130,11 +130,17 @@ where
     }
 
     /// Approve (if needed) and deposit USDC. Returns the deposit tx receipt.
-    pub async fn deposit(&self, owner: Address, amount: U256) -> Result<N::ReceiptResponse> {
+    pub async fn deposit(
+        &self,
+        owner: Address,
+        amount: U256,
+        dapp_id: U256,
+        an_account: B256,
+    ) -> Result<N::ReceiptResponse> {
         self.ensure_usdc_approval(owner, amount).await?;
         let pending = self
             .contract
-            .deposit(amount)
+            .deposit(amount, dapp_id, an_account)
             .send()
             .await
             .map_err(|e| BridgeError::ContractError(e.to_string()))?;
@@ -149,9 +155,11 @@ where
         &self,
         recipient: Address,
         amount: U256,
+        dapp_id: U256,
+        an_account: B256,
     ) -> Result<N::ReceiptResponse> {
         self.fund_usdc_from_aave_faucet(recipient, amount).await?;
-        self.deposit(recipient, amount).await
+        self.deposit(recipient, amount, dapp_id, an_account).await
     }
 
     /// Get the treasury balance.

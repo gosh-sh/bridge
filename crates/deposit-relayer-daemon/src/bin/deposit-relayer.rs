@@ -43,10 +43,10 @@ use alloy::{
 };
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    arbitrum, fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
-    AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
-    DepositProofBundle, DepositProverBins, DepositSource, EthLogSource, MockAnSubmitter,
-    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
+    arbitrum, fetch_deposit_from_receipt, resolve_from_block, AnConfig, AnInterfaceSubmitter,
+    AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle,
+    DepositProverBins, DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer,
+    RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
     SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
 };
 use tracing::{error, info, warn};
@@ -142,12 +142,6 @@ enum Cmd {
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,
-        /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
-        /// bound as the dappId public inputs (not part of the deposit event).
-        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
-        /// value, so the default `0` is correct (QC-OFF-09).
-        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
-        dapp_id: String,
         /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
         #[arg(long)]
         out_dir: PathBuf,
@@ -193,12 +187,6 @@ enum Cmd {
         max_data_byte_len: usize,
         #[arg(long, default_value_t = 20)]
         max_log_num: usize,
-        /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
-        /// bound as the dappId public inputs (not part of the deposit event).
-        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
-        /// value, so the default `0` is correct (QC-OFF-09).
-        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
-        dapp_id: String,
         /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
         /// `/v2/messages` (`send_message`). A public gateway that only
         /// answers `/graphql` is not enough. Example:
@@ -485,11 +473,9 @@ async fn main() -> anyhow::Result<()> {
             degree,
             max_data_byte_len,
             max_log_num,
-            dapp_id,
             out_dir,
             expect_chain_id,
         } => {
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
                 DepositProverBins {
@@ -501,7 +487,6 @@ async fn main() -> anyhow::Result<()> {
                 degree,
                 max_data_byte_len,
                 max_log_num,
-                dapp_id,
             )?;
             prove_one(
                 rpc_url,
@@ -549,7 +534,6 @@ async fn main() -> anyhow::Result<()> {
             degree,
             max_data_byte_len,
             max_log_num,
-            dapp_id,
             an_graphql_url,
             an_keys_path,
             an_bridge_abi_path,
@@ -570,8 +554,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(addr) = metrics_addr {
                 install_metrics_exporter(addr)?;
             }
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
-            info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
+
             let prover_cfg = build_prover_cfg(
                 deposit_prover_dir,
                 DepositProverBins {
@@ -583,7 +566,6 @@ async fn main() -> anyhow::Result<()> {
                 degree,
                 max_data_byte_len,
                 max_log_num,
-                dapp_id,
             )?;
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -713,7 +695,6 @@ fn build_prover_cfg(
     degree: u32,
     max_data_byte_len: usize,
     max_log_num: usize,
-    dapp_id: String,
 ) -> anyhow::Result<SubprocessProverConfig> {
     anyhow::ensure!(
         deposit_prover_dir.is_dir(),
@@ -724,7 +705,6 @@ fn build_prover_cfg(
     cfg.degree = degree;
     cfg.max_data_byte_len = max_data_byte_len;
     cfg.max_log_num = max_log_num;
-    cfg.dapp_id = dapp_id;
     Ok(cfg)
 }
 
@@ -909,7 +889,7 @@ async fn run_daemon(
         chain = deposit_relayer_daemon::supported_deposit_chain_name(chain_id).unwrap_or("?"),
         "deposit source chain",
     );
-    let deployment = DeploymentIdentity::new(chain_id, bridge_address, prover_cfg.dapp_id.clone());
+    let deployment = DeploymentIdentity::new(chain_id, bridge_address, "event-bound");
 
     let source = Arc::new(
         EthLogSource::new(provider, bridge_address, from_block, confirmations)

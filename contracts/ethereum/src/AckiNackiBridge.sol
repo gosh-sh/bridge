@@ -309,7 +309,7 @@ contract AckiNackiBridge {
     // Events
     // ---------------------------------------------------------------------
 
-    /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
+    /// @notice Emitted on every deposit. `anAccount` and `dappId` identify the
     ///         destination: it is carried as ZK public inputs and credited on the
     ///         AN side (the EVM `sender` is kept only for provenance, since a
     ///         20-byte EVM address is not a valid AN recipient).
@@ -318,7 +318,8 @@ contract AckiNackiBridge {
         address indexed sender,
         uint256 amount,
         bytes32 anAccount,
-        uint256 timestamp
+        uint256 timestamp,
+        uint256 dappId
     );
 
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
@@ -769,6 +770,7 @@ contract AckiNackiBridge {
     ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
     ///      in batches via `supplyToAave()`.
     /// @param amount      USDC amount (6 decimals) to bridge.
+    /// @param dappId      Destination DApp ID, including zero and the full UInt256 range.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -776,7 +778,11 @@ contract AckiNackiBridge {
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
     ///                    A wrong non-zero destination is one-way (no refund).
-    function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused {
+    function deposit(uint256 amount, uint256 dappId, bytes32 anAccount)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         if (amount == 0) revert InvalidAmount();
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
@@ -789,7 +795,7 @@ contract AckiNackiBridge {
         uint256 depositId = depositCounter++;
         treasuryBalance += credited;
 
-        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp);
+        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, dappId);
     }
 
     // ---------------------------------------------------------------------

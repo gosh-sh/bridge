@@ -218,8 +218,8 @@ command itself:
 
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
-   the shipped profile leaves them unset. Deposits require `deposit(uint256,bytes32)`
-   on EVM and `eccUSDCBridge` >= 1.13.0 with this build's deposit key on AN.
+   the shipped profile leaves them unset. Deposits require `deposit(uint256,uint256,bytes32)`
+   on EVM and `eccUSDCBridge` >= 1.14.0 with this build's deposit key on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -477,11 +477,12 @@ cast call $BRIDGE_ADDRESS 'usdc()(address)' --rpc-url $RPC_URL
 # b) Approve + deposit into the bridge:
 export USDC=$(cast call "$BRIDGE_ADDRESS" 'usdc()(address)' --rpc-url "$RPC_URL")
 export AMOUNT=10000000    # 10.000000 USDC in µUSDC — comfortably covers a 1 USDC burn
+AN_DAPP_ID="${WITHDRAW_FROM%%::*}"
 AN_ACCOUNT_ID="${WITHDRAW_FROM##*::}"  # your own destination, from Step 2
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-cast send $BRIDGE_ADDRESS 'deposit(uint256,bytes32)' \
-  $AMOUNT "0x${AN_ACCOUNT_ID#0x}" \
+cast send $BRIDGE_ADDRESS 'deposit(uint256,uint256,bytes32)' \
+  $AMOUNT "0x${AN_DAPP_ID#0x}" "0x${AN_ACCOUNT_ID#0x}" \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 ```
@@ -1719,7 +1720,7 @@ already. Independently of that minimum, preflight also refuses a bridge
 older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.13.0`) gets a warning.
+than the newest this build was checked against (`1.14.0`) gets a warning.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

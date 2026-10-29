@@ -800,6 +800,7 @@ mod tests {
             sender: Address::repeat_byte(0x11),
             amount: U256::from(42u64),
             an_account: B256::repeat_byte(0x77),
+            dapp_id: U256::from(0xD499u64),
             timestamp: U256::ZERO,
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 0,
@@ -811,7 +812,7 @@ mod tests {
     }
 
     fn bundle(ev: &DepositEvent) -> DepositProofBundle {
-        let pi = MockProofGenerator::derive_public_inputs(ev, U256::from(0xD499u64));
+        let pi = MockProofGenerator::derive_public_inputs(ev);
         DepositProofBundle {
             vk_blob: vec![1, 2, 3].into(),
             public_inputs: pi.to_operand().into(),
@@ -830,8 +831,9 @@ mod tests {
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
         assert_eq!(scalars[4], b.parsed.chain_id); // proven chainId
-                                                   // dappId is the config tag (scalars 5/6); the AN account high/low halves
-                                                   // (scalars 7/8) reconstruct the proven recipient account.
+                                                   // dappId is the event-bound identifier (scalars 5/6); the AN account high/low
+                                                   // halves (scalars 7/8)
+                                                   // reconstruct the proven recipient account.
         let dapp_id = (scalars[5] << 128) | scalars[6];
         assert_eq!(dapp_id, b.parsed.dapp_id());
         let reconstructed = (scalars[7] << 128) | scalars[8];

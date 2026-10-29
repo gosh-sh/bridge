@@ -225,7 +225,7 @@ With the two lines `install.sh` printed in effect (`PATH` and
 `BRIDGE_CONFIG`):
 
 ```bash
-export BRIDGE_ADDRESS='0x<new-bridge-address>'      # deposit(uint256,bytes32)
+export BRIDGE_ADDRESS='0x<new-bridge-address>'      # deposit(uint256,uint256,bytes32)
 export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
@@ -237,8 +237,9 @@ chain. Limit reads must succeed before an approval, deposit or burn is requested
 
 `--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
 mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits
-35–75 minutes for its block to be anchored. The new EVM deployment must expose `deposit(uint256,bytes32)`
-and be paired with an AN bridge at version 1.13.0 or newer using this build's
+35–75 minutes for its block to be anchored. The new EVM deployment must expose
+`deposit(uint256,uint256,bytes32)` and be paired with an AN bridge at version
+1.14.0 or newer using this build's
 key. Older deployment addresses are incompatible. The RPC, Acki Nacki endpoint,
 prover directory and state directory come from the profile. When reusing a
 profile, replace its old deployment values before running this build.

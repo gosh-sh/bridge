@@ -10,7 +10,7 @@
 use deposit_prover::{
     circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_LOG_NUM},
     prover::{mock_circuit_pinned, test_circuit_mock_pinned, CircuitConfig},
-    synthetic::{build, SyntheticSpec},
+    synthetic::{build, build_with_dapp_id, SyntheticSpec},
     types::DepositProofInput,
 };
 
@@ -38,6 +38,29 @@ fn proof_00_satisfies_production_shape() {
 fn type2_synthetic_satisfies_production_shape() {
     test_circuit_mock_pinned(build(SyntheticSpec::type2_direct()), &production())
         .expect("type2 synthetic");
+}
+
+#[test]
+#[ignore]
+fn full_width_dapp_id_is_bound_to_the_event() {
+    let input = build_with_dapp_id(SyntheticSpec::type2_direct(), 7, [0xff; 32]);
+    test_circuit_mock_pinned(input, &production()).expect("full UInt256 DApp ID");
+}
+
+#[test]
+#[ignore]
+fn forged_dapp_high_half_is_rejected() {
+    let mut input = build_with_dapp_id(SyntheticSpec::type2_direct(), 7, [0xff; 32]);
+    input.event_data.dapp_id[0] ^= 1;
+    assert!(test_circuit_mock_pinned(input, &production()).is_err());
+}
+
+#[test]
+#[ignore]
+fn forged_dapp_low_half_is_rejected() {
+    let mut input = build_with_dapp_id(SyntheticSpec::type2_direct(), 7, [0xff; 32]);
+    input.event_data.dapp_id[31] ^= 1;
+    assert!(test_circuit_mock_pinned(input, &production()).is_err());
 }
 
 #[test]

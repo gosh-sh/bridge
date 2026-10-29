@@ -6,7 +6,7 @@ use crate::{
     config::{
         bridge_contract_address, ACKI_NACKI_RECEIVER, MAX_TRANSFER_USDC_UNITS, SEPOLIA_CHAIN_ID_HEX,
     },
-    utils::validate_an_account,
+    utils::validate_an_target,
     web3::{
         approve_usdc, get_allowance, get_chain_id, get_current_account, get_deposit_counter,
         make_deposit, switch_to_sepolia, usdc_to_units, wait_for_receipt,
@@ -93,7 +93,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                 return;
             }
 
-            let an_recipient = match validate_an_account(&an_account) {
+            let an_recipient = match validate_an_target(&an_account) {
                 Ok(a) => a,
                 Err(err) => {
                     error_msg.set(Some(err));
@@ -226,16 +226,16 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <input
                             type="text"
                             class="form-input"
-                            placeholder="0x… (64 hex chars, 256-bit AN account)"
+                            placeholder="dapp_id::account_id (64 hex chars each)"
                             value={(*an_account).clone()}
                             onchange={on_account_change}
                             disabled={!props.wallet_connected || *is_loading}
                         />
-                        <span class="input-suffix">{"account"}</span>
+                        <span class="input-suffix">{"address"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Your destination on Acki Nacki: exactly 64 hex chars. An Ethereum \
-                          address is 40 chars and is not a valid AN recipient. Check it before \
+                        {"Your destination on Acki Nacki: dapp_id::account_id, each exactly 64 hex chars. \
+                          An Ethereum address is not a valid AN recipient. Check it before \
                           sending — a deposit to the wrong account is one-way, with no refund."}
                     </div>
                 </div>

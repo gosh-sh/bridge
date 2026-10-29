@@ -1098,6 +1098,7 @@ mod tests {
             sender: Address::repeat_byte(0x11),
             amount: U256::from(id * 1000 + 1),
             an_account: B256::repeat_byte(0x33),
+            dapp_id: U256::ZERO,
             timestamp: U256::from(1_700_000_000u64),
             tx_hash: B256::repeat_byte(0xaa),
             log_index: 0,

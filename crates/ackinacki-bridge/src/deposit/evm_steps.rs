@@ -410,12 +410,14 @@ pub async fn build_deposit_request(
     bridge: Address,
     amount: u64,
     account: B256,
+    dapp_id: [u8; 32],
     at: BlockTag,
 ) -> CliResult<TxRequest> {
     let purpose = TxPurpose::Deposit {
         bridge,
         amount,
         account,
+        dapp_id,
     };
     build_or_revert(evm, ui, "estimating the deposit", from, purpose, at)
         .await
@@ -1034,6 +1036,7 @@ mod tests {
                 bridge: BRIDGE,
                 amount: 1,
                 account: B256::ZERO,
+                dapp_id: [0; 32],
             },
         };
         Setup {
@@ -1239,6 +1242,7 @@ mod tests {
             BRIDGE,
             1,
             B256::ZERO,
+            [0; 32],
             BlockTag::Latest,
         )
         .await
@@ -1260,6 +1264,7 @@ mod tests {
             BRIDGE,
             1,
             B256::ZERO,
+            [0; 32],
             BlockTag::Latest,
         )
         .await
@@ -1284,6 +1289,7 @@ mod tests {
             BRIDGE,
             1,
             B256::ZERO,
+            [0; 32],
             BlockTag::Latest,
         )
         .await

@@ -96,7 +96,7 @@ new bridge.
 ```mermaid
 flowchart TB
     subgraph ETH["Ethereum / L2 (this repo)"]
-        U["User"] -->|"approve + deposit(amount, anAccount)"| B["AckiNackiBridge"]
+        U["User"] -->|"approve + deposit(amount, dappId, anAccount)"| B["AckiNackiBridge"]
         B -->|"Deposit event"| LOG[("tx receipt log")]
         B <-->|"supply / withdraw"| AAVE["AAVE V3 Pool (USDC)"]
         R["relayer (permissionless)"] -->|"verifyBlock"| B
@@ -259,7 +259,7 @@ emitted (`:637-643`).
 ## 6. ETH → AN: deposits
 
 ```solidity
-function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused  // :774
+function deposit(uint256 amount, uint256 dappId, bytes32 anAccount) external nonReentrant whenNotPaused  // :774
 ```
 
 `whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
@@ -275,7 +275,7 @@ Sequence (`:774-785`):
 5. `_pullExactUsdc(amount)` calls `usdc.transferFrom`; a `false` return ⇒ `TransferFromFailed`.
    The received balance delta must equal `amount`, else `TransferAmountMismatch` (`:1538-1547`).
 6. `depositId = depositCounter++`, `treasuryBalance += credited`.
-7. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp)`.
+7. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, dappId)`.
 
 Notes that matter downstream:
 
@@ -283,17 +283,15 @@ Notes that matter downstream:
 * The received amount must match the requested amount exactly; a fee-on-transfer token is
   rejected before `depositCounter` or `treasuryBalance` changes (`:1538-1547`).
 * The `Deposit` **event layout is a hard cross-repo ABI**: the off-chain prover parses
-  `topics[1] = depositId`, `topics[2] = sender`, and reads three data words:
-  `amount` at bytes 0..32, `anAccount` at 32..64, and `timestamp` at 64..96.
+  `topics[1] = depositId`, `topics[2] = sender`, and reads four data words:
+  `amount` at bytes 0..32, `anAccount` at 32..64, `timestamp` at 64..96, and `dappId` at 96..128.
   Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`. The circuit constrains
-  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:834-835`) and binds the
+  the 128-byte data length (`deposit-prover/src/circuit_v2.rs:834-835`) and binds the
   account from word 1 (`:1009-1011`).
-  This format requires the matching deposit VK; the earlier workchain-bearing
-  event and its proofs are incompatible.
+  This format requires the matching deposit VK; the earlier event without DApp ID and its proofs are incompatible.
 * The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
-  (`crates/deposit-relayer-daemon/src/types.rs:98-110`). The DApp ID remains a
-  config-supplied tag; removing workchain does not change its meaning or PI slots.
+  (`crates/deposit-relayer-daemon/src/types.rs:98-110`). Both DApp halves are bound to the event, with the same PI slots as before.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The
@@ -670,7 +668,7 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 
 | Event | topic0 | Indexed |
 |---|---|---|
-| `Deposit(uint256,address,uint256,bytes32,uint256)` | `0x6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe` | `depositId`, `sender` |
+| `Deposit(uint256,address,uint256,bytes32,uint256,uint256)` | `0xfa647be3c21bb35d3e9e53f50fa07d7385b76dcdf2608472a4c3cae986c655c9` | `depositId`, `sender` |
 | `BlockVerified(uint256,uint64,uint8,uint8)` | `0x4a5fe28cf677e5cbd58dbc0d09f8786dcc5203154f0a44ca08de71802838e301` | `blockId`, `blockSeqNo` |
 | `LayerAnchorAppended(uint8,uint256,uint64)` | `0xa107038a79964f3eb528acbade584d60e11790b79033d6ca561747c916e2522d` | `layer` |
 | `BkSetUpdated(uint256,uint256,uint64)` | `0x3b61abb5642de7c0408ea1d76cdc9a7f26020b2b511a5a0698fc238172674dd1` | `oldCommitment`, `newCommitment`, `blockSeqNo` |
@@ -686,7 +684,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 
 | Selector | Signature |
 |---|---|
-| `0xc9630cb0` | `deposit(uint256,bytes32)` |
+| `0x045434c4` | `deposit(uint256,uint256,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
 | `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
 | `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
@@ -701,7 +699,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0x3f4ba83a` | `unpause()` |
 | `0x5c975abb` | `paused()` |
 
-(Computed from the signatures above; `0xc9630cb0` and `0xecb3dc88` cross-check against
+(Computed from the signatures above; `0x045434c4` and `0xecb3dc88` cross-check against
 `deposit_calldata` and `get_deposit_counter` in `frontend/src/web3.rs`.)
 
 ### 11.3 Custom errors
@@ -844,8 +842,8 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 | `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
 | `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. |
 | `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:58-153`), emits the 12-PI SHPLONK proof. |
-| `frontend/` (WASM) | Calls `deposit(uint256,bytes32)` = `0xc9630cb0` and `depositCounter()` — **current**. |
-| `crates/eth-frontend` | ⚠️ **Stale ABI.** Declares `deposit(uint256)` and a 4-field `Deposit` event (`src/contract.rs:42,47`) and calls `.deposit(amount)` at `src/contract.rs:133-137`. No such selector exists on the deployed bridge, so that call path cannot succeed against any current deployment. |
+| `frontend/` (WASM) | Calls `deposit(uint256,uint256,bytes32)` = `0x045434c4` and `depositCounter()` — **current**. |
+| `crates/eth-frontend` | Uses the same three-argument deposit ABI and six-field event as the CLI and web form. |
 
 **The contract is the only gate.** Until `a69ba36` the relayer polled a `proof_event_*.result.json`
 ACK written by `bridge-verifier-daemon` — a dev scaffold that imitated this contract — before
@@ -967,7 +965,7 @@ The root `README.md` and much of `docs/` predate the current code. Concretely, a
 code contradicts them on:
 
 * `deposit()` takes **USDC via `transferFrom`**, not ETH; the signature is
-  `deposit(uint256, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
+  `deposit(uint256, uint256, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
 * The `Deposit` event carries five fields including the AN destination, not four.
 * Verification is **SHPLONK aggregator Yul** for all four circuits; the gnark Groth16 wrappers and
   the `*Groth16VerifierGenerated.sol` files described in the README no longer exist in `src/`.

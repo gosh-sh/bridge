@@ -23,8 +23,13 @@ pub fn uri(chain_id: u64, p: &TxPurpose) -> String {
             bridge,
             amount,
             account,
+            dapp_id,
         } => {
-            format!("ethereum:{bridge:#x}@{chain_id}/deposit?uint256={amount}&bytes32={account:#x}")
+            format!(
+                "ethereum:{bridge:#x}@{chain_id}/deposit?uint256={amount}&uint256={}&\
+                 bytes32={account:#x}",
+                alloy_primitives::U256::from_be_bytes(*dapp_id)
+            )
         },
     }
 }
@@ -46,10 +51,12 @@ pub fn decoded(p: &TxPurpose) -> Vec<(String, String)> {
             bridge,
             amount,
             account,
+            dapp_id,
         } => vec![
             ("contract".into(), format!("{bridge:#x} (AckiNackiBridge)")),
-            ("function".into(), "deposit(uint256,bytes32)".into()),
+            ("function".into(), "deposit(uint256,uint256,bytes32)".into()),
             ("amount".into(), format!("{amount} units")),
+            ("dappId".into(), format!("0x{}", hex::encode(dapp_id))),
             ("anAccount".into(), format!("{account:#x}")),
         ],
     }
@@ -132,9 +139,12 @@ mod tests {
             uri(11_155_111, &TxPurpose::Deposit {
                 bridge,
                 amount: 12_500_000,
-                account: acc
+                account: acc,
+                dapp_id: [0; 32],
             }),
-            format!("ethereum:{bridge:#x}@11155111/deposit?uint256=12500000&bytes32={acc:#x}")
+            format!(
+                "ethereum:{bridge:#x}@11155111/deposit?uint256=12500000&uint256=0&bytes32={acc:#x}"
+            )
         );
     }
 
@@ -157,6 +167,7 @@ mod tests {
                 bridge: Default::default(),
                 amount: 1,
                 account: Default::default(),
+                dapp_id: [0; 32],
             },
         };
         assert_eq!(w.send_transaction(&ui, &tx).await, Err(WalletError::NoHash));

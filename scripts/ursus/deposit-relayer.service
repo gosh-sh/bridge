@@ -22,7 +22,6 @@ ExecStart=/home/ubuntu/bridge-e2e/bin/deposit-relayer daemon \
   --fetch-deposit-data-bin ${DEPOSIT_FETCH_DEPOSIT_DATA_BIN} \
   --export-vk-blob-bin ${DEPOSIT_EXPORT_VK_BLOB_BIN} \
   --export-blake2b-proof-bin ${DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN} \
-  --dapp-id ${AN_DAPP_ID} \
   --an-graphql-url ${AN_GRAPHQL_URL} \
   --an-keys-path ${AN_KEYS_PATH} \
   --an-bridge-abi-path ${AN_BRIDGE_ABI_PATH} \

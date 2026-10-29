@@ -1045,12 +1045,15 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 build of eccUSDCBridge 1.14.0: 1.13.0 plus the Arbitrum
-        // block verifier's deploy and writer path, and the refusal to deploy
-        // the recorded verifier again.
+        // sold 0.80.0 build of eccUSDCBridge 1.14.0 carrying both lines of
+        // work this branch merges: main's Arbitrum block verifier (deploy and
+        // writer path, and the refusal to deploy the recorded verifier again),
+        // and this branch's limits, replay protection and the DApp-bound
+        // deposit key. Neither side's hash survives the merge, so this is the
+        // rebuild from the merged source.
         assert_eq!(
             &hash[..8],
-            "5cada5db",
+            "4ed1fcc1",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

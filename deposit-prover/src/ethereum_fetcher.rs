@@ -87,7 +87,7 @@ impl EthereumFetcher {
         }
 
         // Parse indexed parameters
-        if log.topics.len() < 3 {
+        if log.topics.len() != 3 {
             return Err(anyhow!(
                 "Not enough topics. Expected 3 (signature + 2 indexed params), got {}",
                 log.topics.len()
@@ -105,11 +105,11 @@ impl EthereumFetcher {
         };
 
         // Parse non-indexed parameters from data.
-        // ABI layout (3 words):
-        // [amount(32)][anAccount(32)][timestamp(32)]
-        if log.data.len() != 96 {
+        // ABI layout: amount, anAccount, timestamp, dappId.
+        if log.data.len() != 128 {
             return Err(anyhow!(
-                "Expected 96 bytes of Deposit data (amount + anAccount + timestamp), got {}",
+                "Expected 128 bytes of Deposit data (amount + anAccount + timestamp + dappId), \
+                 got {}",
                 log.data.len()
             ));
         }
@@ -121,6 +121,8 @@ impl EthereumFetcher {
             bytes.copy_from_slice(&log.data[0..32]);
             bytes
         };
+
+        let dapp_id = log.data[96..128].try_into().unwrap();
 
         // anAccount (word 1): 256-bit TVM account address.
         let an_account = {
@@ -146,6 +148,7 @@ impl EthereumFetcher {
             deposit_id,
             sender,
             amount,
+            dapp_id,
             an_account,
             timestamp,
             contract_address: contract_address.as_bytes().try_into().unwrap(),
@@ -219,18 +222,14 @@ impl EthereumFetcher {
             event_data,
             receipt_proof,
             tx_proof,
-            // dappId is a config tag, not part of the event. Defaults to zero
-            // here; callers (CLI / prover config) overwrite `input.dapp_id`
-            // with the operator-configured Acki Nacki dApp identifier.
-            dapp_id: [0u8; 32],
         })
     }
 }
 
 /// Get the Deposit event signature
-/// keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
+/// keccak256("Deposit(uint256,address,uint256,bytes32,uint256,uint256)")
 pub fn get_deposit_event_signature() -> [u8; 32] {
-    keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
+    keccak256("Deposit(uint256,address,uint256,bytes32,uint256,uint256)")
 }
 
 #[cfg(test)]
@@ -238,7 +237,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deposit_event_uses_three_data_words() {
+    fn deposit_event_binds_the_full_dapp_id_and_rejects_the_old_layout() {
         use ethers::types::{Bytes, Log, U256, U64};
 
         let bridge = H160::repeat_byte(0x33);
@@ -256,7 +255,7 @@ mod tests {
                     H256::from_low_u64_be(7),
                     H256::from_low_u64_be(0x1234),
                 ],
-                data: Bytes::from([amount, account, timestamp].concat()),
+                data: Bytes::from([amount, account, timestamp, [0xff; 32]].concat()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -267,8 +266,9 @@ mod tests {
         assert_eq!(event.amount, amount);
         assert_eq!(event.an_account, account);
         assert_eq!(event.timestamp, 1_700_000_000);
+        assert_eq!(event.dapp_id, [0xff; 32]);
 
-        receipt.logs[0].data = Bytes::from([amount, [0u8; 32], account, timestamp].concat());
+        receipt.logs[0].data = Bytes::from([amount, account, timestamp].concat());
         assert!(fetcher.parse_deposit_event(&receipt, bridge, 0).is_err());
     }
 

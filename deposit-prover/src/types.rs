@@ -31,6 +31,9 @@ pub struct DepositEventData {
     /// The EVM `sender` is not a valid AN recipient, so the destination is
     /// supplied explicitly at deposit time and carried as ZK public inputs.
     pub an_account: [u8; 32],
+    /// Destination DApp ID committed by the Ethereum deposit event.
+    #[serde(default)]
+    pub dapp_id: [u8; 32],
     /// Timestamp (from log data)
     pub timestamp: u64,
     /// Contract address that emitted the event
@@ -87,14 +90,6 @@ pub struct DepositProofInput {
     /// non-empty `tx_bytes` before proving.
     #[serde(default)]
     pub tx_proof: TransactionProof,
-    /// Acki Nacki destination dApp identifier (`UInt256`, 32 bytes big-endian).
-    /// Config-supplied (not part of the Ethereum `Deposit` event): the bridge
-    /// operator sets which AN dApp a deposit credits. Bound as the
-    /// `dappIdHigh`/`dappIdLow` public inputs (replaced `anWorkchain` on
-    /// 2026-06-02). The AN-side bridge pins `dappId` to 0 and does not check
-    /// the proven halves.
-    #[serde(default)]
-    pub dapp_id: [u8; 32],
 }
 
 impl DepositProofInput {
@@ -164,8 +159,7 @@ pub struct DepositProofOutput {
     /// 18.44 ETH
     pub amount: [u8; 32],
     /// Acki Nacki destination dApp identifier (`UInt256`, 32 bytes big-endian).
-    /// Config-supplied tag bound as `dappIdHigh`/`dappIdLow` public inputs
-    /// (replaced `anWorkchain` on 2026-06-02).
+    /// Receipt-bound `dappIdHigh`/`dappIdLow` public inputs.
     pub dapp_id: [u8; 32],
     /// Acki Nacki destination account (256-bit TVM address).
     pub an_account: [u8; 32],
@@ -240,6 +234,7 @@ mod tests {
                 deposit_id: 0,
                 sender: [0u8; 20],
                 amount: [0u8; 32],
+                dapp_id: [0u8; 32],
                 an_account: [0u8; 32],
                 timestamp: 0,
                 contract_address: [0u8; 20],
@@ -256,7 +251,6 @@ mod tests {
                 proof_nodes: vec![],
                 transactions_root: [0u8; 32],
             },
-            dapp_id: [0u8; 32],
         }
     }
 

@@ -5,23 +5,25 @@
 //! bridge:
 //!
 //! 1. **Listen** for `AckiNackiBridge.Deposit(depositId, sender, amount,
-//!    anAccount, timestamp)` events on Ethereum, surfacing only deposits buried
-//!    under a configurable confirmation depth ([`source::EthLogSource`]).
+//!    anAccount, timestamp, dappId)` events on Ethereum, surfacing only
+//!    deposits buried under a configurable confirmation depth
+//!    ([`source::EthLogSource`]).
 //! 2. **Prove** that the deposit event was emitted — the `deposit-prover` Halo2
 //!    circuit (K=18, RLC) produces a Blake2b-transcript SHPLONK proof plus the
 //!    twelve public inputs `[depositId, sender, amount, contractAddress,
 //!    chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 //!    blockHashHigh, blockHashLow, promiseCommit]` — the Acki Nacki destination
 //!    account is bound in-circuit so the AN side credits a proven account,
-//!    proven `chainId` is allowlisted by `eccUSDCBridge` as a per-chain set
-//!    of bridges (`_trustedL1Bridge[chainId][bridge]`), and `dappId` (a config
-//!    tag, replaced `anWorkchain` on 2026-06-02) is pinned to 0 by the AN-side
-//!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
-//!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
+//!    proven `chainId` is allowlisted by `eccUSDCBridge` as a per-chain set of
+//!    bridges (`_trustedL1Bridge[chainId][bridge]`), and the DApp ID is bound
+//!    to the event too. The AN bridge keeps zero in its voucher identity;
+//!    recipient DApp validation is outside this release. Because
+//!    `deposit-prover` is its own cargo workspace, the proof is generated
+//!    out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
 //!    `proof`) to the AN-side `eccUSDCBridge.finalizeDeposit(...)`, which
-//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and deploys
-//!    a per-deposit `DepositVoucher` ([`submitter::AnInterfaceSubmitter`]).
+//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and deploys a
+//!    per-deposit `DepositVoucher` ([`submitter::AnInterfaceSubmitter`]).
 //!
 //! ## Architecture
 //!
@@ -50,9 +52,9 @@
 //!   Ethereum + the `deposit-prover` examples.
 //! - **AN delivery** ([`submitter::AnInterfaceSubmitter`]) is wired over the
 //!   [`acki_nacki_interface::IAckiNacki`] trait. The live client is
-//!   [`acki_nacki_interface::TvmAckiNacki`]. A second `finalizeDeposit` for
-//!   the same deposit fails in the voucher constructor (exit 51), so
-//!   re-submission is safe.
+//!   [`acki_nacki_interface::TvmAckiNacki`]. A second `finalizeDeposit` for the
+//!   same deposit fails in the voucher constructor (exit 51), so re-submission
+//!   is safe.
 //! - The AN-side `eccUSDCBridge.finalizeDeposit` entry point is in
 //!   `contracts/an/exchange/`; the `ZKHALO2VERIFYWITHVK` opcode lives in
 //!   `tvm-sdk` and is authoritative for its semantics.

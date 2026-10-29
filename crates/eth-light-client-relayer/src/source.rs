@@ -7,6 +7,11 @@
 
 use std::sync::Mutex;
 
+use alloy::{
+    primitives::B256,
+    providers::{Provider, ProviderBuilder, RootProvider},
+    rpc::types::{Filter, Header as RpcHeader, Log},
+};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::Value;
@@ -375,50 +380,77 @@ impl HttpBeaconSource {
     }
 }
 
+/// Retry `eth_getLogs` on transient RPC rate limits (HTTP 429 / CU/sec caps).
+const GET_LOGS_MAX_ATTEMPTS: u32 = 5;
+const GET_LOGS_INITIAL_BACKOFF_MS: u64 = 500;
+const GET_LOGS_MAX_BACKOFF_MS: u64 = 8_000;
+
+/// Whether an Ethereum RPC error is likely transient (429 / throughput).
+pub fn is_retryable_eth_rpc_error(err: &impl std::fmt::Display) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("compute units per second")
+        || msg.contains("too many requests")
+}
+
+/// `eth_getLogs`, retried with backoff while the RPC rate-limits.
+pub async fn get_logs_with_retry<P: Provider>(
+    provider: &P,
+    filter: &Filter,
+) -> Result<Vec<Log>, RelayerError> {
+    let mut attempt = 0u32;
+    let mut backoff_ms = GET_LOGS_INITIAL_BACKOFF_MS;
+    loop {
+        attempt += 1;
+        match provider.get_logs(filter).await {
+            Ok(logs) => return Ok(logs),
+            Err(e) if is_retryable_eth_rpc_error(&e) && attempt < GET_LOGS_MAX_ATTEMPTS => {
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms.saturating_mul(2).min(GET_LOGS_MAX_BACKOFF_MS);
+            },
+            Err(e) => {
+                return Err(RelayerError::eth(format!(
+                    "get_logs failed after {attempt} attempt(s): {e}"
+                )));
+            },
+        }
+    }
+}
+
 /// Execution-layer JSON-RPC (`eth_getBlockByHash`) for header RLP.
 pub struct EthExecutionRpc {
-    client: Client,
-    url: String,
+    provider: RootProvider,
 }
 
 impl EthExecutionRpc {
     pub fn new(url: impl Into<String>) -> Result<Self, RelayerError> {
+        let url: String = url.into();
+        let url = url
+            .parse()
+            .map_err(|e| RelayerError::eth(format!("ETH_RPC_URL: {e}")))?;
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| RelayerError::beacon(e.to_string()))?;
+            .map_err(|e| RelayerError::eth(e.to_string()))?;
         Ok(Self {
-            client,
-            url: url.into(),
+            provider: ProviderBuilder::new()
+                .disable_recommended_fillers()
+                .connect_reqwest(client, url),
         })
     }
 
+    /// Reads only the header fields of the block: the transaction hashes,
+    /// uncles and withdrawals beside them are not parsed.
     pub async fn header_rlp(&self, block_hash: [u8; 32]) -> Result<Vec<u8>, RelayerError> {
-        let hx = format!("0x{}", hex::encode(block_hash));
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_getBlockByHash",
-            "params": [hx, false]
-        });
-        let resp = self
-            .client
-            .post(&self.url)
-            .json(&body)
-            .send()
+        let hash = B256::from(block_hash);
+        let header: RpcHeader = self
+            .provider
+            .raw_request::<_, Option<RpcHeader>>("eth_getBlockByHash".into(), (hash, false))
             .await
-            .map_err(|e| RelayerError::beacon(format!("eth_getBlockByHash: {e}")))?;
-        let v: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| RelayerError::beacon(format!("eth_getBlockByHash json: {e}")))?;
-        let result = v
-            .get("result")
-            .ok_or_else(|| RelayerError::beacon("eth_getBlockByHash missing result"))?;
-        if result.is_null() {
-            return Err(RelayerError::beacon(format!("unknown block {hx}")));
-        }
-        crate::header_rlp::encode_header_rlp(result)
+            .map_err(|e| RelayerError::eth(format!("eth_getBlockByHash: {e}")))?
+            .ok_or_else(|| RelayerError::eth(format!("unknown block {hash}")))?;
+        Ok(crate::header_rlp::encode_header_rlp(&header)?.to_vec())
     }
 
     /// The span from `older` to `newer` inclusive, oldest first, at most `max`
@@ -592,6 +624,28 @@ impl BeaconSource for InMemoryBeaconSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `header_rlp` parses the `eth_getBlockByHash` answer as a header: the
+    /// block body beside it is never read, whatever shape it has.
+    #[test]
+    fn a_block_answer_parses_as_its_header() {
+        let mut v: Value =
+            serde_json::from_str(include_str!("fixtures/sepolia_amsterdam.json")).unwrap();
+        v["transactions"] = serde_json::json!([format!("0x{}", "11".repeat(32))]);
+        v["uncles"] = serde_json::json!([]);
+        v["withdrawals"] = serde_json::json!("a shape no block type knows");
+        let header: RpcHeader = serde_json::from_value(v).unwrap();
+        let rlp = crate::header_rlp::encode_header_rlp(&header).unwrap();
+        assert_eq!(crate::header_rlp::keccak256(&rlp), header.hash.0);
+    }
+
+    #[test]
+    fn is_retryable_detects_429() {
+        assert!(is_retryable_eth_rpc_error(
+            &"HTTP error 429 with body: compute units per second"
+        ));
+        assert!(!is_retryable_eth_rpc_error(&"invalid params"));
+    }
 
     #[test]
     fn parse_exec_link_reads_payload_hashes() {

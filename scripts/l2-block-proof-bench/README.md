@@ -56,15 +56,15 @@ the chain; an empty slot is refused (315).
 
 ## Vectors
 
-- `fixtures/arbitrum_sepolia_11992300.json` was written by `deposit-relayer arbitrum-vector` on
-  2026-10-25. It holds the assertion in Sepolia block 11992300 (tx 26), block M = 322755844, and the
-  history slot of N = 322753172. The relayer took the slot proof when M's batch was posted, about
+- `fixtures/arbitrum_sepolia_11992300.json` was written by `arbitrum-vector` on 2026-10-25. It
+  holds the assertion in Sepolia block 11992300 (tx 26), block M = 322755844, and the history slot
+  of N = 322753172. The relayer took the slot proof when M's batch was posted, about
   20 s after M; the assertion came 34 minutes later, when ordinary nodes no longer serve M's state.
   To write another, run it with ordinary RPCs. It returns after one or two assertion intervals,
   35–70 minutes on Arbitrum Sepolia:
 
   ```sh
-  deposit-relayer arbitrum-vector --parent-rpc-url <Sepolia> --arbitrum-rpc-url <Arbitrum Sepolia> \
+  eth-lc-relayer arbitrum-vector --parent-rpc-url <Sepolia> --arbitrum-rpc-url <Arbitrum Sepolia> \
       --out fixtures/<name>.json
   ```
 

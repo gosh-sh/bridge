@@ -20,7 +20,6 @@ build crates/bridge-prover-libraries -p bridge-relayer-daemon --bin relayer -p b
 # seed_prover_bk_set: the BK set at the seed (live_relayer_bridge_runbook.md §3.2).
 build crates/bridge-prover-libraries -p bridge-prover-daemon --example seed_prover_bk_set
 build crates/bridge-evm-aggregator --bin aggregate-proof
-build crates/deposit-relayer-daemon --bin deposit-relayer
 build deposit-prover --example fetch_deposit_data --example export_vk_blob --example export_blake2b_proof \
   --example downsize_srs
 # The Sepolia light client's relayer and its step prover.
@@ -29,7 +28,6 @@ build eth-light-client-prover --example export_step_vk_blob
 t=/cache/target
 install -m 0755 "$t/crates_bridge-prover-libraries/release/relayer" "$t/crates_bridge-prover-libraries/release/compute_bridge_anchors" \
   "$t/crates_bridge-prover-libraries/release/ackinacki-bridge" "$t/crates_bridge-evm-aggregator/release/aggregate-proof" \
-  "$t/crates_deposit-relayer-daemon/release/deposit-relayer" \
   "$t/crates_bridge-prover-libraries/release/examples/seed_prover_bk_set" /out/
 for e in fetch_deposit_data export_vk_blob export_blake2b_proof downsize_srs; do
   install -m 0755 "$t/deposit-prover/release/examples/$e" /out/

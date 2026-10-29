@@ -23,9 +23,24 @@ reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "charset",
 ] }
-rlp = "0.5"
-tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+# EVM JSON-RPC and header RLP (`eth_getBlockByHash` for `submitAncestry`), and
+# the Arbitrum block anchors (`src/arbitrum.rs`): receipt envelopes and the
+# receipt-trie proof.
+alloy = { version = "2.0", features = [
+    "providers",
+    "provider-http",
+    "rpc-types-eth",
+    "network",
+    "sol-types",
+    "transport-http",
+    "consensus",
+    "eips",
+    "rlp",
+    "trie",
+] }
 acki-nacki-interface = { path = "../acki-nacki-interface" }
+# The Arbitrum chain ids, shared verbatim with `deposit-prover`.
+deposit-chain-ids = { path = "../deposit-chain-ids" }
 tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",
@@ -56,6 +71,8 @@ live-submit = ["acki-nacki-interface/tvm-sdk", "dep:tvm_client"]
 [dev-dependencies]
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 tempfile = "3"
+# `arbitrum.rs` tests build the JSON-RPC error a node answers with.
+alloy-json-rpc = "2"
 
 [[bin]]
 name = "eth-lc-relayer"

@@ -139,7 +139,26 @@ pub async fn build_real_chain(
         hex::encode(target_hash),
     );
 
-    if num_layers > prev_num_layers {
+    if prev_num_layers == 0 {
+        // Genesis seed (seq_no 0): nothing proved yet, so the chain starts at
+        // the zero anchor. The first bundle is the network's first W^N
+        // boundary; its L(N) tree has no earlier L(N) root, and the node puts
+        // zero in slot 1 (`prev_same_layer_root`). One slot-1 opening, as in
+        // Case D. Its data leaves are the L(N-1) roots of blocks W^(N-1) ..
+        // W^N, so block 0 is never read.
+        ensure!(
+            prev_hash == [0u8; 32],
+            "no layer proved yet but the anchor is not zero: {}",
+            hex::encode(prev_hash)
+        );
+        ensure!(
+            num_layers >= 2 && target_seqno == window_size.pow(num_layers as u32),
+            "a genesis seed proves the first L2 boundary first: target {} has {} layer(s)",
+            target_seqno,
+            num_layers
+        );
+        build_chain_same_layer_n(gql, target_seqno, num_layers as u8, prev_hash, window_size).await
+    } else if num_layers > prev_num_layers {
         // Case B: a new layer just appeared at target (e.g. FIRST L2 boundary
         // with prev_num_layers=1, num_layers=2). Prev's L(N) root sits at a
         // data-leaf slot of target's L(N+1) tree — single opening.

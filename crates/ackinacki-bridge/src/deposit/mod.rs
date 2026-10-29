@@ -148,6 +148,11 @@ async fn start(p: &args::DepositParams, d: &preflight::Deps) -> CliResult<Deposi
             let from = p.from_address.ok_or_else(|| usage("--from-address"))?;
             run::run_with(p, d, &mut eip681(from)).await
         },
+        args::QrMode::LocalKey => {
+            let from = p.from_address.ok_or_else(|| usage("--from-address"))?;
+            let rpc = p.rpc_url.clone().ok_or_else(|| usage("--rpc-url"))?;
+            run::run_with(p, d, &mut local_key_wallet(from, rpc, net)?).await
+        },
         args::QrMode::Walletconnect | args::QrMode::Both => {
             let mut w = wc::WalletConnectWallet::new(wc::WcConfig {
                 relay_url: p.wc_relay_url.clone(),
@@ -174,6 +179,37 @@ async fn start(p: &args::DepositParams, d: &preflight::Deps) -> CliResult<Deposi
             }
         },
     }
+}
+
+/// The wallet of `--qr-mode local-key`: the key in [`args::LOCAL_KEY_ENV`],
+/// which must sign for `from`. Exit 2 otherwise, before anything is read.
+fn local_key_wallet(
+    from: alloy_primitives::Address,
+    rpc: String,
+    net: args::Network,
+) -> CliResult<wallet::local_key::LocalKeyWallet> {
+    let usage = |reason: String| CliError::Usage {
+        reason,
+    };
+    let key = std::env::var(args::LOCAL_KEY_ENV)
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            usage(format!(
+                "deposit: --qr-mode local-key signs with the key in {}, which is not set",
+                args::LOCAL_KEY_ENV
+            ))
+        })?;
+    let w = wallet::local_key::LocalKeyWallet::new(&key, rpc, net.chain_id())
+        .map_err(|e| usage(format!("deposit: {} {e}", args::LOCAL_KEY_ENV)))?;
+    if w.address() != from {
+        return Err(usage(format!(
+            "deposit: the key in {} signs for {}, not --from-address {from}",
+            args::LOCAL_KEY_ENV,
+            w.address()
+        )));
+    }
+    Ok(w)
 }
 
 /// The final summary of a deposit run, printed by `output`.

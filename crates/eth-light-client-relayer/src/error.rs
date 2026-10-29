@@ -7,6 +7,10 @@ pub enum RelayerError {
     #[error("beacon source error: {0}")]
     Beacon(String),
 
+    /// An EVM JSON-RPC failure, or an answer that does not check out.
+    #[error("ethereum error: {0}")]
+    Eth(String),
+
     #[error("proof generation failed: {0}")]
     ProofGeneration(String),
 
@@ -39,5 +43,9 @@ impl RelayerError {
 
     pub fn beacon(msg: impl Into<String>) -> Self {
         Self::Beacon(msg.into())
+    }
+
+    pub fn eth(msg: impl Into<String>) -> Self {
+        Self::Eth(msg.into())
     }
 }

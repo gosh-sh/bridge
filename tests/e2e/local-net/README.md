@@ -11,7 +11,9 @@ covers: `.woodpecker/local-net-e2e.yaml`, `tests/e2e/local-net/`,
 `.woodpecker/local-net-e2e.yaml` brings up a complete acki-nacki network on one
 dedicated host, bakes **this PR's** `contracts/an/*` into its zerostate, and runs
 `crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py` against it
-(multisig deploy → `mintAndSendBridged` → `initiateWithdrawal` → `WithdrawalInitiated`).
+(multisig deploy → `mintAndSendBridged` → `initiateWithdrawal` → `WithdrawalInitiated`),
+then `test_arbitrum_block_proof.py` (`deployL2Verifier` → `proveBlock` on the bench's
+synthetic vector, refused before its parent block is accepted and admitted after).
 It follows the dexdo e2e pattern (gosh-sh/dexdo `.woodpecker/e2e.yml`) and reuses
 acki-nacki's `tests/dexdo/up.sh` + `ansible/dexdo-e2e-{prepare,up,down}.yml` as they are.
 The network follows a **branch** of acki-nacki (`dev`), not a commit: each run resolves
@@ -72,6 +74,66 @@ lands upstream (`checkout-acki-on-host.sh` refuses to proceed when it no longer 
   6623). The patched hand-over also waits for node0 to serve the zerostate giver account.
 
 The other nodes' APIs are no way around this: they want the token `nginx0` adds.
+
+## Arbitrum Sepolia: `arbitrum-e2e`
+
+After `run-test`, the pytest suite in `tests/e2e/local-net/arbitrum/` deploys a fresh
+`AckiNackiBridge` on Arbitrum Sepolia (421614) and sends 2 USDC from it to this network with
+`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. Each
+test is one step and asserts what the step must have produced, from the chains or from the
+log of the job that did it; `-x` stops at the first failure, which names the step, what it
+waited for and the tail of the log.
+
+| Tests | Step |
+|---|---|
+| `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 4 hours |
+| `test_10`–`12` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the zerostate's keepers); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
+| `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
+| `test_40`–`44` | `deposit`: sent, Deposit event — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
+| `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
+| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
+| `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, 2 USDC back on the deployer |
+
+Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
+`lc-prove` proves the latest finality update from the beacon chain
+(`https://lodestar-sepolia.chainsafe.io`, `BEACON_URL` in `prover-host/jobs/common.sh`), and
+`lc-bootstrap` sets the committee that signed it, then switches the owner off. From there the
+light client accepts one finalized checkpoint per epoch and, with `--submit-ancestry`, the
+blocks between two consecutive ones; `eth-lc-relayer arbitrum-anchors` proves the deposit's Arbitrum block
+from the assertion in one of those Sepolia blocks. The light client follows a new sync
+committee (every ~27 h) only by a rotate proof, which does not run live yet, so a run must
+not cross one: `test_02` refuses to start a run that would.
+
+Owner calls and Acki Nacki reads run on this host (`an-on-host.sh` →
+`python/arbitrum_e2e_an.py`).
+
+The provers, daemons and the CLI run on a separate **prover host**, not on this one: bundle
+proving peaks at ~23 GB and reads ~40 GB of SRS and keys. The runner reaches it with a CI key
+whose `authorized_keys` entry allows only the dispatcher (a copy of
+`tests/e2e/local-net/prover-host/ci-entry` in the CI directory's `bin/`) and the tunnel ports
+127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
+what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
+socket and capped memory and CPU (40 GB / 12 cores for the build and the deposit prover, 64 GB /
+32 cores for the provers that have to keep pace: the light client's step prover, which has an
+epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once in a `rust:1-bookworm` container
+(`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
+set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own
+where `nginx0` and `node0..4` are proxies to the runner's tunnels.
+
+A run is named `arbitrum-e2e-<UTC timestamp>`. Its work directory is `runs/<run>/` and its
+logs `run-logs/<run>/<job>.log` in the CI directory, an external volume every job mounts as
+`/logs`: the logs outlive the containers, and the next run's clean removes everything else.
+
+| Secret | Holds |
+|---|---|
+| `PROVER_HOST`, `PROVER_HOST_PORT`, `PROVER_HOST_USER` | the prover host's ssh address, port and user: three secrets so the log masks each |
+| `PROVER_HOST_SSH_KEY` | the private half of its CI key, newline-joined with `@` |
+| `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY` | the deployer and depositor on Arbitrum Sepolia; the relayer and burner keys are derived from it. Its address, `ARBITRUM_SEPOLIA_E2E_ADDRESS`, is public and set in the pipeline itself; `test_01` checks the key against it |
+
+The deployer needs Arbitrum Sepolia ETH and USDC (https://faucet.circle.com, network
+Arbitrum Sepolia): each run deploys a bridge (~0.0013 ETH), funds the two derived senders and
+moves 2 USDC there and back.
 
 ## Knobs (one place each; the future ansible role takes them over)
 

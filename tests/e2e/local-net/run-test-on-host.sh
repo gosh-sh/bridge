@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py ON
-# the local-net e2e host, against the co-located single-compose acki-nacki
+# Run crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py and
+# test_arbitrum_block_proof.py ON the local-net e2e host, against the co-located single-compose acki-nacki
 # network that tests/dexdo/up.sh (acki-nacki) brought up there.
 #
 # Piped over ssh by .woodpecker/local-net-e2e.yaml (`bash -s`), never executed
@@ -133,10 +133,15 @@ HB=$!
 trap 'pkill -P "$HB" 2>/dev/null || true; kill "$HB" 2>/dev/null || true' EXIT
 # stdin is this script, still being read by ssh: the test and its tvm-cli children
 # must not inherit it.
-set +e
-( cd "$PY_DIR" && python3 test_deploy_and_withdraw_only.py </dev/null )
-rc=$?
-set -e
-echo "==> test exit code: $rc"
+# Each test runs even when the one before it failed; the run is red if any is.
+rc=0
+for test in test_deploy_and_withdraw_only.py test_arbitrum_block_proof.py; do
+  set +e
+  ( cd "$PY_DIR" && python3 "$test" </dev/null )
+  r=$?
+  set -e
+  echo "==> $test exit code: $r"
+  [ "$r" -eq 0 ] || rc=$r
+done
 if [ -f "$WORK_ROOT/lease-lost" ]; then echo "FATAL: $(cat "$WORK_ROOT/lease-lost"): the host lease was not ours any more while the test ran"; exit 72; fi
 exit $rc

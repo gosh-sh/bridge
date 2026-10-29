@@ -1201,7 +1201,10 @@ Preflight, in order:
   still anchors this deposit's chain (on 1.7.0 that flag is still
   `getAnchorConfig().ownerAnchorsEnabled`, one bool for every chain); and
   with owner anchors off the light client must pass its
-  [readiness checks](#when-only-the-light-client-anchors);
+  [readiness checks](#when-only-the-light-client-anchors); from bridge
+  1.14.0, `getL2Verifier(chainId)` naming an Arbitrum verifier for the
+  deposit's chain takes the light client's place: that verifier accepts the
+  chain's blocks from the assertions the rollup posts to its parent chain;
   `getDepositVoucherCodeHash()` is the voucher code this build carries
   (otherwise the CLI cannot compute the voucher's address, and a newer CLI is
   needed); and the recipient: an active account must live in the dapp `--to`
@@ -1245,7 +1248,7 @@ profile it installed before deposits existed.
 
 | Flag | Value | Refused with exit 2 |
 |------|-------|---------------------|
-| `--network` | `sepolia` (chain id 11155111), the only deposit network in this version | any other name |
+| `--network` | `sepolia` (chain id 11155111) or `arbitrum-sepolia` (chain id 421614) | any other name |
 | `--amount` | USDC, at most 6 fractional digits, never rounded; above 0 and at most `u64::MAX` micro-USDC | anything else |
 | `--to` | `dapp_id::account_id`, both halves 64 hex characters without `0x`, the account non-zero | a wrong shape; an active account that lives in another dapp: `--to names dapp <x>, but account <acc> lives in dapp <y>` |
 
@@ -1259,7 +1262,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 
 | Flag | Env var / profile key | Default | Purpose |
 |------|-----------------------|---------|---------|
-| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions) |
+| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions). On Arbitrum Sepolia, `https://sepolia-rollup.arbitrum.io/rpc` does not serve `eth_getRawTransactionByHash` either; `https://arbitrum-sepolia-rpc.publicnode.com` does |
 | `--bridge-address` | `BRIDGE_ADDRESS` | — | `AckiNackiBridge` on the EVM chain |
 | `--gql-endpoint` | `BRIDGE_GQL_ENDPOINT` | — | The Acki Nacki host. GraphQL for reads; `finalizeDeposit` goes to `POST /v2/messages` on the same host, so it has to serve both |
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID` | — | Account id of the Acki Nacki bridge; its dapp is resolved live |
@@ -1286,14 +1289,15 @@ larger value is refused with exit 2.
 
 A read that fails is retried without a limit, backing off from 1 to 60 s,
 and every attempt is logged as `ERROR` — except inside a step with its own
-time limit, which covers the retries too.
+time limit, which covers the retries too. Preflight's EVM reads are tried for
+2 minutes, then refuse the deposit with exit 2: nothing has been sent yet.
 
 **QR code and wallet:**
 
 | Flag | Value | Default or effect |
 |------|-------|-------------------|
-| `--qr-mode` | `walletconnect`, `eip681` or `both` | `walletconnect` |
-| `--from-address` | `0x…`, the sending account | checked against the wallet session in `walletconnect`; required by `eip681` and `both` |
+| `--qr-mode` | `walletconnect`, `eip681`, `both` or `local-key` | `walletconnect`. `local-key` uses no wallet: the CLI signs both transactions itself with the private key in `BRIDGE_DEPOSIT_PRIVATE_KEY` (environment only, never a flag) and sends them through `--rpc-url`; for unattended runs such as CI |
+| `--from-address` | `0x…`, the sending account; `BRIDGE_DEPOSIT_FROM` | checked against the wallet session in `walletconnect` and against the key in `local-key`; required by `eip681`, `both` and `local-key` |
 | `--qr-out` | a path ending in `.png` or `.svg` | the WalletConnect QR is written there as well |
 | `--uri-only` | flag | print the URI as text, without the QR picture |
 | `--qr-invert` | flag | swap dark and light in the text code, for a light-on-dark terminal |
@@ -1377,10 +1381,12 @@ cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
 
 ### Networks
 
-Sepolia is the only deposit network in this version. **Ethereum mainnet is
+`deposit --network` takes Sepolia (`sepolia`) and Arbitrum Sepolia
+(`arbitrum-sepolia`) in this version; an Arbitrum Sepolia deposit needs a
+bridge at 1.14.0 or newer with a verifier for 421614. **Ethereum mainnet is
 not a deposit network**: the deposit circuit accepts OP Mainnet, World Chain,
-Mantle, Base, Arbitrum One, Blast and Sepolia (`crates/deposit-chain-ids`), so
-production deposits come from L2s. `bridge_config.mainnet` cannot be used for
+Mantle, Base, Arbitrum One, Blast, Sepolia and Arbitrum Sepolia
+(`crates/deposit-chain-ids`), so production deposits come from L2s. `bridge_config.mainnet` cannot be used for
 `deposit`.
 
 ### Deposit timing
@@ -1393,17 +1399,20 @@ after the deposit, plus however long the owner takes to act. The status line
 prints the owner's call to pass on:
 `setAcceptedBlockHash(<chainId>, 0x<blockHash>, true)`.
 
-| Phase | On Sepolia |
-|-------|------------|
-| Preflight | seconds |
-| Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing, and an `approve` that does not show on chain, give up after `--pair-timeout-s` |
-| EVM confirmation, 12 blocks | ~2.5 min |
-| Block anchor, by the owner | **from ~13 min, plus the owner's reaction; no limit by default** |
-| Deposit block finalized on the EVM side | ~13 min, inside the anchor wait |
-| Relayer grace | up to 2 min |
-| Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) |
-| `finalizeDeposit` and the credit | under a minute; at most `--credit-timeout-s` |
-| **End to end** | **~17 min, plus the owner's reaction** — an estimate summed from the rows above, not a measured run |
+| Phase | On Sepolia | On Arbitrum Sepolia |
+|-------|------------|---------------------|
+| Preflight | seconds | seconds |
+| Pairing, account check, `approve`, `deposit` | as fast as you confirm in the wallet; pairing, and an `approve` that does not show on chain, give up after `--pair-timeout-s` | the same |
+| EVM confirmation, 12 blocks | ~2.5 min | seconds |
+| Block anchor | by the owner: **from ~13 min, plus the owner's reaction; no limit by default** | by `eth-lc-relayer arbitrum-anchors` through the verifier: **35–75 min** (the rollup's next assertion on Sepolia, then the Sepolia light client admitting its block; 70 min in one measured run); the owner can anchor it sooner |
+| Deposit block finalized on the EVM side | ~13 min, inside the anchor wait | inside the anchor wait |
+| Relayer grace | up to 2 min | up to 2 min |
+| Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) | the same |
+| `finalizeDeposit` and the credit | under a minute; at most `--credit-timeout-s` | the same |
+| **End to end** | **~17 min, plus the owner's reaction** — an estimate summed from the rows above, not a measured run | **~40–80 min** — an estimate from the rows above |
+
+On Arbitrum One the assertion comes about once an hour and covers blocks up to
+about an hour before it, so the anchor takes about 2–2.5 hours there.
 
 With owner anchors disabled, the light client anchors a block once it is
 finalized and the next checkpoint is proven: at least two epochs (~13 minutes

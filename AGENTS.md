@@ -104,9 +104,9 @@ arrangement while GitLab was canonical, and `.gitlab-ci.yml` is what remains of 
 ```
 contracts/ethereum/        Solidity (Foundry): AckiNackiBridge, SHPLONK verifier adapters, oracles.
                            verifiers/ holds the production Yul bytecode (.bin) and its source (.sol)
-contracts/an/              TVM (gosh-solidity): exchange/ has eccUSDCBridge, DepositVoucher and the
-                           Ethereum beacon light client, with the compiled artefacts acki-nacki pins by
-                           commit; zerostate/ assembles the bridge account; place.json tells acki-nacki
+contracts/an/              TVM (gosh-solidity): exchange/ has eccUSDCBridge, DepositVoucher, the
+                           Ethereum beacon light client and the Arbitrum block verifier, with the
+                           compiled artefacts acki-nacki pins by commit; zerostate/ assembles the bridge account; place.json tells acki-nacki
                            what to place where
 deposit-prover/            ETH→AN deposit circuit (Halo2 on axiom-eth), standalone package
 eth-light-client-prover/   Ethereum sync-committee light-client circuits (step, rotate), standalone
@@ -115,7 +115,8 @@ crates/
   deposit-chain-ids/       the EVM chains the deposit bridge accepts — single source of truth
   eth-frontend/            Ethereum client (alloy)
   deposit-relayer-daemon/  ETH→AN relayer: Deposit logs → deposit-prover → finalizeDeposit on AN
-  eth-light-client-relayer/ finality_update → step/rotate proofs → EthBeaconLightClient on AN
+  eth-light-client-relayer/ finality_update → step/rotate proofs → EthBeaconLightClient on AN;
+                           arbitrum-anchors: Arbitrum deposit blocks → proveBlock on AN
   bridge-prover-libraries/ AN→ETH prover workspace (gosh halo2 fork): prover lib and live driver,
                            GraphQL fetcher, prover and verifier daemons, Circuit 4 event witness
                            and prover, snark wrap

@@ -22,20 +22,127 @@ assigns it when the release is tagged.
 
 ## [Unreleased]
 
-### Fixed
+### Breaking Changes
+
+- `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
+  (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
+  file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
+  flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+
+### Fixes
 
 - **A withdrawal in the last 128 blocks before an L2 boundary can be proven.**
   The Circuit 4 witness put that boundary's own L2 root into leaf 0 of its L1
-  tree (every 16 384 blocks, about 0.8% of withdrawals). The rebuilt root did
-  not match the root the bridge stores, so `withdrawByProof` reverted
-  `UnknownAnchor` on an L1 anchor, and an L2 anchor failed while the witness
-  was built. The USDC was already burned on Acki Nacki. Leaf 0 is now the L2
-  root of the previous L2 boundary, or 32 zero bytes at the first boundary
-  (block 16 384). A missing layer root fails the build instead of becoming a
-  tree of zeros, and the rebuilt L1 root must match the root the key block
-  published. No verification key changes. Re-run the withdrawal prover for an
-  affected withdrawal while that L2 root is still inside the bridge window
-  (about 8 days at 3 blocks/s).
+  tree (every 16 384 blocks). The rebuilt root did not match the root the bridge
+  stores, so `withdrawByProof` reverted `UnknownAnchor` on an L1 anchor, and an
+  L2 anchor failed while the witness was built. The USDC was already burned on
+  Acki Nacki. Leaf 0 is now the L2 root of the previous L2 boundary, or 32 zero
+  bytes at the first boundary (block 16 384). A missing layer root fails the
+  build instead of becoming a tree of zeros, and the rebuilt L1 root must match
+  the root the key block published. No verification key changes.
+  A `proof_event_*.json` already built with the old leaf 0 still makes
+  `withdrawByProof` revert `UnknownAnchor`. `relayer daemon-withdraw` and
+  `relayer daemon-bridge` treat that revert as transient and submit the same
+  file again. Move those files out of `--proofs-dir`. Prove the withdrawal
+  again with `ackinacki-bridge withdraw --allow-retry` (the burn is already
+  recorded), or let `daemon-withdraw` / `daemon-bridge` pick up the new
+  `proof_event_*.json`. Do this while that L2 root is still inside the bridge
+  window (about 8 days at 3 blocks/s).
+- `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
+- `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
+  retry on the next tick, instead of waiting forever on a node that does not answer.
+- `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
+  refuses to start while another instance holds it.
+
+- `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
+  with the deployed bridge, and `release.yaml` publishes the binaries again.
+- A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
+  first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
+  (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`
+  with `BRIDGE_BOOTSTRAP_SEQNO=0` proves its first bundle at seq_no 16384. L2 anchoring only.
+- A bridge seeded on a key block of higher order than its anchor level (L2 on a W³ boundary, L1 on
+  a W² boundary) no longer stalls `verifyBlock` at the next boundary of that order. On a
+  `prover_state.json` an earlier build seeded that way, `relayer daemon-live` and
+  `bridge-prover-daemon` refuse to start and name the layer: for `relayer daemon-live` remove the
+  file and restart; for `bridge-prover-daemon` move it and `prover_bk_set.json` aside and restart
+  with `BRIDGE_BOOTSTRAP_SEQNO` set to the bridge's seed seq_no.
+
+## [0.7.0] – 2026-10-27
+
+### Breaking Changes
+
+- A CLI built before this release refuses a 1.14.0 bridge as newer than it knows: install this
+  `ackinacki-bridge` before upgrading the bridge to 1.14.0.
+- `deposit-relayer arbitrum-anchors` refuses to start without a state file and without
+  `--from-block` (`BRIDGE_DEPLOY_BLOCK`), instead of scanning Arbitrum from block 0. It also refuses
+  a verifier whose `getConfig()` names another chain, parent chain or rollup, a
+  `--parent-rpc-url` without `eth_getBlockReceipts`, and a state file of another `--bridge-address`.
+
+### New / Improvements
+
+- `ArbitrumBlockVerifier` 1.0.0 (`contracts/an/0.81.0_compiled/exchange/`, code hash `ba8c1342…`):
+  proves an Arbitrum block from the assertion its rollup posts on the parent chain and admits the
+  block's hash to the bridge's anchor set without the owner; `proveBlock` is permissionless. Deploy
+  it after the parent chain's light client with `deployL2Verifier(421614, 11155111,
+  0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4)` or `deployL2Verifier(42161, 1,
+  0x4dceb440657f21083db8add07665f8ddbe1dcfc0)`; see *Arbitrum blocks* in `contracts/an/README.md`.
+  It accepts an assertion when it is posted, not when the rollup confirms it: on Arbitrum Sepolia
+  only the rollup's validator whitelist backs that, so deploy 421614's verifier on test networks
+  only. Rebuilding it needs `sold` 0.81.0 from TVM-Solidity-Compiler `feature/keccak256-builtin`.
+- `eccUSDCBridge` 1.14.0 (code hash `5cada5db…`): `setL2VerifierCode`, `deployL2Verifier`,
+  `getL2Verifier`, `acceptBlockHashFromL2Verifier`, error 237 `ERR_L2_VERIFIER_UNSET`, error 238
+  `ERR_L2_VERIFIER_DEPLOYED` when `deployL2Verifier` is called again with the recorded verifier's
+  code (a new rollup or parent chain needs new verifier code); `disableOwnerAnchorsOn` also takes a
+  chain that has an Arbitrum verifier. `updateCode` from 1.13.0 keeps balances but not the verifier
+  code or the verifiers: install and deploy them again.
+- The zerostate installs the verifier code, and `place.json` places the verifier, `EthTrie.sol`,
+  `ArbitrumBlockVerifierDeploy.sol` and the compiled verifier in acki-nacki.
+- Arbitrum Sepolia (421614) is a deposit chain for the deposit prover and relayer;
+  `ackinacki-bridge withdraw --to-chain` accepts 42161 and 421614, and the CLI knows bridge 1.14.0.
+- `deposit-relayer arbitrum-anchors` gets the Arbitrum blocks that hold deposits accepted through
+  `proveBlock`, with an Arbitrum RPC that keeps a few minutes of state (public ones keep ~30 s).
+  Run one per Arbitrum chain next to `daemon`, keep `ARBITRUM_ANCHOR_STATE` across restarts, and run `eth-lc-relayer` with `--submit-ancestry`. It
+  scans for deposits 240 blocks behind the Arbitrum head; a `proveBlock` Acki Nacki refuses is sent
+  again after 5 minutes without holding up the others; a deposit block older than 393 168 blocks is
+  logged as an error saying it now needs the bridge owner, and dropped. An RPC failure while it
+  looks up a batch's last block is retried on the next tick instead of being read as "not posted
+  yet". A batch whose last block's state the Arbitrum node no longer keeps ("historical state … is
+  not available") is dropped at once, since the next batch covers the same deposits; any other
+  failure on a batch is tried on at most 2 more ticks.
+  `deposit-relayer arbitrum-vector` writes a test vector.
+- `scripts/l2-block-proof-bench` runs the verifier offline; one proof costs about 0.55M gas on
+  Arbitrum One data.
+- `ackinacki-bridge deposit --network arbitrum-sepolia` deposits from Arbitrum Sepolia. A bridge
+  whose `getL2Verifier(chainId)` names a verifier for that chain needs no light client there. While
+  owner anchors are on, the wait prints the owner's `setAcceptedBlockHash` call, as on Sepolia; with
+  them off, preflight refuses the deposit when the verifier's parent chain has no light client.
+- The light client's step prover `export_step_vk_blob` keeps its proving key: `STEP_KEYGEN_ONLY=1`
+  with `STEP_KEY_DIR` generates it once, and every later run with that `STEP_KEY_DIR` only proves
+  (about 2 minutes instead of 6 on 24 cores). `eth-lc-relayer` passes its environment to the
+  prover, so set `STEP_KEY_DIR` in its unit after one keygen run. The key is tied to the binary
+  that generated it: after every prover upgrade the prover refuses the stored key until
+  `STEP_KEYGEN_ONLY=1` is run again.
+- `ackinacki-bridge deposit` tries a failed EVM read in preflight again for 2 minutes instead of
+  refusing at once, so a load-balanced public RPC's dropped request no longer ends the run. A call
+  that reverts or answers something other than the bridge's reply is refused at once.
+- `ackinacki-bridge deposit --qr-mode local-key` signs with the key in `BRIDGE_DEPOSIT_PRIVATE_KEY`
+  instead of a wallet, for unattended runs. It needs `--from-address`, which must be the key's
+  address. `--from-address` now also reads `BRIDGE_DEPOSIT_FROM`. It never signs below the nonce
+  after its own last transaction, so a load-balanced `--rpc-url` that missed the `approve` does not
+  make the `deposit` reuse its nonce.
+
+### Fixes
+
+- `disableOwnerAnchorsOn(chainId)` in `eccUSDCBridge` 1.13.0 turns the owner writer off for any
+  chain, including one with no light client, which then has no anchor writer until the next
+  `updateCode`. 1.14.0 throws 226 for such a chain.
+
+### Changed
+
+- The `shellnet-l2` relayer kit (`crates/bridge-relayer-daemon/deploy/shellnet-l2`) runs against
+  any EVM chain: `EXPECTED_EVM_CHAIN_ID` is the chain the bridge is deployed on (11155111
+  Sepolia, 421614 Arbitrum Sepolia), and every `RPC_URL` / `RPC_FAILOVER_URLS` endpoint must
+  serve it. Before, the entrypoint and the preflight refused any value but 11155111.
 
 ## [0.6.0] – 2026-10-23
 

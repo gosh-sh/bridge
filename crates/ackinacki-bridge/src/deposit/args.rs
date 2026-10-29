@@ -16,17 +16,22 @@ use crate::{
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
 )]
-#[serde(rename_all = "lowercase")]
+// kebab-case, as clap spells the value: `arbitrum-sepolia` in JSON too.
+#[serde(rename_all = "kebab-case")]
 pub enum Network {
     Sepolia,
+    /// Its blocks reach the Acki Nacki bridge through the bridge's Arbitrum
+    /// verifier, from assertions on Sepolia.
+    ArbitrumSepolia,
 }
 
 impl Network {
-    pub const ALL: &'static [Network] = &[Network::Sepolia];
+    pub const ALL: &'static [Network] = &[Network::Sepolia, Network::ArbitrumSepolia];
 
     pub fn chain_id(self) -> u64 {
         match self {
             Network::Sepolia => deposit_chain_ids::CHAIN_ID_SEPOLIA,
+            Network::ArbitrumSepolia => deposit_chain_ids::CHAIN_ID_ARBITRUM_SEPOLIA,
         }
     }
 
@@ -34,6 +39,7 @@ impl Network {
     pub fn name(self) -> &'static str {
         match self {
             Network::Sepolia => "Sepolia",
+            Network::ArbitrumSepolia => "Arbitrum Sepolia",
         }
     }
 
@@ -60,6 +66,13 @@ impl Network {
                 "nativeCurrency": { "name": "Sepolia Ether", "symbol": "ETH", "decimals": 18 },
                 "rpcUrls": ["https://ethereum-sepolia-rpc.publicnode.com"],
                 "blockExplorerUrls": ["https://sepolia.etherscan.io"],
+            }),
+            Network::ArbitrumSepolia => json!({
+                "chainId": format!("0x{:x}", self.chain_id()),
+                "chainName": "Arbitrum Sepolia",
+                "nativeCurrency": { "name": "Sepolia Ether", "symbol": "ETH", "decimals": 18 },
+                "rpcUrls": ["https://sepolia-rollup.arbitrum.io/rpc"],
+                "blockExplorerUrls": ["https://sepolia.arbiscan.io"],
             }),
         }
     }
@@ -133,7 +146,14 @@ pub enum QrMode {
     Walletconnect,
     Eip681,
     Both,
+    /// No wallet: the CLI signs with the key in BRIDGE_DEPOSIT_PRIVATE_KEY,
+    /// for unattended runs. Needs --from-address.
+    LocalKey,
 }
+
+/// The environment variable `--qr-mode local-key` reads its key from. Never
+/// a flag: a command line is visible to every user of the host.
+pub const LOCAL_KEY_ENV: &str = "BRIDGE_DEPOSIT_PRIVATE_KEY";
 
 /// How a QR code is drawn: `auto` asks the terminal what it can show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -270,8 +290,9 @@ pub struct DepositArgs {
     #[arg(long, default_value = "wss://relay.walletconnect.org")]
     pub wc_relay_url: String,
     /// The sending account. Checked against the wallet session in
-    /// `walletconnect` mode; required in `eip681` and `both`.
-    #[arg(long)]
+    /// `walletconnect` mode and against the key in `local-key`; required in
+    /// `eip681`, `both` and `local-key`.
+    #[arg(long, env = "BRIDGE_DEPOSIT_FROM")]
     pub from_address: Option<Address>,
 
     /// Run preflight, print both transactions and the QR payload, send nothing.
@@ -481,10 +502,16 @@ impl DepositArgs {
             }
         }
         if starts_new
-            && matches!(self.qr_mode, QrMode::Eip681 | QrMode::Both)
+            && matches!(
+                self.qr_mode,
+                QrMode::Eip681 | QrMode::Both | QrMode::LocalKey
+            )
             && self.from_address.is_none()
         {
-            missing.push("--from-address (required by --qr-mode eip681 and both)");
+            missing.push(
+                "--from-address (BRIDGE_DEPOSIT_FROM; required by --qr-mode eip681, both and \
+                 local-key)",
+            );
         }
         let wc_project_id = self
             .wc_project_id
@@ -601,6 +628,11 @@ mod tests {
         assert_eq!(Network::Sepolia.name(), "Sepolia");
         assert_eq!(Network::Sepolia.caip2(), "eip155:11155111");
         assert_eq!(Network::Sepolia.eip3085()["chainId"], "0xaa36a7");
+        assert_eq!(Network::ArbitrumSepolia.chain_id(), 421_614);
+        assert_eq!(Network::ArbitrumSepolia.arg(), "arbitrum-sepolia");
+        assert_eq!(Network::ArbitrumSepolia.name(), "Arbitrum Sepolia");
+        assert_eq!(Network::ArbitrumSepolia.caip2(), "eip155:421614");
+        assert_eq!(Network::ArbitrumSepolia.eip3085()["chainId"], "0x66eee");
     }
 
     #[test]
@@ -680,25 +712,22 @@ mod tests {
     }
 
     #[test]
-    fn eip681_requires_from_address() {
-        let cli = crate::args::Cli::try_parse_from([
-            "ackinacki-bridge",
-            "deposit",
-            "--network",
-            "sepolia",
-            "--amount",
-            "1",
-            "--to",
-            &format!("{DAPP}::{ACC}"),
-            "--qr-mode",
-            "eip681",
-        ])
-        .unwrap();
-        let crate::args::Command::Deposit(a) = cli.cmd else {
-            panic!()
-        };
-        let e = a.validate(&GlobalFlags::default()).unwrap_err();
-        assert!(e.to_string().contains("--from-address"), "{e}");
+    fn eip681_and_local_key_require_from_address() {
+        for mode in ["eip681", "local-key"] {
+            let to = format!("{DAPP}::{ACC}");
+            let a = crate::deposit::testkit::deposit_args(&[
+                "--network",
+                "arbitrum-sepolia",
+                "--amount",
+                "1",
+                "--to",
+                &to,
+                "--qr-mode",
+                mode,
+            ]);
+            let e = a.validate(&GlobalFlags::default()).unwrap_err();
+            assert!(e.to_string().contains("--from-address"), "{mode}: {e}");
+        }
     }
 
     #[test]

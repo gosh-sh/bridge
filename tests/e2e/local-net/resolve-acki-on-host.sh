@@ -14,9 +14,17 @@ REGISTRY=${REGISTRY:?REGISTRY is required}; TAG=${TAG:?TAG is required}; WORK_RO
 label() { docker inspect "$1" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'; }
 digest() { docker inspect "$1" --format '{{index .RepoDigests 0}}'; }
 declare -A REV DIG
+# Optional AUX_FALLBACK_TAG: gql-server and block-manager are pulled from it when TAG has
+# no such image (a commit-tagged build may carry only node and all-bin).
 for img in ackinacki-node ackinacki-gql-server ackinacki-block-manager ackinacki-all-bin; do
   ref="$REGISTRY/$img:$TAG"
-  docker pull -q "$ref" >&2
+  if ! docker pull -q "$ref" >&2; then
+    case "$img" in ackinacki-gql-server|ackinacki-block-manager) ;; *) echo "FATAL: no $ref" >&2; exit 64 ;; esac
+    [ -n "${AUX_FALLBACK_TAG:-}" ] || { echo "FATAL: no $ref and no AUX_FALLBACK_TAG" >&2; exit 64; }
+    ref="$REGISTRY/$img:$AUX_FALLBACK_TAG"
+    echo "$img: no $TAG image, using $AUX_FALLBACK_TAG" >&2
+    docker pull -q "$ref" >&2
+  fi
   REV[$img]=$(label "$ref"); DIG[$img]=$(digest "$ref")
   [ -n "${REV[$img]}" ] && [ -n "${DIG[$img]}" ] || { echo "FATAL: $ref has no revision label or digest" >&2; exit 65; }
   echo "$img:$TAG -> ${REV[$img]:0:12} ${DIG[$img]##*@}" >&2

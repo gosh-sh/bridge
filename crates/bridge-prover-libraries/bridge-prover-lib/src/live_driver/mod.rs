@@ -324,9 +324,12 @@ impl LiveProverConfig {
 /// steady state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedPolicy {
-    /// Pin a specific seqno. MUST be `> 0` and divisible by the
-    /// configured [`crate::AnchorMode`]'s bundle stride
-    /// (`W * P` under L1, `W²` under L2 — see [`crate::AnchorMode::stride`]).
+    /// Pin a specific seqno. MUST be divisible by the configured
+    /// [`crate::AnchorMode`]'s bundle stride (`W * P` under L1, `W²` under
+    /// L2 — see [`crate::AnchorMode::stride`]). `0` is the network's genesis
+    /// (a bridge deployed with `genesisLastSeenBlockSeqNo = 0` and a zero
+    /// anchor): nothing is fetched and the first bundle is the first L2
+    /// boundary, so it needs L2 anchoring.
     ///
     /// Used by manual / reproducible starts (our daemon's
     /// `BRIDGE_BOOTSTRAP_SEQNO=N`).
@@ -610,7 +613,7 @@ impl LiveProverDriver {
     fn new_inner(
         gql: GqlClient,
         key_manager: KeyManager,
-        state: BridgeState,
+        mut state: BridgeState,
         prover_bk_set: ProverBkSet,
         cfg: LiveProverConfig,
     ) -> anyhow::Result<Self> {
@@ -654,11 +657,26 @@ impl LiveProverDriver {
                      BridgeState — got initialized=false"
                 );
             }
+            // Seed 0 is the network's genesis: a bridge deployed with
+            // `genesisLastSeenBlockSeqNo = 0` and a zero anchor, whose BK set
+            // is the zerostate's. No block is fetched: the state starts
+            // initialized at seq_no 0 with empty windows, so the first bundle
+            // carries last_seen 0 and the zero anchor the contract expects.
+            (SeedPolicy::Explicit(0), false) => {
+                state.initialize_bk_set_commitment(bk_set_commitment_bytes)?;
+                state.initialized = true;
+                state.anchor_level = cfg.anchor_mode.level();
+                info!(
+                    "live_driver: genesis seed — seq_no=0, bk_set_commitment={}",
+                    hex::encode(bk_set_commitment_bytes),
+                );
+                DriverStage::Steady
+            },
             (SeedPolicy::Explicit(n), false) => {
                 let step = cfg.bundle_stride();
                 anyhow::ensure!(
-                    n > 0 && n % step == 0,
-                    "SeedPolicy::Explicit({}) invalid: must be > 0 and divisible by \
+                    n % step == 0,
+                    "SeedPolicy::Explicit({}) invalid: must be 0 (genesis) or divisible by \
                      bundle_stride={} (anchor_mode={:?}, W={}, P={})",
                     n,
                     step,

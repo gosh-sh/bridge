@@ -140,6 +140,30 @@ async fn main() -> anyhow::Result<()> {
                 drift.cfg_level,
             );
         }
+        // A state seeded with the seed's layers above the anchor level
+        // (bridge-audit#122) stalls verifyBlock at the next boundary of that
+        // layer. Without a seed file there is nothing to compare against.
+        match bootstrap::BootstrapSeed::load(&bootstrap::default_seed_path()) {
+            Ok(Some(seed)) => {
+                if let Some(layer) = seed.layer_seeded_above_anchor_level(&state) {
+                    anyhow::bail!(
+                        "{} holds the seed's layer-{} root: it was seeded above anchor level {} \
+                         by an earlier build and would stall verifyBlock at the next layer-{} \
+                         boundary. Move it and {} aside and restart with {}={} to rebootstrap at \
+                         the bridge's seed.",
+                        state_file,
+                        layer,
+                        seed.anchor_level,
+                        layer,
+                        prover_bk_set_file,
+                        ENV_BOOTSTRAP_SEQNO,
+                        seed.block_seq_no,
+                    );
+                }
+            },
+            Ok(None) => {},
+            Err(e) => warn!("seed file not checked for layers above the anchor level: {e:#}"),
+        }
     }
 
     // Resolve prover_bk_set: warm-load from disk if present, else

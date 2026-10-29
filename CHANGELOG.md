@@ -31,6 +31,23 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- **A withdrawal in the last 128 blocks before an L2 boundary can be proven.**
+  The Circuit 4 witness put that boundary's own L2 root into leaf 0 of its L1
+  tree (every 16 384 blocks). The rebuilt root did not match the root the bridge
+  stores, so `withdrawByProof` reverted `UnknownAnchor` on an L1 anchor, and an
+  L2 anchor failed while the witness was built. The USDC was already burned on
+  Acki Nacki. Leaf 0 is now the L2 root of the previous L2 boundary, or 32 zero
+  bytes at the first boundary (block 16 384). A missing layer root fails the
+  build instead of becoming a tree of zeros, and the rebuilt L1 root must match
+  the root the key block published. No verification key changes.
+  A `proof_event_*.json` already built with the old leaf 0 still makes
+  `withdrawByProof` revert `UnknownAnchor`. `relayer daemon-withdraw` and
+  `relayer daemon-bridge` treat that revert as transient and submit the same
+  file again. Move those files out of `--proofs-dir`. Prove the withdrawal
+  again with `ackinacki-bridge withdraw --allow-retry` (the burn is already
+  recorded), or let `daemon-withdraw` / `daemon-bridge` pick up the new
+  `proof_event_*.json`. Do this while that L2 root is still inside the bridge
+  window (about 8 days at 3 blocks/s).
 - `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 - `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
   retry on the next tick, instead of waiting forever on a node that does not answer.

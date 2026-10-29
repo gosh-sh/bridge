@@ -49,8 +49,12 @@ verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
 for one chain and needs a light client or an Arbitrum block verifier deployed
 for it (`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
-for chain id 0); the no-argument `disableOwnerAnchors()` does the same for the
-chain whose client was deployed last. Neither checks that the light-client
+for chain id 0). A chain with an Arbitrum block verifier closes only after its
+parent chain: until the owner writer is off there, `disableOwnerAnchorsOn`
+throws `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239), because a parent-chain block
+the owner accepts lets the verifier admit any block of the Arbitrum chain. The
+no-argument `disableOwnerAnchors()` does the same for the chain whose client
+was deployed last. Neither checks that the light-client
 account is Active. Each client writes only for its own chain:
 `acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient` compare
 the sender against the client of the chain named in the call. An L2 source
@@ -192,8 +196,13 @@ than 393 168 blocks past N.
    which deploys at a new address and replaces the recorded verifier.
 4. Check `getL2Verifier(l2ChainId)` on the bridge, which returns the address
    and the parent chain, and `getConfig()` on the verifier.
-5. When the verifier is admitting blocks, `disableOwnerAnchorsOn(l2ChainId)`
-   turns the owner writer off for that chain.
+5. When the verifier is admitting blocks, turn the owner writer off for the
+   parent chain (`disableOwnerAnchorsOn(parentChainId)`, or the light client
+   relayer's flip), then `disableOwnerAnchorsOn(l2ChainId)` for the Arbitrum
+   chain. In the other order the second call throws
+   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239). On a closed Arbitrum chain,
+   `deployL2Verifier` throws 239 too for a parent chain the owner still
+   anchors.
 
 The verifier code and the recorded verifiers are not carried through
 `updateCode`. After a bridge upgrade, repeat steps 1 and 3 with the arguments

@@ -35,8 +35,10 @@ assigns it when the release is tagged.
   or when its bundle cursor is behind a rotation the contract already accepted. If the receipt is
   not back within 180 seconds, the update counts as applied when the contract already shows that
   seq_no — and, for a rotation, the new BK-set commitment. A deferred rotation ack no longer fails
-  the tick: the daemon acks the bundles the contract already has, then rotates. Restart the
-  relayer. Do not delete `prover_state.json` because of this stall. Verification keys are unchanged.
+  the tick: the daemon acks the bundles the contract already has, then rotates. The rotation
+  proof already built for that ack is kept until the cursor passes it, instead of being proved
+  again on every tick of the catch-up. Restart the relayer. Do not delete `prover_state.json`
+  because of this stall. Verification keys are unchanged.
 - `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 - `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
   retry on the next tick, instead of waiting forever on a node that does not answer.

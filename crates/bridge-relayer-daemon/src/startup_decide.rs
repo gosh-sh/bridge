@@ -33,10 +33,13 @@ pub enum StartupDecision {
     /// via `SeedPolicy::Auto` or `SeedPolicy::Explicit(n)`.
     Cold { policy: SeedPolicy },
 
-    /// Local state matches the contract exactly (same last_seen, same
-    /// bk-set commitment, same bk-update seq_no, same layer windows
-    /// byte-for-byte). Safe to resume: pass local state through as-is
-    /// with `SeedPolicy::Resume`.
+    /// Safe to resume with `SeedPolicy::Resume`, passing local state
+    /// through as-is. Either local state matches the contract (same
+    /// last_seen, same bk-set commitment, same bk-update seq_no, same
+    /// layer windows) or it is behind inside the BK-set hold window:
+    /// the contract already applied a rotation and the local cursor is
+    /// still on the outgoing set. The tick acks the bundles the
+    /// contract has, then the rotation.
     WarmResume,
 
     /// Local state is either absent-but-chain-has-history, or present

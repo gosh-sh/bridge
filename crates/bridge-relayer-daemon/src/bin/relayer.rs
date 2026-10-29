@@ -2471,8 +2471,9 @@ async fn run_daemon_live(
     // The pre-decide drift-audit that used to live here is now subsumed
     // by `startup_decide::decide()`: `Stop` bails with a precise reason,
     // `Resurrect` rebuilds the local mirror before the driver is even
-    // constructed, and `WarmResume` is only reached when local and chain
-    // match byte-for-byte.
+    // constructed, and `WarmResume` is also the hold window, where the
+    // local cursor is behind a rotation the contract already accepted.
+    // The log just above says which of the two it was.
     let bridge = Arc::new(bridge_probe);
 
     // Anchor-level cross-check. Decision logic and the full truth table

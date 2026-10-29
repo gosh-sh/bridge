@@ -34,6 +34,8 @@ assigns it when the release is tagged.
 - `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 - `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
   retry on the next tick, instead of waiting forever on a node that does not answer.
+- `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
+  refuses to start while another instance holds it.
 
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
   with the deployed bridge, and `release.yaml` publishes the binaries again.

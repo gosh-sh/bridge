@@ -1636,6 +1636,9 @@ async fn arbitrum_anchors(
     parent_log_span: u64,
     arbitrum_log_span: u64,
 ) -> anyhow::Result<()> {
+    // One relayer per state file: two would overwrite each other's proofs,
+    // which cannot be fetched again.
+    let _lock = StateLock::acquire(state_path)?;
     let view = arbitrum_view(
         parent_rpc_url,
         arbitrum_rpc_url,
@@ -2020,6 +2023,35 @@ mod tests {
                 ("parent-log-span", None, &["1000"]),
             ])
         );
+    }
+
+    #[cfg(feature = "live-submit")]
+    #[tokio::test]
+    async fn arbitrum_anchors_refuses_a_state_file_another_one_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("arbitrum-anchors-state.json");
+        let _held = StateLock::acquire(&state).unwrap();
+        let err = arbitrum_anchors(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            Address::ZERO,
+            1,
+            AnchorsAn {
+                graphql_url: String::new(),
+                keys_path: String::new(),
+                bridge_abi_path: String::new(),
+                verifier_abi_path: String::new(),
+                token_bridge: String::new(),
+            },
+            &state,
+            Duration::from_secs(1),
+            1,
+            1,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("state lock busy"), "{err}");
     }
 
     #[test]

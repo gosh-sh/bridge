@@ -671,15 +671,23 @@ mod tests {
             boundary >= l2,
             "chain head {head} is not past the first L2 boundary"
         );
-        assert_eq!(prev_l2_key_block(boundary, w), boundary - l2);
+        let prev_seq = prev_l2_key_block(boundary, w);
+        assert_eq!(prev_seq, boundary - l2);
         let own = fetch_layer_root(&gql, boundary, 2).await.expect("boundary L2 root");
-        let prev = fetch_layer_root(&gql, boundary - l2, 2)
-            .await
-            .expect("previous L2 root");
-        assert_ne!(
-            own, prev,
-            "L2 root at {boundary} equals the previous one, so the old leaf 0 would still match"
-        );
+        // Block 0 has no layer-2 root. On a chain whose head is still in
+        // [16384, 32768) the previous boundary is 0, and fetching it errors.
+        // Leaf 0 there is 32 zero bytes. Today's shellnet no longer serves
+        // block 16384, so that tree is built by
+        // `first_l2_boundary_leaf0_is_32_zero_bytes_and_block_0_is_not_fetched`.
+        if prev_seq > 0 {
+            let prev = fetch_layer_root(&gql, prev_seq, 2)
+                .await
+                .expect("previous L2 root");
+            assert_ne!(
+                own, prev,
+                "L2 root at {boundary} equals the previous one, so the old leaf 0 would still match"
+            );
+        }
 
         for key in [boundary - w, boundary] {
             let (proof, root) = build_block_tree_proof(&gql, key, w, 0)

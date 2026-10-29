@@ -35,8 +35,7 @@
 #
 # A tag fails in `ceremony`, before the builds, when no earlier release has
 # kzg_bn254_21.srs: without it the deposit file cannot be derived and the
-# deposit prover cannot be checked. A release that failed to publish does not
-# stop the next one: the step looks past it.
+# deposit prover cannot be checked.
 #
 # The build fails at once while `MIN_BRIDGE_VERSION` in
 # crates/ackinacki-bridge/src/deposit/an_preflight.rs is still `None`: that CLI
@@ -55,12 +54,6 @@
 # and cron. One token doing both jobs means the review pipelines can write to
 # the repository too; a separate RELEASE_GH_TOKEN is the alternative, and only
 # the two `from_secret: REVIEW_GH_TOKEN` lines change.
-#
-# No other secret. The release CLI compiles in no WalletConnect project id: a
-# QR deposit takes `--wc-project-id` or `BRIDGE_WC_PROJECT_ID`. Woodpecker
-# refuses the whole pipeline, before any step runs, when a step names a secret
-# that does not exist, so an optional secret cannot be read here — that is what
-# kept v0.3.0 to v0.7.0 from publishing anything.
 
 when:
   - event: tag
@@ -83,8 +76,7 @@ steps:
 
         # Carry the ceremony forward from the newest earlier release that has it,
         # newest first. Release assets do not inherit, so without this every tag
-        # would need the 257 MB upload repeated by hand; looking past the releases
-        # without it keeps one release that failed to publish from failing the rest.
+        # would need the 257 MB upload repeated by hand.
         PREVIOUS=""
         for t in $(gh release list -R "$REPO" --limit 50 --json tagName,isDraft \
             --jq '.[] | select(.isDraft | not) | .tagName'); do

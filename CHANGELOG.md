@@ -24,9 +24,6 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- Release builds of `ackinacki-bridge` carry no default `--wc-project-id`: a QR `deposit` needs
-  `--wc-project-id` or `BRIDGE_WC_PROJECT_ID` in the profile.
-
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
@@ -35,9 +32,8 @@ assigns it when the release is tagged.
 ### Fixes
 
 - Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
-  `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`): `.woodpecker/release.yaml` no longer
-  needs a `WC_PROJECT_ID` secret, and takes `kzg_bn254_21.srs` from the newest earlier release that
-  has it. v0.3.0 to v0.7.0 have no assets; `install.sh` needs a tag cut after this change.
+  `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
+  `install.sh` needs a tag cut after this change.
 - `relayer daemon-live` no longer stalls after a late `applyBkSetUpdate` or `verifyBlock` receipt,
   or when its bundle cursor is behind a rotation the contract already accepted. If the receipt is
   not back within 180 seconds, the update counts as applied when the contract already shows that

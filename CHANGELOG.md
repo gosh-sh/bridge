@@ -31,12 +31,20 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `eccUSDCBridge` 1.14.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `82d38aae…`):
+  `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
+  `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) until the owner's anchors are off for the verifier's
+  parent chain, and `deployL2Verifier` throws 239 on a closed chain for a parent chain the owner
+  still anchors. Before, the owner could still reach a closed Arbitrum chain by accepting a
+  parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
+  (or Ethereum) first, then the Arbitrum chain. The version string stays 1.14.0, so released CLIs
+  keep working. `updateCode` drops the verifier code and the verifiers, as for 1.14.0: install and
+  deploy them again after the upgrade.
 - `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 - `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
   retry on the next tick, instead of waiting forever on a node that does not answer.
 - `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
   refuses to start while another instance holds it.
-
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
   with the deployed bridge, and `release.yaml` publishes the binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the

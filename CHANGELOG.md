@@ -31,6 +31,14 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `relayer daemon-live` no longer stalls after a late `applyBkSetUpdate` or `verifyBlock` receipt,
+  or when its bundle cursor is behind a rotation the contract already accepted. If the receipt is
+  not back within 180 seconds, the update counts as applied when the contract already shows that
+  seq_no — and, for a rotation, the new BK-set commitment. A deferred rotation ack no longer fails
+  the tick: the daemon acks the bundles the contract already has, then rotates. The rotation
+  proof already built for that ack is kept until the cursor passes it, instead of being proved
+  again on every tick of the catch-up. Restart the relayer. Do not delete `prover_state.json`
+  because of this stall. Verification keys are unchanged.
 - **A withdrawal in the last 128 blocks before an L2 boundary can be proven.**
   The Circuit 4 witness put that boundary's own L2 root into leaf 0 of its L1
   tree (every 16 384 blocks). The rebuilt root did not match the root the bridge
@@ -53,7 +61,6 @@ assigns it when the release is tagged.
   retry on the next tick, instead of waiting forever on a node that does not answer.
 - `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
   refuses to start while another instance holds it.
-
 - `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
   with the deployed bridge, and `release.yaml` publishes the binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the

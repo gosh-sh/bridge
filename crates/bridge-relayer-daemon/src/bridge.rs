@@ -619,6 +619,16 @@ impl MockBridgeClient {
             .accepted_log
             .clone()
     }
+
+    /// Test helper: a rotation and a bundle cursor already on the contract,
+    /// as after a receipt that arrived late.
+    pub fn land_rotation_for_test(&self, last_seen: u64, last_bk: u64, new_commitment: U256) {
+        let mut inner = self.inner.lock().expect("poisoned lock");
+        inner.prev_bk_set_commitment = inner.bk_set_commitment;
+        inner.bk_set_commitment = new_commitment;
+        inner.last_bk_set_update_seq_no = last_bk;
+        inner.last_seen_block_seq_no = last_seen;
+    }
 }
 
 impl MockBridgeInner {
@@ -1453,12 +1463,12 @@ where
             {
                 Ok(outcome) => outcome?,
                 Err(_) => {
-                    return Ok(BkSetUpdateSubmitOutcome::Reverted {
-                        reason: format!(
-                            "tx confirmation error: no receipt within {} s",
-                            BK_UPDATE_RECEIPT_TIMEOUT.as_secs()
-                        ),
-                    });
+                    return self
+                        .bk_update_after_receipt_timeout(
+                            update.block_seq_no,
+                            update.new_commitment_l3,
+                        )
+                        .await;
                 },
             };
         if let BkSetUpdateSubmitOutcome::Applied {
@@ -1531,6 +1541,54 @@ where
                 reason: format!("applyBkSetUpdate send failed: {e}"),
             }),
         }
+    }
+
+    /// The receipt wait ended without a receipt. If this rotation is already
+    /// the contract's current BK set, the transaction landed and the receipt
+    /// was only late. A read that fails, or a contract that has not moved to
+    /// this seq_no and commitment, stays an unconfirmed failure.
+    async fn bk_update_after_receipt_timeout(
+        &self,
+        seq_no: u64,
+        new_commitment: U256,
+    ) -> Result<BkSetUpdateSubmitOutcome, RelayerError> {
+        if let Ok(state) = self.read_state_at(BlockId::latest()).await {
+            if state.last_bk_set_update_seq_no == seq_no
+                && state.bk_set_commitment == new_commitment
+            {
+                return Ok(BkSetUpdateSubmitOutcome::Applied {
+                    new_state: state,
+                    tx_hash: None,
+                });
+            }
+        }
+        Ok(BkSetUpdateSubmitOutcome::Reverted {
+            reason: format!(
+                "tx confirmation error: no receipt within {} s",
+                BK_UPDATE_RECEIPT_TIMEOUT.as_secs()
+            ),
+        })
+    }
+
+    /// Same recovery as [`Self::bk_update_after_receipt_timeout`] for
+    /// `verifyBlock`: a cursor already at the submitted seq_no means the
+    /// transaction landed.
+    async fn verify_block_after_receipt_timeout(
+        &self,
+        block_seq_no: u64,
+        confirm_error: String,
+    ) -> Result<SubmitOutcome, RelayerError> {
+        if let Ok(state) = self.read_state_at(BlockId::latest()).await {
+            if state.last_seen_block_seq_no == block_seq_no {
+                return Ok(SubmitOutcome::Verified {
+                    new_state: state,
+                    tx_hash: None,
+                });
+            }
+        }
+        Ok(SubmitOutcome::Reverted {
+            reason: format!("tx confirmation error: {confirm_error}"),
+        })
     }
 
     pub async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
@@ -2491,9 +2549,9 @@ where
                     (Some(receipt.transaction_hash()), bn)
                 },
                 Err(e) => {
-                    return Ok(SubmitOutcome::Reverted {
-                        reason: format!("tx confirmation error: {e}"),
-                    });
+                    return self
+                        .verify_block_after_receipt_timeout(block.block_seq_no, e.to_string())
+                        .await;
                 },
             },
             Err(e) => {

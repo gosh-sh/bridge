@@ -554,10 +554,27 @@ async fn build_chain_for_new_layer(
     })
 }
 
+/// Seqno of the L2 key block whose layer-2 root belongs in leaf 0 of the L1
+/// tree at `key_block_seqno`.
+///
+/// That root is the latest L2 root emitted strictly before `key_block_seqno`.
+/// At an L2 boundary (`key_block_seqno` divisible by `window_size` squared) the
+/// block's own L2 root is computed from this L1 tree, so it cannot also be
+/// leaf 0. Returns 0 before the first L2 boundary; the caller stores 32 zero
+/// bytes and does not fetch a block.
+pub fn prev_l2_key_block(key_block_seqno: u64, window_size: u64) -> u64 {
+    let l2_step = window_size * window_size;
+    key_block_seqno
+        .checked_sub(1)
+        .map(|s| (s / l2_step) * l2_step)
+        .unwrap_or(0)
+}
+
 /// Build a layer 1 Poseidon tree for a key block.
 ///
 /// Leaf layout (see crate-level docs for the concrete W=128 example):
-///   [0]:         higher_layer_root (layer 2 root from this block, or zero)
+///   [0]:         higher_layer_root (L2 root of [`prev_l2_key_block`], or 32
+///                zero bytes before the first L2 boundary)
 ///   [1]:         prev_same_layer_root = chain_leaf_value (from previous key block)
 ///   [2..W+2]:    Poseidon(block_id || envelope_hash || ext_msg_root) for the
 ///                HISTORY_PROOF_WINDOW_SIZE (W) blocks in the window
@@ -579,11 +596,7 @@ pub async fn build_layer1_tree(
     // verification with an opaque error, mirroring the Case B `prev_same_root`
     // bug that surfaced at shellnet 2,523,136).
     let higher_root = {
-        let l2_step = window_size * window_size;
-        let prev_l2_block = key_block_seqno
-            .checked_sub(1)
-            .map(|s| (s / l2_step) * l2_step)
-            .unwrap_or(0);
+        let prev_l2_block = prev_l2_key_block(key_block_seqno, window_size);
         if prev_l2_block > 0 {
             fetch_layer_root(gql, prev_l2_block, 2)
                 .await
@@ -1114,16 +1127,146 @@ async fn fetch_block_leaf_hash_from_boc(gql: &GqlClient, seqno: u64) -> anyhow::
 
 #[cfg(test)]
 mod tests {
-    //! Pure-arithmetic tests for the event-anchor boundary helpers. The
-    //! live GQL-consuming paths (`build_event_anchor_chain_l1`/`_l2`) are
-    //! covered by the manual E2E in `E2E_RUN_STATE_2026_08_15.md`; adding
-    //! a mock GqlClient is deferred (would need a trait refactor).
-    use super::{l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries};
+    //! Pure-arithmetic tests for the event-anchor boundary helpers, plus one
+    //! local GraphQL stand-in for leaf 0 at the first L2 boundary. The live
+    //! GQL paths are `#[ignore]`d in `bridge-event-witness`.
+    use super::{
+        build_layer1_tree, l1_anchor_boundaries, l2_anchor_boundaries, l_n_anchor_boundaries,
+        prev_l2_key_block,
+    };
 
     // W as in production; P = 4 is a smaller stride so the boundary
     // arithmetic is easier to read by hand. `THINNING_FACTOR_P` is 8.
     const W: u64 = 128;
     const P: u64 = 4;
+
+    /// Leaf 0 of an L1 tree is the previous L2 boundary, never the key block
+    /// itself. At block 16384 there is no earlier L2 root, so the caller
+    /// stores 32 zero bytes.
+    #[test]
+    fn l1_leaf0_at_an_l2_boundary_is_the_previous_l2_block() {
+        let l2 = W * W;
+        assert_eq!(prev_l2_key_block(l2, W), 0, "first boundary has no earlier L2 root");
+        assert_eq!(prev_l2_key_block(0, W), 0);
+        for k in 2..8 {
+            let boundary = k * l2;
+            assert_eq!(prev_l2_key_block(boundary, W), (k - 1) * l2);
+            assert_ne!(prev_l2_key_block(boundary, W), boundary);
+        }
+        // Off a boundary the old `(H / L2) * L2` formula agrees.
+        let old = |h: u64| (h / l2) * l2;
+        assert_eq!(prev_l2_key_block(l2 + W, W), l2);
+        assert_eq!(prev_l2_key_block(2 * l2 - W, W), l2);
+        assert_eq!(old(l2 + W), prev_l2_key_block(l2 + W, W));
+        assert_ne!(old(2 * l2), prev_l2_key_block(2 * l2, W));
+    }
+
+    /// Block 16 384, W = 128: leaf 0 is 32 zero bytes, and the builder does
+    /// not ask the node for a layer-2 root of block 0. The window blocks are
+    /// served by a local stand-in, so this runs without the network.
+    #[tokio::test]
+    async fn first_l2_boundary_leaf0_is_32_zero_bytes_and_block_0_is_not_fetched() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use bridge_gql_fetcher::gql_client::create_client;
+
+        const FIRST: u64 = 16_384;
+        const WINDOW: u64 = 128;
+
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seen_srv = Arc::clone(&seen);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/graphql", listener.local_addr().expect("addr"));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = ready_tx.send(());
+            for conn in listener.incoming() {
+                let Ok(mut stream) = conn else { continue };
+                stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if http_body_complete(&buf) {
+                                break;
+                            }
+                        },
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf);
+                let height = height_in_request(&req).unwrap_or(u64::MAX);
+                seen_srv.lock().expect("seen").push(height);
+                let body = if (FIRST - WINDOW..FIRST).contains(&height) {
+                    proof_block_json(height)
+                } else {
+                    format!(r#"{{"errors":[{{"message":"refusing height {height}"}}]}}"#)
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        ready_rx.recv().expect("graphql stand-in started");
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(prev_l2_key_block(FIRST, WINDOW), 0);
+        let gql = create_client(&url).expect("client");
+        let tree = build_layer1_tree(&gql, FIRST, [7u8; 32], WINDOW)
+            .await
+            .expect("L1 tree at the first L2 boundary");
+        assert_eq!(tree.leaves[0], [0u8; 32], "leaf 0 is 32 zero bytes");
+        assert_eq!(tree.leaves[1], [7u8; 32], "leaf 1 is the previous L1 root");
+
+        let fetched = seen.lock().expect("seen").clone();
+        assert!(
+            fetched.iter().all(|h| (FIRST - WINDOW..FIRST).contains(h)),
+            "leaf 0 must not fetch block 0 (or anything outside the window), fetched {fetched:?}"
+        );
+        assert_eq!(fetched.len(), WINDOW as usize, "one fetch per window block, got {fetched:?}");
+    }
+
+    fn http_body_complete(buf: &[u8]) -> bool {
+        let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buf[..split]);
+        let len = headers
+            .lines()
+            .find_map(|line| {
+                let rest = line.split_once(':')?;
+                rest.0.eq_ignore_ascii_case("content-length").then_some(rest.1.trim())
+            })
+            .and_then(|n| n.parse::<usize>().ok());
+        match len {
+            Some(len) => buf.len() >= split + 4 + len,
+            None => true,
+        }
+    }
+
+    fn height_in_request(req: &str) -> Option<u64> {
+        let rest = req.split("height:").nth(1)?;
+        let digits: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    }
+
+    fn proof_block_json(height: u64) -> String {
+        let hash = format!("{height:064x}");
+        let thread = bridge_gql_fetcher::gql_client::DEFAULT_THREAD_ID_HEX;
+        format!(
+            r#"{{"data":{{"blockchain":{{"blockByHeight":{{"id":"{hash}","block_id":"{hash}","thread_id":"{thread}","height":{height},"envelope_hash":"{hash}","tracked_ext_out_messages_root":"{hash}","tracked_ext_out_message_hashes":[],"history_proofs":[],"block_merkle_tree_leaves":null}}}}}}}}"#
+        )
+    }
 
     // ---- L1 -----------------------------------------------------------
 

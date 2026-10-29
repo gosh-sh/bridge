@@ -33,10 +33,13 @@ pub enum StartupDecision {
     /// via `SeedPolicy::Auto` or `SeedPolicy::Explicit(n)`.
     Cold { policy: SeedPolicy },
 
-    /// Local state matches the contract exactly (same last_seen, same
-    /// bk-set commitment, same bk-update seq_no, same layer windows
-    /// byte-for-byte). Safe to resume: pass local state through as-is
-    /// with `SeedPolicy::Resume`.
+    /// Safe to resume with `SeedPolicy::Resume`, passing local state
+    /// through as-is. Either local state matches the contract (same
+    /// last_seen, same bk-set commitment, same bk-update seq_no, same
+    /// layer windows) or it is behind inside the BK-set hold window:
+    /// the contract already applied a rotation and the local cursor is
+    /// still on the outgoing set. The tick acks the bundles the
+    /// contract has, then the rotation.
     WarmResume,
 
     /// Local state is either absent-but-chain-has-history, or present
@@ -231,6 +234,7 @@ fn stale_seed_layer_stop(layer: u8, anchor_level: u8) -> StartupDecision {
 /// | uninitialized        | genesis (last_seen == 0)           | Cold                         |
 /// | uninitialized        | advanced (last_seen  > 0)          | Resurrect                    |
 /// | initialized, matches | matches local exactly              | WarmResume                   |
+/// | initialized, behind  | ahead, local still on the outgoing BK set | WarmResume               |
 /// | initialized, behind  | ahead of local (last_seen greater) | Resurrect                    |
 /// | initialized, ahead   | genesis or older than local        | Stop                         |
 /// | initialized, mismatch on same last_seen                     | Stop (bk-commit / windows)   |
@@ -557,6 +561,39 @@ mod tests {
         }) {
             StartupDecision::WarmResume => {},
             d => panic!("expected WarmResume in hold window, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn warm_resume_when_hold_window_and_bundle_cursor_lags() {
+        // The contract already verified the next bundle and rotated. Local
+        // still holds the outgoing set, so resurrecting would swap in the
+        // new commitment and desync prover_bk_set. Resume, and let the tick
+        // ack the bundle the chain already has.
+        let mut local = advanced_state(8);
+        local.stored_last_bk_set_update_seq_no = 0;
+        let old = local.stored_bk_set_commitment;
+        let mut chain = snapshot_as_chain(&local);
+        chain.bk_set_commitment = [0xABu8; 32];
+        chain.prev_bk_set_commitment = old;
+        chain.last_bk_set_update_seq_no = 12;
+        // One stride ahead, and several. The gap does not change the
+        // decision: resurrecting either way installs the new commitment.
+        for chain_seen in [16u64, 40] {
+            chain.last_seen_block_seq_no = chain_seen;
+            match decide(DecideInputs {
+                local: &local,
+                chain: &chain,
+                bootstrap_seqno: None,
+                window_size: W,
+                anchor_level: 1,
+            }) {
+                StartupDecision::WarmResume => {},
+                d => panic!(
+                    "expected WarmResume while the outgoing set is unacked (chain last_seen \
+                     {chain_seen}), got {d:?}"
+                ),
+            }
         }
     }
 

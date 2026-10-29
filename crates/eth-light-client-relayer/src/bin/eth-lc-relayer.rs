@@ -41,10 +41,9 @@ use eth_light_client_relayer::AnInterfaceSubmitter;
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::RelayerState;
 use eth_light_client_relayer::{
-    arbitrum, validate_live_graphql_url, AnConfig, AnSubmitter, BackoffConfig, BeaconSource,
-    EthExecutionRpc, HttpBeaconSource, MockAnSubmitter, MockProofGenerator, ProofGenerator,
-    Relayer, RelayerConfig, RelayerMetrics, StateLock, SubprocessProofGenerator,
-    SubprocessProverConfig,
+    arbitrum, AnConfig, AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc,
+    HttpBeaconSource, MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig,
+    RelayerMetrics, StateLock, SubprocessProofGenerator, SubprocessProverConfig,
 };
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
@@ -658,8 +657,12 @@ async fn main() -> anyhow::Result<()> {
             arbitrum_log_span,
             allow_insecure_graphql,
         } => {
-            validate_live_graphql_url(&an_graphql_url, allow_insecure_graphql)
-                .map_err(log_err("arbitrum-anchors"))?;
+            AnConfig {
+                graphql_url: an_graphql_url.clone(),
+                ..AnConfig::default()
+            }
+            .validate_live_graphql_endpoint(allow_insecure_graphql)
+            .map_err(log_err("arbitrum-anchors"))?;
             arbitrum_anchors(
                 &parent_rpc_url,
                 &arbitrum_rpc_url,

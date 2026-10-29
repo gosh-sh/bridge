@@ -34,7 +34,7 @@ pub mod state;
 pub mod submitter;
 pub mod types;
 
-pub use an_config::{validate_live_graphql_url, AnConfig};
+pub use an_config::AnConfig;
 pub use ancestry::{covers_deposit, ExecLink};
 pub use daemon::{BackoffConfig, RelayerMetrics};
 pub use error::RelayerError;

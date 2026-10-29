@@ -31,9 +31,6 @@ assigns it when the release is tagged.
 
 ### Fixes
 
-- `eth-lc-relayer daemon` and `arbitrum-anchors` take a plain-HTTP `--an-graphql-url` without
-  `--allow-insecure-graphql` only when its host is `localhost`, a `127.0.0.0/8` address or `::1`;
-  `localhost` or `127.0.0.1` anywhere else in the URL no longer passes.
 - `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 - `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
   retry on the next tick, instead of waiting forever on a node that does not answer.

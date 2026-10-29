@@ -3,8 +3,10 @@
 Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Proves that a `Deposit`
 event was emitted by the `AckiNackiBridge` contract on Ethereum.
 
-*Verified against the sources in this crate at commit `a69ba36`, 2026-08-18. Claims about the
-Acki Nacki side are marked where they cannot be checked from this repository.*
+*Verified against the sources in this crate at commit `5e6a2569`, 2026-10-29, and against
+axiom-eth `1d61be0` (`gosh-stable-rlcmanager-assignment`). At `a69ba36` (2026-08-18) the header
+buffer was 717 bytes and the pinned log data length was 128; both are 792 and 96 in this tree.
+Claims about the Acki Nacki side are marked where they cannot be checked from this repository.*
 
 > **Status.** This crate emits a raw Halo2 SHPLONK proof. It is consumed natively on the Acki Nacki
 > side through the **`ZKHALO2VERIFYWITHVK`** TVM opcode — the name `VERHALO2SHPLONK` used in older
@@ -58,29 +60,41 @@ and chain-binding inputs were added later.*
 
 ### Fixed-size witness padding
 
-The private witness is longer than those 12 public inputs. axiom-eth passes the receipt and the
-enclosing transaction to the MPT chip as fixed-length byte vectors. `MPTInput::assign` appends
-zeros until `value` reaches `value_max_byte_len` — `receipt_max_byte_len` for the receipt,
-`calc_max_val_len` for the transaction — and until each proof node and key fragment fills
-`max_depth` and `max_key_byte_len`. The RLP decoder does the same for a log: `RlpArrayWitness.rlp_array`
-and each `RlpFieldWitness.field_cells` are padded out to that field's maximum.
+The proof fixes the 12 public inputs. The private witness is longer, and a different assignment
+of its unused tail is another witness of the same inputs, so another Halo2 proof of the same
+deposit. `finalizeDeposit` reads the public inputs, not the witness, so the tail cannot mint a
+second deposit or a deposit that was not in the receipt. The relayer submits the proof and the
+public inputs. The tail stays in the witness.
 
-The receipt hash, and every byte copied into a public input, uses only the prefix named by the
-length witness (`value_byte_len`, `rlp_len`, `field_len`). Bytes after that length are range-checked
-as bytes and are not copied into `depositId`, `sender`, `amount`, `contractAddress`, `chainId`,
-the destination, or `blockHash`. A different assignment of that tail is another valid witness of
-the same 12 public inputs, and so another Halo2 proof of the same deposit. `finalizeDeposit`
-reads the public inputs, not the witness, so the tail cannot mint a second deposit or a deposit
-that was not in the receipt. The relayer submits the proof and the public inputs. The tail stays in the witness.
+The tail is not one buffer, and it is not all range-checked.
 
-The header buffer and a short log are not this tail:
+* **MPT inputs** (`MPTInput::assign`). The value is zero-padded to `value_max_byte_len`
+  (`receipt_max_byte_len` for the receipt, `calc_max_val_len` for the transaction). The path is
+  zero-padded to `max_key_byte_len`. Each proof node is zero-padded to `max_node_bytes`, and the
+  node list is then filled to `max_depth - 1` with `DUMMY_BRANCH`
+  (`d18080808080808080808080808080808080`), not with zeros. The leaf is zero-padded to
+  `max_leaf_bytes`. Each key fragment is zero-padded to `2 * max_key_byte_len` nibbles, and the
+  fragment list is filled to `max_depth` with zero fragments. The MPT chip range-checks the key
+  bytes, value bytes, root hash, leaf bytes and node bytes to 8 bits, and the key-fragment
+  nibbles to 4 bits. The receipt hash, and every byte copied into a public input, uses only the
+  prefix named by `value_byte_len`.
 
-* The block-header buffer is `MAX_BLOCK_HEADER_BYTES` (792) bytes, but keccak hashes only the true
-  header, and that length must equal the RLP list length. Appending a byte and counting it as part
-  of the header is rejected (`mock_fixture --mutate header-pad`).
-* A short log is not read past its payload. The address is 20 bytes, the topics list is 99 bytes,
-  and the data is 96 bytes. Those lengths are constrained, so `depositId` and `sender` cannot come
-  from the padding.
+* **RLP copies.** `witness_subarray` builds `field_cells` and `encoded_item` as a copy of the
+  parsed slice, zero-filled to the field maximum. Those copies are not constrained, and the
+  decoder does not constrain the bytes of the original RLP sequence past the parsed length. The
+  lengths are constrained: the log address is 20 bytes, the topics list is 99 bytes, and the
+  data is 96 bytes, so `depositId` and `sender` cannot be read from past that payload.
+
+* **Block header.** The header witness is `MAX_BLOCK_HEADER_BYTES` (792) cells, loaded with
+  `load_witness` and zero-filled past the true header. Those cells are not range-checked. Keccak
+  hashes `bytes[..header_len]`. `ensure_0_padding` multiplies a fresh copy by a length mask for
+  that hash; it does not force the original cells to zero. The header length must equal the RLP
+  list length, so counting an extra byte as part of the header is rejected
+  (`mock_fixture --mutate header-pad`). Cells `[header_len..792]` are a free tail of the same
+  `blockHash`.
+
+Apart from the MPT chip, the deposit circuit range-checks `log_index` and each `dappId` byte.
+Those checks do not cover the header tail or the RLP copies.
 
 ### Circuit parameters
 

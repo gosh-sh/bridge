@@ -42,6 +42,9 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
+  `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
+  `install.sh` needs a tag cut after this change.
 - `relayer daemon-live` no longer stalls after a late `applyBkSetUpdate` or `verifyBlock` receipt,
   or when its bundle cursor is behind a rotation the contract already accepted. If the receipt is
   not back within 180 seconds, the update counts as applied when the contract already shows that

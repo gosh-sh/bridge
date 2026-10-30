@@ -3,8 +3,9 @@
 .gitignore
 .gitlab-ci.yml
 
-# Rust
+# Rust build directories of every workspace
 target/
+**/target/
 **/*.rs.bk
 *.pdb
 .cargo/
@@ -14,34 +15,25 @@ contracts/ethereum/out/
 contracts/ethereum/cache/
 contracts/ethereum/lib/
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
 
 # Environment
 .env
 .env.local
 
-# Documentation
+# Not needed in any image (crate READMEs, CHANGELOG.md and
+# crates/ackinacki-bridge/docs/ are built into the CLI and stay)
 docs/
-*.md
-!README.md
-
-# Test artifacts
+frontend/
+tests/
 coverage/
 test-results/
-
-# Temporary files
 tmp/
 temp/
-

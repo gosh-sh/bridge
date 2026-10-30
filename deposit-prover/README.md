@@ -1,7 +1,8 @@
 # Deposit Event Prover
 
-Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Proves that a `Deposit`
-event was emitted by the `AckiNackiBridge` contract on Ethereum.
+Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. The circuit checks a
+witness against keccak promise outputs. It does not show that a `Deposit` event was emitted on
+Ethereum: `finalizeDeposit` does not check the promise (item 6).
 
 *The padding section below was checked on 2026-10-30 against this crate at commit `5e6a2569`,
 axiom-eth `1d61be0` (`gosh-stable-rlcmanager-assignment`) and halo2-lib `026e176`. At `a69ba36`
@@ -20,10 +21,11 @@ excluded from the root workspace and built standalone.
 
 ## Circuit: `DepositEventCircuitV2`
 
-The Halo2 circuit (`src/circuit_v2.rs`) checks the following against keccak promise
-outputs. It does not evaluate keccak, and `finalizeDeposit` does not check the promise
-(item 6). These checks do not by themselves prove that the receipt, the trie or the block
-hash are the real ones.
+The Halo2 circuit (`src/circuit_v2.rs`) checks the following. Where a check uses a keccak
+result, that result is a promise output: the circuit does not evaluate keccak, and
+`finalizeDeposit` does not check the promise (item 6). The event-signature digest in item 3
+is an off-circuit constant. These checks do not by themselves prove that the receipt, the
+trie or the block hash are the real ones.
 
 1. **Receipt trie** — the receipt MPT path is checked against `receiptsRoot` from the header.
    The node hashes are promises. `max_key_byte_len` is 3 (`impl ToMPTInput for ReceiptProof`
@@ -32,7 +34,8 @@ hash are the real ones.
 3. **Event signature** — `log.topics[0]` is constrained equal to
    `keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
    (`get_deposit_event_signature` in `src/circuit_v2.rs`). Five fields: the event carries the Acki Nacki destination.
-   That digest is a promise of the same kind as item 6.
+   That digest is hashed off-circuit and loaded with `load_constant`; the topic is compared to
+   those constants byte by byte.
 4. **Contract address** — the log address is constrained equal to public input 3. That the
    log was emitted by that contract depends on the receipt promise.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
@@ -47,9 +50,10 @@ hash are the real ones.
    MPT node hashes are promises of the same kind. Inputs 9 and 10 can therefore be the hash
    of a header that was never mined, whenever that hash is already in `_acceptedBlockHash`,
    and the receipt and trie under it are whatever those promises say.
-7. **Chain id** — the source chain id is a public input taken from the typed transaction, so
-   one chain's instance is not another's. The transaction hash is a promise of the same kind
-   as item 6.
+7. **Chain id** — the circuit checks that the typed transaction sits under `transactionsRoot`
+   through the MPT chip (`parse_transaction_proof_phase0` in `src/circuit_v2.rs`). The promises
+   on that path are trie node hashes and the leaf hash. The source chain id is a public input
+   taken from that transaction, so one chain's instance is not another's.
 
 ### Public inputs (12 field elements)
 
@@ -142,16 +146,23 @@ not all past a length.
   leaves that RLC equality and the 12 public inputs unchanged.
 
   The header is decoded as a variable-length list against the 24-slot table. For a slot past
-  the list the decoder still reads `header[header_len]` as the next prefix, runs
-  `parse_rlp_prefix` on it and checks that prefix's `len_len` against the slot before treating
-  the slot as unused. `is_less_than(..., 8)` assumes its input already fits in 8 bits and does
-  not enforce that. Every unused slot in `BLOCK_HEADER_MAX_FIELD_LENS` is at most 32 bytes, so
-  `len_len` must be 0. The bytes that pass are `0x00`–`0xb7` and `0xc0`–`0xf7`. A long prefix
-  (`0xb8`–`0xbf`, `0xf8`–`0xff`), such as `0xb9`, fails. A non-byte can pass too: the field
-  element `-1` is classified as a literal, so its `len_len` is 0. The comment on
-  `decompose_rlp_array_phase0` says the cells past the list should be 0. That is an assumption of
-  the caller, not a constraint. When the first tail cell has `len_len` 0 the index does not
-  advance, so `[header_len+1..792]` is not read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
+  the list the decoder still reads `header[header_len]` as the next prefix and runs
+  `parse_rlp_prefix` on it. Phase 1 checks that this prefix, the length bytes and the payload
+  concatenate to `encoded_item`. `encoded_item_len` adds the unmasked `is_not_literal`
+  (axiom-eth `rlp/mod.rs` at `1d61be0`), while the concatenated side uses lengths already
+  multiplied by `field_in_list`, which is 0 for a slot past the list. The lengths match only
+  when `is_not_literal` is 0. Among bytes, that is `0x00`–`0x7f`. Any byte `≥ 0x80` fails.
+  A short string prefix such as `0x80` fails the same way as a long one such as `0xb9`.
+  `is_less_than(..., 8)` assumes its inputs already fit in 8 bits. This circuit's lookup bits
+  are 8 (`configs/circuit_params.json`). Under that comparison the field elements `-1` through
+  `-64` also classify as literals (`is_not_literal` 0 and `len_len` 0) and pass; `-65` fails
+  the comparison's own range check. Every value that passes has `len_len` 0, so the index does
+  not advance and `[header_len+1..792]` is not read. The first tail cell is constrained to one
+  of those values. Slot 6 of `BLOCK_HEADER_MAX_FIELD_LENS` is 256 bytes, and nothing in
+  `circuit_v2.rs` reads the header's `list_len` (the receipt log's `list_len` is the one it
+  checks, around `:417-421`), so an unused slot can be that 256-byte slot. The axiom-eth
+  comment that cells past the list should be 0 describes the cells after this first tail cell,
+  which the decoder does not read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
   `header_len` to equal the RLP list length, so counting an extra byte as part of the header is
   rejected (`mock_fixture --mutate header-pad`).
 

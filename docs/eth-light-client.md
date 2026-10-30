@@ -17,8 +17,10 @@ that tree. When code and this text disagree, the code wins.
 
 ## 1. What it is
 
-The ETH → AN deposit path proves that a `Deposit` receipt sits in an Ethereum block with a given
-hash, but a proof cannot say whether that block is on Ethereum's canonical, finalized chain.
+The ETH → AN deposit circuit checks a `Deposit` receipt against a block hash. Those checks
+compare witnesses to keccak promise outputs, and `finalizeDeposit` does not check the promise,
+so they do not show that the receipt or the block hash is a real one. A proof also cannot say
+whether that block is on Ethereum's canonical, finalized chain.
 `USDCBridge.finalizeDeposit` therefore only accepts deposits whose block hash is already in its
 `_acceptedBlockHash` map. Today that map is written by a trusted key (the owner) or an attester
 quorum. The light client replaces that writer with a proof of Ethereum finality.

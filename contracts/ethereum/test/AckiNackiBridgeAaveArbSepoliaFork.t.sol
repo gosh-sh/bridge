@@ -29,7 +29,7 @@ interface IDebtToken {
 
 /// @title AckiNackiBridgeAaveArbSepoliaForkTest
 /// @notice Live Arbitrum Sepolia AAVE market (Circle USDC). Opt-in via
-/// `FORK_URL`. Without it the test skips.
+/// `FORK_URL`. Without it, or when the fork is another chain, the test skips.
 ///
 /// ```bash
 /// FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
@@ -71,7 +71,11 @@ contract AckiNackiBridgeAaveArbSepoliaForkTest is Test {
         } else {
             vm.createSelectFork(rpc);
         }
-        require(block.chainid == 421614, "fork must be Arbitrum Sepolia (chainid=421614)");
+        if (block.chainid != 421614) {
+            console.log("FORK_URL is not Arbitrum Sepolia; skipping");
+            vm.skip(true);
+            return;
+        }
 
         usdc = IERC20(USDC);
         MockPrimaryVerifier primary = new MockPrimaryVerifier();

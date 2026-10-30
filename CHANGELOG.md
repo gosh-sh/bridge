@@ -31,14 +31,17 @@ assigns it when the release is tagged.
 
 ### Added
 
-- `DeployRealBridge` on Arbitrum Sepolia (chain id 421614) wires the AAVE V3 pool
-  `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
-  `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` and its aToken
-  `0x460b97BD498E1157530AEb3086301d5225b91216`. `USE_AXIOM_ORACLE` stays limited to
-  Ethereum mainnet and Ethereum Sepolia; this chain gets `MockBlockHeaderOracle`.
-  `aavePool` and `aUSDC` are constructor immutables, so a bridge already deployed with a
-  zero pool cannot be pointed at this market — deploy a new one. `setAaveEnabled(true)`
-  on a zero pool still reverts `InvalidAaveAddress`.
+- `DeployRealBridge` wires AAVE on Arbitrum Sepolia (chain id 421614) only when
+  `USE_AAVE=true`: pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
+  `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, aToken
+  `0x460b97BD498E1157530AEb3086301d5225b91216`. Leave `USE_AXIOM_ORACLE` unset —
+  `true` reverts on this chain, and the script then deploys `MockBlockHeaderOracle`.
+  Set `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID`) for a shellnet withdrawal; the script
+  defaults it to 0, and the value is immutable. After the deploy, call
+  `setTrustedL1Bridge(421614, <bridge>, true)` on `eccUSDCBridge` and point
+  `BRIDGE_ADDRESS` at the new bridge. `aavePool` and `aUSDC` are immutables: a deploy
+  without `USE_AAVE=true` cannot be switched on later (`setAaveEnabled(true)` reverts
+  `InvalidAaveAddress`). `DeployShellnetE2EBridge` does not wire this market.
 
 ### Fixes
 

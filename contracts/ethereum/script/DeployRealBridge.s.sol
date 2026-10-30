@@ -19,7 +19,9 @@ import "./ShplonkDeployLib.sol";
  * Oracle mode:
  *   - chainid 1: USE_AXIOM_ORACLE must be set true (Mock forbidden).
  *   - chainid 11155111: USE_AXIOM_ORACLE=true → Axiom; default → Mock.
- *   - any other chain, including 421614: Mock. Axiom is not deployed by this script.
+ *   - chainid 421614: default → Mock. USE_AXIOM_ORACLE=true reverts
+ *     "Axiom oracle not supported on this chain".
+ *   - any other chain: `_resolveTokenAddresses` reverts. This script does not deploy it.
  *
  * verifyBlock wiring:
  *   - chainid 1: WIRE_VERIFY_BLOCK must be set true.

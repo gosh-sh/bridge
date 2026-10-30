@@ -10,8 +10,10 @@ is, which command collects what, and the two ways to get it wrong. The contract-
 ## Which market a deploy wires
 
 `DeployRealBridge` (`contracts/ethereum/script/DeployRealBridge.s.sol`) fills `aavePool` and `aUSDC`
-only on the chain ids below. Both are constructor immutables. A bridge deployed with either address
-zero cannot be switched onto a market later: `setAaveEnabled(true)` reverts `InvalidAaveAddress`.
+only on the chain ids below, and only when `USE_AAVE=true`. The flag defaults to false. Both
+addresses are constructor immutables. A bridge deployed with either address zero cannot be switched
+onto a market later: `setAaveEnabled(true)` reverts `InvalidAaveAddress`. `DeployShellnetE2EBridge`,
+which is what the shellnet runbooks run, always passes zeros and does not take `USE_AAVE`.
 
 | Chain | Chain id | USDC the pool lists | Pool | aToken |
 |---|---:|---|---|---|
@@ -32,9 +34,21 @@ FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
   forge test --match-contract AckiNackiBridgeAaveArbSepoliaForkTest -vv
 ```
 
-`USE_AXIOM_ORACLE` deploys `AxiomBlockHeaderOracle` only on chain ids 1 and 11155111. On 421614 the
-script deploys `MockBlockHeaderOracle`. The bridge stores that address and does not call it on the
-deposit path.
+`USE_AXIOM_ORACLE` deploys `AxiomBlockHeaderOracle` only on chain ids 1 and 11155111. On 421614
+leave it unset: the script deploys `MockBlockHeaderOracle`. Setting it `true` reverts
+`Axiom oracle not supported on this chain` and does not fall back to the mock. The bridge stores
+the oracle address and does not call it on the deposit path.
+
+A shellnet withdrawal of this bridge also needs `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID` on Acki
+Nacki). `DeployRealBridge` defaults that value to 0. It is immutable, so a bridge deployed without
+it rejects every shellnet withdrawal with `UnsupportedTokenId(3)` and has to be deployed again.
+The shellnet e2e deploy sets 3; this script does not.
+
+After the deploy, the Acki Nacki bridge has to trust the new address:
+`setTrustedL1Bridge(421614, <bridge>, true)` on `eccUSDCBridge`. Without that,
+`finalizeDeposit` reverts `ERR_UNSUPPORTED_SRC_CHAIN`. Point the deposit relayer and
+`ackinacki-bridge` at the same address (`BRIDGE_ADDRESS`). The bridge already recorded for
+Arbitrum Sepolia has no pool, so this is a new address.
 
 ## Where the money is
 

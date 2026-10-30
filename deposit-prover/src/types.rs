@@ -170,7 +170,8 @@ pub struct DepositProofOutput {
     /// Acki Nacki destination account (256-bit TVM address).
     pub an_account: [u8; 32],
     pub contract_address: [u8; 20],
-    /// Block hash (32 bytes) - proves the deposit is from a real Ethereum block
+    /// 32 bytes split into public inputs 9 and 10: the header keccak promise
+    /// output, not a shown hash of a real block.
     pub block_hash: [u8; 32],
     /// EIP-155 chain id of the source L1/L2 (committed as public input #4).
     /// `#[serde(default)]` keeps pre-12-PI output JSON loadable.

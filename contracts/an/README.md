@@ -42,8 +42,10 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
 trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
 verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
-and then requires the proven block hash in the anchor set: the proof places the
-event in a block, but cannot show that the block is canonical. Three writers
+and then requires public inputs 9 and 10 to sit in the anchor set. Those halves are
+the header keccak promise output. `finalizeDeposit` does not check the promise, so
+the proof does not show the event sits in a real block, and it does not show the
+block is canonical. Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off

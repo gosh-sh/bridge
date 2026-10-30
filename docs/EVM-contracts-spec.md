@@ -306,20 +306,28 @@ Notes that matter downstream:
   promise outputs filled from the witness. The checks in the deposit circuit compare
   witnesses to those outputs. They do not show that the receipt, the trie or the block
   hash are the real ones.
-  More than one witness can produce the same 12 values. The Phase-0 bytes of `depositId`,
+  More than one witness can produce the same first 11 values. The Phase-0 bytes of `depositId`,
   `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so a carry
   of 256 between two adjacent bytes leaves the field element unchanged. The same carry
-  inside one 8-byte packed word of the header, on a field the circuit does not publish
-  (for example `parentHash`), leaves the packed keccak-promise input unchanged. The header
-  RLC value changes with that carry. Phase 1 still holds when the `witness_subarray` copies
-  take the same carry: the two RLC values stay equal to each other, and the 12 public inputs
-  stay the same.
+  inside one 8-byte packed word of the header leaves the packed keccak-promise input
+  unchanged. The header RLC value changes with that carry. Phase 1 still holds when the
+  `witness_subarray` copies take the same carry, so the two RLC values stay equal.
+  `receiptsRoot` and `transactionsRoot` are not public inputs, but their cells are
+  constrained equal, byte by byte, to the MPT roots, and those root bytes are
+  range-checked to 8 bits, so a carry on either field fails. On a field with neither
+  that comparison nor a public input, such as `parentHash`, the 12 public inputs stay
+  the same. Public input 11 is a Poseidon of the loaded promise table, padded to the
+  fixed keccak capacity. A row no call reads is not fixed by the witness, so one witness
+  can produce more than one value of input 11. Inputs 9 and 10 are the header row's
+  output, not necessarily the keccak of the witnessed header. `finalizeDeposit` accepts
+  any pair already in `_acceptedBlockHash`.
   MPT value bytes past `value_byte_len`, key bytes past `key_byte_len`, leaf and node
   bytes past each node's RLP length, key-fragment nibbles past `frag_len` or past
   `pseudo_depth`, and the stored length of a non-last branch fragment, are range-checked
   and are not what the hash or the RLC reads. A padding slot is not required to be a
   branch: `DUMMY_BRANCH` with `node_type` 0 and `DUMMY_EXT` with `node_type` 1 hash the
-  same two preimages. Bytes past the hashed length of either encoding are free. RLP cells
+  same two preimages. Bytes past the hashed length of either encoding are range-checked
+  and are not an input to that hash. RLP cells
   past `field_len` or `encoded_item_len` are outside the phase-1 RLC; cells inside the
   length are bound by that RLC, not byte for byte. `header[header_len]` is the next prefix
   the variable-length decoder reads for every slot past the list. Phase 1 requires

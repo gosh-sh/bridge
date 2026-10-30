@@ -2,11 +2,10 @@
 """Derive the `USDCBridge.setAcceptedBlockHash` arguments for a deposit proof,
 and check against an RPC that the block really is canonical.
 
-The deposit proof binds the event to a block whose header hashes to public
-inputs #9/#10, but it cannot show that block is on the canonical chain — a
-privately mined block with a fabricated event proves equally well. So the AN
-bridge gates `finalizeDeposit` on an anchor set that someone populates from
-outside the proof (audit finding BC-D01).
+Public inputs #9/#10 are the header keccak promise output. `finalizeDeposit`
+does not check that promise, so the pair need not be the keccak of the
+witnessed header. The AN bridge still requires the pair to be in an anchor
+set that someone populates from outside the proof (audit finding BC-D01).
 
 Whoever holds that key is asserting canonicality, which means two obligations
 that no contract can enforce: read the hash from a source independent of the

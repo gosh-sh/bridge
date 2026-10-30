@@ -54,9 +54,11 @@ public endpoints do not (`crates/deposit-relayer-daemon/docs/operator_runbook.md
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
 `deposit(uint256 amount, bytes32 anAccount)`. The contract takes custody via
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
-the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
-(receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
-consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints.
+the Ethereum side. Off-chain, `deposit-prover/` builds a Halo2 proof of a `Deposit` log.
+The keccak results in that proof are promise outputs, and `finalizeDeposit` does not check
+the promise, so the proof does not show the event was in a real Ethereum block. The AN-side
+`USDCBridge` consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode,
+then mints.
 Each transfer is capped at 50 USDC, and the outstanding principal at 10,000 USDC
 per L1 chain.
 
@@ -121,7 +123,7 @@ Every component and the interface each connection goes through, with its call si
 | `contracts/ethereum/src/` | The bridge, four verifier adapters, the SHPLONK shim, oracles. Solidity 0.8.19, Foundry. |
 | `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, the generated Solidity source (`.sol`) it compiles from, and reference calldata. The `.bin` is what deploys; the `.sol` is what `aggregate-proof` self-checks a proof against. |
 | `contracts/ethereum/script/` | Deploy scripts; `ShplonkDeployLib.sol` wires `.bin` → shim → typed adapter. |
-| `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT, log binding, keccak coprocessor). |
+| `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT and log binding against keccak promise outputs). |
 | `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, drives the prover, submits `finalizeDeposit` on AN. |
 | `crates/deposit-chain-ids/` | The single allowlist of deposit source chains, shared by prover and relayer. |
 | `crates/bridge-prover-libraries/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |

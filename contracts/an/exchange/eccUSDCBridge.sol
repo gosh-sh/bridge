@@ -1024,10 +1024,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
             ERR_INVALID_ZKPROOF
         );
 
-        // Canonical-chain gate: the proof binds the event to a block whose
-        // header hashes to instances #9/#10, but says nothing about that block
-        // being on the canonical chain. The hash must therefore appear in the
-        // anchor set, which is asserted from outside the proof (see
+        // Canonical-chain gate. Instances #9/#10 are the header keccak promise
+        // output. This function does not read instance #11, so it does not show
+        // those halves are the keccak of a header. It requires the pair to be
+        // in the anchor set, which is written from outside the proof (see
         // `_acceptedBlockHash`). Parsed here rather than in the pre-accept path
         // so the external-message gas budget stays untouched.
         require(

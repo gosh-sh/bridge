@@ -40,16 +40,19 @@ trie or the block hash are the real ones.
    log was emitted by that contract depends on the receipt promise.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
    as public inputs.
-6. **Block-hash public input** — inputs 9 and 10 are the output of the header's keccak
-   promise, split in half. `finalizeDeposit` checks those halves against
-   `_acceptedBlockHash`. The circuit does not evaluate keccak. `EthCircuitImpl` records
-   the calls as promises and publishes only their commitment, public input 11. The prover
-   fills those rows from the witness (`mock_fulfill_keccak_promises` in `src/prover.rs` and
-   `src/provable.rs`). `finalizeDeposit` does not read input 11, and nothing in this
-   repository checks that commitment against a keccak evaluation. The receipt hash and the
-   MPT node hashes are promises of the same kind. Inputs 9 and 10 can therefore be the hash
-   of a header that was never mined, whenever that hash is already in `_acceptedBlockHash`,
-   and the receipt and trie under it are whatever those promises say.
+6. **Block-hash public input** — inputs 9 and 10 are the two halves of the header
+   promise row's output. They do not have to be the keccak of the witnessed header.
+   `finalizeDeposit` accepts them when that pair is already in `_acceptedBlockHash`,
+   including the hash of a block that was mined. The receipt and the trie are whatever
+   the other promise rows say. The circuit does not evaluate keccak. Public input 11 is
+   a Poseidon of the promise table the prover loads
+   (`assign_and_compute_commitment` in axiom-eth `promise_loader/single.rs` at
+   `1d61be0`), not a commitment to the calls. The lookup only requires each call to
+   appear as a row. `mock_fulfill_keccak_promises` (`examples/export_blake2b_proof.rs`,
+   `src/prover.rs`, `src/provable.rs`) pads that table to `FIXED_KECCAK_CAPACITY`. A row
+   no call reads is not fixed by the deposit witness, so the same witness can carry a
+   different input 11. `finalizeDeposit` does not read input 11, and nothing in this
+   repository checks a row against a keccak evaluation.
 7. **Chain id** — the circuit checks that the typed transaction sits under `transactionsRoot`
    through the MPT chip (`parse_transaction_proof_phase0` in `src/circuit_v2.rs`). The promises
    on that path are trie node hashes and the leaf hash. The source chain id is a public input
@@ -71,17 +74,18 @@ One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
 | 6 | `dappIdLow` | Destination dapp id, lower half |
 | 7 | `anAccountHigh` | AN destination account, upper 128 bits |
 | 8 | `anAccountLow` | AN destination account, lower 128 bits |
-| 9 | `blockHashHigh` | Upper 128 bits of the block hash |
-| 10 | `blockHashLow` | Lower 128 bits of the block hash |
-| 11 | `promiseCommit` | Keccak-coprocessor promise commitment |
+| 9 | `blockHashHigh` | Upper 128 bits of the header promise output |
+| 10 | `blockHashLow` | Lower 128 bits of the header promise output |
+| 11 | `promiseCommit` | Poseidon of the loaded keccak promise table |
 
 *Earlier revisions of this file documented seven inputs ending at `promiseCommit`; the destination
 and chain-binding inputs were added later.*
 
 ### Fixed-size witness padding
 
-Several witnesses can produce the same 12 public inputs. They are not one buffer, and they are
-not all past a length.
+Several witnesses can produce the same first 11 public inputs. They are not one buffer, and
+they are not all past a length. Input 11 is the Poseidon of the loaded promise table, so it
+can differ for one witness: a row no call reads is not fixed by that witness (item 6).
 
 * **Phase-0 bytes of the instance, not a tail.** `depositId`, `sender`, `amount`,
   `contractAddress` and `anAccount` are loaded with `load_witness` and folded by `bytes_to_field`
@@ -142,8 +146,12 @@ not all past a length.
   `range_check`. `format_input` packs them into 8-byte words. Raising one cell by 256 and
   lowering the next cell in that same word by 1 leaves the packed promise input unchanged.
   Phase 1 checks an RLC of the header against an RLC of the `witness_subarray` copies, not
-  byte equality. The same carry on a field the circuit does not publish, such as `parentHash`,
-  leaves that RLC equality and the 12 public inputs unchanged.
+  byte equality. `receiptsRoot` and `transactionsRoot` are not public inputs, but their
+  `field_cells` are constrained equal, byte by byte, to the MPT chip's `root_hash_bytes`
+  (`src/circuit_v2.rs`), and those root bytes are range-checked to 8 bits. A carry on
+  either field fails that check. On a field with neither that comparison nor a public
+  input, such as `parentHash`, the same carry leaves the RLC equality and the 12 public
+  inputs unchanged.
 
   The header is decoded as a variable-length list against the 24-slot table. For a slot past
   the list the decoder still reads `header[header_len]` as the next prefix and runs

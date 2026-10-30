@@ -20,15 +20,21 @@ excluded from the root workspace and built standalone.
 
 ## Circuit: `DepositEventCircuitV2`
 
-The Halo2 circuit (`src/circuit_v2.rs`) proves:
+The Halo2 circuit (`src/circuit_v2.rs`) checks the following against keccak promise
+outputs. It does not evaluate keccak, and `finalizeDeposit` does not check the promise
+(item 6). These checks do not by themselves prove that the receipt, the trie or the block
+hash are the real ones.
 
-1. **Receipt trie inclusion** — the transaction receipt exists in Ethereum's receipt trie (MPT
-   proof), with `max_key_byte_len: 3` (`impl ToMPTInput for ReceiptProof` in `src/circuit_v2.rs`;
-   the leaf bound is `receipt_max_byte_len`).
+1. **Receipt trie** — the receipt MPT path is checked against `receiptsRoot` from the header.
+   The node hashes are promises. `max_key_byte_len` is 3 (`impl ToMPTInput for ReceiptProof`
+   in `src/circuit_v2.rs`; the leaf bound is `receipt_max_byte_len`).
 2. **Event log extraction** — the RLP-encoded receipt is parsed and the `Deposit` log extracted.
-3. **Event signature** — `log.topics[0] == keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
+3. **Event signature** — `log.topics[0]` is constrained equal to
+   `keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")`
    (`get_deposit_event_signature` in `src/circuit_v2.rs`). Five fields: the event carries the Acki Nacki destination.
-4. **Contract address** — the event was emitted by the expected bridge contract.
+   That digest is a promise of the same kind as item 6.
+4. **Contract address** — the log address is constrained equal to public input 3. That the
+   log was emitted by that contract depends on the receipt promise.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
    as public inputs.
 6. **Block-hash public input** — inputs 9 and 10 are the output of the header's keccak
@@ -38,9 +44,12 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
    fills those rows from the witness (`mock_fulfill_keccak_promises` in `src/prover.rs` and
    `src/provable.rs`). `finalizeDeposit` does not read input 11, and nothing in this
    repository checks that commitment against a keccak evaluation. The receipt hash and the
-   MPT node hashes are promises of the same kind.
-7. **Chain binding** — the source chain id is a public input, so a proof from one chain cannot be
-   replayed as another.
+   MPT node hashes are promises of the same kind. Inputs 9 and 10 can therefore be the hash
+   of a header that was never mined, whenever that hash is already in `_acceptedBlockHash`,
+   and the receipt and trie under it are whatever those promises say.
+7. **Chain id** — the source chain id is a public input taken from the typed transaction, so
+   one chain's instance is not another's. The transaction hash is a promise of the same kind
+   as item 6.
 
 ### Public inputs (12 field elements)
 
@@ -86,27 +95,34 @@ not all past a length.
   (`d18080808080808080808080808080808080`), not with zeros. Each key fragment is zero-padded to
   `2 * max_key_byte_len` nibbles, and the fragment list is filled to `max_depth` with zero
   fragments. The MPT chip range-checks the key bytes, value bytes, root hash, leaf bytes and node
-  bytes to 8 bits, and the key-fragment nibbles to 4 bits. The receipt hash uses the prefix named
-  by `value_byte_len`. `blockHash` does not: it comes from the header promise, whose length is
-  `block_header_len`, tied to the header's RLP `rlp_len`. The log fields are bound through
-  `field_len`.
+  bytes to 8 bits, and the key-fragment nibbles to 4 bits. `value_byte_len` bounds the RLC
+  that is compared with the leaf's value field. No keccak is taken over `value[..value_byte_len]`.
+  The leaf's promise is `mpt_hash_phase0` over the leaf's own `rlp_len`. `blockHash` comes from
+  the header promise, whose length is `block_header_len`, tied to the header's RLP `rlp_len`.
+  The log fields are bound through `field_len`.
 
-  The hash and the RLC use a length, so bytes past that length can change without changing the
-  12 public inputs. They stay range-checked:
+  Bytes past a length can change without changing the 12 public inputs. They stay range-checked:
 
   * value bytes past `value_byte_len`;
+  * key bytes past `key_byte_len` (the key RLC uses `key_byte_len`);
   * leaf and node bytes past that node's RLP length (`mpt_hash_phase0` is `keccak_var_len` over
     `bytes[..len]`);
   * key-fragment nibbles past `frag_len`, and fragments after `pseudo_depth` (`depth`, or 1
-    when the proof is empty). `constrain_rlc_concat` keeps only that prefix.
+    when the proof is empty). `constrain_rlc_concat` keeps only that prefix;
+  * the stored length of a non-last branch fragment. It is range-checked, then the key check
+    uses 1 in its place, so the stored length is not what that check reads.
 
-  `node_type` is 1 for an extension and 0 for a branch. Both parses run, but `select` gives the
-  slot's own bytes to the chosen type only. The other parse receives the constant `DUMMY_EXT` or
-  `DUMMY_BRANCH`. A padding slot is a branch, so its own bytes are the branch input and the
-  extension input is `DUMMY_EXT`. `DUMMY_BRANCH` is 18 bytes. The promise and the RLC take that
-  RLP length, not the whole `max_node_bytes` buffer. Bytes after those 18 can be any byte value
-  and leave all 12 inputs, including `promiseCommit`, unchanged. Replacing the 18 encoded bytes
-  changes `promiseCommit`.
+  `node_type` is only a bit: 1 for an extension, 0 for a branch. The assigner fills a padding
+  slot with `DUMMY_BRANCH` and `node_type` 0. The circuit does not require that. Both parses
+  run, and `select` gives the slot's own bytes to the chosen type only. The other parse
+  receives the constant `DUMMY_EXT` or `DUMMY_BRANCH`. The promise hashes `bytes[..rlp_len]` of
+  each parse. Bytes past that length are only range-checked.
+
+  `DUMMY_BRANCH` with `node_type` 0 and `DUMMY_EXT` with `node_type` 1 feed the same two
+  preimages, in the same order: the extension parse sees `DUMMY_EXT`, the branch parse sees
+  `DUMMY_BRANCH`. With `node_type` 1 the key check compares that slot's fragment to
+  `DUMMY_EXT`'s path, and that fragment is outside the concatenation, so it can be set to
+  match. Replacing the 18 `DUMMY_BRANCH` bytes does not, by itself, change `promiseCommit`.
 
 * **RLP copies.** `witness_subarray` copies the parsed slice into `field_cells`, sized to the
   field maximum, and into `encoded_item`, sized to `max_rlp_encoding_len(max_field_len)` — the
@@ -118,15 +134,23 @@ not all past a length.
   makes no guarantee on the original RLP buffer past `rlp_len`.
 
 * **Block header.** The witness is `MAX_BLOCK_HEADER_BYTES` (792) cells, `load_witness` only,
-  zero-filled past the true header. They are not passed to `range_check`. The header is decoded
-  as a variable-length list against the 24-slot table. For a slot past the list the decoder still
-  reads `header[header_len]` as the next prefix, runs `parse_rlp_prefix` on it (8-bit
-  `is_less_than`) and checks that prefix's `len_len` against the slot before treating the slot as
-  unused. Every unused slot in `BLOCK_HEADER_MAX_FIELD_LENS` is at most 32 bytes, so `len_len`
-  must be 0. Any byte with that length-of-length passes: `0x00`–`0xb7` and `0xc0`–`0xf7`. A long
-  prefix (`0xb8`–`0xbf`, `0xf8`–`0xff`), such as `0xb9`, fails. The comment on
+  zero-filled past the true header. None of them, inside the length or past it, is passed to
+  `range_check`. `format_input` packs them into 8-byte words. Raising one cell by 256 and
+  lowering the next cell in that same word by 1 leaves the packed promise input unchanged.
+  Phase 1 checks an RLC of the header against an RLC of the `witness_subarray` copies, not
+  byte equality. The same carry on a field the circuit does not publish, such as `parentHash`,
+  leaves that RLC equality and the 12 public inputs unchanged.
+
+  The header is decoded as a variable-length list against the 24-slot table. For a slot past
+  the list the decoder still reads `header[header_len]` as the next prefix, runs
+  `parse_rlp_prefix` on it and checks that prefix's `len_len` against the slot before treating
+  the slot as unused. `is_less_than(..., 8)` assumes its input already fits in 8 bits and does
+  not enforce that. Every unused slot in `BLOCK_HEADER_MAX_FIELD_LENS` is at most 32 bytes, so
+  `len_len` must be 0. The bytes that pass are `0x00`–`0xb7` and `0xc0`–`0xf7`. A long prefix
+  (`0xb8`–`0xbf`, `0xf8`–`0xff`), such as `0xb9`, fails. A non-byte can pass too: the field
+  element `-1` is classified as a literal, so its `len_len` is 0. The comment on
   `decompose_rlp_array_phase0` says the cells past the list should be 0. That is an assumption of
-  the caller, not a constraint. When the first tail byte has `len_len` 0 the index does not
+  the caller, not a constraint. When the first tail cell has `len_len` 0 the index does not
   advance, so `[header_len+1..792]` is not read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
   `header_len` to equal the RLP list length, so counting an extra byte as part of the header is
   rejected (`mock_fixture --mutate header-pad`).

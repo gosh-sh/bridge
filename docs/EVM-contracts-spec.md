@@ -34,6 +34,11 @@ note here calling out the drift.
 > change. Earlier drift notes describe historical snapshots; other citations
 > have not been re-anchored by this change. Locate symbols in current source
 > before relying on their line offsets.
+>
+> **Drift note, 2026-10-30 (deposit witness padding).** The §6 bullet on the 12 public
+> inputs was rewritten against `deposit-prover` at `5e6a2569`, axiom-eth `1d61be0` and
+> halo2-lib `026e176`. That bullet does not cite `file:line`. Other citations in this
+> document were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -297,19 +302,26 @@ Notes that matter downstream:
   The instance column is those 12 values. `finalizeDeposit` reads the first 9 and checks
   the block-hash halves. It does not read `promiseCommit`, and nothing in this repository
   checks that commitment against a keccak evaluation: the circuit's keccak results are
-  promise outputs filled from the witness.
+  promise outputs filled from the witness. The checks in the deposit circuit compare
+  witnesses to those outputs. They do not show that the receipt, the trie or the block
+  hash are the real ones.
   More than one witness can produce the same 12 values. The Phase-0 bytes of `depositId`,
   `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so a carry
-  of 256 between two adjacent bytes leaves the field element unchanged. MPT value bytes
-  past `value_byte_len`, leaf and node bytes past each node's RLP length, and key-fragment
-  nibbles past `frag_len` or past `depth`, are range-checked and are not in the hash or the
-  RLC. That includes the bytes of a padding node after its 18-byte `DUMMY_BRANCH` encoding;
-  replacing those 18 bytes changes `promiseCommit`. RLP cells past `field_len` or
-  `encoded_item_len` are outside the phase-1 RLC; cells inside the length are bound.
-  `header[header_len]` may be any byte whose RLP length-of-length is 0 (`0x00`–`0xb7` and
-  `0xc0`–`0xf7`); every unused header slot is at most 32 bytes, so a longer prefix fails.
-  Bytes after that one are not read.
-  [`deposit-prover/README.md`](../deposit-prover/README.md) is the full account.
+  of 256 between two adjacent bytes leaves the field element unchanged. The same carry
+  inside one 8-byte packed word of the header, on a field the circuit does not publish
+  (for example `parentHash`), leaves the keccak promise and the header RLC unchanged.
+  MPT value bytes past `value_byte_len`, key bytes past `key_byte_len`, leaf and node
+  bytes past each node's RLP length, key-fragment nibbles past `frag_len` or past
+  `pseudo_depth`, and the stored length of a non-last branch fragment, are range-checked
+  and are not what the hash or the RLC reads. A padding slot is not required to be a
+  branch: `DUMMY_BRANCH` with `node_type` 0 and `DUMMY_EXT` with `node_type` 1 hash the
+  same two preimages. Bytes past the hashed length of either encoding are free. RLP cells
+  past `field_len` or `encoded_item_len` are outside the phase-1 RLC; cells inside the
+  length are bound by that RLC, not byte for byte. `header[header_len]` is not
+  range-checked. The bytes `0x00`–`0xb7` and `0xc0`–`0xf7` pass, and so does a non-byte
+  such as the field element `-1`, because `parse_rlp_prefix` only runs an 8-bit
+  comparison. Bytes after that cell are not read.
+  [`deposit-prover/README.md`](../deposit-prover/README.md) lists the same places.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The

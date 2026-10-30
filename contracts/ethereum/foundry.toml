@@ -25,8 +25,7 @@ invariant = { runs = 1000 }
 # Sepolia RPC; each suite skips on other chains. Requires
 # `evm_version = "shanghai"` so the foundry REVM can execute live AAVE bytecode
 # (post-Shanghai opcodes, including PUSH0). The default `paris` profile rejects
-# PUSH0 with an InvalidOpcode revert — see `test/AckiNackiBridgeAaveFork.t.sol`
-# docstring for the diagnosis. Solc 0.8.21 supports `shanghai`, and both
+# PUSH0 with an InvalidOpcode revert. Solc 0.8.21 supports `shanghai`, and both
 # Ethereum Sepolia and Arbitrum Sepolia execute PUSH0, so this is a safe
 # override.
 #

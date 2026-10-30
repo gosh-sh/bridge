@@ -6,7 +6,8 @@
 # that would have caught it.
 #
 # Fork tests need an Ethereum Sepolia or Arbitrum Sepolia RPC (each suite
-# skips on other chains) and stay on GitLab (`FOUNDRY_PROFILE=fork`).
+# skips on other chains). No CI runs them: run them by hand with
+# `FOUNDRY_PROFILE=fork FORK_URL=<RPC>`.
 
 when:
   - event: pull_request

@@ -316,30 +316,34 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         IBridgeWithdrawalVerifier verifier,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub
     ) internal returns (AckiNackiBridge bridge) {
-        MockBlockHeaderOracle oracle = new MockBlockHeaderOracle();
-        MockERC20 usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        bridge = new AckiNackiBridge(
+            address(new MockBlockHeaderOracle()),
+            address(new MockERC20("Mock USDC", "mUSDC", 6)),
+            address(0),
+            address(0),
+            _acceptingVerifyBlockConfig(),
+            VerifyBlockConfigLib.withWithdrawShellnet(
+                verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
+            )
+        );
+    }
+
+    function _acceptingVerifyBlockConfig()
+        internal
+        returns (AckiNackiBridge.VerifyBlockConfig memory)
+    {
         MockPrimaryVerifier primary = new MockPrimaryVerifier();
         MockFallbackVerifier fallback_ = new MockFallbackVerifier();
         MockLayerHashesMovementVerifier layer = new MockLayerHashesMovementVerifier();
         primary.setShouldAccept(true);
         fallback_.setShouldAccept(true);
         layer.setShouldAccept(true);
-
-        bridge = new AckiNackiBridge(
-            address(oracle),
-            address(usdc),
-            address(0),
-            address(0),
-            VerifyBlockConfigLib.with(
-                IPrimaryVerifier(address(primary)),
-                IFallbackVerifier(address(fallback_)),
-                ILayerHashesMovementVerifier(address(layer)),
-                BK_SET,
-                GENESIS_PREV
-            ),
-            VerifyBlockConfigLib.withWithdrawShellnet(
-                    verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
-                )
+        return VerifyBlockConfigLib.with(
+            IPrimaryVerifier(address(primary)),
+            IFallbackVerifier(address(fallback_)),
+            ILayerHashesMovementVerifier(address(layer)),
+            BK_SET,
+            GENESIS_PREV
         );
     }
 

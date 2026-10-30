@@ -31,6 +31,9 @@ BUNDLE_STRIDE=16384
 # --- Withdraw (Phase 2) ---
 # WITHDRAW_ACC_FR=0x...
 # WITHDRAW_DAPP_FR=0x...
+# The bridge this deploy replaces on the same chain, already paused; the zero
+# address for the first bridge there. Required by DeployRealBridge.
+PREDECESSOR_BRIDGE=0x0000000000000000000000000000000000000000
 
 # --- Oracle ---
 USE_AXIOM_ORACLE=false               # true for mainnet-style deploy

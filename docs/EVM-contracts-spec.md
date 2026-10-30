@@ -294,11 +294,14 @@ Notes that matter downstream:
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
   (`crates/deposit-relayer-daemon/src/types.rs:98-110`). The DApp ID remains a
   config-supplied tag; removing workchain does not change its meaning or PI slots.
-  The proof fixes those 12 values. Only the unused tail of the private witness can vary,
-  including the header cells past the true header length, and a different tail is another
-  witness of the same public inputs, not another deposit.
-  [`deposit-prover/README.md`](../deposit-prover/README.md) names each buffer and which of
-  them are range-checked.
+  The instance column is those 12 values. `finalizeDeposit` reads the first 9 and checks
+  the block-hash halves; it does not read `promiseCommit`. More than one witness can produce
+  the same 12 values. The Phase-0 bytes of `depositId`, `sender`, `amount`,
+  `contractAddress` and `anAccount` are not range-checked, so a carry of 256 between two
+  adjacent bytes leaves the field element unchanged. Cells past an RLP field's length, and
+  header cells after the first byte past the header, sit outside the length the circuit
+  binds. An MPT padding node is not in that set: replacing it changes `promiseCommit`.
+  [`deposit-prover/README.md`](../deposit-prover/README.md) is the full account.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The

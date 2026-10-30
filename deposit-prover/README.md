@@ -3,10 +3,10 @@
 Standalone ZK proof generator for Ethereum `Deposit` events using axiom-eth. Proves that a `Deposit`
 event was emitted by the `AckiNackiBridge` contract on Ethereum.
 
-*Verified against the sources in this crate at commit `5e6a2569`, 2026-10-29, and against
-axiom-eth `1d61be0` (`gosh-stable-rlcmanager-assignment`). At `a69ba36` (2026-08-18) the header
-buffer was 717 bytes and the pinned log data length was 128; both are 792 and 96 in this tree.
-Claims about the Acki Nacki side are marked where they cannot be checked from this repository.*
+*The padding section below was checked on 2026-10-30 against this crate at commit `5e6a2569`,
+axiom-eth `1d61be0` (`gosh-stable-rlcmanager-assignment`) and halo2-lib `026e176`. At `a69ba36`
+(2026-08-18) the header buffer was 717 bytes and the pinned log data length was 128; both are
+792 and 96 in this tree. The rest of this file was not re-checked as a whole.*
 
 > **Status.** This crate emits a raw Halo2 SHPLONK proof. It is consumed natively on the Acki Nacki
 > side through the **`ZKHALO2VERIFYWITHVK`** TVM opcode — the name `VERHALO2SHPLONK` used in older
@@ -60,41 +60,69 @@ and chain-binding inputs were added later.*
 
 ### Fixed-size witness padding
 
-The proof fixes the 12 public inputs. The private witness is longer, and a different assignment
-of its unused tail is another witness of the same inputs, so another Halo2 proof of the same
-deposit. `finalizeDeposit` reads the public inputs, not the witness, so the tail cannot mint a
-second deposit or a deposit that was not in the receipt. The relayer submits the proof and the
-public inputs. The tail stays in the witness.
+Several witnesses can produce the same 12 public inputs. They are not one buffer, and they are
+not all past a length.
 
-The tail is not one buffer, and it is not all range-checked.
+* **Phase-0 bytes of the instance, not a tail.** `depositId`, `sender`, `amount`,
+  `contractAddress` and `anAccount` are loaded with `load_witness` and folded by `bytes_to_field`
+  (Horner, base 256) with no range check (`src/circuit_v2.rs`). Phase 1 checks the folded field,
+  not each byte. Raising one byte by 256 and lowering the byte before it by 1 leaves the field
+  element, and so that public input, unchanged. The 12 leading zeros of `sender` and
+  `contractAddress` are constants. `dappId` bytes are range-checked to 8 bits, so this carry does
+  not apply to them. `chainId` comes from the typed-transaction decode, not from these witnesses.
 
-* **MPT inputs** (`MPTInput::assign`). The value is zero-padded to `value_max_byte_len`
-  (`receipt_max_byte_len` for the receipt, `calc_max_val_len` for the transaction). The path is
-  zero-padded to `max_key_byte_len`. Each proof node is zero-padded to `max_node_bytes`, and the
-  node list is then filled to `max_depth - 1` with `DUMMY_BRANCH`
-  (`d18080808080808080808080808080808080`), not with zeros. The leaf is zero-padded to
-  `max_leaf_bytes`. Each key fragment is zero-padded to `2 * max_key_byte_len` nibbles, and the
-  fragment list is filled to `max_depth` with zero fragments. The MPT chip range-checks the key
-  bytes, value bytes, root hash, leaf bytes and node bytes to 8 bits, and the key-fragment
-  nibbles to 4 bits. The receipt hash, and every byte copied into a public input, uses only the
-  prefix named by `value_byte_len`.
+* **MPT value, path and nodes** (`MPTInput::assign` in axiom-eth). The value is zero-padded to
+  `value_max_byte_len` (`receipt_max_byte_len` for the receipt, `calc_max_val_len` for the
+  transaction). The path is zero-padded to `max_key_byte_len`. The leaf is zero-padded to
+  `max_leaf_bytes`. Each proof node is zero-padded to `max_node_bytes`, and the node list is then
+  filled to `max_depth - 1` with `DUMMY_BRANCH`
+  (`d18080808080808080808080808080808080`), not with zeros. Each key fragment is zero-padded to
+  `2 * max_key_byte_len` nibbles, and the fragment list is filled to `max_depth` with zero
+  fragments. The MPT chip range-checks the key bytes, value bytes, root hash, leaf bytes and node
+  bytes to 8 bits, and the key-fragment nibbles to 4 bits. The receipt hash uses the prefix named
+  by `value_byte_len`. `blockHash` does not: it comes from the header promise, whose length is
+  `block_header_len`, tied to the header's RLP `rlp_len`. The log fields are bound through
+  `field_len`.
 
-* **RLP copies.** `witness_subarray` builds `field_cells` and `encoded_item` as a copy of the
-  parsed slice, zero-filled to the field maximum. Those copies are not constrained, and the
-  decoder does not constrain the bytes of the original RLP sequence past the parsed length. The
-  lengths are constrained: the log address is 20 bytes, the topics list is 99 bytes, and the
-  data is 96 bytes, so `depositId` and `sender` cannot be read from past that payload.
+  A padding node is not a witness of the same inputs. Every node slot, the padding included, is
+  parsed as a branch and as an extension, and each parse calls `mpt_hash_phase0`
+  (`keccak_var_len` over that node's RLP). The slot must decode as a well-formed node. Slots past
+  the real proof are not tied into the hash chain. A different well-formed branch in a padding
+  slot is a different promise input and changes `promiseCommit`, public input 11.
 
-* **Block header.** The header witness is `MAX_BLOCK_HEADER_BYTES` (792) cells, loaded with
-  `load_witness` and zero-filled past the true header. Those cells are not range-checked. Keccak
-  hashes `bytes[..header_len]`. `ensure_0_padding` multiplies a fresh copy by a length mask for
-  that hash; it does not force the original cells to zero. The header length must equal the RLP
-  list length, so counting an extra byte as part of the header is rejected
-  (`mock_fixture --mutate header-pad`). Cells `[header_len..792]` are a free tail of the same
-  `blockHash`.
+* **RLP copies.** `witness_subarray` copies the parsed slice into `field_cells`, sized to the
+  field maximum, and into `encoded_item`, sized to `max_rlp_encoding_len(max_field_len)` — the
+  payload plus its prefix and length bytes, not the field maximum. Phase 1 takes the RLC of each
+  copy over its length and checks that `encoded_item` is their concatenation. Cells inside that
+  length are bound. That is what ties `depositId`, `sender` and `amount` to the log. Cells past
+  `field_len` or `encoded_item_len` are not in the RLC. The log address is 20 bytes, the topics
+  list is 99, and the data is 96, so those fields are not read from past that payload. Phase 1
+  makes no guarantee on the original RLP buffer past `rlp_len`.
 
-Apart from the MPT chip, the deposit circuit range-checks `log_index` and each `dappId` byte.
-Those checks do not cover the header tail or the RLP copies.
+* **Block header.** The witness is `MAX_BLOCK_HEADER_BYTES` (792) cells, `load_witness` only,
+  zero-filled past the true header. They are not passed to `range_check`. The header is decoded
+  as a variable-length list against the 24-slot table. For a slot past the list the decoder still
+  reads `header[header_len]` as the next prefix, runs `parse_rlp_prefix` on it (8-bit
+  `is_less_than`) and checks that prefix's `len_len` against the slot before treating the slot as
+  unused. A slot of at most 55 bytes allows `len_len` 0 only, so `0x00` passes and a long-string
+  prefix such as `0xb9` fails. axiom-eth requires the cells past the list to be 0 for the circuit
+  to pass. When that first tail byte has `len_len` 0 the index does not advance, and the decoder
+  does not read `[header_len+1..792]`. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
+  `header_len` to equal the RLP list length, so counting an extra byte as part of the header is
+  rejected (`mock_fixture --mutate header-pad`).
+
+`keccak_var_len` does not hash the header. It records a promise and returns that promise's output
+bytes. `ensure_0_padding` (halo2-lib) multiplies a copy by a length mask for the promise input; it
+does not zero the original cells. The same call range-checks `block_header_len`, and the output
+bytes are range-checked when they are split. The RLP chip range-checks every `len_len`,
+`field_len` and list payload length. Apart from the MPT chip and those checks, the deposit
+circuit range-checks `log_index` and each `dappId` byte.
+
+The promise rows are themselves witnesses. Their commitment is public input 11.
+`finalizeDeposit` in `contracts/an/exchange/eccUSDCBridge.sol` verifies the proof, reads the first
+9 inputs, and checks the block-hash halves (inputs 9 and 10) against `_acceptedBlockHash`. It
+does not read input 11, and nothing in this repository checks the promise against a keccak
+computation. The relayer submits the proof and the public inputs. The witness stays off-chain.
 
 ### Circuit parameters
 
@@ -155,21 +183,13 @@ cargo test --release --test circuit_synthesis -- --ignored --nocapture
 ## On-chain consumption
 
 There is **no on-chain ETH-side ZK consumer** for this proof — the Ethereum contract only emits the
-event and keeps custody. The proof is consumed on the Acki Nacki side by `USDCBridge`, whose ABI is
-bundled in this repo at `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`:
-
-```
-finalizeDeposit(bytes proof, bytes publicInputs)
-```
-
-Two arguments, not three: the verifying key is not passed by the caller. The contract parses the
-deposit fields out of `publicInputs` itself and verifies through `ZKHALO2VERIFYWITHVK` against the VK
-embedded in its own code.
-
-<!-- UNVERIFIED 2026-08-18: what USDCBridge enforces beyond the proof check — bridge-address
-equality, per-depositId replay protection, the canonical-block-hash gate, and the mint itself — is
-implemented in the Acki Nacki contract, whose source is not in this repository. Only the ABI is
-bundled here. Confirm against the acki-nacki repo before relying on any of it. -->
+event and keeps custody. The proof is consumed by `finalizeDeposit` in
+`contracts/an/exchange/eccUSDCBridge.sol`. The caller passes `(proof, publicInputs)`; the verifying
+key is not an argument. The contract verifies that pair with `ZKHALO2VERIFYWITHVK` against the VK
+embedded in its code, reads the first 9 public inputs, and checks the block-hash halves against
+`_acceptedBlockHash`. It does not read public input 11 (`promiseCommit`). The ABI of the older
+`USDCBridge` name is still bundled at
+`crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`.
 
 The relayer that carries a proof across is `crates/deposit-relayer-daemon/`.
 
@@ -191,12 +211,13 @@ Run with `cargo run --release --example <name>`. Present under `examples/`:
 | `generate_verifier` | Generate Solidity verifier bytecode — legacy reference; the AN side verifies natively |
 | `generate_aggregation_verifier` | Generate an aggregation verifier — same caveat |
 | `export_blake2b_proof` | Export a Blake2b-transcript proof |
+| `generate_deposit_fixtures` | Write synthetic `input.json` fixtures for a deposit-id range |
 
 ## Development
 
 ```bash
 cargo build --release
-cargo test                 # 42 `#[test]` functions in src/ + tests/ (static count, not a run)
+cargo test                 # 79 `#[test]` functions in src/ + tests/ (static count, not a run)
 cargo run --release --example fetch_deposit_data -- --help
 ```
 

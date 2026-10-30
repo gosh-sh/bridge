@@ -34,7 +34,7 @@ use std::{
 use tracing::{error, info, warn};
 
 use crate::{
-    bridge::BridgeClient,
+    bridge::{is_unconfirmed_submit_failure, BridgeClient},
     error::RelayerError,
     relayer::{Relayer, TickOutcome},
     source::BlockSource,
@@ -275,11 +275,19 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                     target_seq_no,
                     reason,
                 }) => {
-                    if let Some(m) = &metrics {
-                        m.reverted_total.fetch_add(1, Ordering::Relaxed);
+                    if is_unconfirmed_submit_failure(&reason) {
+                        warn!(
+                            target_seq_no,
+                            reason = %reason,
+                            "daemon: verifyBlock not confirmed"
+                        );
+                    } else {
+                        if let Some(m) = &metrics {
+                            m.reverted_total.fetch_add(1, Ordering::Relaxed);
+                        }
+                        summary.reverted += 1;
+                        warn!(target_seq_no, reason = %reason, "daemon: bridge reverted");
                     }
-                    summary.reverted += 1;
-                    warn!(target_seq_no, reason = %reason, "daemon: bridge reverted");
                     (false, LastOutcome::BridgeReverted {
                         seq_no: target_seq_no,
                     })
@@ -288,11 +296,19 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                     seq_no,
                     reason,
                 }) => {
-                    if let Some(m) = &metrics {
-                        m.reverted_total.fetch_add(1, Ordering::Relaxed);
+                    if is_unconfirmed_submit_failure(&reason) {
+                        warn!(
+                            seq_no,
+                            reason = %reason,
+                            "daemon: bk-set update not confirmed"
+                        );
+                    } else {
+                        if let Some(m) = &metrics {
+                            m.reverted_total.fetch_add(1, Ordering::Relaxed);
+                        }
+                        summary.reverted += 1;
+                        warn!(seq_no, reason = %reason, "daemon: bk-set update reverted");
                     }
-                    summary.reverted += 1;
-                    warn!(seq_no, reason = %reason, "daemon: bk-set update reverted");
                     (false, LastOutcome::BkUpdateReverted {
                         seq_no,
                     })

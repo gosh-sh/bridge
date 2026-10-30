@@ -406,9 +406,12 @@ pkill -f aggregate-proof                      # a stray child, if any
 ```
 
 Relaunch with the same exports as [§3.5](#35-start-the-daemon), keeping the
-state files. Expect `startup: WarmResume — local state matches chain
-byte-for-byte` and `seed_policy=Resume`. A proof that was in progress is lost
-and redone (~10–14 min for a bundle, ~3.5–5 min per pending rotation).
+state files. Expect `startup: WarmResume — local state matches the chain`
+when the files match the contract, or `startup: WarmResume — local cursor is
+behind the contract in the BK-set hold window` when a rotation has landed and
+the bundle cursor has not caught up. Either way `seed_policy=Resume`. A proof
+that was in progress is lost across the restart and redone (~10–14 min for a
+bundle, ~3.5–5 min per pending rotation).
 
 ### 5.2 Hard abort after failed submissions
 

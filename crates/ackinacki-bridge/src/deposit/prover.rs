@@ -73,6 +73,10 @@ pub struct ProveRequest {
     pub chain_id: u64,
     /// Where the witness, the proof and its public inputs are written.
     pub work: PathBuf,
+    /// Where each tool's stderr is kept, one file per run, named after the
+    /// operation and the tool (`--log-dir`). `None` keeps only the tail
+    /// that a failure quotes.
+    pub log_dir: Option<PathBuf>,
 }
 
 /// A proof and its public inputs, as the prover wrote them.
@@ -328,6 +332,7 @@ fn unprovable_reason(stderr: &[u8]) -> String {
 
 /// Runs one tool to completion by `deadline`, handing it the prover lock
 /// `lock_fd`. `limit` is the whole attempt's budget, for the message.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     cmd: &mut Command,
     what: &str,
@@ -335,6 +340,7 @@ async fn run(
     deadline: Instant,
     limit: Duration,
     op_id: &str,
+    log_dir: Option<&Path>,
 ) -> CliResult<Ran> {
     // The prover never signs anything; `--qr-mode local-key`'s key stays here.
     cmd.env_remove(crate::deposit::args::LOCAL_KEY_ENV)
@@ -364,6 +370,25 @@ async fn run(
             ))
         },
     };
+    // The whole transcript, success or not, when there is somewhere to put
+    // it; the error below still quotes the tail.
+    if let Some(dir) = log_dir {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("{op_id}-{what}-{stamp}.log"));
+        let transcript = format!(
+            "$ {what}\n--- stderr ---\n{}\n--- exit: {} ---\n",
+            String::from_utf8_lossy(&out.stderr),
+            out.status
+        );
+        if let Err(e) =
+            std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&path, transcript))
+        {
+            tracing::warn!(log = %path.display(), error = %e, "{what}: transcript not written");
+        }
+    }
     if out.status.code() == Some(PROVER_UNPROVABLE_EXIT) {
         return Ok(Ran::Unprovable(unprovable_reason(&out.stderr)));
     }
@@ -459,6 +484,7 @@ pub async fn prove(
         deadline,
         timeout,
         op_id,
+        req.log_dir.as_deref(),
     )
     .await?;
     if let Ran::Unprovable(reason) = fetched {
@@ -467,6 +493,7 @@ pub async fn prove(
         }));
     }
     ui.status("building the proof (minutes; the first run also builds the proving key)");
+    let log_dir = req.log_dir.as_deref();
     let proved = run(
         Command::new(dir.bin(PROVE_BIN))
             .current_dir(&dir.root)
@@ -485,6 +512,7 @@ pub async fn prove(
         deadline,
         timeout,
         op_id,
+        log_dir,
     )
     .await?;
     drop(lock);
@@ -550,6 +578,7 @@ mod tests {
             dapp_hex: "00".repeat(32),
             chain_id: 11_155_111,
             work: work.to_path_buf(),
+            log_dir: None,
         }
     }
 

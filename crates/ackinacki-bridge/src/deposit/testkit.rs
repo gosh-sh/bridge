@@ -1828,6 +1828,7 @@ impl World {
             confirmations: 12,
             state_dir: self.state.path().to_path_buf(),
             work_dir: Some(self.work.path().to_path_buf()),
+            log_dir: None,
             prover_timeout: Duration::from_secs(10),
             anchor_timeout: Some(Duration::from_secs(3600)),
             relayer_grace: Duration::from_secs(1),

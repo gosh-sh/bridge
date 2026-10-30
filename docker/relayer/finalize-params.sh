@@ -9,7 +9,7 @@ die() {
 }
 
 params_dir=${1:-}
-service_user=${2:-gosh-relayer}
+service_user=${2:-bridge}
 [[ -n "$params_dir" && -d "$params_dir" ]] ||
   die "usage: $0 PARAMS_DIR [SERVICE_USER]"
 id "$service_user" >/dev/null 2>&1 || die "service user does not exist: $service_user"

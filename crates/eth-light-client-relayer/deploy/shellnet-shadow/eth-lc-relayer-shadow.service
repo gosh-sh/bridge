@@ -16,7 +16,9 @@ Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Shadow: step only, no submitRotate (tvm-sdk#284 is not on shellnet nodes),
 # no one-way owner flip, no USDCBridge wiring.
 ExecStart=/mnt/data/gosh-eth-lc-relayer/bin/eth-lc-relayer daemon \
-    --state /mnt/data/gosh-eth-lc-relayer/state/eth-lc-relayer-state.json \
+    --state-dir /mnt/data/gosh-eth-lc-relayer/state \
+    --work-dir /mnt/data/gosh-eth-lc-relayer/work \
+    --log-dir /mnt/data/gosh-eth-lc-relayer/logs \
     --no-rotate --no-flip-owner --owner-hop \
     --poll-secs 64 --prove-timeout-secs 7200
 Restart=on-failure

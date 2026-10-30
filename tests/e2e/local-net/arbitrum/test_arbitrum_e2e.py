@@ -182,14 +182,17 @@ def test_30_sender_keys_funded(run, arb):
 
 
 def test_31_deposit_services_started(run):
-    """daemon-live and eth-lc-relayer arbitrum-anchors start and say so in their logs.
-    arbitrum-anchors has to run before the deposit: it takes the slot proofs when the deposit's batch lands, a minute or
-    two after the deposit."""
+    """daemon-live, eth-lc-relayer arbitrum-anchors and deposit-relayer daemon start from their
+    images and say so in their logs. arbitrum-anchors has to run before the deposit: it takes
+    the slot proofs when the deposit's batch lands, a minute or two after the deposit. The
+    deposit relayer finalizes the deposit beside the CLI; the second finalizeDeposit is a
+    no-op."""
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     # The ARB_RPC secret, when set, follows the keys on the job's stdin: ci-entry logs every
     # command line, so a secret never travels as a job argument.
     anchors_rpc = os.environ.get("ANCHORS_ARB_RPC", "")
     run.job("anchors", stdin=owner_keys() + ("\n" + anchors_rpc if anchors_rpc else ""))
+    run.job("deposit-relayer", stdin=owner_keys())
     # The texts relayer.rs logs at startup (`startup: bridge bundleStride matches`,
     # `daemon-live starting`); its later proving output pushes them out of a log tail fast.
     wait_for("daemon-live reads the bridge's bundle stride", lambda: "bundleStride matches" in run.log("relayer"),
@@ -203,7 +206,9 @@ def test_31_deposit_services_started(run):
              300, log=lambda: run.log("anchors"))
     wait_for("arbitrum-anchors starts", lambda: "arbitrum-anchors starting" in run.log("anchors"),
              300, log=lambda: run.log("anchors"))
-    for job in ("relayer", "anchors"):
+    wait_for("deposit-relayer starts its loop", lambda: "deposit daemon starting" in run.log("deposit-relayer"),
+             600, log=lambda: run.log("deposit-relayer"))
+    for job in ("relayer", "anchors", "deposit-relayer"):
         assert run.wait(job, 1) is None, f"{job} exited\n" + tail(run.log(job))
 
 

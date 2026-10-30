@@ -1,0 +1,169 @@
+# The service images (docker/Dockerfile, bridge-audit#135): built on every
+# pull request (no push), built and pushed to docker.gosh.sh on a push to main
+# and on a version tag. One image per target, tagged `sha-<12>` always,
+# `latest` on main, the tag on a release, `br_<branch>` for the cache.
+#
+# Secrets: DOCKER_GOSH_SH_PASSWORD for the registry (the same login the other
+# repositories' image builds use) and the Docker Hub pair teamgosh_login /
+# teamgosh_password for the base images. A pull request builds without
+# pushing and needs none of them.
+#
+# Woodpecker cannot make a plugin setting depend on the event, so each image
+# has a pull-request step (dry run) and a push step; `when` picks one.
+
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+  - event: tag
+  - event: manual
+
+variables:
+  # The stock buildx plugin: the server runs it privileged on its own (it is
+  # on the privileged-plugins list), so the steps need neither `privileged`
+  # nor a trust level on the repository.
+  - &buildx_image "woodpeckerci/plugin-docker-buildx:latest"
+  - docker_logins: &docker_logins
+      - registry: https://docker.gosh.sh
+        username: woodpecker
+        password:
+          from_secret: DOCKER_GOSH_SH_PASSWORD
+      - username:
+          from_secret: teamgosh_login
+        password:
+          from_secret: teamgosh_password
+  - when_pr: &when_pr
+      - event: pull_request
+  - when_push: &when_push
+      - event: push
+        branch: main
+      - event: tag
+      - event: manual
+  # Every target shares the builder stages, so the first image warms the
+  # cache mounts for the other three.
+  - build: &build
+      dockerfile: docker/Dockerfile
+      context: .
+      platforms: linux/amd64
+      tags_file: .tags
+      build_args:
+        SOURCE_COMMIT: ${CI_COMMIT_SHA}
+
+steps:
+  tags:
+    image: bash
+    commands:
+      - |
+        {
+          echo "sha-${CI_COMMIT_SHA:0:12}"
+          if [[ -n "${CI_COMMIT_TAG:-}" ]]; then echo "$CI_COMMIT_TAG"; fi
+          if [[ "$CI_PIPELINE_EVENT" == push && "$CI_COMMIT_BRANCH" == main ]]; then echo latest; fi
+          if [[ -n "${CI_COMMIT_SOURCE_BRANCH:-}" ]]; then echo "br_${CI_COMMIT_SOURCE_BRANCH//\//_}"; fi
+        } | tee .tags
+
+  # ---- pull request: build only -------------------------------------------
+  pr-bridge-relayer:
+    when: *when_pr
+    depends_on: [tags]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-relayer
+      repo: docker.gosh.sh/bridge-relayer
+      dry_run: true
+  pr-bridge-deposit-relayer:
+    when: *when_pr
+    depends_on: [pr-bridge-relayer]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-deposit-relayer
+      repo: docker.gosh.sh/bridge-deposit-relayer
+      dry_run: true
+  pr-bridge-eth-lc-relayer:
+    when: *when_pr
+    depends_on: [pr-bridge-relayer]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-eth-lc-relayer
+      repo: docker.gosh.sh/bridge-eth-lc-relayer
+      dry_run: true
+  pr-bridge-cli:
+    when: *when_pr
+    depends_on: [pr-bridge-relayer]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-cli
+      repo: docker.gosh.sh/bridge-cli
+      dry_run: true
+
+  # ---- main and tags: build and push ---------------------------------------
+  push-bridge-relayer:
+    when: *when_push
+    depends_on: [tags]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-relayer
+      repo: docker.gosh.sh/bridge-relayer
+      logins: *docker_logins
+      cache_to:
+        - type=inline,mode=max
+      cache_from:
+        - docker.gosh.sh/bridge-relayer:latest
+  push-bridge-deposit-relayer:
+    when: *when_push
+    depends_on: [push-bridge-relayer]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-deposit-relayer
+      repo: docker.gosh.sh/bridge-deposit-relayer
+      logins: *docker_logins
+      cache_to:
+        - type=inline,mode=max
+      cache_from:
+        - docker.gosh.sh/bridge-deposit-relayer:latest
+  push-bridge-eth-lc-relayer:
+    when: *when_push
+    depends_on: [push-bridge-relayer]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-eth-lc-relayer
+      repo: docker.gosh.sh/bridge-eth-lc-relayer
+      logins: *docker_logins
+      cache_to:
+        - type=inline,mode=max
+      cache_from:
+        - docker.gosh.sh/bridge-eth-lc-relayer:latest
+  push-bridge-cli:
+    when: *when_push
+    depends_on: [push-bridge-relayer]
+    image: *buildx_image
+    settings:
+      <<: *build
+      target: bridge-cli
+      repo: docker.gosh.sh/bridge-cli
+      logins: *docker_logins
+      cache_to:
+        - type=inline,mode=max
+      cache_from:
+        - docker.gosh.sh/bridge-cli:latest
+
+  # The compose file must stay valid against the example settings: a
+  # structural mistake fails here, not on the host.
+  compose-config:
+    depends_on: [tags]
+    image: docker:27-cli
+    commands:
+      # The example settings against an empty host layout: env_file entries
+      # must exist for `config`, their contents do not matter here.
+      - mkdir -p /tmp/bridge/opt/env /tmp/bridge/opt/keys /tmp/bridge/data
+      - for f in daemon-live deposit-relayer eth-lc-relayer arbitrum-anchors; do touch /tmp/bridge/opt/env/$f.env; done
+      - cp docker/.env.example docker/.env
+      - sed -i 's/^BRIDGE_IMAGE_TAG=.*/BRIDGE_IMAGE_TAG=ci/; s/^METRICS_LISTEN_ADDR=.*/METRICS_LISTEN_ADDR=127.0.0.1/; s#^BRIDGE_OPT=.*#BRIDGE_OPT=/tmp/bridge/opt#; s#^BRIDGE_DATA=.*#BRIDGE_DATA=/tmp/bridge/data#' docker/.env
+      - docker compose -f docker/compose.yaml --project-directory docker --profile ops config --quiet
+      - rm docker/.env

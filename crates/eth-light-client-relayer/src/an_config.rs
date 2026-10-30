@@ -16,15 +16,11 @@ pub struct AnConfig {
     #[serde(default)]
     pub keys_path: String,
     #[serde(default)]
-    pub light_client_abi_path: String,
-    #[serde(default)]
     pub light_client: String,
     #[serde(default)]
     pub sender: String,
     #[serde(default)]
     pub usdc_bridge: String,
-    #[serde(default)]
-    pub usdc_abi_path: String,
     #[serde(default = "default_confirm_timeout_secs")]
     pub confirm_timeout_secs: u64,
 }
@@ -34,27 +30,26 @@ impl Default for AnConfig {
         Self {
             graphql_url: String::new(),
             keys_path: String::new(),
-            light_client_abi_path: String::new(),
             light_client: String::new(),
             sender: String::new(),
             usdc_bridge: String::new(),
-            usdc_abi_path: String::new(),
             confirm_timeout_secs: default_confirm_timeout_secs(),
         }
     }
 }
 
 impl AnConfig {
+    /// The ABIs are built in ([`crate::abi`]); only the endpoint, the key
+    /// and the two addresses have to be given.
     pub fn is_live_submit_ready(&self) -> bool {
         !self.graphql_url.is_empty()
             && !self.keys_path.is_empty()
-            && !self.light_client_abi_path.is_empty()
             && !self.light_client.is_empty()
             && !self.sender.is_empty()
     }
 
     pub fn is_usdc_ready(&self) -> bool {
-        !self.usdc_bridge.is_empty() && !self.usdc_abi_path.is_empty()
+        !self.usdc_bridge.is_empty()
     }
 
     pub fn to_submit_config(&self) -> AnSubmitConfig {
@@ -96,9 +91,7 @@ impl AnConfig {
     /// half could run.
     pub fn validate_flip_owner(&self, flip_owner: bool) -> Result<(), RelayerError> {
         if flip_owner && !self.is_usdc_ready() {
-            return Err(RelayerError::other(
-                "--flip-owner needs AN_USDC_BRIDGE and AN_USDC_ABI_PATH",
-            ));
+            return Err(RelayerError::other("--flip-owner needs AN_USDC_BRIDGE"));
         }
         Ok(())
     }
@@ -114,8 +107,18 @@ mod tests {
         assert!(an.validate_flip_owner(false).is_ok());
         assert!(an.validate_flip_owner(true).is_err());
         an.usdc_bridge = format!("{0}::{0}", "1a".repeat(32));
-        assert!(an.validate_flip_owner(true).is_err());
-        an.usdc_abi_path = "abi/USDCBridge.abi.json".into();
         assert!(an.validate_flip_owner(true).is_ok());
+    }
+
+    #[test]
+    fn live_submit_needs_no_abi_path() {
+        let an = AnConfig {
+            graphql_url: "https://an.example/graphql".into(),
+            keys_path: "keys.json".into(),
+            light_client: format!("{0}::{0}", "2b".repeat(32)),
+            sender: format!("{0}::{0}", "2b".repeat(32)),
+            ..AnConfig::default()
+        };
+        assert!(an.is_live_submit_ready());
     }
 }

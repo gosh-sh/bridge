@@ -116,10 +116,15 @@ whose `authorized_keys` entry allows only the dispatcher (a copy of
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
 socket and capped memory and CPU (40 GB / 12 cores for the build and the deposit prover, 64 GB /
 32 cores for the provers that have to keep pace: the light client's step prover, which has an
-epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once in a `rust:1-bookworm` container
-(`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
-set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own
-where `nginx0` and `node0..4` are proxies to the runner's tunnels.
+epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once with `docker/Dockerfile`:
+the `tools` target gives every binary as plain files (`/bin-ci` in the jobs; `ackinacki-bridge`
+with `dev-unfixed-bridge`, since no release has set `MIN_BRIDGE_VERSION` yet), and the
+`bridge-relayer`, `bridge-eth-lc-relayer` and `bridge-deposit-relayer` targets give the
+service images, so the service jobs (`relayer`, `lc-relayer`, `anchors`, `deposit-relayer`,
+`lc-keygen`, `lc-prove`) run from the images a host deploys. `prover-host/build.sh` then
+builds the EVM contracts for `deploy.sh`. The jobs run on a docker network of its own where
+`nginx0` and `node0..4` are proxies to the runner's tunnels. The dispatcher's copy on the host
+must be updated by hand when `ci-entry` changes.
 
 A run is named `arbitrum-e2e-<UTC timestamp>`. Its work directory is `runs/<run>/` and its
 logs `run-logs/<run>/<job>.log` in the CI directory, an external volume every job mounts as

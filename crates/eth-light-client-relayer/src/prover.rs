@@ -118,11 +118,15 @@ pub struct SubprocessProverConfig {
     pub prover_dir: Option<PathBuf>,
     pub srs_path: PathBuf,
     pub timeout: Duration,
-    /// Where to keep the prover transcript
-    /// (`prover-<attested_slot>-{stdout,stderr}.log`). `None` leaves it in
-    /// the per-run temp dir (lost after the run); the error message still
+    /// Where each prove gets its directory of inputs and outputs, removed
+    /// once the bundle is read back. Never the system temp directory
+    /// (bridge-audit#132).
+    pub work_dir: PathBuf,
+    /// Where the prover transcripts go, one pair of files per run
+    /// (`step-<attested_slot>-{stdout,stderr}.log`,
+    /// `rotate-<period>-{stdout,stderr}.log`); the error message still
     /// carries the stderr tail.
-    pub log_dir: Option<PathBuf>,
+    pub log_dir: PathBuf,
 }
 
 impl SubprocessProverConfig {
@@ -181,9 +185,39 @@ impl SubprocessProofGenerator {
         }
     }
 
+    /// One directory per prove inside the work directory, gone with the
+    /// returned guard; never the system temp directory.
+    fn prove_dir(&self, prefix: &str) -> Result<tempfile::TempDir, RelayerError> {
+        let fail = |e: std::io::Error| {
+            RelayerError::ProofGeneration(format!(
+                "work directory {}: {e}",
+                self.cfg.work_dir.display()
+            ))
+        };
+        std::fs::create_dir_all(&self.cfg.work_dir).map_err(fail)?;
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(&self.cfg.work_dir)
+            .map_err(fail)
+    }
+
+    /// The transcript of one prover run, both streams, in the log
+    /// directory. Written even when the prover failed: that is when it is
+    /// read.
+    fn write_transcript(&self, stem: &str, output: &std::process::Output) {
+        let _ = std::fs::create_dir_all(&self.cfg.log_dir);
+        let _ = std::fs::write(
+            self.cfg.log_dir.join(format!("{stem}-stdout.log")),
+            &output.stdout,
+        );
+        let _ = std::fs::write(
+            self.cfg.log_dir.join(format!("{stem}-stderr.log")),
+            &output.stderr,
+        );
+    }
+
     async fn run_step(&self, update: &FinalityUpdate) -> Result<StepProofBundle, RelayerError> {
-        let work = tempfile::tempdir()
-            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
+        let work = self.prove_dir(&format!("step-{}-", update.attested_slot))?;
         let json_path = work.path().join("finality_update.json");
         std::fs::write(&json_path, &update.raw_json)?;
         if update.committee_json.is_empty() {
@@ -236,19 +270,9 @@ impl SubprocessProofGenerator {
                     self.cfg.step_prover_bin.display()
                 ))
             })?;
-        // Keep the prover transcript next to the bundle: `prove-one` copies the
-        // bundle out, the daemon's tempdir is dropped, so the error also
-        // carries the stderr tail.
-        let log_dir = match &self.cfg.log_dir {
-            Some(d) => {
-                let _ = std::fs::create_dir_all(d);
-                d.clone()
-            },
-            None => out_dir.clone(),
-        };
-        let stem = format!("prover-{}", update.attested_slot);
-        let _ = std::fs::write(log_dir.join(format!("{stem}-stdout.log")), &output.stdout);
-        let _ = std::fs::write(log_dir.join(format!("{stem}-stderr.log")), &output.stderr);
+        // The transcript outlives the prove directory, which is dropped with
+        // the bundle; the error also carries the stderr tail.
+        self.write_transcript(&format!("step-{}", update.attested_slot), &output);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: String = stderr
@@ -313,8 +337,7 @@ impl SubprocessProofGenerator {
                  period {to_period}; prove the hand-off on n14 and submit-rotate"
             )));
         }
-        let work = tempfile::tempdir()
-            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
+        let work = self.prove_dir(&format!("rotate-{to_period}-"))?;
         let tree_out = work.path().join("rotate_tree");
         std::fs::create_dir_all(&tree_out)?;
         let rotate_bin = rotate_bin.ok_or_else(|| {
@@ -343,20 +366,34 @@ impl SubprocessProofGenerator {
                 chain.gloas_fork_slot.to_string(),
             );
         }
-        let status = cmd
+        // Both streams are read to the end: `status()` with piped streams
+        // would leave the prover blocked on a full pipe.
+        let output = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .status();
-        let child = tokio::time::timeout(self.cfg.timeout, status)
+            .output();
+        let output = tokio::time::timeout(self.cfg.timeout, output)
             .await
             .map_err(|_| RelayerError::ProofGeneration("rotate prove timed out".into()))?
             .map_err(|e| {
                 RelayerError::ProofGeneration(format!("spawn {}: {e}", rotate_bin.display()))
             })?;
-        if !child.success() {
+        self.write_transcript(&format!("rotate-{to_period}"), &output);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
             return Err(RelayerError::ProofGeneration(format!(
-                "rotate_tree_n8 exited {child}"
+                "rotate_tree_n8 exited {}; stderr tail:\n{tail}",
+                output.status
             )));
         }
         let bundle = RotateProofBundle::from_dir(&tree_out)?;
@@ -446,13 +483,17 @@ mod tests {
     }
 
     fn cfg(step: &Path, rotate: Option<&Path>, dir: Option<&Path>) -> SubprocessProverConfig {
+        // The tests keep the fake prover in a temp directory of their own:
+        // work and log directories go beside it.
+        let root = step.parent().expect("the fake prover has a directory");
         SubprocessProverConfig {
             step_prover_bin: step.to_path_buf(),
             rotate_prover_bin: rotate.map(Path::to_path_buf),
             prover_dir: dir.map(Path::to_path_buf),
             srs_path: "srs.bin".into(),
             timeout: Duration::from_secs(10),
-            log_dir: None,
+            work_dir: root.join("work-files"),
+            log_dir: root.join("logs"),
         }
     }
 
@@ -647,13 +688,15 @@ mod tests {
 
     #[tokio::test]
     async fn run_rotate_refuses_a_live_period_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
         let gen = SubprocessProofGenerator::new(SubprocessProverConfig {
             step_prover_bin: "export_step_vk_blob".into(),
             rotate_prover_bin: None,
             prover_dir: Some(".".into()),
             srs_path: ".".into(),
             timeout: Duration::from_secs(1),
-            log_dir: None,
+            work_dir: dir.path().join("work-files"),
+            log_dir: dir.path().join("logs"),
         });
         let err = gen.generate_rotate(1, None).await.unwrap_err();
         match err {

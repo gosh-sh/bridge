@@ -45,7 +45,8 @@ remap_compose_runtime_paths
 printf 'Starting shellnet -> EVM chain %s L2 relayer: source=%s bridge=%s EOA=%s seed=%s\n' \
   "$EXPECTED_EVM_CHAIN_ID" "$EXPECTED_BRIDGE_COMMIT" "$BRIDGE_ADDRESS" \
   "$RELAYER_ADDRESS" "$BRIDGE_BOOTSTRAP_SEQNO"
-cd /opt/gosh-relayer/prover
+mkdir -p "$BRIDGE_DUMP_SUBMISSIONS_DIR"
+cd "$BRIDGE_WORK_DIR"
 
 # Run as a child, not exec'd: its exit status decides what Docker sees. 78
 # means the Acki Nacki chain is behind the bridge (a restarted network, or a
@@ -53,7 +54,9 @@ cd /opt/gosh-relayer/prover
 # `restart: unless-stopped` the container would rerun the preflight and the
 # startup scan and stop again every few minutes. It stays up instead, with
 # the daemon stopped, until an operator stops or recreates it.
-"$RELAYER_BINARY" --state "$RELAYER_STATE_PATH" daemon-live &
+# The cursor file relayer-state.json sits in BRIDGE_STATE_DIR with the
+# prover state (bridge-audit#132); the daemon names it itself.
+"$RELAYER_BINARY" daemon-live &
 daemon=$!
 trap 'kill -TERM "$daemon" 2>/dev/null || true' TERM INT
 status=0

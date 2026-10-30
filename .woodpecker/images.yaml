@@ -19,7 +19,10 @@ when:
   - event: manual
 
 variables:
-  - &buildx_image "docker.gosh.sh/plugin-docker-buildx-cond:stable"
+  # The stock buildx plugin: the server runs it privileged on its own (it is
+  # on the privileged-plugins list), so the steps need neither `privileged`
+  # nor a trust level on the repository.
+  - &buildx_image "woodpeckerci/plugin-docker-buildx:latest"
   - docker_logins: &docker_logins
       - registry: https://docker.gosh.sh
         username: woodpecker
@@ -63,7 +66,6 @@ steps:
     when: *when_pr
     depends_on: [tags]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-relayer
@@ -73,7 +75,6 @@ steps:
     when: *when_pr
     depends_on: [pr-bridge-relayer]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-deposit-relayer
@@ -83,7 +84,6 @@ steps:
     when: *when_pr
     depends_on: [pr-bridge-relayer]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-eth-lc-relayer
@@ -93,7 +93,6 @@ steps:
     when: *when_pr
     depends_on: [pr-bridge-relayer]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-cli
@@ -105,7 +104,6 @@ steps:
     when: *when_push
     depends_on: [tags]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-relayer
@@ -119,7 +117,6 @@ steps:
     when: *when_push
     depends_on: [push-bridge-relayer]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-deposit-relayer
@@ -133,7 +130,6 @@ steps:
     when: *when_push
     depends_on: [push-bridge-relayer]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-eth-lc-relayer
@@ -147,7 +143,6 @@ steps:
     when: *when_push
     depends_on: [push-bridge-relayer]
     image: *buildx_image
-    privileged: true
     settings:
       <<: *build
       target: bridge-cli

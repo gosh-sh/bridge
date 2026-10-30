@@ -28,6 +28,32 @@ assigns it when the release is tagged.
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
   flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+- **A second `AckiNackiBridge` on the same chain no longer pays withdrawals the first one already
+  paid.** A withdrawal proof names the chain, not the bridge, and each bridge keeps its own
+  nullifiers, so a replacement bridge could pay an old burn again out of new deposits. The
+  constructor's `BridgeWithdrawConfig` gains a last field, `predecessor`: the bridge this one
+  replaces on the same chain, or zero for the first one there. `withdrawByProof` and
+  `isNullifierUsed` then treat every nullifier the predecessor — or its own predecessor, and so
+  on — paid as used (`NullifierAlreadyUsed`). The constructor reverts `InvalidPredecessor` unless
+  the address is a bridge on this chain for the same `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`.
+  The constructor ABI changes, so tooling that encodes it must be updated. Already deployed
+  bridges are unchanged. `DeployRealBridge` now requires `PREDECESSOR_BRIDGE` on every deploy
+  (the zero address for the first bridge on a chain) and refuses a predecessor that is not paused;
+  the other deploy scripts read it with a zero default. The old bridge does not consult the new
+  one: keep it paused for good. The cutover order is in `docs/aave-yield.md`, "Replacing a bridge
+  on the same chain".
+
+### Added
+
+- `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused bridge only) hands the whole
+  `treasuryBalance` to the bridge whose `predecessor()` is this one, so the eccUSDC it backs stays
+  backed after a cutover. Pull AAVE principal back first (`TreasuryNotLiquid` otherwise). Emits
+  `TreasuryMigrated`; the old bridge cannot pay anything afterwards.
+- `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
+  `treasuryBalance` without a `Deposit` event, so nothing is minted on Acki Nacki. It is how
+  `migrateTreasury` delivers, and how the owner covers a predecessor deployed before
+  `migrateTreasury` existed, such as the Arbitrum Sepolia bridge
+  `0x3FB082a905a895151224F6d93bD074E816338638`. Emits `TreasuryFunded`.
 
 ### Fixes
 

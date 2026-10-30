@@ -159,7 +159,61 @@ excessUsdc() > 0 across a collection cycle        # uncollected surplus; the nex
 capped at 50 % (`:67`). Ours, not an AAVE convention. `setAaveEnabled` — gate on new supplies;
 `emergencyWithdrawAll` turns it off, and only an explicit call turns it back on.
 
-The owner cannot reduce `treasuryBalance` and cannot replace a verifier — those bindings are
-immutable. The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
+The owner cannot replace a verifier — those bindings are immutable — and can reduce
+`treasuryBalance` only by handing all of it to a successor bridge with `migrateTreasury` (see
+[Replacing a bridge on the same chain](#replacing-a-bridge-on-the-same-chain)). The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
 `applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield controls above stay
 available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec.md`, §10.1).
+
+## Replacing a bridge on the same chain
+
+A withdrawal proof names the destination chain, not a bridge contract, and each bridge keeps its
+own record of the withdrawals it paid. A new bridge on a chain that already has one therefore has
+to be told about the old one: it is deployed with `predecessor` set to the old bridge's address
+(`PREDECESSOR_BRIDGE` for `DeployRealBridge`, which requires the variable on every deploy — the
+zero address for the first bridge on a chain). The new bridge then refuses, with
+`NullifierAlreadyUsed`, every withdrawal the old bridge — or any bridge before it — already paid,
+and its `isNullifierUsed` reports those as used. The old bridge does not consult the new one, so
+once the new bridge is live the old one never pays again.
+
+The old bridge's user principal (`treasuryBalance`) has to follow the eccUSDC it backs, or the new
+bridge pays those withdrawals out of other depositors' money and eventually stops with
+`WithdrawTreasuryShortfall`. So the order is:
+
+1. **Pause the old bridge** (`pause()`) and leave it paused for good. `DeployRealBridge`
+   refuses a predecessor that is not paused. The yield controls keep working while it is
+   paused: pull its AAVE position back with `withdrawFromAave` or `emergencyWithdrawAll`, so
+   its whole `treasuryBalance` is liquid USDC.
+2. **Deploy the new bridge** with `PREDECESSOR_BRIDGE` set to the old one. The constructor
+   reverts `InvalidPredecessor` unless that address has code on this chain, answers
+   `isNullifierUsed`, and was deployed for the same `WITHDRAW_DAPP_FR` and `WITHDRAW_ACC_FR`.
+   For a third bridge, name the second one: each bridge answers for its own predecessor, so
+   one address covers the whole line.
+3. **Move the principal.**
+   - An old bridge that has `migrateTreasury(address)` (this release onwards): its owner calls
+     `migrateTreasury(<new bridge>)`. It needs the old bridge paused, its `treasuryBalance`
+     liquid (`TreasuryNotLiquid` otherwise), and a target whose `predecessor()` is the old
+     bridge (`NotSuccessor` otherwise). The whole `treasuryBalance` moves; the old bridge's
+     book drops to 0, so it cannot pay anything even if unpaused. USDC above the book and any
+     aUSDC yield stay behind for `skimExcessUsdc` / `harvestYield`. The new bridge emits
+     `TreasuryFunded`, the old one `TreasuryMigrated`.
+   - An older bridge, such as the 421614 bridge `0x3FB082a905a895151224F6d93bD074E816338638`, has
+     no way to release its principal. The new bridge's owner covers that amount instead:
+     `approve` the new bridge, then `fundTreasury(<old treasuryBalance>)`. The USDC left in the
+     old bridge stays there.
+
+   `fundTreasury` credits `treasuryBalance` without a `Deposit` event, so nothing is minted on
+   Acki Nacki. Only the owner and `predecessor` may call it, and it works while the bridge is
+   paused.
+4. **Move Acki Nacki and the off-chain services over**: trust the new bridge on `eccUSDCBridge`,
+   stop trusting the old one, point relayers and `ackinacki-bridge` at the new address, then
+   `unpause()` the new bridge if it was deployed paused.
+
+Check the new bridge before unpausing anything that depends on it:
+
+```bash
+cast call $NEW 'predecessor()(address)' --rpc-url $RPC               # the old bridge
+cast call $OLD 'paused()(bool)' --rpc-url $RPC                        # true
+cast call $NEW 'isNullifierUsed(uint256)(bool)' $PAID --rpc-url $RPC  # true for a nullifier the old bridge paid
+cast call $NEW 'treasuryBalance()(uint256)' --rpc-url $RPC              # the old bridge's book, after step 3
+```

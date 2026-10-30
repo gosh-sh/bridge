@@ -36,6 +36,12 @@ import "./ShplonkDeployLib.sol";
  *     script always wires Circuit 4, so WIRE_VERIFY_BLOCK=true is required on
  *     every chain (`WithdrawRequiresVerifyBlock`). VerifyBlock-only bring-up:
  *     DeployShellnetE2EBridge on local anvil.
+ *
+ * Predecessor:
+ *   - PREDECESSOR_BRIDGE is required: the bridge this deploy replaces on the
+ *     same chain, or the zero address for the first bridge there. A non-zero
+ *     predecessor must already be paused; the new bridge refuses the
+ *     withdrawals it paid.
  */
 contract DeployRealBridge is Script {
     struct WireInputs {
@@ -48,6 +54,7 @@ contract DeployRealBridge is Script {
         uint256 altDstChainId;
         uint256 altDstHostChainId;
         uint256 altTokenId;
+        address predecessor;
     }
 
     struct DeployResult {
@@ -70,6 +77,7 @@ contract DeployRealBridge is Script {
         address withdrawalVerifierAddr;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevAnchor;
+        address predecessor;
     }
 
     address constant AXIOM_V2_CORE_MAINNET = 0x69963768F8407dE501029680dE46945F838Fc98B;
@@ -99,6 +107,14 @@ contract DeployRealBridge is Script {
             // pair. Same class as altTokenId: envOr defaults to 0, then
             // immutable.
         }
+        if (w.predecessor != address(0)) {
+            // The predecessor does not consult its successor's nullifiers,
+            // so it must not pay anything once the successor is live.
+            require(
+                AckiNackiBridge(w.predecessor).paused(),
+                "pause PREDECESSOR_BRIDGE before the deploy"
+            );
+        }
 
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
 
@@ -121,7 +137,8 @@ contract DeployRealBridge is Script {
                 layerHashesVerifierAddr: r.layerHashesVerifierAddr,
                 withdrawalVerifierAddr: r.withdrawalVerifierAddr,
                 genesisBkSetCommitment: w.genesisBkSetCommitment,
-                genesisPrevAnchor: w.genesisPrevAnchor
+                genesisPrevAnchor: w.genesisPrevAnchor,
+                predecessor: w.predecessor
             })
         );
         console.log("\nDeployment info saved to: deployment_real.json");
@@ -149,6 +166,9 @@ contract DeployRealBridge is Script {
         w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
         w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
         w.altTokenId = vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(0));
+        // No default: forgetting the bridge being replaced would let the new
+        // one pay withdrawals the old one already paid.
+        w.predecessor = vm.envAddress("PREDECESSOR_BRIDGE");
     }
 
     function _deployBridge(address oracleAddr, WireInputs memory w)
@@ -161,7 +181,12 @@ contract DeployRealBridge is Script {
             w.wireVerifyBlock, w.genesisBkSetCommitment, w.genesisPrevAnchor
         );
         AckiNackiBridge.BridgeWithdrawConfig memory bw = _buildWithdrawConfig(
-            w.withdrawDappFr, w.withdrawAccFr, w.altDstChainId, w.altDstHostChainId, w.altTokenId
+            w.withdrawDappFr,
+            w.withdrawAccFr,
+            w.altDstChainId,
+            w.altDstHostChainId,
+            w.altTokenId,
+            w.predecessor
         );
 
         if (w.wireVerifyBlock) {
@@ -195,6 +220,7 @@ contract DeployRealBridge is Script {
             console.log("LayerHashesAggregatorVerifier:", r.layerHashesVerifierAddr);
         }
         console.log("BridgeWithdrawalAggregatorVerifier:", r.withdrawalVerifierAddr);
+        console.log("Predecessor:", w.predecessor);
         if (!useAxiomOracle) {
             console.log("\n  ** WARNING: MockBlockHeaderOracle - NOT for production **");
         }
@@ -300,7 +326,8 @@ contract DeployRealBridge is Script {
         uint256 accFr,
         uint256 altDstChainId,
         uint256 altDstHostChainId,
-        uint256 altTokenId
+        uint256 altTokenId,
+        address predecessor
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");
         IBridgeWithdrawalVerifier w =
@@ -313,7 +340,8 @@ contract DeployRealBridge is Script {
             accFr: accFr,
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
-            altTokenId: altTokenId
+            altTokenId: altTokenId,
+            predecessor: IPredecessorBridge(predecessor)
         });
     }
 
@@ -345,6 +373,9 @@ contract DeployRealBridge is Script {
                 verifierJson,
                 '  "withdrawal_verifier": "',
                 vm.toString(a.withdrawalVerifierAddr),
+                '",\n',
+                '  "predecessor": "',
+                vm.toString(a.predecessor),
                 '",\n'
             )
         );

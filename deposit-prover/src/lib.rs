@@ -1,8 +1,10 @@
 //! Deposit Prover Library
 //!
 //! This library provides ZK proof generation for Ethereum deposit events.
-//! It uses axiom-eth to prove that a specific Deposit event was emitted on
-//! Ethereum by verifying the MPT proof and extracting event data.
+//! It uses axiom-eth to check a Deposit log against an MPT proof and a block
+//! header and to extract the event data. Its keccak results are promise outputs
+//! the prover supplies, so a proof does not show the event was emitted on
+//! Ethereum (see `README.md`).
 
 pub mod aggregation;
 pub mod circuit_v2;

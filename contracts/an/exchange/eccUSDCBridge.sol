@@ -126,10 +126,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     mapping(uint256 => mapping(uint256 => bool)) _trustedL1Bridge;
 
     // Canonicality anchor: source chain id -> L1 block hash -> admitted. The
-    // deposit proof binds its event to a block, but says nothing about that
-    // block sitting on the canonical chain — a privately mined block carrying a
-    // fabricated deposit event proves just as well. This mapping is that
-    // assertion, made from outside the proof.
+    // deposit proof's block-hash instances (#9/#10) are its header keccak
+    // promise output, and `finalizeDeposit` does not read the promise
+    // commitment (#11), so the proof shows neither that the event is in that
+    // block nor that the block is canonical. This mapping only restricts
+    // #9/#10 to hashes admitted from outside the proof.
     //
     // Fail-closed: an unset entry rejects the deposit. Like `_trustedL1Bridge`
     // this is NOT threaded through the `onCodeUpgrade` migration cell, so after
@@ -706,8 +707,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         Accepts a hash rather than a header so that swapping this writer
     ///         for the light client later needs no change to `finalizeDeposit`.
     /// @param chainId   — EIP-155 chain id of the source L1/L2.
-    /// @param blockHash — the block's 256-bit hash, as the circuit binds it into
-    ///                    public inputs #9/#10 (`hi << 128 | lo`).
+    /// @param blockHash — the block's 256-bit hash, in the form public inputs
+    ///                    #9/#10 carry it (`hi << 128 | lo`).
     /// @param accepted  — true to admit, false to retract (e.g. on discovering
     ///                    the block was reorged out before any deposit landed).
     function setAcceptedBlockHash(uint256 chainId, uint256 blockHash, bool accepted)
@@ -980,12 +981,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         return _paused;
     }
 
-    /// @notice Finalizes an L1 deposit proven by the final ETH-deposit halo2
-    ///         circuit (receipt-proof of the L1 deposit event). The relayer
-    ///         passes the proof and its public-inputs blob verbatim; we verify
-    ///         against `VK_BLOB` and read every deposit field straight out of the
-    ///         PROVEN instances — amount, recipient and source identity are all
-    ///         proof-bound, nothing is caller-set. A deterministic
+    /// @notice Finalizes an L1 deposit with a proof of the final ETH-deposit
+    ///         halo2 circuit. Its keccak results are promise outputs this
+    ///         function does not check (see the canonical-chain gate below), so
+    ///         the proof does not show the deposit event happened on L1. The
+    ///         relayer passes the proof and its public-inputs blob verbatim; we
+    ///         verify against `VK_BLOB` and read every deposit field straight
+    ///         out of the verified instances — amount, recipient and source
+    ///         identity, nothing is caller-set. A deterministic
     ///         `DepositVoucher` (keyed on the proof-bound deposit identity) gives
     ///         replay protection; it calls back `confirmDeposit` to mint + pay.
     /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
@@ -1004,8 +1007,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(f.amount > 0, ERR_ZERO_AMOUNT);
         require(f.amount <= MAX_TRANSFER_AMOUNT, ERR_TRANSFER_TOO_LARGE);
         require(_outstandingByChain[f.chainId] + f.amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
-        // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
-        // pins which (chain, bridge contract) pairs this side trusts. The deposit
+        // (chainId, contractAddr) come from the verified instances; the
+        // allowlist pins which (chain, bridge contract) pairs this side trusts. The deposit
         // passes if its proven address is in the chain's trusted set — an absent
         // entry is false, so unknown chains/addresses reject. The != 0 guard
         // keeps a stray `_trustedL1Bridge[chainId][0]=true` from ever admitting a
@@ -1318,7 +1321,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     }
 
     /// @dev Read ONLY the block-hash halves (Fr #9 = hi, #10 = lo) out of the
-    ///      same proven blob, and recombine them the way the circuit binds
+    ///      same proven blob, and recombine them the way the circuit splits
     ///      them: `hi << 128 | lo`. Kept separate from `_parsePublicInputs` so
     ///      the pre-accept path does not pay for the extra two field elements.
     function _parseBlockHash(bytes publicInputs) private pure returns (uint256) {

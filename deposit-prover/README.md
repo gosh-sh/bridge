@@ -46,7 +46,8 @@ trie or the block hash are the real ones.
    including the hash of a block that was mined. The receipt and the trie are whatever
    the other promise rows say. The circuit does not evaluate keccak. Public input 11 is
    a Poseidon of the promise table the prover loads
-   (`assign_and_compute_commitment` in axiom-eth `promise_loader/single.rs` at
+   (`assign_and_compute_commitment`, implemented in axiom-eth
+   `promise_loader/comp_loader.rs` and called from `promise_loader/single.rs` at
    `1d61be0`), not a commitment to the calls. The lookup only requires each call to
    appear as a row. `mock_fulfill_keccak_promises` (`examples/export_blake2b_proof.rs`,
    `src/prover.rs`, `src/provable.rs`) pads that table to `FIXED_KECCAK_CAPACITY`. A row
@@ -153,7 +154,8 @@ can differ for one witness: a row no call reads is not fixed by that witness (it
   input, such as `parentHash`, the same carry leaves the RLC equality and the 12 public
   inputs unchanged.
 
-  The header is decoded as a variable-length list against the 24-slot table. For a slot past
+  The header is decoded as a variable-length list against the 24-slot table, one decoder
+  step per slot. When the list has fewer than 24 fields, for each slot past
   the list the decoder still reads `header[header_len]` as the next prefix and runs
   `parse_rlp_prefix` on it. Phase 1 checks that this prefix, the length bytes and the payload
   concatenate to `encoded_item`. `encoded_item_len` adds the unmasked `is_not_literal`
@@ -165,12 +167,14 @@ can differ for one witness: a row no call reads is not fixed by that witness (it
   are 8 (`configs/circuit_params.json`). Under that comparison the field elements `-1` through
   `-64` also classify as literals (`is_not_literal` 0 and `len_len` 0) and pass; `-65` fails
   the comparison's own range check. Every value that passes has `len_len` 0, so the index does
-  not advance and `[header_len+1..792]` is not read. The first tail cell is constrained to one
-  of those values. Slot 6 of `BLOCK_HEADER_MAX_FIELD_LENS` is 256 bytes, and nothing in
+  not advance and `[header_len+1..792]` is not read. With fewer than 24 fields, the first tail
+  cell is constrained to one of those values. A 24-field header, which the decoder accepts,
+  leaves no slot past the list: nothing reads `header[header_len]`, and the whole tail is
+  unconstrained. Slot 6 of `BLOCK_HEADER_MAX_FIELD_LENS` is 256 bytes, and nothing in
   `circuit_v2.rs` reads the header's `list_len` (the receipt log's `list_len` is the one it
   checks, around `:417-421`), so an unused slot can be that 256-byte slot. The axiom-eth
-  comment that cells past the list should be 0 describes the cells after this first tail cell,
-  which the decoder does not read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
+  comment that cells past the list should be 0 describes the tail cells the decoder does not
+  read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
   `header_len` to equal the RLP list length, so counting an extra byte as part of the header is
   rejected (`mock_fixture --mutate header-pad`).
 

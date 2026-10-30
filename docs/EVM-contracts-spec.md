@@ -329,15 +329,16 @@ Notes that matter downstream:
   same two preimages. Bytes past the hashed length of either encoding are range-checked
   and are not an input to that hash. RLP cells
   past `field_len` or `encoded_item_len` are outside the phase-1 RLC; cells inside the
-  length are bound by that RLC, not byte for byte. `header[header_len]` is the next prefix
-  the variable-length decoder reads for every slot past the list. Phase 1 requires
-  `is_not_literal` to be 0 there: `encoded_item_len` adds the unmasked flag, and the
-  concatenated lengths were masked by `field_in_list` (0). Bytes `0x00`–`0x7f` pass. Any
-  byte `≥ 0x80` fails. With this circuit's lookup bits of 8, the field elements `-1`
-  through `-64` also pass, each with `len_len` 0. Every passing value has `len_len` 0, so
-  `[header_len+1..792]` is not read. The first tail cell is constrained to one of those
-  values. Slot 6 is 256 bytes and the header `list_len` is unused, so an unused slot can
-  be wider than 32 bytes.
+  length are bound by that RLC, not byte for byte. When the header has fewer than 24 fields,
+  `header[header_len]` is the next prefix the variable-length decoder reads for every slot
+  past the list. Phase 1 requires `is_not_literal` to be 0 there: `encoded_item_len` adds
+  the unmasked flag, and the concatenated lengths were masked by `field_in_list` (0). Bytes
+  `0x00`–`0x7f` pass. Any byte `≥ 0x80` fails. With this circuit's lookup bits of 8, the
+  field elements `-1` through `-64` also pass, each with `len_len` 0. Every passing value
+  has `len_len` 0, so `[header_len+1..792]` is not read, and the first tail cell is
+  constrained to one of those values. A 24-field header, which the decoder accepts, leaves
+  no slot past the list, so no cell of its tail is read or constrained. Slot 6 is 256 bytes
+  and the header `list_len` is unused, so an unused slot can be wider than 32 bytes.
   [`deposit-prover/README.md`](../deposit-prover/README.md) lists the same places.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)

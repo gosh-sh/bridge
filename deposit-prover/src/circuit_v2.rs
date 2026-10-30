@@ -1,7 +1,10 @@
 //! Deposit Event Proof Circuit - Axiom-eth Integration
 //!
-//! This circuit uses axiom-eth to prove that a Deposit event was emitted on
-//! Ethereum. It follows the EthCircuitInstructions pattern from axiom-eth.
+//! This circuit uses axiom-eth to check a Deposit log, its receipt and its
+//! transaction against a block header. Every keccak in it is a promise output
+//! the prover supplies, so it does not show the event was emitted on Ethereum
+//! (see `deposit-prover/README.md`). It follows the EthCircuitInstructions
+//! pattern from axiom-eth.
 
 use axiom_eth::{
     mpt::MPTChip,
@@ -120,8 +123,9 @@ pub const EIP1559_TX_TYPE: u64 = 2;
 /// verifying key — witness-dependent. We instead load a FIXED-size, zero-padded
 /// witness vector of this length so `keccak_var_len` and
 /// `decompose_rlp_array_*` emit an identical number of cells / copy-constraints
-/// for every block. The true header length is still bound cryptographically via
-/// the `keccak_var_len` length witness.
+/// for every block. The true header length is the `keccak_var_len` length
+/// witness, tied to the RLP list length by BC-D03; the keccak of those bytes is
+/// a promise output, not evaluated in the circuit.
 ///
 /// Sized for a 24-slot header table: axiom-eth's Cancun/Ecotone
 /// `MAINNET_HEADER_FIELDS_MAX_BYTES` (20 slots, 668 B) plus the EIP-7685
@@ -331,7 +335,7 @@ pub struct Phase0Output {
     /// First-phase decomposition of the selected receipt log, `[address,
     /// topics, data]`. Phase 1 binds it to the receipt's bytes by RLC.
     pub deposit_log_witness: RlpArrayWitness<Fr>,
-    pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from keccak256(block_header_rlp)
+    pub block_hash_bytes: Vec<AssignedValue<Fr>>, // 32 bytes: the header keccak promise output
     pub receipts_root_bytes: Vec<AssignedValue<Fr>>, // 32 bytes from block header field 5
     pub mpt_root_bytes: Vec<AssignedValue<Fr>>,   // 32 bytes from MPT proof
     pub block_header_witness: RlpArrayWitness<Fr>, /* Block header RLP witness for Phase 1
@@ -491,11 +495,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // decoder derived from the list prefix must be the same number.
         // Without this the two views of the header are independent: the prover
         // can append arbitrary trailing bytes inside the zero-padded witness,
-        // move `block_header_len` past them to shift `blockHash`, and still
-        // have `decompose_rlp_array` read the same `receiptsRoot` from the
-        // prefix-delimited list. That would let one event carry unboundedly
-        // many valid `blockHash` public inputs — none of them a real block, but
-        // it voids the "the proof commits to the producing block" claim.
+        // move `block_header_len` past them, and still have
+        // `decompose_rlp_array` read the same `receiptsRoot` from the
+        // prefix-delimited list. This fixes which bytes are hashed, not the
+        // hash: `blockHash` is the keccak promise output for them.
         ctx.constrain_equal(&block_header_len, &block_header_array.rlp_len);
         println!("   ✓ Constrained keccak length == RLP list length (BC-D03)");
 

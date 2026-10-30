@@ -9,7 +9,8 @@
 #   ping
 #   clean                       remove every earlier deployment: containers, docker networks,
 #                               work directories. Run logs stay (run-logs/)
-#   build <sha>                 fetch the commit, build it in a rust container (build.sh)
+#   build <sha>                 fetch the commit, build its docker/Dockerfile: the binaries as
+#                               files (/bin-ci) and the service images; forge build (build.sh)
 #   net-up <run> <sha>          docker network ci-<run> and the proxies nginx0, node0..4
 #   job <run> <sha> <name> [K=V ...]   start tests/e2e/local-net/prover-host/jobs/<name>.sh
 #                               detached; its input (a key, a BK set) arrives on stdin, never
@@ -46,7 +47,7 @@ LIMITS_PROVER=(--memory 64g --memory-swap 64g --cpus 32 --pids-limit 4096)
 LIMITS_SMALL=(--memory 8g --memory-swap 8g --cpus 4 --pids-limit 1024)
 limits() {
   case "$1" in
-    build|cli-deposit) echo large ;;
+    build|cli-deposit|deposit-relayer) echo large ;;
     lc-keygen|lc-prove|lc-relayer|relayer|cli-withdraw) echo prover ;;
     *) echo small ;;
   esac
@@ -95,6 +96,18 @@ case "$verb" in
     checkout "$s"
     mkdir -p "$b/out" "$CI/cache"
     if [ -f "$b/out/.complete" ]; then echo "built already: $s"; exit 0; fi
+    # One build of the commit's docker/Dockerfile: every binary as plain files (/bin-ci,
+    # for the one-shot jobs and the CLI) and the three service images the service jobs run
+    # from, so the e2e exercises what a host deploys. BuildKit's cache mounts keep the
+    # cargo registry and the target directories between commits.
+    build_args=(--build-arg "SOURCE_COMMIT=$s" --build-arg CLI_FEATURES=ackinacki-bridge/dev-unfixed-bridge)
+    DOCKER_BUILDKIT=1 docker build -f "$b/src/docker/Dockerfile" --target tools "${build_args[@]}" \
+      --output "type=local,dest=$b/out" "$b/src"
+    for t in bridge-relayer bridge-eth-lc-relayer bridge-deposit-relayer; do
+      DOCKER_BUILDKIT=1 docker build -f "$b/src/docker/Dockerfile" --target "$t" "${build_args[@]}" \
+        -t "ci-$t:$s" "$b/src"
+    done
+    # The EVM contracts for deploy.sh (forge build with the forge the image build fetched).
     docker run --rm --name "ci-build-${s:0:12}" "${LIMITS_LARGE[@]}" -u "$(id -u):$(id -g)" -e HOME=/cache \
       -v "$b/src:/src:ro" -v "$CI/cache:/cache" -v "$b/out:/out" \
       "$RUST_IMAGE" bash /src/tests/e2e/local-net/prover-host/build.sh
@@ -134,6 +147,15 @@ case "$verb" in
       envs+=(-e "$kv")
     done
     docker rm -f "ci-$d-$n" >/dev/null 2>&1 || true
+    # A service job runs in the image built for its service, with the job script as the
+    # entrypoint: the binaries and the provers are the image's own. Everything else runs in
+    # the plain rust image with the build's files on /bin-ci.
+    case "$n" in
+      relayer) img="ci-bridge-relayer:$s" ;;
+      lc-relayer|anchors|lc-keygen|lc-prove) img="ci-bridge-eth-lc-relayer:$s" ;;
+      deposit-relayer) img="ci-bridge-deposit-relayer:$s" ;;
+      *) img=$RUST_IMAGE ;;
+    esac
     case "$(limits "$n")" in
       large) lim=("${LIMITS_LARGE[@]}") ;;
       prover) lim=("${LIMITS_PROVER[@]}") ;;
@@ -144,7 +166,7 @@ case "$verb" in
       -v "$CI/build/$s/src:/src:ro" -v "$CI/build/$s/out:/bin-ci:ro" \
       -v "$CI/params:/params" -v "$CI/cache:/cache" \
       -v "$w/out:/out" -v "$w/work:/work" -v "$CI/run-logs/$r:/logs" -v "$w/input-$n:/run/input:ro" \
-      "$RUST_IMAGE" bash -c 'exec >>"/logs/$JOB.log" 2>&1; exec bash "/src/tests/e2e/local-net/prover-host/jobs/$JOB.sh"' \
+      --entrypoint bash "$img" -c 'exec >>"/logs/$JOB.log" 2>&1; exec bash "/src/tests/e2e/local-net/prover-host/jobs/$JOB.sh"' \
       >/dev/null
     echo "job $n started" ;;
 

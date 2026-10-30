@@ -7,11 +7,14 @@
 # permissionless. Args: LC, the light client's address. Runs until the runner stops the run.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 cp /run/input "$WORK/lc-sender.keys.json"
-mkdir -p "$WORK/lc-prover"
+mkdir -p "$WORK/lc-prover" "$WORK/lc-work" /logs/lc-relayer
 export STEP_KEY_DIR=$LC_STEP_KEY_DIR   # the prover inherits it: proves with lc-keygen's key
-exec eth-lc-relayer daemon --beacon-url "$BEACON_URL" --state "$OUT/lc-state.json" \
-  --step-prover-bin /bin-ci/export_step_vk_blob --prover-dir "$WORK/lc-prover" \
+# The image's step prover when running from it, /bin-ci's otherwise. The state is a directory
+# (bridge-audit#132): /out/lc-state/eth-lc-relayer-state.json.
+exec eth-lc-relayer daemon --beacon-url "$BEACON_URL" \
+  --state-dir "$OUT/lc-state" --work-dir "$WORK/lc-work" --log-dir /logs/lc-relayer \
+  --step-prover-bin "${LIGHT_CLIENT_STEP_PROVER_BIN:-/bin-ci/export_step_vk_blob}" --prover-dir "$WORK/lc-prover" \
   --srs-path /params/kzg_bn254_19.srs --no-rotate --no-flip-owner \
   --eth-rpc-url "$SEPOLIA_RPC" --submit-ancestry \
-  --an-graphql-url "$GQL" --an-keys-path "$WORK/lc-sender.keys.json" --an-lc-abi-path "$LC_ABI" \
+  --an-graphql-url "$GQL" --an-keys-path "$WORK/lc-sender.keys.json" \
   --an-light-client "$LC" --an-sender "$LC" --allow-insecure-graphql

@@ -3,7 +3,10 @@
 # reads back with `ci-entry get`), /work (this run's scratch), /logs (the run's logs, which
 # outlive it; this job's own output already goes to /logs/$JOB.log) and /run/input (stdin).
 set -euo pipefail
-export PATH=/bin-ci:$PATH
+# The service jobs run in the image built for the service (ci-entry job), whose
+# binaries are on PATH already; /bin-ci, the same build as plain files, is what
+# the other jobs and the rust container run.
+export PATH=$PATH:/bin-ci
 OUT=/out WORK=/work
 GQL=http://nginx0/graphql
 AN_BRIDGE=0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a

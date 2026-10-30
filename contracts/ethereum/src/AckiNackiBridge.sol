@@ -8,6 +8,7 @@ import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
+import "./IPredecessorBridge.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -271,6 +272,17 @@ contract AckiNackiBridge {
     /// @notice See `BridgeWithdrawConfig.altTokenId`.
     uint256 public immutable bridgeWithdrawalAltTokenId;
 
+    /// @notice The bridge this one replaces on the same chain, or zero.
+    ///         A withdrawal proof names no EVM bridge, so a proof the
+    ///         predecessor already paid would otherwise verify here too.
+    ///         `withdrawByProof` refuses a nullifier the predecessor reports
+    ///         as used, and the predecessor answers for its own predecessor
+    ///         in turn (see `isNullifierUsed`), so one address covers the
+    ///         whole line of earlier deployments.
+    /// @dev    The predecessor does not consult this bridge. It must stay
+    ///         paused for good once this bridge is live.
+    IPredecessorBridge public immutable predecessor;
+
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
@@ -338,6 +350,12 @@ contract AckiNackiBridge {
     /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
     ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
     event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
+    /// @notice `fundTreasury`: `from` (the owner or `predecessor`) added
+    ///         `amount` to `treasuryBalance` without a `Deposit`.
+    event TreasuryFunded(address indexed from, uint256 amount, uint256 treasuryBalanceAfter);
+    /// @notice `migrateTreasury`: this paused bridge handed its whole
+    ///         `treasuryBalance` to `successor`.
+    event TreasuryMigrated(address indexed successor, uint256 amount);
 
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     event Paused(address indexed by);
@@ -450,6 +468,18 @@ contract AckiNackiBridge {
     error LayerHashActiveZero(uint256 index);
     /// @notice No skimable liquid USDC above `treasuryBalance` (QC-A1-3).
     error NoExcessUsdc();
+    /// @notice `fundTreasury` caller is neither `owner` nor `predecessor`.
+    error NotOwnerOrPredecessor();
+    /// @notice `migrateTreasury` needs the bridge paused.
+    error NotPaused();
+    /// @notice `migrateTreasury` target does not name this bridge as its
+    ///         `predecessor`.
+    error NotSuccessor(address successor);
+    /// @notice `migrateTreasury`: nothing to hand over.
+    error NothingToMigrate();
+    /// @notice `migrateTreasury`: part of `treasuryBalance` is still in AAVE;
+    ///         `withdrawFromAave` or `emergencyWithdrawAll` first.
+    error TreasuryNotLiquid(uint256 liquid, uint256 treasuryBalance);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -507,6 +537,10 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
     error InvalidBridgeWithdrawalIdentity();
+    /// @notice `BridgeWithdrawConfig.predecessor` is not an `AckiNackiBridge`
+    ///         on this chain wired to the same AN-side `(dappFr, accFr)`, or
+    ///         it was set while `withdrawByProof` is disabled.
+    error InvalidPredecessor(address predecessor);
     /// @notice Only `tokenId == 0` (bridged USDC) is currently supported.
     ///         Non-zero token ids are reserved for multi-token wiring in a
     ///         future milestone.
@@ -650,6 +684,12 @@ contract AckiNackiBridge {
         ///         (see `DeployRealBridge`); not enforced here because
         ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
         uint256 altTokenId;
+        /// @notice The `AckiNackiBridge` this deployment replaces on the same
+        ///         chain, or zero for the first bridge there. Must have code
+        ///         here, answer `isNullifierUsed`, and carry the same
+        ///         `(dappFr, accFr)`; else `InvalidPredecessor`. Requires
+        ///         `bridgeWithdrawalVerifier` to be non-zero.
+        IPredecessorBridge predecessor;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -669,7 +709,8 @@ contract AckiNackiBridge {
     ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
     ///                            to disable. When `bridgeWithdrawalVerifier`
     ///                            is non-zero, both `dappFr` and `accFr`
-    ///                            must be non-zero.
+    ///                            must be non-zero. `predecessor` names the
+    ///                            bridge this one replaces on the same chain.
     /// @dev Pass address(0) for `_aavePool`/`_aUSDC` to disable AAVE.
     ///      `_usdc` must always be non-zero — deposits pull USDC via `transferFrom`.
     constructor(
@@ -749,6 +790,10 @@ contract AckiNackiBridge {
         bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
         bridgeWithdrawalAltDstHostChainId = _bw.altDstHostChainId;
         bridgeWithdrawalAltTokenId = _bw.altTokenId;
+        if (address(_bw.predecessor) != address(0)) {
+            _requirePredecessor(_bw);
+        }
+        predecessor = _bw.predecessor;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -757,6 +802,33 @@ contract AckiNackiBridge {
         _reentrancyStatus = _NOT_ENTERED;
 
         emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    /// @dev A predecessor has to be a bridge that can actually have paid one
+    ///      of this bridge's withdrawals: deployed on this chain (it has code
+    ///      at this address here), answering `isNullifierUsed` (the probe also
+    ///      walks its own predecessors), and bound to the same AN-side bridge.
+    ///      A wrong address would either refuse nothing or revert every
+    ///      withdrawal, and the field is immutable.
+    function _requirePredecessor(BridgeWithdrawConfig memory _bw) private view {
+        IPredecessorBridge p = _bw.predecessor;
+        if (address(_bw.bridgeWithdrawalVerifier) == address(0) || address(p).code.length == 0) {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.isNullifierUsed(0) returns (bool) { }
+        catch {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.bridgeWithdrawalDappFr() returns (uint256 dappFr) {
+            if (dappFr != _bw.dappFr) revert InvalidPredecessor(address(p));
+        } catch {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.bridgeWithdrawalAccFr() returns (uint256 accFr) {
+            if (accFr != _bw.accFr) revert InvalidPredecessor(address(p));
+        } catch {
+            revert InvalidPredecessor(address(p));
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1412,14 +1484,17 @@ contract AckiNackiBridge {
     ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
     ///      only — `pub.dstChainId == altDstChainId` while
     ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the
-    ///      same proof is rejected because nullifiers are per-contract *and*
-    ///      `dstChainId` must match the executing chain (or its scoped alias).
+    ///      same proof is rejected because `dstChainId` must match the
+    ///      executing chain (or its scoped alias). On one chain, nullifiers
+    ///      are per-contract: a replacement bridge sees the ones its
+    ///      `predecessor` line paid, nothing else does.
     ///   3. `pub.dappFr == bridgeWithdrawalDappFr` and
     ///      `pub.accFr == bridgeWithdrawalAccFr` (defensive — also enforced
     ///      by the verifier under the same identity, but checked here so
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
-    ///   4. `pub.nullifier` has not been used before (replay protection).
+    ///   4. `pub.nullifier` has not been used before, here or by
+    ///      `predecessor` (replay protection; see `isNullifierUsed`).
     ///   5. `pub.tokenId == 0` (only bridged USDC is currently supported;
     ///      non-zero token ids reserved for multi-token in a future milestone).
     ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
@@ -1484,7 +1559,7 @@ contract AckiNackiBridge {
         _requireCanonicalFr(pub.finalRoot);
         _requireCanonicalFr(pub.anchorLayer);
         bytes32 nullifierKey = bytes32(pub.nullifier);
-        if (_nullifiers[nullifierKey]) {
+        if (_nullifiers[nullifierKey] || _predecessorUsed(pub.nullifier)) {
             revert NullifierAlreadyUsed(pub.nullifier);
         }
         if (pub.anchorLayer == 0 || pub.anchorLayer > MAX_LAYER_HASHES) {
@@ -1530,11 +1605,21 @@ contract AckiNackiBridge {
         return true;
     }
 
-    /// @notice View helper: has `nullifier` already been consumed?
+    /// @notice View helper: has `nullifier` already been consumed, here or by
+    ///         `predecessor` (which answers for its own predecessor in turn)?
+    ///         `true` means `withdrawByProof` refuses it with
+    ///         `NullifierAlreadyUsed`.
     /// @dev Useful for relayers / front-ends to skip re-submission of an
-    ///      already-paid proof before paying gas for the verify call.
+    ///      already-paid proof before paying gas for the verify call. Costs
+    ///      one external call per earlier deployment in the line.
     function isNullifierUsed(uint256 nullifier) external view returns (bool) {
-        return _nullifiers[bytes32(nullifier)];
+        return _nullifiers[bytes32(nullifier)] || _predecessorUsed(nullifier);
+    }
+
+    /// @dev A predecessor that reverts makes the caller revert: a withdrawal
+    ///      then waits rather than risk paying twice.
+    function _predecessorUsed(uint256 nullifier) internal view returns (bool) {
+        return address(predecessor) != address(0) && predecessor.isNullifierUsed(nullifier);
     }
 
     /// @dev Revert unless `value` is a canonical BN254 Fr. Public inputs that
@@ -1716,6 +1801,52 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(yieldRecipient, toSkim);
         }
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
+    }
+
+    /// @notice Add `amount` USDC to `treasuryBalance` without a `Deposit`, so
+    ///         nothing is minted on Acki Nacki. For eccUSDC already backed by
+    ///         a predecessor's treasury: `predecessor` calls it from
+    ///         `migrateTreasury`, and the owner calls it for a predecessor
+    ///         that cannot migrate. Caller must `approve` first. Not capped by
+    ///         `MAX_BRIDGE_TVL` (that cap gates `deposit` only) and allowed
+    ///         while paused.
+    function fundTreasury(uint256 amount) external nonReentrant {
+        if (msg.sender != owner && msg.sender != address(predecessor)) {
+            revert NotOwnerOrPredecessor();
+        }
+        if (amount == 0) revert InvalidAmount();
+        treasuryBalance += _pullExactUsdc(amount);
+        emit TreasuryFunded(msg.sender, amount, treasuryBalance);
+    }
+
+    /// @notice Hand the whole `treasuryBalance` to `successor`, the bridge
+    ///         that names this one as its `predecessor`. Leaves this bridge
+    ///         with nothing to pay withdrawals from; USDC above the book
+    ///         (`excessUsdc`, aUSDC yield) stays here for the owner.
+    /// @dev Paused only: a live bridge would keep paying from the book it
+    ///      just gave away. AAVE-supplied principal must be pulled back first.
+    function migrateTreasury(address successor) external onlyOwner nonReentrant {
+        if (!paused) revert NotPaused();
+        if (successor == address(0) || successor == address(this)) {
+            revert NotSuccessor(successor);
+        }
+        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
+            if (address(p) != address(this)) revert NotSuccessor(successor);
+        } catch {
+            revert NotSuccessor(successor);
+        }
+        uint256 amount = treasuryBalance;
+        if (amount == 0) revert NothingToMigrate();
+        uint256 liquid = usdc.balanceOf(address(this));
+        if (liquid < amount) revert TreasuryNotLiquid(liquid, amount);
+
+        treasuryBalance = 0;
+        if (!usdc.approve(successor, amount)) revert WithdrawTransferFailed(successor, amount);
+        AckiNackiBridge(successor).fundTreasury(amount);
+        if (usdc.balanceOf(address(this)) != liquid - amount) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        emit TreasuryMigrated(successor, amount);
     }
 
     /// @notice Pause user-facing entrypoints (`deposit`, `verifyBlock`,

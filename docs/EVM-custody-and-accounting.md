@@ -126,10 +126,10 @@ Quote these, not their earlier versions.
 |---|---|
 | **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
 | **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`; otherwise an amount above 50 USDC reverts `TransferTooLarge`, and principal above 10,000 USDC reverts `TvlCapReached`, before a token call. The function is not `payable`. |
-| **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. No other function in the contract increases `treasuryBalance`, and only `withdrawByProof` decreases it. |
+| **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. Apart from `deposit`, only `fundTreasury` (owner or `predecessor`, no `Deposit` event) increases `treasuryBalance`; `withdrawByProof` decreases it, and `migrateTreasury` zeroes it while handing it to a successor bridge. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |
 | **CUST-1** | `treasuryBalance` is book value, not a balance. The solvency invariant is `totalAssets() ≥ treasuryBalance`, never equality. |
-| **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. None of them writes `treasuryBalance`. |
+| **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. The only owner function that writes `treasuryBalance` is `migrateTreasury`, which works only on a paused bridge, sends all of it to the bridge that names this one as `predecessor`, and adds it to that bridge's `treasuryBalance`. `fundTreasury` adds USDC the caller supplies. |
 | **CEI-1** | `withdrawByProof` mutates state before every external call. `deposit` does not, and does not need to — see above. A blanket "all external interactions follow CEI" claim is false for this contract. |
 
 ## What earlier text got wrong

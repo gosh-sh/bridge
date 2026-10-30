@@ -34,6 +34,12 @@ note here calling out the drift.
 > change. Earlier drift notes describe historical snapshots; other citations
 > have not been re-anchored by this change. Locate symbols in current source
 > before relying on their line offsets.
+>
+> **Drift note, 2026-10-30 (predecessor bridge, gosh-sh/bridge-audit#140).** §4.2's `predecessor`
+> row, §5's `BridgeWithdrawConfig` and predecessor rows, §7.2's check 7 and *Replay scope*, §7.4's
+> `isNullifierUsed` row, §10's `fundTreasury` / `migrateTreasury` rows, §12.1's `DeployRealBridge` predecessor sentence and §12.2's
+> `PREDECESSOR_BRIDGE` row cite `src/AckiNackiBridge.sol` and `script/DeployRealBridge.s.sol` as of
+> this change. Other citations were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -160,7 +166,7 @@ relying on them for a storage-level migration.
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
 | 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 104 | `deposit` (+), `withdrawByProof` (−) |
+| 1 | 0 | `treasuryBalance` | `uint256` | 108 | `deposit` (+), `fundTreasury` (+), `withdrawByProof` (−), `migrateTreasury` (→ 0) |
 | 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
 | 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
 | 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
@@ -192,6 +198,7 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
 | `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId`, `bridgeWithdrawalAltTokenId` | `uint256` | 232, 236, 239 | Shellnet/testnet aliases (§7.2). |
+| `predecessor` | `IPredecessorBridge` | 284 | The bridge this deployment replaces on the same chain, or zero. Its paid nullifiers count as used here (§7.2). Immutable, so no storage slot changes. |
 
 ### 4.3 `HistoryWindow` (`:259-271`)
 
@@ -235,8 +242,10 @@ whether a second rotation would cross an unverified bundle boundary. When the ve
 wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); when the triple is
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
-`BridgeWithdrawConfig` (`:525-550`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
-`altDstHostChainId`, `altTokenId`.
+`BridgeWithdrawConfig` (`:644-675`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
+`altDstHostChainId`, `altTokenId`, `predecessor`. `predecessor` is the `AckiNackiBridge` this
+deployment replaces on the same chain (zero for the first one there); it is the last field, so
+the constructor's ABI signature changed when it was added.
 
 Validation performed (and *not* performed):
 
@@ -248,6 +257,7 @@ Validation performed (and *not* performed):
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
 | `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:141`). |
+| `predecessor != 0` ⇒ C4 verifier set, `predecessor` has code, answers `isNullifierUsed(0)`, and returns this deployment's `dappFr` and `accFr` from `bridgeWithdrawalDappFr()` / `bridgeWithdrawalAccFr()` | 793-796, 813-832 | else `InvalidPredecessor(predecessor)`. Code at the address on this chain is what ties the predecessor to this chain; the identity check ties it to the same AN-side bridge. A probe that reverts gives `InvalidPredecessor`; one whose return data does not decode reverts the deployment without a reason. |
 | verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
@@ -417,7 +427,7 @@ finalRoot, anchorLayer`.
 | 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1315-1319 | `UnsupportedTokenId` |
 | 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1320-1325 | `RecipientHalfOutOfRange` |
 | 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1328 | `InvalidRecipient` |
-| 7 | `!_nullifiers[bytes32(pub.nullifier)]` | 1338 | `NullifierAlreadyUsed` |
+| 7 | `!_nullifiers[bytes32(pub.nullifier)]`, and `predecessor == 0 \|\| !predecessor.isNullifierUsed(pub.nullifier)` | 1562, 1615-1623 | `NullifierAlreadyUsed`. A predecessor that reverts makes the call revert with its reason. |
 | 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1341-1345 | `LayerOutOfRange` |
 | 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
 | 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
@@ -438,8 +448,16 @@ only the window named by Circuit 4's 1-indexed `anchorLayer` public input
 even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
-**Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
-(or its scoped alias), so the same proof cannot be replayed on a second deployment. The
+**Replay scope.** `dstChainId` must match the executing chain (or its scoped alias), so a proof
+cannot be paid on a deployment on another chain. The public inputs name no EVM bridge and the
+nullifier map is per-contract, so on one chain the guard is `predecessor`: a bridge deployed with
+`predecessor` set refuses the nullifiers that bridge reports as used, and since the predecessor's
+own `isNullifierUsed` answers for *its* predecessor, every earlier bridge in the line is covered
+through one address. Each hop costs one `STATICCALL` (a cold account and a cold slot, about 5k
+gas). The predecessor does not see nullifiers its successor pays, so it must stay paused once the
+successor is live; two unpaused bridges for the same AN-side identity on one chain are not
+protected against each other. The cutover order is in
+[`aave-yield.md`](aave-yield.md#replacing-a-bridge-on-the-same-chain). The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
 on a deployment whose host chain is not the configured one. The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
@@ -529,7 +547,7 @@ boundary at or below it — usually just that one bundle.
 | `getLatestPerLayer()` | 1156 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
 | `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
 | `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
-| `isNullifierUsed(uint256)` | 1388 | Replay pre-check for relayers. |
+| `isNullifierUsed(uint256)` | 1615 | Replay pre-check for relayers: `true` when this bridge or its `predecessor` line paid the nullifier, which is exactly when `withdrawByProof` reverts `NullifierAlreadyUsed`. |
 
 ---
 
@@ -640,6 +658,8 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 | `setAaveEnabled(bool)` | 1544 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
 | `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
 | `setYieldRecipient(addr)` | 1557 | Non-zero. |
+| `fundTreasury(amount)` | 1813 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
+| `migrateTreasury(successor)` | 1828 | Owner only, while paused (`NotPaused`). `successor.predecessor()` must be this bridge (`NotSuccessor`); the whole `treasuryBalance` must be liquid (`TreasuryNotLiquid`); zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
 | `transferOwnership(addr)` | 1565 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
@@ -655,16 +675,18 @@ Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal`
 | Function | Caller |
 |---|---|
 | `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone, while not `paused` |
-| `pause`, `unpause`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `pause`, `unpause`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `migrateTreasury`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `fundTreasury` | `owner` or `predecessor` |
 | `acceptOwnership` | `pendingOwner` |
 | everything else | view/pure |
 
 The owner can **pause** the bridge (`pause()` / `unpause()`, `:1685`, `:1692`; a call that would not
 change the state reverts `AlreadyInThatPauseState()`). While `paused` is true, `deposit`,
 `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert `BridgePaused()`; the owner's AAVE
-functions stay available, so funds can be moved out of AAVE during a pause. There is **no owner path
-that can move user principal** — the owner can only route funds between the contract and AAVE, and
-skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-failure escape hatch.
+functions stay available, so funds can be moved out of AAVE during a pause. The only owner path
+that moves user principal is `migrateTreasury`, which works only while paused and only into the
+bridge that names this one as `predecessor`; otherwise the owner can only route funds between the
+contract and AAVE, and skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-failure escape hatch.
 
 ---
 
@@ -679,6 +701,8 @@ skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-f
 | `LayerAnchorAppended(uint8,uint256,uint64)` | `0xa107038a79964f3eb528acbade584d60e11790b79033d6ca561747c916e2522d` | `layer` |
 | `BkSetUpdated(uint256,uint256,uint64)` | `0x3b61abb5642de7c0408ea1d76cdc9a7f26020b2b511a5a0698fc238172674dd1` | `oldCommitment`, `newCommitment`, `blockSeqNo` |
 | `WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)` | `0x88738ab1295650557339cebd9882c9db35ae232be3a8fcb180054213fe0dad92` | `nullifier`, `recipient`, `tokenId` |
+| `TreasuryFunded(address,uint256,uint256)` | `0xc368570c718ead78e572d31d3c0a44869e1623a1355733b857032ded01322d83` | `from` |
+| `TreasuryMigrated(address,uint256)` | `0x8a7c92de40fc5fb3ac08137bd5d6656cae1706c5026efc082c00156a6b25a325` | `successor` |
 | `Paused(address)` | `0x62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a258` | `by` |
 | `Unpaused(address)` | `0x5db9ee0a495bf2e6ff9c91a7834c1ba4fdd244a5e8aa4e537bd38aeae4b073aa` | `by` |
 
@@ -699,6 +723,9 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0xe57869a8` | `isKnownAnchor(uint256)` |
 | `0xa7744702` | `isKnownLayerAnchor(uint8,uint256)` |
 | `0xc6c0572d` | `isNullifierUsed(uint256)` |
+| `0xb719d032` | `predecessor()` |
+| `0xf6471f4b` | `fundTreasury(uint256)` |
+| `0x46756f19` | `migrateTreasury(address)` |
 | `0xecb3dc88` | `depositCounter()` |
 | `0x313dab20` | `treasuryBalance()` |
 | `0x8456cb59` | `pause()` |
@@ -717,6 +744,9 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `NothingToSupply`, `AaveWithdrawFailed`, `AaveSupplyFailed`, `NothingToWriteOff`,
 `HarvestWouldBreakSolvency`, `NoYield`, `NoExcessUsdc`.
 
+Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `NothingToMigrate`,
+`TreasuryNotLiquid`.
+
 `verifyBlock`: `VerifyBlockDisabled`, `AttestationProofRejected`, `LayerHashesProofRejected`,
 `BkSetCommitmentMismatch`, `BlockSeqNoNotMonotonic`, `PrevAnchorMismatch`, `InvalidNumLayers`,
 `LayerHashTailNonZero`, `LayerHashActiveZero`, `LayerOutOfRange`, `NonMonotonicLayerHeight`.
@@ -726,7 +756,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
-`LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
+`LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `InvalidPredecessor`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
 `WithdrawTreasuryShortfall`.
 
 Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` while
@@ -740,7 +770,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Reverts on chains other than 1 / 11155111 (`:249`). Requires `PREDECESSOR_BRIDGE` (`:171`) and refuses a non-zero one that is not paused (`:110-117`). |
 | `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
@@ -764,6 +794,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
+| `PREDECESSOR_BRIDGE` | RealBridge (required, no default), Shellnet, Reuse, GenesisCursor (default zero) | Immutable `predecessor`: the bridge this deploy replaces on the same chain, or the zero address for the first bridge there. `DeployRealBridge` requires it to be paused. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
@@ -818,6 +849,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
 | `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
+| `AckiNackiBridgePredecessor.t.sol` (21) | A successor refuses what its predecessor, or the predecessor's predecessor, paid and pays the rest; zero predecessor unchanged; a reverting predecessor blocks payouts; the constructor rejects an address without code, a non-bridge, a bridge for another AN identity, a reverting probe and a predecessor without withdraw wiring. `migrateTreasury` moves the book only when paused, only to a bridge naming it, only once, and leaves the old bridge unable to pay; `fundTreasury` accepts only the owner or predecessor. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
 | `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
@@ -876,9 +908,12 @@ Read off the code, without a formal audit claim.
 4. Cross-circuit binding: shared `blockId` / `bkSetCommitment` are compared instance-by-instance
    inside each adapter, so a mismatched proof pair cannot pass.
 5. Payout uniqueness: nullifier map + `dstChainId == block.chainid` (or scoped alias) confine a proof
-   to one execution on one deployment.
-6. User principal is not owner-reachable: owner functions move funds only between the contract and
-   AAVE, or skim strictly above `treasuryBalance`.
+   to one execution on one deployment; on one chain, `predecessor` extends that to a line of
+   deployments that replace each other, provided each replaced bridge stays paused.
+6. User principal is not owner-reachable except as a whole, into a successor: owner functions move
+   funds only between the contract and AAVE, skim strictly above `treasuryBalance`, or — paused,
+   and only into the bridge whose `predecessor` is this one — hand all of it over
+   (`migrateTreasury`).
 
 **Deliberate trade-offs and limitations (all flagged in-code)**
 

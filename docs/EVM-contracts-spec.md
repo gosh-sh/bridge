@@ -39,7 +39,10 @@ note here calling out the drift.
 > now include chain id 421614. `DeployRealBridge._resolveTokenAddresses` accepts it.
 > `USE_AAVE` defaults false, and `USE_AXIOM_ORACLE=true` reverts on this chain. The
 > `DeployRealBridge.s.sol` citations in the constructor table (`:152`) and in §12
-> (`:144`, `:147`, `:157-158`) were re-anchored to this script. Other citations were not.
+> (`:144`, `:147`, `:157-158`) were re-anchored to this script. The constructor table's
+> `genesisBkSetCommitment` row cites `src/AckiNackiBridge.sol` as of this note (`:721-722`).
+> §7.2's *Replay scope* now covers a second deployment on the same chain. Other citations were
+> not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -253,7 +256,7 @@ Validation performed (and *not* performed):
 | AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
-| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:152`). |
+| `genesisBkSetCommitment != 0` when the verifier triple is wired | 721-722 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:152` checks it before the deploy too. |
 | verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
@@ -448,8 +451,8 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 (or its scoped alias), so the same proof cannot be replayed on a deployment on another chain. A
 second deployment on the same chain, with the same `dappFr` and `accFr`, does accept it: the
 inputs name no bridge address, so each unpaused copy with an anchor covering the burn and
-treasury to pay it pays it once. [`aave-yield.md`](aave-yield.md) has the cutover. The
-`altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
+treasury to pay it pays it once. [`aave-yield.md`](aave-yield.md) explains why that blocks a
+second bridge on 421614 (gosh-sh/bridge-audit#140). The `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
 on a deployment whose host chain is not the configured one. The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
 nullifier, so two identical burns in one AN block mint distinct

@@ -47,9 +47,11 @@ The shellnet e2e deploy sets 3; this script does not.
 
 The bridge already recorded for Arbitrum Sepolia,
 `0x3FB082a905a895151224F6d93bD074E816338638` (`README.md`), has no pool, so this
-deploy is a second contract. Call it the old bridge; the AAVE deploy is the new bridge.
+deploy is a second contract. The current contracts give no safe way to move from that
+bridge to the new one. The cutover waits for a contract change, tracked in
+gosh-sh/bridge-audit#140.
 
-### Why the old bridge has to be empty first
+### Why a second bridge on the same chain is unsafe
 
 A withdrawal proof carries no EVM bridge address
 (`WithdrawalPublicInputs` in `IBridgeWithdrawalVerifier.sol`). `withdrawByProof`
@@ -57,108 +59,63 @@ checks `dappFr` and `accFr` (the same Acki Nacki bridge on both deploys),
 `dstChainId`, that contract's own `_nullifiers`, and that contract's own anchor
 window. `verifyBlock` has no caller restriction. One Acki Nacki burn with
 `dstChainId` 421614 can be paid by every unpaused bridge that has an anchor
-covering it and USDC in `treasuryBalance`. The two treasuries are separate, and
-nothing but `withdrawByProof` takes USDC out of one: there is no sweep, and
-`emergencyWithdrawAll` only pulls the AAVE position back into the same contract.
-`setTrustedL1Bridge` on `eccUSDCBridge` adds or removes one address, and only
-`finalizeDeposit` reads that list.
+covering it and USDC in `treasuryBalance`.
 
-So the contracts give two ways to get a cutover wrong:
+* **A withdrawal the old bridge paid is paid again by the new one.** The new bridge's
+  `_nullifiers` start empty. A withdrawal proof at layer n ≥ 2 anchors to the first multiple
+  of `W^n` after the burn (`l_n_anchor_boundaries` in
+  `crates/bridge-prover-libraries/bridge-prover-lib/src/real_chain_builder.rs`). At a high
+  enough layer that boundary falls after the new bridge's seed, whichever seed is chosen. Once
+  the new bridge anchors that boundary, the old proof passes there and is paid out of the new
+  bridge's USDC. Read on 2026-10-30, the old bridge had paid one withdrawal (nullifier
+  `0x2b9017c241a2ee4235c3379761156d8b2606895d65271bd32c76f5e361ff72df`, Arbitrum Sepolia
+  block 324163888) and held `treasuryBalance` 1999999 (1.999999 USDC).
+* **USDC left in a paused bridge stays there.** The principal, `treasuryBalance`, leaves only
+  through `withdrawByProof`. `skimExcessUsdc` and `harvestYield` pay out only what is above
+  it: liquid USDC beyond `treasuryBalance`, and AAVE interest. A
+  bridge paused with `treasuryBalance` X keeps those X USDC, while the eccUSDC they back can
+  still be burnt towards 421614 and paid by the other bridge out of its own depositors' USDC.
+  That bridge then ends X short, and its last withdrawals revert `WithdrawTreasuryShortfall`.
 
-* Both bridges unpaused, both holding USDC: one burn is paid twice.
-* The old bridge paused while `treasuryBalance()` is still some amount X: those X USDC
-  stay locked in it, the eccUSDC they back is still burnable towards 421614, and the new
-  bridge pays those burns out of its own depositors' USDC. It ends X short, and its last
-  withdrawals revert `WithdrawTreasuryShortfall`.
+Until that change lands, the old bridge stays the live one for 421614. Call `pause()` on a new
+bridge right after the deploy, from the deploying account (the owner). While it is paused,
+`deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert, so it pays nothing.
+Do not `setTrustedL1Bridge(421614, <new bridge>, true)` on `eccUSDCBridge`, and do not point
+a relayer or `ackinacki-bridge` at it. `AckiNackiBridgeAaveArbSepoliaForkTest` exercises the
+AAVE calls against the live market on a fork, with a bridge it deploys there. The web form
+deposits on Ethereum Sepolia only (`USDC_CONTRACT_ADDRESS` and `SEPOLIA_CHAIN_ID` in
+`frontend/src/config.rs`) and plays no part on 421614.
 
-Neither contract can retire a bridge that still owes USDC. Cut over only when the old
-bridge owes nothing:
+### Deploy inputs that cannot be changed later
 
-1. Deploy the new bridge, with the inputs the shellnet-l2 kit needs (below) if the kit
-   is to run it. Then call `pause()` on it from the deploying account (the owner) at
-   once. Check `paused()` is `true`. While it is paused, `deposit`,
-   `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert, so it pays no burn.
-   Do not trust it on Acki Nacki and do not start a relayer for it yet.
-2. Stop sending users to the old bridge: rebuild the web form without
-   `BRIDGE_CONTRACT_ADDRESS`, which makes it refuse deposits
-   (`frontend/src/config.rs`). Keep the old bridge unpaused and trusted, and keep its
-   deposit relayer, its `eth-lc-relayer arbitrum-anchors` and its Acki Nacki to Ethereum
-   relayer running. Deposits already sent to it still have to be finalized on Acki
-   Nacki, and burns against them still have to be paid by it.
-3. Wait until all three hold: `parked_deposit_ids` and `outstanding_deposits` in the
-   old bridge's deposit relayer `state.json` are empty, `treasuryBalance()` on the old
-   bridge reads 0, and `getDepositLimits(421614)` on `eccUSDCBridge` returns
-   `outstanding` 0. A burn is refused above `outstanding`, so 0 means no eccUSDC can
-   still be redeemed on 421614. If holders never burn, the numbers never reach 0. The
-   cutover then cannot be done safely: leave the old bridge live and the new one paused.
-4. `pause()` the old bridge and check all three again: a deposit sent to the contract
-   directly can land between steps 3 and 4. If any fails, `unpause()` it and go back to
-   step 3. Otherwise stop the old bridge's relayers and call
-   `setTrustedL1Bridge(421614, <old bridge>, false)` on `eccUSDCBridge`. Leave the old
-   bridge paused.
-5. `setTrustedL1Bridge(421614, <new bridge>, true)`. Without it, `finalizeDeposit`
-   reverts `ERR_UNSUPPORTED_SRC_CHAIN`. Reconfigure the consumers below, `unpause()` the
-   new bridge, then start them and rebuild the web form with its address.
+The anchors, the owner and the withdraw fields are fixed at deploy, so deploy the bridge the
+way its relayer will need it. The shellnet-l2 kit runs `relayer daemon-live`
+(`crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/container-entrypoint.sh`), and its
+`scripts/preflight.sh` refuses a bridge that does not match its `runtime.env`. The kit runs
+anchor level 2 only, so deploy with the output of `compute_bridge_anchors --level 2` (with
+`--at-head` or `--seed-seqno`): `BUNDLE_STRIDE`, `GENESIS_BK_SET_COMMITMENT`,
+`GENESIS_PREV_MAX_LEVEL_LAYER_HASH`, `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and
+`GENESIS_SEED_SEQNO` exported as `GENESIS_LAST_SEEN_BLOCK_SEQNO`, as
+`deploy_bridge_bundle.sh` does. Set `PRIVATE_KEY` to the key of the kit's `RELAYER_ADDRESS`:
+the deploying account becomes the owner, and preflight requires the owner to be
+`RELAYER_ADDRESS`. The kit's `runtime.env` then needs:
 
-The consumers:
-
-* Deposit relayer. `scripts/ursus/deposit-relayer.service` passes
-  `--from-block ${FROM_BLOCK}` and `--start-deposit-id ${START_DEPOSIT_ID}`, and
-  does not pass `--force-state`. `--from-block` wins over `BRIDGE_DEPLOY_BLOCK`
-  whenever it is not 0 (`resolve_from_block`), and the current `FROM_BLOCK` is
-  the old deploy block `323405848`, so setting only `BRIDGE_DEPLOY_BLOCK` is
-  ignored. In `deposit-relayer.env` set `BRIDGE_ADDRESS` to the new bridge,
-  `FROM_BLOCK` and `BRIDGE_DEPLOY_BLOCK` to its deploy block, and
-  `START_DEPOSIT_ID=0`. A raised `START_DEPOSIT_ID` never delivers deposits
-  below that id.
-  A `state.json` stamped with the old bridge refuses to start with
-  `state.json deployment mismatch`. `--force-state` replaces that file with a
-  fresh one: progress, the scan cursor, parked ids, outstanding ids and
-  `last_finalized_deposit_id` are dropped (`RelayerState::ensure_deployment`).
-  After step 3 it holds nothing the old bridge still needs. Keep a copy, add the
-  flag for one start, then take it back out.
-* `eth-lc-relayer arbitrum-anchors --bridge-address <new bridge>`. It anchors
-  only Arbitrum blocks that contain `Deposit` logs from that address. An
-  `ARBITRUM_ANCHOR_STATE` file recorded for the old bridge (the default path is
-  `./arbitrum-anchors-state.json`) refuses to start and tells the operator to
-  move it away. Move that file away and pass `--from-block` of the new deploy
-  block. `BRIDGE_DEPLOY_BLOCK` applies only when `--from-block` is 0.
-* The web form. `BRIDGE_CONTRACT_ADDRESS` is compiled in
-  (`frontend/src/config.rs`). Rebuild the form with the new address.
-* `ackinacki-bridge`: `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK`.
-* The shellnet-l2 kit runs `relayer daemon-live`
-  (`crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/container-entrypoint.sh`),
-  and its `scripts/preflight.sh` refuses a bridge that does not match its env. The kit
-  runs anchor level 2 only, so deploy with the output of
-  `compute_bridge_anchors --level 2` (with `--at-head` or `--seed-seqno`):
-  `BUNDLE_STRIDE`, `GENESIS_BK_SET_COMMITMENT`, `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`, `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and
-  `GENESIS_SEED_SEQNO` exported as `GENESIS_LAST_SEEN_BLOCK_SEQNO`, as
-  `deploy_bridge_bundle.sh` does. Set `PRIVATE_KEY` to the key of the kit's
-  `RELAYER_ADDRESS`: the deploying account becomes the owner, and preflight requires the
-  owner to be `RELAYER_ADDRESS`. Then set in `runtime.env`:
-  * `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK`.
-  * `RPC_URL`, and `RPC_FAILOVER_URLS` if set: Arbitrum Sepolia endpoints, and
-    `EXPECTED_EVM_CHAIN_ID=421614`. Preflight checks the chain id of every endpoint
-    that answers.
-  * `EXPECTED_USDC_ADDRESS=0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`. The example
-    holds Ethereum Sepolia USDC.
-  * `BRIDGE_BOOTSTRAP_SEQNO`: `GENESIS_SEED_SEQNO`. `EXPECTED_GENESIS_PREV_ANCHOR`:
-    `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`. `EXPECTED_BK_SET_COMMITMENT`:
-    `GENESIS_BK_SET_COMMITMENT`.
-  * `EXPECTED_WITHDRAW_DAPP_FR` and `EXPECTED_WITHDRAW_ACC_FR`: the `WITHDRAW_DAPP_FR`
-    and `WITHDRAW_ACC_FR` of the deploy.
-  * `EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID`, `EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID` and
-    `EXPECTED_WITHDRAW_ALT_TOKEN_ID`: the `WITHDRAW_ALT_*` values of the deploy. The
-    example's 1, 11155111 and 3 are the Ethereum Sepolia bridge's. The chain id alias
-    applies only where `block.chainid` is the host chain id, and a burn towards this
-    bridge names 421614 itself, so a deploy that sets only `WITHDRAW_ALT_TOKEN_ID=3`
-    needs 0, 0 and 3.
-
-  Move the `*.json` files in `BRIDGE_STATE_DIR` aside, as `deploy_bridge_bundle.sh`
-  does. While `prover_state.json` is there, preflight skips its cold-start check of the
-  new bridge's cursor and `expectedPrevAnchor(2)`. `relayer daemon-bridge` takes
-  `--bridge-address`, has no deploy-block setting, and does not submit
-  `applyBkSetUpdate`.
+* `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK`.
+* `RPC_URL`, and `RPC_FAILOVER_URLS` if set: Arbitrum Sepolia endpoints, and
+  `EXPECTED_EVM_CHAIN_ID=421614`. Preflight checks the chain id of every endpoint that
+  answers.
+* `EXPECTED_USDC_ADDRESS=0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`. The example holds
+  Ethereum Sepolia USDC.
+* `BRIDGE_BOOTSTRAP_SEQNO`: `GENESIS_SEED_SEQNO`. `EXPECTED_GENESIS_PREV_ANCHOR`:
+  `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`. `EXPECTED_BK_SET_COMMITMENT`:
+  `GENESIS_BK_SET_COMMITMENT`.
+* `EXPECTED_WITHDRAW_DAPP_FR` and `EXPECTED_WITHDRAW_ACC_FR`: the `WITHDRAW_DAPP_FR` and
+  `WITHDRAW_ACC_FR` of the deploy.
+* `EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID`, `EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID` and
+  `EXPECTED_WITHDRAW_ALT_TOKEN_ID`: the `WITHDRAW_ALT_*` values of the deploy. The example's
+  1, 11155111 and 3 are the Ethereum Sepolia bridge's. The chain id alias applies only where
+  `block.chainid` is the host chain id, and a burn towards this bridge names 421614 itself, so
+  a deploy that sets only `WITHDRAW_ALT_TOKEN_ID=3` needs 0, 0 and 3.
 
 ## Where the money is
 

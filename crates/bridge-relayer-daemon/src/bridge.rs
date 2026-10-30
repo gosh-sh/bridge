@@ -975,7 +975,7 @@ mod sol_bindings {
         /// The two links between `bridgeWithdrawalVerifier` and the
         /// deployed Yul verifier. Declared here so the CLI can walk
         /// `adapter → shplonkVerifier() → yulVerifier()` the same way
-        /// `deploy/shellnet-l2/scripts/preflight.sh:28` does: a non-zero
+        /// `docker/relayer/preflight.sh` does: a non-zero
         /// adapter address proves nothing on its own.
         #[sol(rpc)]
         #[allow(missing_docs)]

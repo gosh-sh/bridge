@@ -367,7 +367,7 @@ flowchart LR
     direction TB
     SVC["systemd unit: eth-lc-relayer daemon<br/>outbound HTTPS only"]
     PRV["prover subprocess<br/>export_step_vk_blob (LIGHT_CLIENT_STEP_PROVER_BIN)"]
-    FS[("ETH_LC_ROOT/<br/>config/ env file, owner key (0600)<br/>state/ state json, prover-logs/<br/>bundles/ srs/ contracts/ bin/")]
+    FS[("ETH_LC_ROOT/<br/>config/ env file, owner key (0600)<br/>state/ state json, work/, logs/<br/>bundles/ srs/ contracts/ bin/")]
     SVC --> PRV
     SVC --- FS
   end
@@ -418,8 +418,9 @@ production unit in `scripts/ursus/` uses the same pieces under a different prefi
 | `contracts/` | compiled `EthBeaconLightClient.tvc`, `.abi.json` | public |
 | `config/eth-lc-relayer.env` | endpoints, addresses, paths (see §4.4) | 0600, no secrets besides paths |
 | `config/*.keys.json` | owner key of the light client (and, in production, of `USDCBridge`); giver key on test networks | 0600, never committed, never pasted anywhere |
-| `state/eth-lc-relayer-state.json` | last finalized slot, committee period, `owner_flip_done`, `genesis_validators_root` pin (`src/state.rs:16`) | operational; losing it is safe (the contract is the truth, the file is re-derived) |
-| `state/prover-logs/`, `bundles/` | prover transcripts and proof bundles per slot | operational |
+| `state/eth-lc-relayer-state.json` | last finalized slot, committee period, `owner_flip_done`, `genesis_validators_root` pin (`src/state.rs:16`); its lock and the temporary file of its atomic write beside it. `state/` is `--state-dir` (bridge-audit#132) | operational; losing it is safe (the contract is the truth, the file is re-derived) |
+| `work/` (`--work-dir`) | one directory per prove while it runs, gone with the bundle; never the system temp directory | recomputable |
+| `logs/` (`--log-dir`) | the daemon's own log, a file per day beside stdout, and the provers' transcripts `step-<slot>-{stdout,stderr}.log`, `rotate-<period>-*.log` | operational |
 
 ### 4.4 Configuration
 
@@ -435,9 +436,9 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |
-| `AN_LC_ABI_PATH` | slim ABI `crates/eth-light-client-relayer/abi/EthBeaconLightClient.abi.json` | | |
 | `AN_LIGHT_CLIENT`, `AN_SENDER` | light client address as `dapp_id::account_id` (self-rooted deploy: both halves equal) | | |
-| `AN_USDC_BRIDGE`, `AN_USDC_ABI_PATH` | `USDCBridge` address and slim ABI | set | empty |
+| `AN_USDC_BRIDGE` | `USDCBridge` address (its ABI and the light client's are built in; no `*_ABI_PATH`) | set | empty |
+| `ETH_LC_RELAYER_STATE_DIR`, `ETH_LC_RELAYER_WORK_DIR`, `ETH_LC_RELAYER_LOG_DIR` | the three directories (`--state-dir`, `--work-dir`, `--log-dir`), see §4.3 | required | required |
 | `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
 | `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain for the span between consecutive checkpoints | unset | unset |
 | daemon flags | | none (rotate on, flip off; `--flip-owner` only once §3.5 no longer applies) | `--no-rotate --no-flip-owner --owner-hop` |

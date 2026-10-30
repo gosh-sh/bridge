@@ -43,9 +43,9 @@ recipient through `confirmDeposit`.
 | Setting | Value | Why |
 |---|---|---|
 | Daemons per AN bridge | **exactly one** | `StateLock` (an advisory `flock` on `<state>.lock`) only stops a second daemon on the *same host and file*. Two hosts with the same keys would both prove and submit every deposit. The vouchers keep that safe, but it wastes proofs and the two senders compete. |
-| `DEPOSIT_RELAYER_STATE` | an absolute path on persistent disk | Read as `--state`. Without it, the file lands in the working directory as `./deposit-relayer-state.json`. |
+| `DEPOSIT_RELAYER_STATE_DIR`, `DEPOSIT_RELAYER_WORK_DIR`, `DEPOSIT_RELAYER_LOG_DIR` | three absolute directories on persistent disk (`--state-dir`, `--work-dir`, `--log-dir`; bridge-audit#132) | The state directory holds `deposit-relayer-state.json`, its lock and the temporary file of its atomic write; the work directory one subdirectory per proof, removed when the proof is read back; the log directory the daemon's own log (a file per day, beside stdout) and every `deposit-prover` run's transcript. Nothing goes to the system temp directory or `$HOME`. |
 | State file backup | copy it every few minutes, with the keys | The file is replaced atomically (temp file, `fsync`, `rename`, in `RelayerState::save`), so a plain `cp` always reads a complete file. The copy is what keeps `parked_deposit_ids` if the host dies. |
-| `AN_BRIDGE_ABI_PATH` | full bridge ABI containing `isAcceptedBlockHash(uint256,uint256) returns (bool)` | Upgrade custom ABIs alongside the daemon. A missing getter produces tick errors and no deposits are delivered. The full bridge ABI in the repository includes this getter. |
+| bridge ABI | built into the binary (`crates/ackinacki-bridge/abi/USDCBridge.abi.json` at build time) | No ABI file is read (bridge-audit#132); a daemon built from a commit whose ABI lacks a getter the contract has is upgraded, not reconfigured. |
 | `AN_DAPP_ID` | `0` | `eccUSDCBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
 | `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not proven again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
@@ -280,7 +280,7 @@ the same binary, env file and AN keys, and keep the service disabled. To fail ov
 
 1. Make sure the primary is really stopped (`systemctl stop`, or the host powered off).
    The lock does not reach across hosts.
-2. Copy the latest backup of `state.json` to the standby's `DEPOSIT_RELAYER_STATE`,
+2. Copy the latest backup of `deposit-relayer-state.json` into the standby's `DEPOSIT_RELAYER_STATE_DIR`,
    including `outstanding_deposits`. If there is no backup, start without a file and
    set `START_DEPOSIT_ID` to the primary's last `target_deposit_id` **only if that
    file had no outstanding ids**. `target_deposit_id` is the forward id; every
@@ -310,9 +310,8 @@ bridge operator.
 | `PARENT_RPC_URL` | Sepolia for Arbitrum Sepolia, Ethereum for Arbitrum One; must serve `eth_getBlockReceipts` | The assertion and its receipt are on the parent chain. Checked against the Arbitrum chain at start-up. |
 | `ARBITRUM_RPC_URL` | a node that serves `eth_getProof` on blocks a few minutes old, such as a free Alchemy key (which allows 10 blocks per `eth_getLogs`: add `--arbitrum-log-span 10`) | The proofs are taken when each batch lands, 40–60 s after its last block. `sepolia-rollup.arbitrum.io` and publicnode keep about 128 blocks of state, half a minute on Arbitrum, and miss many batches; a missed batch waits for the next one. |
 | `--bridge-address`, `--from-block` | `AckiNackiBridge` on the Arbitrum chain and its deploy block | Its `Deposit` logs are the blocks to anchor. Without a state file the relayer refuses to start without `--from-block`. |
-| `AN_GRAPHQL_URL`, `AN_KEYS_PATH`, `AN_BRIDGE_ABI_PATH`, `AN_TOKEN_BRIDGE` | as for `daemon` | Any key signs: `proveBlock` is permissionless. |
-| `AN_ARBITRUM_VERIFIER_ABI_PATH` | `contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json` | The verifier's address comes from the bridge (`getL2Verifier`). The relayer refuses to start before `deployL2Verifier`, and when the verifier's `getConfig()` names another chain, parent chain or rollup. |
-| `ARBITRUM_ANCHOR_STATE` | an absolute path on persistent disk, backed up like `state.json` | It keeps the proofs taken at batch time until their assertion lands, 30–60 min later. They cannot be fetched again. |
+| `AN_GRAPHQL_URL`, `AN_KEYS_PATH`, `AN_TOKEN_BRIDGE` | as for `daemon` | Any key signs: `proveBlock` is permissionless. The bridge and verifier ABIs are built in; the verifier's address comes from the bridge (`getL2Verifier`), and the relayer refuses to start before `deployL2Verifier` or when the verifier's `getConfig()` names another chain, parent chain or rollup. |
+| `ARBITRUM_ANCHORS_STATE_DIR`, `ARBITRUM_ANCHORS_WORK_DIR`, `ARBITRUM_ANCHORS_LOG_DIR` | three absolute directories on persistent disk (`--state-dir`, `--work-dir`, `--log-dir`) | The state directory holds `arbitrum-anchors-state.json`, backed up like the deposit relayer's: it keeps the proofs taken at batch time until their assertion lands, 30–60 min later, and they cannot be fetched again. The work directory stays empty (the command starts no prover); the log directory holds its own log. |
 
 The proofs wait in the state file until the bridge accepts the parent-chain block
 that holds the assertion. That is the parent chain's light client: run

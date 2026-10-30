@@ -4,7 +4,7 @@ How to deploy, run and recover `relayer daemon-live`, the AN→ETH relayer that
 proves Acki Nacki shellnet state and posts it to an `AckiNackiBridge` on
 Sepolia. Withdrawals (`withdrawByProof`, Circuit 4) are covered by the
 withdraw runbook. For a long-running server use the
-[Docker Compose kit](../deploy/shellnet-l2/README.md); the commands below are
+[Docker Compose kit](../../../docker/README.md); the commands below are
 the direct-CLI equivalent, for development and recovery.
 
 Run every command from `crates/bridge-prover-libraries/` in **bash**: the env
@@ -565,7 +565,7 @@ previous one, since the evening of 2026-10-08). Step by step, with rollback:
 
 ### Server deployment and handoff
 
-The [Compose kit](../deploy/shellnet-l2/README.md) wraps the same steps:
+The [Compose kit](../../../docker/README.md) wraps the same steps:
 read-only preflight on every start, `restart: unless-stopped`, and the kit's
 `scripts/status.sh` for a snapshot. Never run two daemons on the
 same bridge, key or state. Record for every deployment: the bridge address

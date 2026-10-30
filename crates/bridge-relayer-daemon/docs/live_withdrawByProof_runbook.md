@@ -1024,7 +1024,7 @@ highest active layer. The clock runs only while the bridge relays — a
 layer that gets no appends evicts nothing.
 
 **The L2-deploy sharp edge.** Shellnet is an L2 deploy:
-[`deploy/shellnet-l2/scripts/preflight.sh`](../deploy/shellnet-l2/scripts/preflight.sh)
+[`docker/relayer/preflight.sh`](../../../docker/relayer/preflight.sh)
 refuses any `BRIDGE_ANCHOR_LEVEL` but 2. There the L1 and L2 rings
 advance together, one slot per bundle, so an event's L1 anchor — when it
 has one — is evicted by the same `verifyBlock` as its L2 anchor.

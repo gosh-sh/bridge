@@ -34,12 +34,17 @@ assigns it when the release is tagged.
 - `DeployRealBridge` wires AAVE on Arbitrum Sepolia (chain id 421614) only when
   `USE_AAVE=true`: pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
   `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, aToken
-  `0x460b97BD498E1157530AEb3086301d5225b91216`. Leave `USE_AXIOM_ORACLE` unset —
-  `true` reverts on this chain, and the script then deploys `MockBlockHeaderOracle`.
-  Set `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID`) for a shellnet withdrawal; the script
-  defaults it to 0, and the value is immutable. After the deploy, call
-  `setTrustedL1Bridge(421614, <bridge>, true)` on `eccUSDCBridge` and point
-  `BRIDGE_ADDRESS` at the new bridge. `aavePool` and `aUSDC` are immutables: a deploy
+  `0x460b97BD498E1157530AEb3086301d5225b91216`. Leave `USE_AXIOM_ORACLE` unset.
+  `true` reverts on this chain and deploys nothing; unset, the script deploys
+  `MockBlockHeaderOracle`. Set `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID`) for a shellnet
+  withdrawal; the script defaults it to 0, and the value is immutable. After the deploy,
+  call `setTrustedL1Bridge(421614, <bridge>, true)` on `eccUSDCBridge`. Point
+  `BRIDGE_ADDRESS` at the new bridge on the deposit relayer, on `ackinacki-bridge`, and
+  on `relayer daemon-bridge --bridge-address` (without that daemon the new bridge has
+  no `verifyBlock` anchor and `withdrawByProof` cannot pay). Set `BRIDGE_DEPLOY_BLOCK`
+  to the deploy block for those same three. A deposit-relayer `state.json` stamped with
+  the old bridge refuses to start (`state.json deployment mismatch`); pass `--force-state`
+  or use a new state file. `aavePool` and `aUSDC` are immutables: a deploy
   without `USE_AAVE=true` cannot be switched on later (`setAaveEnabled(true)` reverts
   `InvalidAaveAddress`). `DeployShellnetE2EBridge` does not wire this market.
 

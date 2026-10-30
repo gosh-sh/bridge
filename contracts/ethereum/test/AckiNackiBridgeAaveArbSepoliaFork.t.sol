@@ -123,9 +123,11 @@ contract AckiNackiBridgeAaveArbSepoliaForkTest is Test {
         assertApproxEqAbs(
             bridge.suppliedPrincipal(), 9 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "90% supplied"
         );
-        assertEq(
+        // AAVE's rayDiv can credit 1 wei less aUSDC than the USDC that left.
+        assertApproxEqAbs(
             usdc.balanceOf(address(bridge)),
             liquidBefore - bridge.suppliedPrincipal(),
+            DRIFT_TOLERANCE,
             "liquid reserve stays"
         );
         assertApproxEqAbs(

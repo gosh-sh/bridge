@@ -37,8 +37,9 @@ note here calling out the drift.
 >
 > **Drift note, 2026-10-30 (Arbitrum Sepolia AAVE).** §10, §12.1, §12.2, §12.3 and §13
 > now include chain id 421614. `DeployRealBridge._resolveTokenAddresses` accepts it.
-> `USE_AAVE` defaults false, and `USE_AXIOM_ORACLE=true` reverts on this chain. Other
-> citations were not re-anchored.
+> `USE_AAVE` defaults false, and `USE_AXIOM_ORACLE=true` reverts on this chain. The
+> `DeployRealBridge.s.sol` citations in the constructor table (`:152`) and in §12
+> (`:144`, `:147`, `:157-158`) were re-anchored to this script. Other citations were not.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -252,7 +253,7 @@ Validation performed (and *not* performed):
 | AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
-| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:141`). |
+| `genesisBkSetCommitment != 0` when verifiers wired | — | **Not enforced on-chain**; only the deploy script enforces it (`script/DeployRealBridge.s.sol:152`). |
 | verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
@@ -747,7 +748,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:146-147`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:157-158`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. |
 | `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
@@ -762,7 +763,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle` on chain ids 1 and 11155111. On 421614 `true` reverts; leave it unset for `MockBlockHeaderOracle`. |
 | `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:136`, unconditional). On mainnet the value is `envBool` with no default (`:133`); on other nets it used to default false and no longer may. |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:147`, unconditional). On mainnet the value is `envBool` with no default (`:144`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned** at L1; under L2 anchoring it must be a multiple of `BUNDLE_STRIDE` = 16384. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |

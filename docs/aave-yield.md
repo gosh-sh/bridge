@@ -46,9 +46,19 @@ The shellnet e2e deploy sets 3; this script does not.
 
 After the deploy, the Acki Nacki bridge has to trust the new address:
 `setTrustedL1Bridge(421614, <bridge>, true)` on `eccUSDCBridge`. Without that,
-`finalizeDeposit` reverts `ERR_UNSUPPORTED_SRC_CHAIN`. Point the deposit relayer and
-`ackinacki-bridge` at the same address (`BRIDGE_ADDRESS`). The bridge already recorded for
-Arbitrum Sepolia has no pool, so this is a new address.
+`finalizeDeposit` reverts `ERR_UNSUPPORTED_SRC_CHAIN`. The bridge already recorded for
+Arbitrum Sepolia has no pool, so this is a new address. Point every consumer at it:
+
+* `BRIDGE_ADDRESS` on the deposit relayer and on `ackinacki-bridge`.
+* `relayer daemon-bridge --bridge-address`. That daemon is what submits `verifyBlock`.
+  Without it the new bridge has no anchor, and `withdrawByProof` cannot pay.
+* `BRIDGE_DEPLOY_BLOCK`, set to the deploy block, on the deposit relayer, on
+  `relayer daemon-bridge`, and on the CLI. Left unset, log scans and the anchor walk
+  start from genesis.
+
+A deposit-relayer `state.json` stamped with the previous bridge refuses to start with
+`state.json deployment mismatch`. `--force-state` discards that file's progress and
+starts at `--start-deposit-id`. A new state file does the same.
 
 ## Where the money is
 

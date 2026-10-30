@@ -1,0 +1,356 @@
+# The four bridge services from the images docker/Dockerfile builds
+# (bridge-audit#135), and the one-shot commands around them (profile `ops`).
+#
+# Nothing here names a host, an address or a key: every value comes from
+# `.env` next to this file (image tags, the two directory roots, the metrics
+# address, the service UID) and from the env files under $BRIDGE_OPT/env/
+# (chain addresses, endpoints, keys). `.env.example` and `env/*.env.example`
+# are the templates.
+#
+# Layout on the host (bridge-audit#132), two roots:
+#   $BRIDGE_OPT   small and not recoverable: env/, keys/, <service>/state/
+#   $BRIDGE_DATA  large and recomputable: <service>/work/, <service>/logs/,
+#                 params/<prover>/ (SRS, keys, caches)
+# In the container every service sees /data/state, /data/work, /data/logs and
+# /data/params, so the images know no host path.
+
+name: bridge-${BRIDGE_NET:?BRIDGE_NET names the network, e.g. shellnet}
+
+x-service: &service
+  user: "${BRIDGE_UID:-998}:${BRIDGE_GID:-998}"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  init: true
+  restart: unless-stopped
+  logging:
+    driver: local
+    options:
+      max-size: 100m
+      max-file: "10"
+  networks:
+    - egress
+  tmpfs:
+    # A read-only root still needs somewhere for the few things glibc and
+    # the tools expect; the services themselves write only to /data.
+    - /tmp:size=64m,mode=1777
+
+services:
+  # Acki Nacki -> EVM: proves Acki Nacki blocks to AckiNackiBridge (verifyBlock,
+  # applyBkSetUpdate). Its entrypoint reruns verify-params and preflight on every
+  # start; the env file is a mounted secret the entrypoint sources, not container
+  # environment, so `docker inspect` shows no key.
+  daemon-live:
+    <<: *service
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    environment:
+      RELAYER_RUNTIME_ENV_FILE: /run/secrets/runtime-env
+      RELAYER_METRICS_ADDR: 0.0.0.0:9464
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT:?}/env/daemon-live.env
+        target: /run/secrets/runtime-env
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/keys/bk_set.json
+        target: /run/config/bk_set.json
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/daemon-live/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA:?}/daemon-live/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/daemon-live/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params/relayer
+        target: /data/params
+        read_only: true
+        bind: { create_host_path: false }
+      # The outer proving-key cache is the one writable part of the params.
+      - type: bind
+        source: ${BRIDGE_DATA}/params/relayer/pk_cache
+        target: /data/params/pk_cache
+        bind: { create_host_path: false }
+    ports:
+      # The LAN address is required: without one Docker publishes the port on
+      # every interface, past the host firewall.
+      - "${METRICS_LISTEN_ADDR:?}:${DAEMON_LIVE_METRICS_PORT:-9464}:9464"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9464/metrics"]
+      interval: 60s
+      timeout: 10s
+      start_period: 15m
+      retries: 5
+    stop_signal: SIGTERM
+    # A tick may be inside a multi-minute proof; let it finish on stop.
+    stop_grace_period: 20m
+
+  # EVM -> Acki Nacki: proves Deposit events and finalizes them on
+  # eccUSDCBridge. The deposit-prover tools are in the image; the SRS and the
+  # proving key they read and write are /data/params.
+  deposit-relayer:
+    <<: *service
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-deposit-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    command: ["daemon"]
+    env_file:
+      - path: ${BRIDGE_OPT}/env/deposit-relayer.env
+        required: true
+    environment:
+      AN_KEYS_PATH: /run/keys/deposit-sender.keys.json
+      DEPOSIT_RELAYER_METRICS_ADDR: 0.0.0.0:9467
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/keys
+        target: /run/keys
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/deposit-relayer/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/deposit-relayer/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/deposit-relayer/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+      # Writable: export_blake2b_proof generates the proving key into data/
+      # on the first proof.
+      - type: bind
+        source: ${BRIDGE_DATA}/params/deposit-prover
+        target: /data/params
+        bind: { create_host_path: false }
+    ports:
+      - "${METRICS_LISTEN_ADDR:?}:${DEPOSIT_RELAYER_METRICS_PORT:-9467}:9467"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9467/metrics"]
+      interval: 60s
+      timeout: 10s
+      start_period: 2m
+      retries: 5
+    stop_grace_period: 10m
+
+  # Sepolia -> Acki Nacki: the beacon light client. Step and rotate provers are
+  # in the image; the SRS and the step proving key are /data/params. Flags
+  # without an environment variable are set here; an operator overrides the
+  # command in compose.override.yaml.
+  eth-lc-relayer:
+    <<: *service
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    command: ["daemon", "--no-rotate", "--no-flip-owner", "--owner-hop", "--poll-secs", "64", "--prove-timeout-secs", "7200"]
+    env_file:
+      - path: ${BRIDGE_OPT}/env/eth-lc-relayer.env
+        required: true
+    environment:
+      AN_KEYS_PATH: /run/keys/an-owner.keys.json
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/keys
+        target: /run/keys
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/eth-lc-relayer/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/eth-lc-relayer/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/eth-lc-relayer/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+      # Writable: the step key is generated here once per prover build
+      # (`docker compose run --rm lc-keygen`).
+      - type: bind
+        source: ${BRIDGE_DATA}/params/lc-prover
+        target: /data/params
+        bind: { create_host_path: false }
+    # A tick may be inside a step proof (up to --prove-timeout-secs).
+    stop_grace_period: 2h
+
+  # Arbitrum -> Acki Nacki: proves the Arbitrum blocks that hold deposits to
+  # ArbitrumBlockVerifier, on top of the parent-chain blocks the light client
+  # accepted. Same image as eth-lc-relayer, another command.
+  arbitrum-anchors:
+    <<: *service
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    command: ["arbitrum-anchors"]
+    env_file:
+      - path: ${BRIDGE_OPT}/env/arbitrum-anchors.env
+        required: true
+    environment:
+      AN_KEYS_PATH: /run/keys/deposit-sender.keys.json
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/keys
+        target: /run/keys
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/arbitrum-anchors/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/arbitrum-anchors/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/arbitrum-anchors/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+    stop_grace_period: 2m
+
+  # ---- one-shot commands, `docker compose run --rm <name> ...` ----------
+
+  # daemon-live's startup checks alone: artifacts, image, chain, key, cursor.
+  # Sends nothing, starts no daemon.
+  preflight:
+    <<: *service
+    profiles: [ops]
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    restart: "no"
+    command: ["preflight"]
+    environment:
+      RELAYER_RUNTIME_ENV_FILE: /run/secrets/runtime-env
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/env/daemon-live.env
+        target: /run/secrets/runtime-env
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/keys/bk_set.json
+        target: /run/config/bk_set.json
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/daemon-live/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/daemon-live/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/daemon-live/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params/relayer
+        target: /data/params
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params/relayer/pk_cache
+        target: /data/params/pk_cache
+        bind: { create_host_path: false }
+
+  # The step proving key for the light-client prover of this image: generated
+  # once per image into /data/params/step-key (the prover refuses a key another
+  # build generated). Minutes and a few GB.
+  lc-keygen:
+    <<: *service
+    profiles: [ops]
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    restart: "no"
+    entrypoint: ["/opt/bridge/bin/export_step_vk_blob"]
+    command: []
+    environment:
+      STEP_KEYGEN_ONLY: "1"
+      STEP_KEY_DIR: /data/params/step-key
+      STEP_SRS_PATH: /data/params/kzg_bn254_19.srs
+      STEP_OUT_DIR: /data/work
+    volumes:
+      - type: bind
+        source: ${BRIDGE_DATA}/eth-lc-relayer/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params/lc-prover
+        target: /data/params
+        bind: { create_host_path: false }
+
+  # The BK set file for a (re)deploy: the live set folded forward to the seed
+  # height. `docker compose run --rm fold-bk-set --cap-height <seed>
+  # --genesis /data/state/prover_bk_set.json --out /data/work/bk_set.json`
+  fold-bk-set:
+    <<: *service
+    profiles: [ops]
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    restart: "no"
+    entrypoint: ["/opt/bridge/bin/seed_prover_bk_set"]
+    command: ["--help"]
+    env_file:
+      - path: ${BRIDGE_OPT}/env/daemon-live.env
+        required: true
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/daemon-live/state
+        target: /data/state
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/daemon-live/work
+        target: /data/work
+        bind: { create_host_path: false }
+
+  # The operator's CLI with the provers and the aggregator it starts.
+  # `docker compose run --rm cli withdraw ...`; its state and work directories
+  # are /data/state and /data/work (flags), its params /data/params.
+  cli:
+    <<: *service
+    profiles: [ops]
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-cli:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    restart: "no"
+    command: ["--help"]
+    env_file:
+      - path: ${BRIDGE_OPT}/env/cli.env
+        required: false
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/keys
+        target: /run/keys
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/cli/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/cli/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/cli/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params
+        target: /data/params
+        bind: { create_host_path: false }
+
+networks:
+  egress:
+    driver: bridge

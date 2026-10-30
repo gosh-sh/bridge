@@ -27,20 +27,20 @@ interface IDebtToken {
     function totalSupply() external view returns (uint256);
 }
 
-/// @title AckiNackiBridgeAaveArbSepoliaForkTest
+/// @title AckiNackiBridgeArbSepoliaAaveForkTest
 /// @notice Live Arbitrum Sepolia AAVE market (Circle USDC). Opt-in via
 /// `FORK_URL`. Without it, or when the fork is another chain, the test skips.
 ///
 /// ```bash
 /// FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
-///   forge test --match-contract AckiNackiBridgeAaveArbSepoliaForkTest -vv
+///   forge test --match-contract AckiNackiBridgeArbSepoliaAaveForkTest -vv
 /// ```
 ///
 /// The three addresses are the ones `DeployRealBridge` writes on chain id
 /// 421614. Supply, harvest, withdraw, emergency unwind and a payout that
 /// tops up from the pool all run against that market. The withdrawal proof
 /// is the test mock: the pool pull is the real one.
-contract AckiNackiBridgeAaveArbSepoliaForkTest is Test {
+contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
     address constant AAVE_V3_POOL = 0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff;
     address constant USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
     address constant AUSDC = 0x460b97BD498E1157530AEb3086301d5225b91216;

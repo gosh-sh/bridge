@@ -166,7 +166,7 @@ Contracts on their own:
 cd contracts/ethereum
 forge test                                                   # full suite
 forge test --match-contract AckiNackiBridgeWithdrawByProof -vv
-FOUNDRY_PROFILE=fork forge test --match-contract AaveFork     # Ethereum Sepolia RPC; another chain skips
+FOUNDRY_PROFILE=fork forge test --match-contract AaveFork     # the suite for the RPC's chain runs, the other skips
 ```
 
 The suite is inventoried per file, with what each one covers, in

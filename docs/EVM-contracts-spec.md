@@ -41,8 +41,10 @@ note here calling out the drift.
 > `DeployRealBridge.s.sol` citations in the constructor table (`:152`) and in §12
 > (`:144`, `:147`, `:157-158`) were re-anchored to this script. The constructor table's
 > `genesisBkSetCommitment` row cites `src/AckiNackiBridge.sol` as of this note (`:721-722`).
-> §7.2's *Replay scope* now covers a second deployment on the same chain. Other citations were
-> not re-anchored.
+> The verifier-triple row was wrong: the constructor reverts `PartialVerifyBlockWiring` on a
+> partial triple (`:702`); it and its `VerifyBlockDisabled` citation (`:868`) are re-anchored.
+> §7.2's *Replay scope* no longer claims a second deployment on the same chain is covered. Other
+> citations were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -257,7 +259,7 @@ Validation performed (and *not* performed):
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
 | `genesisBkSetCommitment != 0` when the verifier triple is wired | 721-722 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:152` checks it before the deploy too. |
-| verifier triple is all-or-nothing | — | **Not enforced at construction**; a partially wired triple simply makes `verifyBlock` revert `VerifyBlockDisabled` at call time (`:750-756`). |
+| verifier triple is all-or-nothing | 702 | else `PartialVerifyBlockWiring`. Test `test/AckiNackiBridgeWithdrawByProof.t.sol:305` pins it. With no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` at call time (`:868`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
 `liquidReserveBps = 1_000` (10 %), reentrancy guard armed, `OwnershipTransferred(0, msg.sender)`
@@ -448,11 +450,10 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
-(or its scoped alias), so the same proof cannot be replayed on a deployment on another chain. A
-second deployment on the same chain, with the same `dappFr` and `accFr`, does accept it: the
-inputs name no bridge address, so each unpaused copy with an anchor covering the burn and
-treasury to pay it pays it once. [`aave-yield.md`](aave-yield.md) explains why that blocks a
-second bridge on 421614 (gosh-sh/bridge-audit#140). The `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
+(or its scoped alias), so the same proof cannot be replayed on a deployment on another chain.
+That guarantee does not extend to two deployments on the same chain: run only one unpaused bridge
+per chain, and see [`aave-yield.md`](aave-yield.md) for 421614 (gosh-sh/bridge-audit#140). The
+`altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
 on a deployment whose host chain is not the configured one. The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
 nullifier, so two identical burns in one AN block mint distinct
@@ -829,7 +830,7 @@ was written in, so the suite was read, not executed).
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
 | `AckiNackiBridgeAaveFork.t.sol` (4) | Ethereum Sepolia fork against real AAVE (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 11155111. |
-| `AckiNackiBridgeAaveArbSepoliaFork.t.sol` (6) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, and a `withdrawByProof` top-up (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
+| `AckiNackiBridgeArbSepoliaAaveFork.t.sol` (6) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, and a `withdrawByProof` top-up (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |

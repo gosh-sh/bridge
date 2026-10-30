@@ -39,10 +39,8 @@ assigns it when the release is tagged.
   `MockBlockHeaderOracle`. Set `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID`) for a shellnet
   withdrawal; the script defaults it to 0, and the value is immutable. This deploy is a
   second contract next to the live bridge `0x3FB082a905a895151224F6d93bD074E816338638`,
-  and there is no safe cutover between them yet (gosh-sh/bridge-audit#140). A withdrawal
-  proof names no EVM bridge and each contract keeps its own nullifiers, so the new bridge
-  pays again any withdrawal the old one paid once it anchors a root covering the burn; no
-  choice of seed prevents that. `pause()` the new bridge right after the deploy, do not
+  and moving to it is blocked until gosh-sh/bridge-audit#140 lands. Until then
+  `pause()` the new bridge right after the deploy and leave it paused, do not
   `setTrustedL1Bridge(421614, <new bridge>, true)`, and point no relayer or
   `ackinacki-bridge` at it. The anchors, the owner and the withdraw fields are immutable:
   for the shellnet-l2 kit, deploy from its `RELAYER_ADDRESS` with

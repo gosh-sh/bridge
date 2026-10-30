@@ -25,14 +25,14 @@ Arbitrum Sepolia is the testnet market whose underlying is Circle's USDC. Read o
 aToken's `UNDERLYING_ASSET_ADDRESS()` was that USDC, its `POOL()` was that pool, and the reserve was
 active, not frozen and not paused, with a supply cap of 10_500_000. Testnet markets move. Before a
 deploy, call those two views again and confirm `getReserveData(usdc)` still returns this aToken.
-`AckiNackiBridgeAaveArbSepoliaForkTest` does that check and then calls `supplyToAave`,
+`AckiNackiBridgeArbSepoliaAaveForkTest` does that check and then calls `supplyToAave`,
 `harvestYield` (the reserve already has a borrower), `withdrawFromAave`, `emergencyWithdrawAll`
 and a `withdrawByProof` that tops the payout up from the pool:
 
 ```bash
 cd contracts/ethereum
 FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
-  forge test --match-contract AckiNackiBridgeAaveArbSepoliaForkTest -vv
+  forge test --match-contract AckiNackiBridgeArbSepoliaAaveForkTest -vv
 ```
 
 `USE_AXIOM_ORACLE` deploys `AxiomBlockHeaderOracle` only on chain ids 1 and 11155111. On 421614
@@ -47,44 +47,23 @@ The shellnet e2e deploy sets 3; this script does not.
 
 The bridge already recorded for Arbitrum Sepolia,
 `0x3FB082a905a895151224F6d93bD074E816338638` (`README.md`), has no pool, so this
-deploy is a second contract. The current contracts give no safe way to move from that
-bridge to the new one. The cutover waits for a contract change, tracked in
-gosh-sh/bridge-audit#140.
+deploy is a second contract on the same chain. Moving from that bridge to the new one is blocked
+until gosh-sh/bridge-audit#140 lands; the old bridge stays the live one for 421614.
 
-### Why a second bridge on the same chain is unsafe
+### Keep a new 421614 bridge paused
 
-A withdrawal proof carries no EVM bridge address
-(`WithdrawalPublicInputs` in `IBridgeWithdrawalVerifier.sol`). `withdrawByProof`
-checks `dappFr` and `accFr` (the same Acki Nacki bridge on both deploys),
-`dstChainId`, that contract's own `_nullifiers`, and that contract's own anchor
-window. `verifyBlock` has no caller restriction. One Acki Nacki burn with
-`dstChainId` 421614 can be paid by every unpaused bridge that has an anchor
-covering it and USDC in `treasuryBalance`.
+Until then:
 
-* **A withdrawal the old bridge paid is paid again by the new one.** The new bridge's
-  `_nullifiers` start empty. A withdrawal proof at layer n ≥ 2 anchors to the first multiple
-  of `W^n` after the burn (`l_n_anchor_boundaries` in
-  `crates/bridge-prover-libraries/bridge-prover-lib/src/real_chain_builder.rs`). At a high
-  enough layer that boundary falls after the new bridge's seed, whichever seed is chosen. Once
-  the new bridge anchors that boundary, the old proof passes there and is paid out of the new
-  bridge's USDC. Read on 2026-10-30, the old bridge had paid one withdrawal (nullifier
-  `0x2b9017c241a2ee4235c3379761156d8b2606895d65271bd32c76f5e361ff72df`, Arbitrum Sepolia
-  block 324163888) and held `treasuryBalance` 1999999 (1.999999 USDC).
-* **USDC left in a paused bridge stays there.** The principal, `treasuryBalance`, leaves only
-  through `withdrawByProof`. `skimExcessUsdc` and `harvestYield` pay out only what is above
-  it: liquid USDC beyond `treasuryBalance`, and AAVE interest. A
-  bridge paused with `treasuryBalance` X keeps those X USDC, while the eccUSDC they back can
-  still be burnt towards 421614 and paid by the other bridge out of its own depositors' USDC.
-  That bridge then ends X short, and its last withdrawals revert `WithdrawTreasuryShortfall`.
+* Call `pause()` on the new bridge right after the deploy, from the deploying account (the
+  owner), and leave it paused. While it is paused, `deposit`, `verifyBlock`, `applyBkSetUpdate`
+  and `withdrawByProof` revert.
+* Do not `setTrustedL1Bridge(421614, <new bridge>, true)` on `eccUSDCBridge`.
+* Do not point a relayer or `ackinacki-bridge` at it.
 
-Until that change lands, the old bridge stays the live one for 421614. Call `pause()` on a new
-bridge right after the deploy, from the deploying account (the owner). While it is paused,
-`deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert, so it pays nothing.
-Do not `setTrustedL1Bridge(421614, <new bridge>, true)` on `eccUSDCBridge`, and do not point
-a relayer or `ackinacki-bridge` at it. `AckiNackiBridgeAaveArbSepoliaForkTest` exercises the
-AAVE calls against the live market on a fork, with a bridge it deploys there. The web form
-deposits on Ethereum Sepolia only (`USDC_CONTRACT_ADDRESS` and `SEPOLIA_CHAIN_ID` in
-`frontend/src/config.rs`) and plays no part on 421614.
+`AckiNackiBridgeArbSepoliaAaveForkTest` exercises the AAVE calls against the live market on a
+fork, with a bridge it deploys there. The web form deposits on Ethereum Sepolia only
+(`USDC_CONTRACT_ADDRESS` and `SEPOLIA_CHAIN_ID` in `frontend/src/config.rs`) and plays no part on
+421614.
 
 ### Deploy inputs that cannot be changed later
 

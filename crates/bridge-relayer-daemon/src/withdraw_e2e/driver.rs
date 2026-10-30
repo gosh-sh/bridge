@@ -420,12 +420,16 @@ fn parse_hex32(s: &str) -> Result<[u8; 32]> {
 /// — `ackinacki-bridge withdraw` and `relayer withdraw-e2e` — set its
 /// timeout with `--prover-timeout-s`, so a timeout names that flag.
 fn aggregator_config(cfg: &WithdrawE2EConfig, pk_cache_dir: &Path) -> SubprocessAggregatorConfig {
+    // The calldata file lives in the run's work directory while the
+    // aggregator writes it, not in the system temp directory
+    // (bridge-audit#132).
     let mut agg_cfg = SubprocessAggregatorConfig::new(
         &cfg.aggregate_proof_bin,
         &cfg.verifiers_dir,
         &cfg.params_dir,
     )
-    .with_pk_cache_dir(pk_cache_dir);
+    .with_pk_cache_dir(pk_cache_dir)
+    .with_scratch_dir(&cfg.work_dir);
     agg_cfg.timeout = cfg.prover_timeout;
     agg_cfg.timeout_flag = Some("--prover-timeout-s");
     agg_cfg.slot_report = cfg.slot_report.clone();

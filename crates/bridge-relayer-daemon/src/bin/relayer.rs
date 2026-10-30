@@ -62,10 +62,17 @@ use tracing::{error, info, warn};
     about = "Acki Nacki → Ethereum bridge relayer (Phase 5.1 skeleton)"
 )]
 struct Args {
-    /// Where to persist `state.json`. Only used by the `smoke-fixture`
-    /// subcommand; `sentry-watch` is stateless.
-    #[arg(long, default_value = "./relayer-state.json")]
-    state: PathBuf,
+    /// Directory for `relayer-state.json`, the cursor of the daemon modes
+    /// (bridge-audit#132). `daemon-live` keeps it under `--prover-state-dir`
+    /// instead and ignores this; `sentry-watch` is stateless.
+    #[arg(long, env = "RELAYER_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+
+    /// Removed: the state is a directory now. Kept hidden so an old command
+    /// line or `RELAYER_STATE_PATH` in the environment fails with the
+    /// migration hint instead of a bare "unexpected argument".
+    #[arg(long, env = "RELAYER_STATE_PATH", hide = true)]
+    state: Option<PathBuf>,
 
     /// Fallback Ethereum RPC endpoints behind `--rpc-url`, comma-separated,
     /// tried in order when the one before fails (see
@@ -83,6 +90,12 @@ struct Args {
     #[command(subcommand)]
     cmd: Cmd,
 }
+
+/// The daemon modes' cursor file inside their state directory.
+const RELAYER_STATE_FILE_NAME: &str = "relayer-state.json";
+/// `daemon-live`'s own log file inside its log directory; `tracing-appender`
+/// adds the day to the name.
+const LOG_FILE_PREFIX: &str = "relayer.log";
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
@@ -396,10 +409,21 @@ enum Cmd {
         /// Directory with SRS + circuit PKs (`KeyManager`).
         #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
         params_dir: PathBuf,
-        /// Directory for `prover_state.json` / `prover_bk_set.json` /
-        /// `bootstrap_seed.json`.
+        /// The state directory: `prover_state.json`, `prover_bk_set.json`,
+        /// `bootstrap_seed.json` and `relayer-state.json` (the cursor that
+        /// `--state` used to name; bridge-audit#132).
         #[arg(long, env = "BRIDGE_STATE_DIR", default_value = "./state")]
         prover_state_dir: PathBuf,
+        /// Directory for the files of a proof in flight: the wrapped snarks
+        /// and the aggregator's calldata, gone once read back. Never the
+        /// system temp directory. Created when missing.
+        #[arg(long, env = "BRIDGE_WORK_DIR")]
+        work_dir: PathBuf,
+        /// Directory for the daemon's own log, one file per day beside
+        /// stdout; the aggregator's output is in it line by line. Created
+        /// when missing.
+        #[arg(long, env = "BRIDGE_LOG_DIR")]
+        log_dir: PathBuf,
         /// Fallback BK-set JSON if GQL fetch fails at startup.
         #[arg(
             long,
@@ -616,13 +640,50 @@ fn exit_status(err: &anyhow::Error) -> Option<i32> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
     let args = Args::parse();
+    if let Some(old) = &args.state {
+        // Before bridge-audit#132 the cursor was a file path. Now the daemon
+        // modes name it inside a state directory.
+        anyhow::bail!(
+            "--state / RELAYER_STATE_PATH ({}) is gone: the state is a directory now. Move the \
+             file into a directory as {RELAYER_STATE_FILE_NAME} and pass that directory as \
+             --state-dir / RELAYER_STATE_DIR (daemon-live: --prover-state-dir / \
+             BRIDGE_STATE_DIR); see CHANGELOG.md.",
+            old.display()
+        );
+    }
+    let log_dir = match &args.cmd {
+        Cmd::DaemonLive {
+            log_dir, ..
+        } => Some(log_dir.clone()),
+        _ => None,
+    };
+    if let Some(dir) = &log_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("log directory {}: {e}", dir.display()))?;
+    }
+    // Dropped at exit: flushes the file writer.
+    let _log_guard = init_tracing(log_dir.as_deref());
     let _ = RPC_FAILOVER_URLS.set(args.rpc_failover_urls.clone());
+    // The cursor file of the daemon modes other than `daemon-live`.
+    let state_file = |dir: &Option<PathBuf>| -> anyhow::Result<PathBuf> {
+        let dir = dir.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--state-dir / RELAYER_STATE_DIR is required: the directory for \
+                 {RELAYER_STATE_FILE_NAME}"
+            )
+        })?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("state directory {}: {e}", dir.display()))?;
+        Ok(dir.join(RELAYER_STATE_FILE_NAME))
+    };
 
     match args.cmd {
         Cmd::Status => {
-            info!("relayer state file = {}", args.state.display());
+            info!(
+                "relayer state file = {}",
+                state_file(&args.state_dir)?.display()
+            );
             Ok(())
         },
         Cmd::SmokeFixture {
@@ -634,7 +695,7 @@ async fn main() -> anyhow::Result<()> {
             max_ticks,
             anchor_level,
         } => smoke_fixture(
-            args.state,
+            state_file(&args.state_dir)?,
             fixtures_dir,
             verifiers_dir,
             rpc_url,
@@ -683,7 +744,7 @@ async fn main() -> anyhow::Result<()> {
                 multiplier: backoff_multiplier,
             };
             run_daemon(
-                args.state,
+                state_file(&args.state_dir)?,
                 fixtures_dir,
                 verifiers_dir,
                 rpc_url,
@@ -826,7 +887,7 @@ async fn main() -> anyhow::Result<()> {
                 multiplier: backoff_multiplier,
             };
             run_bridge_daemon(
-                args.state,
+                state_file(&args.state_dir)?,
                 proofs_dir,
                 rpc_url,
                 bridge_address,
@@ -849,6 +910,8 @@ async fn main() -> anyhow::Result<()> {
             gql_endpoint,
             params_dir,
             prover_state_dir,
+            work_dir,
+            log_dir: _,
             bk_set_config,
             bootstrap_seqno,
             backoff_initial_secs,
@@ -897,8 +960,10 @@ async fn main() -> anyhow::Result<()> {
                 .as_deref()
                 .map(bridge_gql_fetcher::gql_client::parse_endpoint_list)
                 .unwrap_or_default();
+            // One state directory: the cursor sits beside the prover state.
+            let relayer_state_path = prover_state_dir.join(RELAYER_STATE_FILE_NAME);
             run_daemon_live(
-                args.state,
+                relayer_state_path,
                 rpc_url,
                 bridge_address,
                 private_key,
@@ -906,6 +971,7 @@ async fn main() -> anyhow::Result<()> {
                 gql_failover_endpoints,
                 params_dir,
                 prover_state_dir,
+                work_dir,
                 bk_set_config,
                 bootstrap_seqno,
                 backoff,
@@ -2209,6 +2275,7 @@ async fn run_daemon_live(
     gql_failover_endpoints: Vec<String>,
     params_dir: PathBuf,
     prover_state_dir: PathBuf,
+    work_dir: PathBuf,
     bk_set_config: PathBuf,
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
@@ -2228,6 +2295,13 @@ async fn run_daemon_live(
     use tokio::sync::Mutex;
 
     std::fs::create_dir_all(&prover_state_dir)?;
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
+    info!(
+        state_dir = %prover_state_dir.display(),
+        work_dir = %work_dir.display(),
+        "daemon-live: service directories",
+    );
     let state_paths = StatePaths::under(&prover_state_dir);
     let prover_state_path = state_paths.prover_state_json.clone();
     let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
@@ -2541,9 +2615,10 @@ async fn run_daemon_live(
         &aggregation.verifiers_dir,
         &params_dir,
     )
-    .with_pk_cache_dir(&aggregation.pk_cache_dir);
+    .with_pk_cache_dir(&aggregation.pk_cache_dir)
+    .with_scratch_dir(&work_dir);
     let pipeline = Circuit12ShplonkPipeline::new(
-        PoseidonSnarkWrapper::new(&params_dir),
+        PoseidonSnarkWrapper::new(&params_dir).with_scratch_dir(&work_dir),
         SubprocessAggregator::new(aggregator_cfg),
     );
     let aggregated = Arc::new(AggregatedBlockSource::new(
@@ -2648,13 +2723,36 @@ fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+/// Log to stdout and, when `log_dir` is given, to a file per day in it
+/// (`relayer.log.<date>`; bridge-audit#132). The guard flushes the file
+/// writer when dropped, so `main` holds it until exit.
+fn init_tracing(log_dir: Option<&Path>) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let stdout = fmt::layer();
+    match log_dir {
+        Some(dir) => {
+            let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
+                dir,
+                LOG_FILE_PREFIX,
+            ));
+            let file = fmt::layer().with_ansi(false).with_writer(writer);
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .with(file)
+                .try_init();
+            Some(guard)
+        },
+        None => {
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .try_init();
+            None
+        },
+    }
 }
 
 #[cfg(test)]

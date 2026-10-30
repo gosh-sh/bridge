@@ -340,6 +340,10 @@ pub struct SubprocessAggregatorConfig {
     /// later ones load the key from disk. Without this, every run re-keygens
     /// from scratch — see `aggregator_cache.rs`.
     pub pk_cache_dir: Option<PathBuf>,
+    /// Where the calldata file lives while a run lasts (removed once read
+    /// back). `None` is the system temp directory; the daemons pass their
+    /// work directory (bridge-audit#132).
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl SubprocessAggregatorConfig {
@@ -357,12 +361,20 @@ impl SubprocessAggregatorConfig {
             timeout_flag: None,
             slot_report: None,
             pk_cache_dir: None,
+            scratch_dir: None,
         }
     }
 
     /// Enable persistent outer-PK caching across `aggregate-proof` invocations.
     pub fn with_pk_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.pk_cache_dir = Some(dir.into());
+        self
+    }
+
+    /// Keep the calldata file under `dir` instead of the system temp
+    /// directory.
+    pub fn with_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.scratch_dir = Some(dir.into());
         self
     }
 }
@@ -648,7 +660,15 @@ impl ProofAggregator for SubprocessAggregator {
         inner_snark: &Path,
         verifier_name: &str,
     ) -> Result<Vec<u8>, RelayerError> {
-        let out_path = std::env::temp_dir().join(format!(
+        let out_dir = self
+            .config
+            .scratch_dir
+            .clone()
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&out_dir).map_err(|e| {
+            RelayerError::other(format!("scratch directory {}: {e}", out_dir.display()))
+        })?;
+        let out_path = out_dir.join(format!(
             "agg_calldata_{verifier_name}_{}.bin",
             std::process::id()
         ));
@@ -1065,13 +1085,25 @@ pub trait SnarkWrapper: Send + Sync {
 /// (see `bridge_snark_wrap::wrap_poseidon_snark_in_memory` docs).
 pub struct PoseidonSnarkWrapper {
     pub params_dir: PathBuf,
+    /// Where the wrapped snark lives while the aggregator reads it. `None`
+    /// is the system temp directory; the daemons pass their work directory
+    /// (bridge-audit#132).
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl PoseidonSnarkWrapper {
     pub fn new(params_dir: impl Into<PathBuf>) -> Self {
         Self {
             params_dir: params_dir.into(),
+            scratch_dir: None,
         }
+    }
+
+    /// Keep the wrapped snark files under `dir` instead of the system temp
+    /// directory.
+    pub fn with_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.scratch_dir = Some(dir.into());
+        self
     }
 
     /// Reconstruct the 4-element Circuit 1A/1B public-instance vector.
@@ -1181,11 +1213,19 @@ impl PoseidonSnarkWrapper {
             wrap_ms,
             bytes.len()
         );
-        let file = tempfile::Builder::new()
-            .prefix(&format!("{key_prefix}_snark_"))
-            .suffix(".snark")
-            .tempfile()
-            .map_err(|e| RelayerError::other(format!("tempfile: {e}")))?;
+        let prefix = format!("{key_prefix}_snark_");
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix).suffix(".snark");
+        let file = match &self.scratch_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    RelayerError::other(format!("scratch directory {}: {e}", dir.display()))
+                })?;
+                builder.tempfile_in(dir)
+            },
+            None => builder.tempfile(),
+        }
+        .map_err(|e| RelayerError::other(format!("snark tempfile: {e}")))?;
         std::fs::write(file.path(), &bytes).map_err(|e| {
             RelayerError::other(format!(
                 "write snark tempfile {}: {e}",
@@ -1463,6 +1503,46 @@ mod tests {
             "--slot-report",
             "/snark/aggregator-slot"
         ]);
+    }
+
+    /// bridge-audit#132: with a scratch directory the calldata file is
+    /// created there and nowhere else, and is gone once read back. The
+    /// fake aggregator records where it was told to write.
+    #[tokio::test]
+    async fn the_calldata_file_lives_in_the_scratch_dir_while_the_run_lasts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join("work");
+        let record = dir.path().join("out-path");
+        let bin = dir.path().join("aggregate-proof");
+        let script = format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then \
+             out=$2; shift; fi\n  shift\ndone\nprintf '%s' \"$out\" > {record}\nprintf calldata > \
+             \"$out\"\n",
+            record = record.display()
+        );
+        let source = dir.path().join("aggregate-proof.src");
+        std::fs::write(&source, script).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(std::process::Command::new("cp")
+            .arg(&source)
+            .arg(&bin)
+            .status()
+            .unwrap()
+            .success());
+        let cfg = SubprocessAggregatorConfig::new(&bin, dir.path(), dir.path())
+            .with_scratch_dir(&scratch);
+        let agg = SubprocessAggregator::new(cfg);
+        let snark = dir.path().join("inner.snark");
+        std::fs::write(&snark, b"snark").unwrap();
+        let calldata = agg.aggregate(&snark, "primary").await.unwrap();
+        assert_eq!(calldata, b"calldata");
+        let written = PathBuf::from(std::fs::read_to_string(&record).unwrap());
+        assert_eq!(written.parent(), Some(scratch.as_path()), "{written:?}");
+        assert!(
+            std::fs::read_dir(&scratch).unwrap().next().is_none(),
+            "the calldata file is removed once read back"
+        );
     }
 
     #[test]

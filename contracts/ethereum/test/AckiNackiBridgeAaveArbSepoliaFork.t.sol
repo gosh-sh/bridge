@@ -32,7 +32,7 @@ interface IDebtToken {
 /// `FORK_URL`. Without it, or when the fork is another chain, the test skips.
 ///
 /// ```bash
-/// FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
+/// FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
 ///   forge test --match-contract AckiNackiBridgeAaveArbSepoliaForkTest -vv
 /// ```
 ///

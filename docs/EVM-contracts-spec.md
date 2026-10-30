@@ -445,7 +445,10 @@ even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
 **Replay scope.** The nullifier map is per-contract, and `dstChainId` must match the executing chain
-(or its scoped alias), so the same proof cannot be replayed on a second deployment. The
+(or its scoped alias), so the same proof cannot be replayed on a deployment on another chain. A
+second deployment on the same chain, with the same `dappFr` and `accFr`, does accept it: the
+inputs name no bridge address, so each unpaused copy with an anchor covering the burn and
+treasury to pay it pays it once. [`aave-yield.md`](aave-yield.md) has the cutover. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
 on a deployment whose host chain is not the configured one. The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
@@ -748,7 +751,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, optional `verifyBlock` triple, **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:157-158`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:147`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:157-158`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. |
 | `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
@@ -823,7 +826,7 @@ was written in, so the suite was read, not executed).
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
 | `AckiNackiBridgeAaveFork.t.sol` (4) | Ethereum Sepolia fork against real AAVE (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 11155111. |
-| `AckiNackiBridgeAaveArbSepoliaFork.t.sol` (6) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, and a `withdrawByProof` top-up. Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
+| `AckiNackiBridgeAaveArbSepoliaFork.t.sol` (6) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, and a `withdrawByProof` top-up (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |

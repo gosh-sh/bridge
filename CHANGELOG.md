@@ -38,22 +38,33 @@ assigns it when the release is tagged.
   `true` reverts on this chain and deploys nothing; unset, the script deploys
   `MockBlockHeaderOracle`. Set `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID`) for a shellnet
   withdrawal; the script defaults it to 0, and the value is immutable. This deploy is a
-  second contract next to the live bridge `0x3FB082a905a895151224F6d93bD074E816338638`.
-  `pause()` that bridge and leave it paused, and
-  `setTrustedL1Bridge(421614, <old bridge>, false)`, before trusting the new address.
-  Trusting adds one entry and does not remove the old one, and the allowlist does not
-  stop `withdrawByProof`. A withdrawal proof names no EVM bridge; each contract has its
-  own nullifiers and its own treasury, so one burn can be paid twice while both are
-  unpaused. USDC in the paused bridge stays there. Then
-  `setTrustedL1Bridge(421614, <new bridge>, true)`. On the deposit relayer set
-  `BRIDGE_ADDRESS`, `FROM_BLOCK` (the unit passes `--from-block ${FROM_BLOCK}`, so
-  `BRIDGE_DEPLOY_BLOCK` alone is ignored) and `START_DEPOSIT_ID=0`. `--force-state`
-  starts `state.json` over; record parked and outstanding ids first, and take the flag
-  back out. Move `ARBITRUM_ANCHOR_STATE` away and point
-  `eth-lc-relayer arbitrum-anchors --bridge-address` at the new bridge. Rebuild the web
-  form with `BRIDGE_CONTRACT_ADDRESS`. Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK`
-  on `ackinacki-bridge` and on `relayer daemon-live` (the shellnet-l2 kit).
-  `daemon-bridge` has no deploy-block setting. `aavePool` and `aUSDC` are immutables: a deploy
+  second contract next to the live bridge `0x3FB082a905a895151224F6d93bD074E816338638`,
+  and the contracts cannot retire a bridge that still owes USDC. A withdrawal proof names
+  no EVM bridge, so one burn is paid by every unpaused bridge with an anchor and treasury
+  for it. Nothing but `withdrawByProof` moves a bridge's treasury, so USDC left in a
+  paused bridge stays locked and the other bridge ends that much short
+  (`WithdrawTreasuryShortfall`). `docs/aave-yield.md` has the order. In short: `pause()`
+  the new bridge right after the deploy. Rebuild the web form without an address, and
+  keep the old bridge, its trust and its relayers live. Cut over once the old bridge's
+  `treasuryBalance()` and `getDepositLimits(421614)` `outstanding` on `eccUSDCBridge`
+  are both 0 and its deposit relayer has nothing parked or outstanding. Then `pause()`
+  the old bridge and check again (if anything moved, `unpause()` it and keep waiting),
+  then `setTrustedL1Bridge(421614, <old bridge>, false)`.
+  Then `setTrustedL1Bridge(421614, <new bridge>, true)`, reconfigure the consumers and
+  `unpause()` the new bridge. If those numbers never reach 0, do not cut over. On the
+  deposit relayer set `BRIDGE_ADDRESS`, `FROM_BLOCK` (the unit passes
+  `--from-block ${FROM_BLOCK}`, so `BRIDGE_DEPLOY_BLOCK` alone is ignored) and
+  `START_DEPOSIT_ID=0`, and start once with `--force-state`. Move `ARBITRUM_ANCHOR_STATE`
+  away and point `eth-lc-relayer arbitrum-anchors --bridge-address` at the new bridge.
+  Rebuild the web form with `BRIDGE_CONTRACT_ADDRESS`. Set `BRIDGE_ADDRESS` and
+  `BRIDGE_DEPLOY_BLOCK` on `ackinacki-bridge`. For the shellnet-l2 kit (`daemon-live`),
+  deploy from its `RELAYER_ADDRESS` with `compute_bridge_anchors --level 2` output. Set
+  `EXPECTED_EVM_CHAIN_ID=421614`, Arbitrum Sepolia RPCs,
+  `EXPECTED_USDC_ADDRESS=0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, and the deploy's
+  anchors and withdraw fields in `runtime.env` (`EXPECTED_WITHDRAW_ALT_*` 0, 0, 3 for a
+  deploy that sets only `WITHDRAW_ALT_TOKEN_ID=3`), and move the old
+  `BRIDGE_STATE_DIR/*.json` aside. `daemon-bridge` has no deploy-block setting. Run the
+  fork test with `FOUNDRY_PROFILE=fork`. `aavePool` and `aUSDC` are immutables: a deploy
   without `USE_AAVE=true` cannot be switched on later (`setAaveEnabled(true)` reverts
   `InvalidAaveAddress`). `DeployShellnetE2EBridge` does not wire this market.
 

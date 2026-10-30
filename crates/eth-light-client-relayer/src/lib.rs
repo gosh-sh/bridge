@@ -20,11 +20,13 @@
 //! `ArbitrumBlockVerifier.proveBlock`, on top of the parent-chain blocks the
 //! light client accepts (`arbitrum-anchors`).
 
+pub mod abi;
 pub mod an_config;
 pub mod ancestry;
 pub mod arbitrum;
 pub mod contract_model;
 pub mod daemon;
+pub mod dirs;
 pub mod error;
 pub mod header_rlp;
 pub mod prover;
@@ -37,6 +39,10 @@ pub mod types;
 pub use an_config::AnConfig;
 pub use ancestry::{covers_deposit, ExecLink};
 pub use daemon::{BackoffConfig, RelayerMetrics};
+pub use dirs::{
+    prepare_dir, ServiceDirs, ANCHORS_LOG_FILE_PREFIX, ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX,
+    STATE_FILE_NAME,
+};
 pub use error::RelayerError;
 pub use prover::{
     MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,

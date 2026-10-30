@@ -170,8 +170,9 @@ pub struct DepositProofOutput {
     /// Acki Nacki destination account (256-bit TVM address).
     pub an_account: [u8; 32],
     pub contract_address: [u8; 20],
-    /// 32 bytes split into public inputs 9 and 10: the header keccak promise
-    /// output, not a shown hash of a real block.
+    /// `keccak256` of the witnessed header, computed off-circuit. In the proof,
+    /// public inputs 9 and 10 are the header keccak promise output, which the
+    /// honest prover sets to this value; the proof does not show it.
     pub block_hash: [u8; 32],
     /// EIP-155 chain id of the source L1/L2 (committed as public input #4).
     /// `#[serde(default)]` keeps pre-12-PI output JSON loadable.

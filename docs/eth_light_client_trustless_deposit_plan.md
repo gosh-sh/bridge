@@ -75,7 +75,8 @@ Three moving parts, mirroring how real zk light clients are deployed:
                           records finalized exec blockHash canonical
                                            │
  deposit-prover proof ──────────────────▶ finalizeDeposit:
-                        require blockHash ∈ light-client-finalized set
+                        require blockHash ∈ _acceptedBlockHash
+                        (light client, owner or L2 verifier wrote it)
 ```
 
 **Design choice — separate header-oracle circuit, two proofs cross-checked on-contract**
@@ -85,10 +86,11 @@ Three moving parts, mirroring how real zk light clients are deployed:
   or per-deposit at most a few/hour). Coupling it to every deposit would re-prove BLS on each
   deposit — wasteful.
 - Keep `deposit-prover` ~unchanged; the AN contract binds `deposit.blockHash` to the light-client's
-  finalized set. This **replaces the attester write path** (`setAcceptedL1Block`) with a ZK write
-  path — same `_acceptedL1Block`-style gate, now trustless.
+  finalized set. This adds a ZK write path to the same `_acceptedBlockHash` gate the owner
+  writes. The gate restricts which block hashes inputs 9/10 may name; it does not make the deposit
+  path trustless, because the deposit proof's keccak results are unchecked promise outputs (§1).
 - In-circuit aggregation (via `bridge-evm-aggregator`/snark-verifier) is a **later optimization**
-  (M-agg), not required for correctness.
+  (M-agg). It is not what is missing for correctness: the keccak promise check is (§1).
 
 ## 5. Light-client update circuit — spec
 

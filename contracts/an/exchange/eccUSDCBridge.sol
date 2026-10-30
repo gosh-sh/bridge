@@ -988,7 +988,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         relayer passes the proof and its public-inputs blob verbatim; we
     ///         verify against `VK_BLOB` and read every deposit field straight
     ///         out of the verified instances — amount, recipient and source
-    ///         identity, nothing is caller-set. A deterministic
+    ///         identity — rather than from separate arguments. Whoever builds
+    ///         the proof chooses those instances. A deterministic
     ///         `DepositVoucher` (keyed on the proof-bound deposit identity) gives
     ///         replay protection; it calls back `confirmDeposit` to mint + pay.
     /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
@@ -1289,7 +1290,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
     ///      3=contract, 4=chain_id, 5..6=dapp_id(hi..lo),
     ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=promise commit
-    ///      (9..11 ignored on the AN side). Only the first 9 Fr are needed.
+    ///      (9 and 10 are read by `_parseBlockHash`; 11 is not read). Only the
+    ///      first 9 Fr are needed here.
     function _parsePublicInputs(bytes publicInputs) private pure returns (DepositPI f) {
         TvmSlice s = TvmSlice(publicInputs);
         uint256[] fr;

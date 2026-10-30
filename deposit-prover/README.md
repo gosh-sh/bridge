@@ -57,11 +57,12 @@ trie or the block hash are the real ones.
 7. **Chain id** — the circuit checks that the typed transaction sits under `transactionsRoot`
    through the MPT chip (`parse_transaction_proof_phase0` in `src/circuit_v2.rs`). The promises
    on that path are trie node hashes and the leaf hash. The source chain id is a public input
-   taken from that transaction, so one chain's instance is not another's.
+   taken from that transaction. Since `transactionsRoot` sits in a header whose hash, like the
+   trie node hashes, is a promise output, nothing ties that chain id to a real chain.
 
 ### Public inputs (12 field elements)
 
-One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
+One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:71`);
 `NUM_PUBLIC_INPUTS` derives from it (`src/types.rs:11`).
 
 | Index | Field | Description |
@@ -91,8 +92,9 @@ can differ for one witness: a row no call reads is not fixed by that witness (it
 * **Phase-0 bytes of the instance, not a tail.** `depositId`, `sender`, `amount`,
   `contractAddress` and `anAccount` are loaded with `load_witness` and folded by `bytes_to_field`
   (Horner, base 256) with no range check (`src/circuit_v2.rs`). Phase 1 checks the folded field,
-  not each byte. Raising one byte by 256 and lowering the byte before it by 1 leaves the field
-  element, and so that public input, unchanged. The 12 leading zeros of `sender` and
+  not each byte. Any byte cells with the same Horner fold give the same field element, and so the
+  same public input; raising one byte by 256 and lowering the byte before it by 1 is the
+  simplest case. The 12 leading zeros of `sender` and
   `contractAddress` are constants. `dappId` bytes are range-checked to 8 bits, so this carry does
   not apply to them. `chainId` comes from the typed-transaction decode, not from these witnesses.
 
@@ -144,8 +146,11 @@ can differ for one witness: a row no call reads is not fixed by that witness (it
 
 * **Block header.** The witness is `MAX_BLOCK_HEADER_BYTES` (792) cells, `load_witness` only,
   zero-filled past the true header. None of them, inside the length or past it, is passed to
-  `range_check`. `format_input` packs them into 8-byte words. Raising one cell by 256 and
-  lowering the next cell in that same word by 1 leaves the packed promise input unchanged.
+  `range_check`. `format_input` (halo2-lib `keccak/component/encode.rs`) packs them into 8-byte
+  words, then three words into each field element, with base-256 and base-2^64 multipliers. Any
+  cells with the same packed elements give the same promise input: for example, raising one
+  cell by 256 and lowering the next cell by 1, inside one word or across a word boundary inside
+  one element.
   Phase 1 checks an RLC of the header against an RLC of the `witness_subarray` copies, not
   byte equality. `receiptsRoot` and `transactionsRoot` are not public inputs, but their
   `field_cells` are constrained equal, byte by byte, to the MPT chip's `root_hash_bytes`
@@ -172,7 +177,7 @@ can differ for one witness: a row no call reads is not fixed by that witness (it
   leaves no slot past the list: nothing reads `header[header_len]`, and the whole tail is
   unconstrained. Slot 6 of `BLOCK_HEADER_MAX_FIELD_LENS` is 256 bytes, and nothing in
   `circuit_v2.rs` reads the header's `list_len` (the receipt log's `list_len` is the one it
-  checks, around `:417-421`), so an unused slot can be that 256-byte slot. The axiom-eth
+  checks, around `:421-425`), so an unused slot can be that 256-byte slot. The axiom-eth
   comment that cells past the list should be 0 describes the tail cells the decoder does not
   read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
   `header_len` to equal the RLP list length, so counting an extra byte as part of the header is

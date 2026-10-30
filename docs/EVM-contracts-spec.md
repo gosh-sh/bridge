@@ -292,8 +292,8 @@ Notes that matter downstream:
   `topics[1] = depositId`, `topics[2] = sender`, and reads three data words:
   `amount` at bytes 0..32, `anAccount` at 32..64, and `timestamp` at 64..96.
   Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`. The circuit constrains
-  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:834-835`) and binds the
-  account from word 1 (`:1009-1011`).
+  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:839-840`) and binds the
+  account from word 1 (`:1014-1016`).
   This format requires the matching deposit VK; the earlier workchain-bearing
   event and its proofs are incompatible.
 * The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
@@ -307,10 +307,11 @@ Notes that matter downstream:
   witnesses to those outputs. They do not show that the receipt, the trie or the block
   hash are the real ones.
   More than one witness can produce the same first 11 values. The Phase-0 bytes of `depositId`,
-  `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so a carry
-  of 256 between two adjacent bytes leaves the field element unchanged. The same carry
-  inside one 8-byte packed word of the header leaves the packed keccak-promise input
-  unchanged. The header RLC value changes with that carry. Phase 1 still holds when the
+  `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so any bytes
+  with the same base-256 fold (a carry of 256 between two adjacent bytes, for one) leave the
+  field element unchanged. The header's keccak-promise input packs three 8-byte words into
+  each field element, so a carry between adjacent cells inside one element, across a word
+  boundary included, leaves it unchanged. The header RLC value changes with that carry. Phase 1 still holds when the
   `witness_subarray` copies take the same carry, so the two RLC values stay equal.
   `receiptsRoot` and `transactionsRoot` are not public inputs, but their cells are
   constrained equal, byte by byte, to the MPT roots, and those root bytes are

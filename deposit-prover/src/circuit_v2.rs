@@ -391,9 +391,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             proof,
         };
 
-        // 4. Parse receipt proof (verifies MPT inclusion)
+        // 4. Parse receipt proof (MPT checks against keccak promise outputs)
         let mut receipt_witness = chip.parse_receipt_proof_phase0(ctx, rc_input);
-        println!("   ✓ Verified MPT inclusion proof");
+        println!("   ✓ Checked MPT proof against promised node hashes");
         if let Some(source) = self.forged_log_source {
             let slot = self.inputs.event_data.log_index;
             let logs = &mut receipt_witness.logs.field_witness;
@@ -450,7 +450,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // vector (see `MAX_BLOCK_HEADER_BYTES`). This is what makes the verifying
         // key universal: the number of witness cells, keccak rounds and RLP
         // decode constraints no longer depends on the block's natural header
-        // length. The true length is bound via `keccak_var_len` below.
+        // length. `keccak_var_len` below takes the true length as the promise
+        // call's length.
         let actual_header = &self.inputs.receipt_proof.block_header_rlp;
         assert!(
             actual_header.len() <= MAX_BLOCK_HEADER_BYTES,
@@ -465,9 +466,10 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             })
             .collect();
 
-        // Compute block hash using Keccak (MUST be in Phase 0). The length
-        // witness is the TRUE header length, so the keccak output binds only the
-        // real header bytes even though the input vector is fixed-size.
+        // Block hash from the keccak promise (MUST be in Phase 0). The length
+        // witness is the TRUE header length, so the promise call names only the
+        // real header bytes even though the input vector is fixed-size. The
+        // output is a promise result the prover supplies, not a computed hash.
         let keccak_chip = chip.keccak();
         let block_header_len = ctx.load_witness(Fr::from(actual_header.len() as u64));
         let block_hash_query = keccak_chip.keccak_var_len(
@@ -617,7 +619,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // We set public instances from witness data in Phase 0, then verify in Phase 1
         // that the RLP-parsed event data matches these values.
         //
-        // This ensures the proof is cryptographically bound to all 6 public values.
+        // This ties the public values to the parsed witness. It does not tie the
+        // witness to Ethereum: the hashes it is checked against are promise outputs.
 
         println!("🔧 Computing public instances in Phase 0...");
 
@@ -780,7 +783,8 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         println!("🔧 Phase 1: Event Verification");
 
         // 1. Verify block header RLP in Phase 1 (RLC verification)
-        // This ensures the block header RLP encoding is cryptographically sound
+        // This checks the header's RLP structure. The header's hash is a keccak
+        // promise output, so this does not show the header was mined.
         let rlp_chip = chip.rlp();
         let _block_header_trace = rlp_chip.decompose_rlp_array_phase1(
             (ctx_gate, ctx_rlc),

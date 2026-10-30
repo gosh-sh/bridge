@@ -5,7 +5,9 @@ talk). Operations are in the runbooks linked below; proof-system internals are i
 `eth-light-client-prover/docs/`.
 
 **Checked against:** branch `github/eth-light-client-prover-m6` at `675cbd5` (bridge PR #36) with
-PR #42 (`feature/node-3917-sepolia-lite-client-shadow`) on top. `file:line` citations refer to
+PR #42 (`feature/node-3917-sepolia-lite-client-shadow`) on top. Section 1's deposit paragraph was
+rewritten on 2026-10-30 against `contracts/an/exchange/eccUSDCBridge.sol` and
+`deposit-prover/src/circuit_v2.rs` (bridge-audit#34), not against that tree. `file:line` citations refer to
 that tree. When code and this text disagree, the code wins.
 
 **Related:** [`eth_light_client_trustless_deposit_plan.md`](eth_light_client_trustless_deposit_plan.md)
@@ -21,9 +23,11 @@ The ETH → AN deposit circuit checks a `Deposit` receipt against a block hash. 
 compare witnesses to keccak promise outputs, and `finalizeDeposit` does not check the promise,
 so they do not show that the receipt or the block hash is a real one. A proof also cannot say
 whether that block is on Ethereum's canonical, finalized chain.
-`USDCBridge.finalizeDeposit` therefore only accepts deposits whose block hash is already in its
-`_acceptedBlockHash` map. Today that map is written by a trusted key (the owner) or an attester
-quorum. The light client replaces that writer with a proof of Ethereum finality.
+`USDCBridge.finalizeDeposit` also only accepts deposits whose block hash is already in its
+`_acceptedBlockHash` map. Today the owner (`setAcceptedBlockHash`), the light clients and the
+Arbitrum verifiers write that map. The light client adds a writer backed by a proof of Ethereum
+finality. It restricts which block hashes a deposit may name; it does not close the promise gap
+above.
 
 "Light client" is three things, and none of them lives on Ethereum:
 

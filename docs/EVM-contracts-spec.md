@@ -295,12 +295,20 @@ Notes that matter downstream:
   (`crates/deposit-relayer-daemon/src/types.rs:98-110`). The DApp ID remains a
   config-supplied tag; removing workchain does not change its meaning or PI slots.
   The instance column is those 12 values. `finalizeDeposit` reads the first 9 and checks
-  the block-hash halves; it does not read `promiseCommit`. More than one witness can produce
-  the same 12 values. The Phase-0 bytes of `depositId`, `sender`, `amount`,
-  `contractAddress` and `anAccount` are not range-checked, so a carry of 256 between two
-  adjacent bytes leaves the field element unchanged. Cells past an RLP field's length, and
-  header cells after the first byte past the header, sit outside the length the circuit
-  binds. An MPT padding node is not in that set: replacing it changes `promiseCommit`.
+  the block-hash halves. It does not read `promiseCommit`, and nothing in this repository
+  checks that commitment against a keccak evaluation: the circuit's keccak results are
+  promise outputs filled from the witness.
+  More than one witness can produce the same 12 values. The Phase-0 bytes of `depositId`,
+  `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so a carry
+  of 256 between two adjacent bytes leaves the field element unchanged. MPT value bytes
+  past `value_byte_len`, leaf and node bytes past each node's RLP length, and key-fragment
+  nibbles past `frag_len` or past `depth`, are range-checked and are not in the hash or the
+  RLC. That includes the bytes of a padding node after its 18-byte `DUMMY_BRANCH` encoding;
+  replacing those 18 bytes changes `promiseCommit`. RLP cells past `field_len` or
+  `encoded_item_len` are outside the phase-1 RLC; cells inside the length are bound.
+  `header[header_len]` may be any byte whose RLP length-of-length is 0 (`0x00`–`0xb7` and
+  `0xc0`–`0xf7`); every unused header slot is at most 32 bytes, so a longer prefix fails.
+  Bytes after that one are not read.
   [`deposit-prover/README.md`](../deposit-prover/README.md) is the full account.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)

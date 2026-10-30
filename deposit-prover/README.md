@@ -31,7 +31,14 @@ The Halo2 circuit (`src/circuit_v2.rs`) proves:
 4. **Contract address** — the event was emitted by the expected bridge contract.
 5. **Event data** — `depositId`, `sender`, `amount`, and the AN destination are extracted and exposed
    as public inputs.
-6. **Block hash binding** — the proof is tied to a specific Ethereum block hash.
+6. **Block-hash public input** — inputs 9 and 10 are the output of the header's keccak
+   promise, split in half. `finalizeDeposit` checks those halves against
+   `_acceptedBlockHash`. The circuit does not evaluate keccak. `EthCircuitImpl` records
+   the calls as promises and publishes only their commitment, public input 11. The prover
+   fills those rows from the witness (`mock_fulfill_keccak_promises` in `src/prover.rs` and
+   `src/provable.rs`). `finalizeDeposit` does not read input 11, and nothing in this
+   repository checks that commitment against a keccak evaluation. The receipt hash and the
+   MPT node hashes are promises of the same kind.
 7. **Chain binding** — the source chain id is a public input, so a proof from one chain cannot be
    replayed as another.
 
@@ -84,11 +91,22 @@ not all past a length.
   `block_header_len`, tied to the header's RLP `rlp_len`. The log fields are bound through
   `field_len`.
 
-  A padding node is not a witness of the same inputs. Every node slot, the padding included, is
-  parsed as a branch and as an extension, and each parse calls `mpt_hash_phase0`
-  (`keccak_var_len` over that node's RLP). The slot must decode as a well-formed node. Slots past
-  the real proof are not tied into the hash chain. A different well-formed branch in a padding
-  slot is a different promise input and changes `promiseCommit`, public input 11.
+  The hash and the RLC use a length, so bytes past that length can change without changing the
+  12 public inputs. They stay range-checked:
+
+  * value bytes past `value_byte_len`;
+  * leaf and node bytes past that node's RLP length (`mpt_hash_phase0` is `keccak_var_len` over
+    `bytes[..len]`);
+  * key-fragment nibbles past `frag_len`, and fragments after `pseudo_depth` (`depth`, or 1
+    when the proof is empty). `constrain_rlc_concat` keeps only that prefix.
+
+  `node_type` is 1 for an extension and 0 for a branch. Both parses run, but `select` gives the
+  slot's own bytes to the chosen type only. The other parse receives the constant `DUMMY_EXT` or
+  `DUMMY_BRANCH`. A padding slot is a branch, so its own bytes are the branch input and the
+  extension input is `DUMMY_EXT`. `DUMMY_BRANCH` is 18 bytes. The promise and the RLC take that
+  RLP length, not the whole `max_node_bytes` buffer. Bytes after those 18 can be any byte value
+  and leave all 12 inputs, including `promiseCommit`, unchanged. Replacing the 18 encoded bytes
+  changes `promiseCommit`.
 
 * **RLP copies.** `witness_subarray` copies the parsed slice into `field_cells`, sized to the
   field maximum, and into `encoded_item`, sized to `max_rlp_encoding_len(max_field_len)` — the
@@ -104,10 +122,12 @@ not all past a length.
   as a variable-length list against the 24-slot table. For a slot past the list the decoder still
   reads `header[header_len]` as the next prefix, runs `parse_rlp_prefix` on it (8-bit
   `is_less_than`) and checks that prefix's `len_len` against the slot before treating the slot as
-  unused. A slot of at most 55 bytes allows `len_len` 0 only, so `0x00` passes and a long-string
-  prefix such as `0xb9` fails. axiom-eth requires the cells past the list to be 0 for the circuit
-  to pass. When that first tail byte has `len_len` 0 the index does not advance, and the decoder
-  does not read `[header_len+1..792]`. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
+  unused. Every unused slot in `BLOCK_HEADER_MAX_FIELD_LENS` is at most 32 bytes, so `len_len`
+  must be 0. Any byte with that length-of-length passes: `0x00`–`0xb7` and `0xc0`–`0xf7`. A long
+  prefix (`0xb8`–`0xbf`, `0xf8`–`0xff`), such as `0xb9`, fails. The comment on
+  `decompose_rlp_array_phase0` says the cells past the list should be 0. That is an assumption of
+  the caller, not a constraint. When the first tail byte has `len_len` 0 the index does not
+  advance, so `[header_len+1..792]` is not read. Phase 1's RLC covers `rlp_len` bytes. BC-D03 forces
   `header_len` to equal the RLP list length, so counting an extra byte as part of the header is
   rejected (`mock_fixture --mutate header-pad`).
 
@@ -118,11 +138,8 @@ bytes are range-checked when they are split. The RLP chip range-checks every `le
 `field_len` and list payload length. Apart from the MPT chip and those checks, the deposit
 circuit range-checks `log_index` and each `dappId` byte.
 
-The promise rows are themselves witnesses. Their commitment is public input 11.
-`finalizeDeposit` in `contracts/an/exchange/eccUSDCBridge.sol` verifies the proof, reads the first
-9 inputs, and checks the block-hash halves (inputs 9 and 10) against `_acceptedBlockHash`. It
-does not read input 11, and nothing in this repository checks the promise against a keccak
-computation. The relayer submits the proof and the public inputs. The witness stays off-chain.
+What input 11 does and does not bind is item 6 above. The relayer submits the proof and the
+public inputs. The witness stays off-chain.
 
 ### Circuit parameters
 

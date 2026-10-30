@@ -44,21 +44,69 @@ Nacki). `DeployRealBridge` defaults that value to 0. It is immutable, so a bridg
 it rejects every shellnet withdrawal with `UnsupportedTokenId(3)` and has to be deployed again.
 The shellnet e2e deploy sets 3; this script does not.
 
-After the deploy, the Acki Nacki bridge has to trust the new address:
-`setTrustedL1Bridge(421614, <bridge>, true)` on `eccUSDCBridge`. Without that,
-`finalizeDeposit` reverts `ERR_UNSUPPORTED_SRC_CHAIN`. The bridge already recorded for
-Arbitrum Sepolia has no pool, so this is a new address. Point every consumer at it:
+The bridge already recorded for Arbitrum Sepolia,
+`0x3FB082a905a895151224F6d93bD074E816338638` (`README.md`), has no pool, so this
+deploy is a second contract. Trusting the new address does not retire the first.
 
-* `BRIDGE_ADDRESS` on the deposit relayer and on `ackinacki-bridge`.
-* `relayer daemon-bridge --bridge-address`. That daemon is what submits `verifyBlock`.
-  Without it the new bridge has no anchor, and `withdrawByProof` cannot pay.
-* `BRIDGE_DEPLOY_BLOCK`, set to the deploy block, on the deposit relayer, on
-  `relayer daemon-bridge`, and on the CLI. Left unset, log scans and the anchor walk
-  start from genesis.
+Pause the live bridge and revoke it before `setTrustedL1Bridge(421614, <new bridge>, true)`
+and before any relayer is pointed at the new address:
 
-A deposit-relayer `state.json` stamped with the previous bridge refuses to start with
-`state.json deployment mismatch`. `--force-state` discards that file's progress and
-starts at `--start-deposit-id`. A new state file does the same.
+* `pause()` on `0x3FB082a905a895151224F6d93bD074E816338638`. While it is paused,
+  `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert.
+  Leave it paused. `unpause()` opens the second payout again.
+* `setTrustedL1Bridge(421614, <old bridge>, false)` on `eccUSDCBridge`. The call
+  adds or removes one address (`eccUSDCBridge.sol`). `allowed=true` on the new
+  bridge leaves the old entry in place. The allowlist is read by `finalizeDeposit`
+  only.
+
+A withdrawal proof carries no EVM bridge address
+(`WithdrawalPublicInputs` in `IBridgeWithdrawalVerifier.sol`). `withdrawByProof`
+checks `dappFr` and `accFr` (the same Acki Nacki bridge on both deploys),
+`dstChainId`, that contract's own `_nullifiers`, and that contract's own anchor
+window. `verifyBlock` has no caller restriction. One Acki Nacki burn with
+`dstChainId` 421614 can be paid by every unpaused bridge that has an anchor
+covering it and USDC in `treasuryBalance`. The two treasuries are separate.
+USDC already in the paused bridge stays there: neither contract moves it.
+
+Then trust the new address: `setTrustedL1Bridge(421614, <new bridge>, true)`.
+Without that, `finalizeDeposit` reverts `ERR_UNSUPPORTED_SRC_CHAIN`.
+
+Point every consumer at the new address:
+
+* Deposit relayer. `scripts/ursus/deposit-relayer.service` passes
+  `--from-block ${FROM_BLOCK}` and `--start-deposit-id ${START_DEPOSIT_ID}`, and
+  does not pass `--force-state`. `--from-block` wins over `BRIDGE_DEPLOY_BLOCK`
+  whenever it is not 0 (`resolve_from_block`), and the current `FROM_BLOCK` is
+  the old deploy block `323405848`, so setting only `BRIDGE_DEPLOY_BLOCK` is
+  ignored. In `deposit-relayer.env` set `BRIDGE_ADDRESS` to the new bridge,
+  `FROM_BLOCK` and `BRIDGE_DEPLOY_BLOCK` to its deploy block, and
+  `START_DEPOSIT_ID=0`. A raised `START_DEPOSIT_ID` never delivers deposits
+  below that id.
+  A `state.json` stamped with the old bridge refuses to start with
+  `state.json deployment mismatch`. `--force-state` replaces that file with a
+  fresh one: progress, the scan cursor, parked ids, outstanding ids and
+  `last_finalized_deposit_id` are dropped (`RelayerState::ensure_deployment`).
+  Before the flag, confirm the mismatch is this deploy, write down
+  `parked_deposit_ids` and `outstanding_deposits` (each still needs
+  `finalize-one` on the bridge it belongs to), and keep a copy of the file.
+  The unit does not pass `--force-state`. Add it for one start, then take it
+  back out.
+* `eth-lc-relayer arbitrum-anchors --bridge-address <new bridge>`. It anchors
+  only Arbitrum blocks that contain `Deposit` logs from that address. An
+  `ARBITRUM_ANCHOR_STATE` file recorded for the old bridge (the default path is
+  `./arbitrum-anchors-state.json`) refuses to start and tells the operator to
+  move it away. Move that file away and pass `--from-block` of the new deploy
+  block. `BRIDGE_DEPLOY_BLOCK` applies only when `--from-block` is 0.
+* The web form. `BRIDGE_CONTRACT_ADDRESS` is compiled in
+  (`frontend/src/config.rs`). Rebuild the form. The one already running keeps
+  sending deposits to the old bridge.
+* `ackinacki-bridge`: `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK`.
+* The shellnet-l2 kit runs `relayer daemon-live`
+  (`crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/container-entrypoint.sh`).
+  Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` in its env
+  (`runtime.env.example`). `daemon-live` reads both. `relayer daemon-bridge`
+  takes `--bridge-address` and has no deploy-block setting, and it does not
+  submit `applyBkSetUpdate`.
 
 ## Where the money is
 

@@ -479,7 +479,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
             0, // No minimum length
         );
         let block_hash_bytes = block_hash_query.output_bytes.as_ref().to_vec();
-        println!("   ✓ Computed block hash (32 bytes)");
+        println!("   ✓ Loaded the header keccak promise output (32 bytes)");
 
         // Parse block header RLP to extract receiptsRoot (field index 5).
         // 24-slot table (see `BLOCK_HEADER_MAX_FIELD_LENS`).
@@ -1063,8 +1063,9 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // Now we verify that the RLP-parsed event data matches those public instances.
         //
         // This ensures:
-        // 1. The proof is cryptographically bound to the public instances (Phase 0)
-        // 2. The public instances match the actual RLP-verified event data (Phase 1)
+        // 1. Phase 1 values are constrained equal to the Phase 0 instances
+        // 2. Those instances are the RLP-parsed event fields, checked against
+        //    keccak promise outputs rather than a computed hash
 
         println!("🔧 Verifying Phase 1 extracted values match Phase 0 public instances...");
 

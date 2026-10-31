@@ -54,9 +54,6 @@ assigns it when the release is tagged.
   `migrateTreasury` delivers, and how the owner covers a predecessor deployed before
   `migrateTreasury` existed, such as the Arbitrum Sepolia bridge
   `0x3FB082a905a895151224F6d93bD074E816338638`. Emits `TreasuryFunded`.
-
-### Added
-
 - `DeployRealBridge` wires AAVE on Arbitrum Sepolia (chain id 421614) only when
   `USE_AAVE=true`: pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
   `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, aToken

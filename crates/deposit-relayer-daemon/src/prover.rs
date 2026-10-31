@@ -146,6 +146,7 @@ impl ProofGenerator for MockProofGenerator {
             vk_blob: vec![0x56, 0x4b, 0x00, 0x00].into(),
             public_inputs: parsed.to_operand().into(),
             proof: vec![0xAA; 32].into(),
+            keccak_proof: vec![0xBB; 32].into(),
             parsed,
         })
     }
@@ -259,10 +260,11 @@ impl SubprocessProverConfig {
 /// 1. `fetch_deposit_data` — RPC → `DepositProofInput` JSON (receipt RLP, MPT
 ///    proof, block header, parsed event fields);
 /// 2. `export_vk_blob` — v2 RLC `VkBlob` for the deposit circuit;
-/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof + the 12×32-byte LE
-///    public-input operand.
+/// 3. `export_blake2b_proof` — raw Blake2b SHPLONK proof, the 12×32-byte LE
+///    public-input operand and the proof of the keccak table behind public
+///    input 11.
 ///
-/// The three resulting files are read back and assembled into a
+/// The resulting files are read back and assembled into a
 /// [`DepositProofBundle`]. This is intentionally heavyweight (it runs the
 /// halo2 prover). The examples are the prebuilt binaries the generator was
 /// configured with; it never builds them.
@@ -362,6 +364,7 @@ impl ProofGenerator for SubprocessProofGenerator {
         let vk_blob_path = workdir.path().join("deposit_vk_blob.bin");
         let proof_path = workdir.path().join("deposit_proof_blake2b.bin");
         let pubin_path = workdir.path().join("deposit_public_inputs.bin");
+        let keccak_proof_path = workdir.path().join("keccak_proof_blake2b.bin");
 
         let degree = self.config.degree.to_string();
         let max_data = self.config.max_data_byte_len.to_string();
@@ -413,7 +416,7 @@ impl ProofGenerator for SubprocessProofGenerator {
         ])
         .await?;
 
-        // 3. Export the Blake2b proof + public inputs.
+        // 3. Export the Blake2b proofs + public inputs.
         self.run_example(&[
             "export_blake2b_proof".into(),
             "--".into(),
@@ -425,6 +428,8 @@ impl ProofGenerator for SubprocessProofGenerator {
             proof_path.display().to_string(),
             "--pubin-out".into(),
             pubin_path.display().to_string(),
+            "--keccak-proof-out".into(),
+            keccak_proof_path.display().to_string(),
             "--degree".into(),
             degree,
             "--max-data-byte-len".into(),
@@ -441,8 +446,10 @@ impl ProofGenerator for SubprocessProofGenerator {
         let vk_blob = read(&vk_blob_path)?;
         let public_inputs = read(&pubin_path)?;
         let proof = read(&proof_path)?;
+        let keccak_proof = read(&keccak_proof_path)?;
 
-        let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof)?;
+        let bundle =
+            DepositProofBundle::from_operands(vk_blob, public_inputs, proof, keccak_proof)?;
         bundle.check_binds_to(event)?;
         Ok(bundle)
     }

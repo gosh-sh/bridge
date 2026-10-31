@@ -34,15 +34,17 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The oldest bridge this build accepts: 1.14.0, the deployed one. Its
-/// voucher code is not changed by `updateCode` (bridge-audit#107: an upgrade
-/// that changes it brings a block cutoff), so a deposit is not minted twice.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 14, 0));
+/// The oldest bridge this build accepts: 1.15.0, the first whose
+/// `finalizeDeposit` takes the keccak proof this build sends. Its voucher
+/// code is not changed by `updateCode` (bridge-audit#107: an upgrade that
+/// changes it brings a block cutoff), so a deposit is not minted twice.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 15, 0));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
-/// The first supported bridge with this build's deposit key and mandatory
-/// per-chain limit getters. Refuse older deployments before USDC leaves L1.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 15, 0);
+/// The first supported bridge with this build's deposit keys — the deposit
+/// key and the keccak key — and mandatory per-chain limit getters. Refuse
+/// older deployments before USDC leaves L1.
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 15, 0);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
@@ -536,7 +538,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -548,6 +550,9 @@ mod tests {
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
+        ]);
+        an.getter(BRIDGE, "getL2Verifier", vec![
+            json!({ "verifier": ":", "parentChainId": "0" }),
         ]);
         an.getter(
             BRIDGE,
@@ -585,18 +590,23 @@ mod tests {
             json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.13.0"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains(&DEPOSIT_KEY_BRIDGE_VERSION.to_string()),
+            "{error}"
+        );
         assert!(error.to_string().contains("per-chain limit"), "{error}");
     }
 
-    /// A bridge whose version says 1.13.0 but whose code has no
+    /// A bridge whose version says 1.15.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -642,7 +652,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -761,16 +771,19 @@ mod tests {
     /// called themselves 1.11.0 left this constant pointing at a bridge
     /// carrying the previous key.
     ///
-    /// The floor moves with the deposit key, not with every release: 1.14.0
-    /// adds the Arbitrum block verifier and keeps 1.13.0's key, and a floor
-    /// of 1.14.0 would refuse the 1.13.0 bridge that holds the same key. So
-    /// the key's VkBlob sha256, which the contract source records next to
-    /// the embedded key, is pinned here with the floor: a rotated key fails
-    /// this test until both are moved to the release that carries it.
+    /// The floor moves with the deposit keys, not with every release: 1.14.0
+    /// added the Arbitrum block verifier and kept 1.13.0's key, and a floor
+    /// of 1.14.0 would have refused the 1.13.0 bridge that held the same
+    /// key. 1.15.0 adds the keccak key. So each key's VkBlob sha256, which
+    /// the contract source records next to the embedded key, is pinned here
+    /// with the floor: a rotated key fails this test until both are moved to
+    /// the release that carries it.
     #[test]
     fn the_deposit_key_floor_matches_the_contract_this_build_ships() {
         const FLOOR_KEY_SHA256: &str =
             "0180ee5af41ba3f408d38bf0c10c005c6618ad379d38da97a7ccc07ab1c3efa1";
+        const FLOOR_KECCAK_KEY_SHA256: &str =
+            "4ccd758c8d0914e7f13aa7e8e45fd74da5b87b122427edf7a7d6755a64c6ad91";
         let src = include_str!("../../../../contracts/an/exchange/eccUSDCBridge.sol");
         let line = src
             .lines()
@@ -780,16 +793,26 @@ mod tests {
             .split('"')
             .nth(1)
             .expect("the version constant is a quoted string");
-        let key = src
+        let recorded: Vec<&str> = src
             .lines()
-            .find(|l| l.trim_start().starts_with("// sha256 = "))
-            .expect("eccUSDCBridge.sol records the embedded deposit key's sha256");
+            .filter(|l| l.trim_start().starts_with("// sha256 = "))
+            .collect();
+        let [key, keccak_key] = recorded[..] else {
+            panic!("eccUSDCBridge.sol records the sha256 of its two embedded keys: {recorded:?}");
+        };
 
         assert!(
             key.contains(FLOOR_KEY_SHA256),
             "the eccUSDCBridge this build ships embeds another deposit key ({}). Bump \
              DEPOSIT_KEY_BRIDGE_VERSION to {shipped} and FLOOR_KEY_SHA256 to that key's sha256.",
             key.trim(),
+        );
+        assert!(
+            keccak_key.contains(FLOOR_KECCAK_KEY_SHA256),
+            "the eccUSDCBridge this build ships embeds another keccak key ({}). Bump \
+             DEPOSIT_KEY_BRIDGE_VERSION to {shipped} and FLOOR_KECCAK_KEY_SHA256 to that key's \
+             sha256.",
+            keccak_key.trim(),
         );
         assert!(
             DEPOSIT_KEY_BRIDGE_VERSION
@@ -848,14 +871,14 @@ mod tests {
         let p = go(&healthy(), [0; 32]).await.unwrap();
         assert_eq!(p.light_client, Some([0x20; 32]));
         assert!(p.owner_anchors_enabled);
-        assert_eq!(p.l2_verifier, None, "1.13.0 has no Arbitrum verifiers");
+        assert_eq!(p.l2_verifier, None, "no Arbitrum verifier for the chain");
     }
 
     #[tokio::test]
     async fn a_1_14_bridge_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -875,7 +898,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),

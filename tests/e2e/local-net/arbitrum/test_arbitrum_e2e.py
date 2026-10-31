@@ -83,7 +83,7 @@ def test_10_local_network_bridge_active(an):
     """The zerostate bridge is up at the version this commit ships."""
     got = an("bridge")
     assert got.get("BRIDGE_ACTIVE") == "true", f"eccUSDCBridge is not Active: {got}"
-    assert got.get("BRIDGE_VERSION") == "1.14.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.14.0"
+    assert got.get("BRIDGE_VERSION") == "1.15.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.15.0"
 
 
 def test_11_build_on_prover_host(ph, sha):

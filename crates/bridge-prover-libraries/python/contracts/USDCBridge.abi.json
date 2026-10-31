@@ -266,7 +266,8 @@
 			"name": "finalizeDeposit",
 			"inputs": [
 				{"name":"proof","type":"bytes"},
-				{"name":"publicInputs","type":"bytes"}
+				{"name":"publicInputs","type":"bytes"},
+				{"name":"keccakProof","type":"bytes"}
 			],
 			"outputs": [
 			]

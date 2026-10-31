@@ -414,13 +414,15 @@ pub trait AnRead: Send + Sync {
 /// The deposit's one write to Acki Nacki.
 #[async_trait]
 pub trait AnSend: Send + Sync {
-    /// Sends `finalizeDeposit(proof, publicInputs)` to the bridge once.
+    /// Sends `finalizeDeposit(proof, publicInputs, keccakProof)` to the
+    /// bridge once.
     async fn send_finalize(
         &self,
         bridge: [u8; 32],
         bridge_dapp: [u8; 32],
         proof: &[u8],
         public_inputs: &[u8],
+        keccak_proof: &[u8],
     ) -> FinalizeSend;
 }
 
@@ -436,6 +438,8 @@ struct FinalizeRequest {
     proof: Vec<u8>,
     /// The proof's public inputs.
     inputs: Vec<u8>,
+    /// The keccak table's proof.
+    keccak_proof: Vec<u8>,
 }
 
 /// An encoded external message retained while its outcome is unknown.
@@ -734,6 +738,7 @@ async fn encode_finalize(
     bridge: [u8; 32],
     proof: &[u8],
     public_inputs: &[u8],
+    keccak_proof: &[u8],
 ) -> Result<(String, u32), FinalizeSend> {
     let config =
         tvm_client::client::config(ctx.clone()).map_err(|error| FinalizeSend::NotSent {
@@ -759,6 +764,7 @@ async fn encode_finalize(
             input: Some(json!({
                 "proof": hex::encode(proof),
                 "publicInputs": hex::encode(public_inputs),
+                "keccakProof": hex::encode(keccak_proof),
             })),
         }),
         signer: Signer::None,
@@ -794,6 +800,7 @@ impl LiveAn {
             request.bridge,
             &request.proof,
             &request.inputs,
+            &request.keccak_proof,
         )
         .await?;
         pending.insert(request.clone(), PendingFinalize {
@@ -905,12 +912,14 @@ impl AnSend for LiveAn {
         bridge_dapp: [u8; 32],
         proof: &[u8],
         public_inputs: &[u8],
+        keccak_proof: &[u8],
     ) -> FinalizeSend {
         let request = FinalizeRequest {
             bridge,
             dapp: bridge_dapp,
             proof: proof.to_vec(),
             inputs: public_inputs.to_vec(),
+            keccak_proof: keccak_proof.to_vec(),
         };
         let message = match self.prepare_finalize(&request).await {
             Ok(message) => message,
@@ -1203,6 +1212,7 @@ mod tests {
             dapp: [2; 32],
             proof: b"proof".to_vec(),
             inputs: b"inputs".to_vec(),
+            keccak_proof: b"keccak proof".to_vec(),
         };
         let first = an.prepare_finalize(&request).await.unwrap();
         an.finish_finalize(&request, &first, &FinalizeSend::Unknown {
@@ -1233,6 +1243,7 @@ mod tests {
             dapp: [2; 32],
             proof: b"proof".to_vec(),
             inputs: b"inputs".to_vec(),
+            keccak_proof: b"keccak proof".to_vec(),
         };
         let decode = |message: String| {
             use tvm_block::Deserializable;
@@ -1245,6 +1256,9 @@ mod tests {
         let first = an.prepare_finalize(&request).await.unwrap();
         let mut other = request.clone();
         other.proof = b"another proof".to_vec();
+        assert_ne!(an.prepare_finalize(&other).await.unwrap(), first);
+        let mut other = request.clone();
+        other.keccak_proof = b"another keccak proof".to_vec();
         assert_ne!(an.prepare_finalize(&other).await.unwrap(), first);
         // The send path discards this BOC on a confirmed node RP refusal.
         // The classification remains Unknown: this BOC could have run earlier.
@@ -1295,6 +1309,7 @@ mod tests {
                 [1; 32],
                 b"proof",
                 b"inputs",
+                b"keccak proof",
             )
             .await
             .unwrap();
@@ -1321,6 +1336,7 @@ mod tests {
             [1; 32],
             b"p",
             b"i",
+            b"k",
         )
         .await;
         assert!(
@@ -1333,6 +1349,7 @@ mod tests {
             [1; 32],
             b"p",
             b"i",
+            b"k",
         )
         .await;
         assert!(ok.is_ok(), "{ok:?}");

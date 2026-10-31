@@ -51,7 +51,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.14.0";
+    string constant version = "1.15.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -414,6 +414,71 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"f78ea175e2c8d3c135de25f341bb1741e4e97d4ddaf09971b5238505aa978deb7eb1d90e2999233df2fa1d5677fba2e2394b694b38d15ac87be9e639"
         hex"b27a6785405d3732f8e754a1ac7317ea06ecc0929e49f9d80958d8b62a7bf831a554fafd3dd4c3f80f4095bf87660f9afd9a68106902a0a98819413c"
         hex"bc73758e1b9a91a1100aa8a632c268270030095ce7d646ae90a55a21ededa23b27481fbc64fc3fe34524f73acf93c35838701f";
+
+    // Byte offset of the promise commit, Fr #11, in the deposit public inputs.
+    uint constant PROMISE_COMMIT_OFFSET = 11 * 32;
+
+    // ZK verifying key (VkBlob) for the keccak shard circuit that proves the
+    // keccak table the deposit circuit loads. The deposit circuit takes its
+    // keccak results from that table and exposes a Poseidon commitment to it
+    // as public input 11; a proof under this key, with that commitment as its
+    // one public input, shows every row is a real keccak result. zkevm-hashes
+    // KeccakComponentShardCircuit, k = 18, capacity 128 permutations, keyed
+    // on the same Hermez SRS. Canonical fixture, regenerated with
+    // deposit-prover's `export_keccak_shard_set`:
+    //   deposit-prover/fixtures/deposit_10proofs/keccak_vk_blob.bin
+    // Magic "VKBLOB\x00\x00" + version 2, shape "KeccakShard".
+    // sha256 = 4ccd758c8d0914e7f13aa7e8e45fd74da5b87b122427edf7a7d6755a64c6ad91.
+    // Rotated with the same script as VK_BLOB, never by hand.
+    bytes constant KECCAK_VK_BLOB =
+        hex"564b424c4f4200000200020000000000190100007b226b223a31382c226e756d5f756e757361626c655f726f77223a3130392c226361706163697479"
+        hex"223a3132382c227075626c6973685f7261775f6f757470757473223a66616c73652c226b656363616b5f636972637569745f706172616d73223a7b22"
+        hex"6b223a31382c22726f77735f7065725f726f756e64223a38317d2c22626173655f636972637569745f706172616d73223a7b226b223a31382c226e75"
+        hex"6d5f6164766963655f7065725f7068617365223a5b375d2c226e756d5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f706572"
+        hex"5f7068617365223a5b302c302c305d2c226c6f6f6b75705f62697473223a6e756c6c2c226e756d5f696e7374616e63655f636f6c756d6e73223a317d"
+        hex"7d0a0a00000212000000001a000000ae3bb1f5e0b7383e7c613c8fb6d3bbec5db749a2e9136919b07a7c0986669d11a866d072c70ca68267ae39b9a0"
+        hex"e189653ca10ada6617d2b6e3156a6cf6a3f62b05d52975ab4e823c0e2c0b9d11d0f8302ceb06c11022003f21c3ad377f115b0aaf8fb1a851b79d9ada"
+        hex"54400de5171e17d716af82a941d440faf7fbfe7394fe16cacfd44646893d24ca44bb18d1c3c9ed9e73d62c87f9bd61ae98c8791acfc506ec11381539"
+        hex"e3dd9eddf149d90bfcd390c2f6d6f43cd35c3bb27bbf83be6dad2d377c008065802144a9732fb3f8f6194885ebe68f705f3f66cae4227fb6642e2ea9"
+        hex"669d24a7967393e65c0cd06dc34214e1f8975b20f074828e99dd4bc2bd3726fe11c60e47fc166671391c30e684012c573f44af254830710c071fb569"
+        hex"8ed617df102637947589ee6ab5395a2548d4b8593ed5d1a5bdc088cd849549d803101836bff34615f8b4eb1305e7b6d8c2b7643c8c7c57e729daccd3"
+        hex"5d610ae588c31bce5ac49bc084bda8f11a97a99bb6be239c7d37d8946a136bd1e6c5d38b782721b240a79a4bf553f33f49ac96927bc6903241fbe43b"
+        hex"c6fc55bc59caff74ff9419d516936e02f08faf074d140eb51c35f6fc662d94b564503ed39b3e854ee35a14203dd559746620bfb5f14293a1f2cbce8b"
+        hex"e2abcd05e8ab0f1f41af02031ee20c373622d6ec5006c6900f069e599dc61d4ff7ad42f2fd1be5e4274725a69b751cfd8d5fe79eb3be92b389a68446"
+        hex"5bb9649b9d9cc7b8635841c8d077c68bde591294689878c7abeb8e68163fa738eb89977bc65c94198ae2d079a9d8abddc04d1cc2a51f07faf0b18275"
+        hex"684b2cd87a8be723f2b2bddf817a4824af0180fd5c490c2f11c13a5b083f8be820699ea06a7909342de4b2116e790350ef7a1bcc82f0143ea8316355"
+        hex"201703dd7c02d5a667535b5d8e2317bc0de2b026a1e7ba6c0077155d0f347c9405229628efd270e7277ff5aa6fc5488f671dc1f5d64715e1eb1803b6"
+        hex"e2c1dc258abe5ea5bd51b4bbe9f3fa91accff843ba5547d734a93e4d980930a75fd2e8be0cec6319930981b985b88267615d0a9d0afc5ee2ee4da264"
+        hex"e703099ec0a4682dd00a79dfd3763ceb505eaaf5c2e9326d02b0a54c1b6478689b6814a85e5f136467afee7d61e4f31df0ae2873d9158d0a03abba8f"
+        hex"ceb017f4244f2250b6bf76aac84ee6905ac05c5d76165bbeb607c5bbfe5acc0edd07e43eea5d05f41dcfc819bb62673dbf6f775398a2fdde607e8f5d"
+        hex"94ab91b6cca14ae44f96030bceac05bca3710a56039be9fd8084d2e4a4f10e34f03ec6d952f0a0131d5701120069d7a96dbf1c0211a9f0f1d7a59e33"
+        hex"30720195073ae639a871eb572a3f02ba4f19054cd6c307d36602336baa692d586aa110ee3376ac59cf3a1492c671019f25c4600578fb6a0432f869ff"
+        hex"f889706b2e5fb6107d56d7c88c772853edf42358c338696a199ecb26464c9bdedd6f46e6fa0c9974d91b9fcaa627c329dff21a4e7b0e1f40caf730f9"
+        hex"cb23b5583598194673b2bc3c7f181c20266ff8b4d3cf2651d9e349df72d581b19899338f870b6483c1701525aa8e7d68e113ecbaaeed2145aea62554"
+        hex"3e0eed51ce52889a9043d39783577ed0cc44795dd5dad6e3f86d0b894ae40bc17f222ae1a9de0e4484e8be954037631da8f3d2e9899c08971e9a18c3"
+        hex"7b8cfc163cd03797bbdf29be712209d1cc2789865eb6a159958659b625751101db3577fc739def1f756871cd9d03dc1e27d5dc8db39e62ad297d1587"
+        hex"95230ea562a25a58e87c81bbc0724bb2332dafe9cda36f2cf0bee6624618954f6129106a6dd5b175a8f25e9d9fddde9cc636aa9ce37460e185c1eeb0"
+        hex"beb9699edc5a137241021329360dcf97ffcc66dde8dcecc313465c85be006a8045a3b0c107802def9d7a97e24d6dadc5b2bb65b18591fe05b646d44f"
+        hex"4778fd54eef1e6a14ed627503570b0bb45198cf3b5868871e7094f17bfc6ecffbb0eeb3b2940e27cbcb81bcbe10e94b50659848c5e85421b7f05cb51"
+        hex"bf1d1ab513314fdce8129e5ef8402f1a7f83e8b37f5ef8133d412d6d1f21ded2e658c32aa3fb9f71640b9c2324ac2b31d0dce3c01c7474b3f54b58fe"
+        hex"0b80c328ced438a4af5622c6cff7bb0b895f257e14afcbdaa4a1bdeac67e9b2f66f7491959983cf2ad9049fff62c5a663e561c2556421ea028189c69"
+        hex"5bd9c4e7a1ed108295718fe759dd5b5df28d80e6f26d0d870bee20eae61fb560eebc45920ffc93035505998c03208457bce40a7557c6077e57bce076"
+        hex"e2accafcc647a2c95a55c545fb49be73da47600bec8b6a3f384107bfcdaba97653785e1a67e5fe51b473a9ca1cd6f9346a8e510d681928ac000a136a"
+        hex"f4a006548dbe05984f43fb76a5a7bfefa290a1b7f70cd89d950aaae7f2222bb94967c0e9c95460023ccaf7bb5fac1e8209124fb369446d2237463392"
+        hex"d4f115139214d3274162d1f90f3c7837820eb25951ce4fca424ad98407fefae746820cd4a54bf03f6bd0eb1f2d6df428d64005d4e95083b68f76f2f1"
+        hex"a5b61d8b89f7249edb0b34c7fb0c8cfaf97ee32707218ab3cd4c80ba2bef91415487509df8522bd6f298ebfb62cd179545cc469dc12a882e533c7d30"
+        hex"3163ae8cb0d304b91dae1255127ca112a76ff89b6e150b54ab190e5af958ab0409645c59b219449d7fdb0523c40863f4c58ccca40d77678cec8a858e"
+        hex"9a7845e58826be2095187cbd12932093aafc9819127eab9a497e5938d20c43ada630ce3f139760a91cfc63a223982a835715f11d001f4b8ecd602bce"
+        hex"841b3f13d64482242868d63f71503c94b2481e09953c2f48c248ef04cc5b870990f272ab34e43e4a8d4ed3c767638eb4c9ab0584e9e9489f931244a4"
+        hex"e29125de40d0d69594f5b85f4b0aa4e3b3d551bb68bd0de2471921ab46964b9d82b8c9cb3df8978e07aee6906253c32111c193a930620aec3ec09a58"
+        hex"71fee70a1a6ccc09e60d85c5a27ba9429b9c51c550229201bb41002d7f2217af3e4a9ba37688909513f49ea7a1479f643d4b198fab3e2a5def0c1726"
+        hex"ad0ce9ea36b0594d7ffcdbb83778a388d8f2c8d3809af20b0ef907f60c90023b44d685510fcfd13a113e834f99eacfabe6481b62c96d7300b1b6dea9"
+        hex"ae1d12296147b3dac63d22b3599422b6439b4a7b475b0000d253a86b8a594f8b1e3a1bb9affca5e78d5b1e8cd82f1eebf41eb60bd45b1b50351539ee"
+        hex"42f99b8ab5c601f5fa86204c81261f06da78f14d80a33fdbfd42843688d1cac2428a2aebd55a2726d51a527f810ae9a115a6b4e93cf522c1257260b6"
+        hex"7efb3a08d0d6ee8d8bee004ca4da59100393d9e976434a281261dab4301ae5feb67d68299e4f3fe877922cbfaaefee036cd9b110757b21c058f6c030"
+        hex"016939177daf16171b53e28509bc03cc77211efbff98ba0d59002f3bdca06c4c9adfbbee661002117a61f086157321e7d9a5c5586e0f991b0f7de5f3"
+        hex"fac091f0a98057e73d3b82c89159998d8190128803253f7a7310490ed0ef423cb8130db899063e0368b65fe027dfbaedd4590b8b4b78fb44dc81e8fd"
+        hex"3503d67a7e00f76d17d46f21df3d1981bf593648fbfd00cafc8695b0954f8213e0cd17f40641ab50dee3ace7a09f2e4a1c9bab9fb42919";
 
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
@@ -997,7 +1062,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///                         + 2 block-hash halves + promise commit). Verified
     ///                         verbatim; business fields read at fixed offsets —
     ///                         see `_parsePublicInputs`.
-    function finalizeDeposit(bytes proof, bytes publicInputs) public {
+    /// @param keccakProof   — SHPLONK proof bytes (no header) under
+    ///                         `KECCAK_VK_BLOB` whose one public input is the
+    ///                         promise commit, Fr #11 of `publicInputs`. The
+    ///                         deposit proof takes its keccak results — the
+    ///                         block hash, the trie roots, the receipt and
+    ///                         transaction leaves — from the table that commit
+    ///                         names; this proof shows the table is real
+    ///                         keccak.
+    function finalizeDeposit(bytes proof, bytes publicInputs, bytes keccakProof) public {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         require(!_paused, ERR_PAUSED);
         DepositPI f = _parsePublicInputs(publicInputs);
@@ -1022,6 +1095,14 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(
             gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof),
             ERR_INVALID_ZKPROOF
+        );
+        require(
+            gosh.zkhalo2VerifyWithVK(
+                KECCAK_VK_BLOB,
+                publicInputs[PROMISE_COMMIT_OFFSET:PROMISE_COMMIT_OFFSET + 32],
+                keccakProof
+            ),
+            ERR_INVALID_KECCAK_PROOF
         );
 
         // Canonical-chain gate: the proof binds the event to a block whose
@@ -1286,7 +1367,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
     ///      3=contract, 4=chain_id, 5..6=dapp_id(hi..lo),
     ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=promise commit
-    ///      (9..11 ignored on the AN side). Only the first 9 Fr are needed.
+    ///      (9..10 read by `_parseBlockHash`, 11 checked by the keccak proof in
+    ///      `finalizeDeposit`). Only the first 9 Fr are needed.
     function _parsePublicInputs(bytes publicInputs) private pure returns (DepositPI f) {
         TvmSlice s = TvmSlice(publicInputs);
         uint256[] fr;

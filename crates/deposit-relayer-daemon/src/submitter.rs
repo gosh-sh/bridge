@@ -2,23 +2,25 @@
 //! Nacki and finalise the deposit?".
 //!
 //! The AN-side entry point is `USDCBridge.finalizeDeposit(bytes proof, bytes
-//! publicInputs)` (acki-nacki branch `poseidon_dex`, deployed on shellnet
-//! 2026-06-22; verified by code-hash match against
+//! publicInputs, bytes keccakProof)` (acki-nacki branch `poseidon_dex`,
+//! deployed on shellnet 2026-06-22; verified by code-hash match against
 //! `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`). The contract parses
 //! every deposit field straight out of the `publicInputs` operand (12 × 32-byte
 //! little-endian `Fr`), verifies the triple via
 //! `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)` (opcode `0xC7
 //! 0x4A`; the `VK_BLOB` is the deploy-time 12-input deposit VkBlob embedded in
-//! the contract, **not** a per-call argument), reconstructs the recipient
-//! account as `(anAccountHigh << 128 | anAccountLow)` from the proven inputs,
-//! consumes a proof-bound deposit nullifier (deployed as a per-deposit
+//! the contract, **not** a per-call argument), verifies `keccakProof` against
+//! the embedded `KECCAK_VK_BLOB` with public input 11 as its instance, so the
+//! keccak results the deposit proof relied on are real, reconstructs the
+//! recipient account as `(anAccountHigh << 128 | anAccountLow)` from the proven
+//! inputs, consumes a proof-bound deposit nullifier (deployed as a per-deposit
 //! `DepositVoucher`), and credits that proven account. An EVM address is not a
 //! valid AN recipient, so binding the destination account in the proof (rather
 //! than trusting an off-circuit relayer hint) is what makes the credit
 //! trust-minimised.
 //!
 //! Because the contract reads the operand directly, the relayer forwards only
-//! the two raw byte blobs — there are no per-field scalar call arguments, and
+//! the raw byte blobs — there are no per-field scalar call arguments, and
 //! the relayer cannot tamper with any proven field.
 //!
 //! Two implementations:
@@ -284,7 +286,8 @@ impl AnSubmitter for MockAnSubmitter {
 
 /// Static configuration for the live submitter.
 ///
-/// The deployed `finalizeDeposit(bytes proof, bytes publicInputs)` call carries
+/// The deployed `finalizeDeposit(bytes proof, bytes publicInputs, bytes
+/// keccakProof)` call carries
 /// no token id and no caller-supplied gas (the contract is hardcoded to ECC[3]
 /// USDC and pays its own gas after `tvm.accept()`), so neither is part of this
 /// config.
@@ -299,23 +302,27 @@ pub struct AnSubmitConfig {
 }
 
 /// Build JSON parameters for `USDCBridge.finalizeDeposit(bytes proof, bytes
-/// publicInputs)` from a proof bundle.
+/// publicInputs, bytes keccakProof)` from a proof bundle.
 ///
 /// The deployed contract (acki-nacki `poseidon_dex`) parses every deposit field
 /// out of the `publicInputs` operand itself and verifies the triple against its
-/// embedded `VK_BLOB`, so the relayer forwards only the two raw byte blobs:
+/// embedded `VK_BLOB`, so the relayer forwards only the raw byte blobs:
 ///
 /// - `proof` — raw Blake2b-transcript SHPLONK bytes.
 /// - `publicInputs` — `NUM_PUBLIC_INPUTS` × 32-byte little-endian `Fr`, exactly
 ///   the operand the AN-side opcode's `public_inputs_cell` carries.
+/// - `keccakProof` — raw Blake2b-transcript SHPLONK bytes of the keccak shard
+///   proof; the contract verifies it against `KECCAK_VK_BLOB` with
+///   `publicInputs[11]` as its instance.
 ///
-/// Both are encoded as plain hex (no `0x`) for the tvm_client ABI JSON encoder.
+/// All are encoded as plain hex (no `0x`) for the tvm_client ABI JSON encoder.
 /// The relayer cannot tamper with any proven field — the contract reads them
 /// from the operand the opcode verifies.
 pub fn build_finalize_deposit_params(bundle: &DepositProofBundle) -> serde_json::Value {
     json!({
         "proof": hex::encode(&bundle.proof),
         "publicInputs": hex::encode(&bundle.public_inputs),
+        "keccakProof": hex::encode(&bundle.keccak_proof),
     })
 }
 
@@ -511,6 +518,7 @@ const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
 const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
 const EXIT_TVL_CAP: i32 = 235;
+const EXIT_INVALID_KECCAK_PROOF: i32 = 239;
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -523,6 +531,11 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
         EXIT_INVALID_ZKPROOF => Some(
             "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
              this prover's VkBlob",
+        ),
+        EXIT_INVALID_KECCAK_PROOF => Some(
+            "ERR_INVALID_KECCAK_PROOF — keccak proof rejected by the opcode; check the deployed \
+             KECCAK_VK_BLOB is this prover's keccak VkBlob and the node verifies the KeccakShard \
+             shape",
         ),
         EXIT_UNSUPPORTED_SRC_CHAIN => Some(
             "ERR_UNSUPPORTED_SRC_CHAIN — the proven (chainId, source contract) pair is not \
@@ -816,6 +829,7 @@ mod tests {
             vk_blob: vec![1, 2, 3].into(),
             public_inputs: pi.to_operand().into(),
             proof: vec![0xAB; 48].into(),
+            keccak_proof: vec![0xCD; 64].into(),
             parsed: pi,
         }
     }
@@ -872,13 +886,20 @@ mod tests {
     }
 
     #[test]
-    fn finalize_params_are_proof_and_public_inputs_hex() {
+    fn finalize_params_are_proof_public_inputs_and_keccak_proof_hex() {
         let ev = event(1);
         let b = bundle(&ev);
         let params = build_finalize_deposit_params(&b);
-        // Exactly the two `bytes` args the deployed contract expects.
+        // Exactly the three `bytes` args the deployed contract expects.
         let obj = params.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.len(), 3);
+
+        let keccak_proof = params["keccakProof"].as_str().unwrap();
+        assert!(
+            !keccak_proof.starts_with("0x"),
+            "keccakProof must be plain hex"
+        );
+        assert_eq!(hex::decode(keccak_proof).unwrap(), b.keccak_proof.to_vec());
 
         let proof = params["proof"].as_str().unwrap();
         assert!(!proof.starts_with("0x"), "proof must be plain hex");
@@ -898,6 +919,43 @@ mod tests {
             crate::types::DepositPublicInputs::from_operand(&pi_bytes).unwrap(),
             b.parsed
         );
+    }
+
+    #[test]
+    fn finalize_params_name_the_inputs_of_the_shipped_bridge_abi() {
+        let abi: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
+        ))
+        .unwrap();
+        let function = abi["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "finalizeDeposit")
+            .expect("finalizeDeposit in the bridge ABI");
+        let inputs: Vec<(&str, &str)> = function["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["name"].as_str().unwrap(), i["type"].as_str().unwrap()))
+            .collect();
+        assert_eq!(inputs, [
+            ("proof", "bytes"),
+            ("publicInputs", "bytes"),
+            ("keccakProof", "bytes")
+        ]);
+
+        let params = build_finalize_deposit_params(&bundle(&event(1)));
+        let mut names: Vec<&str> = params
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
     }
 
     const VOUCHER_TX: TxHash = [0x11; 32];
@@ -1063,6 +1121,16 @@ mod tests {
             } => {
                 assert!(reason.contains("220") || reason.contains("ERR_INVALID_ZKPROOF"));
             },
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_exit_239_as_rejected_naming_the_keccak_proof() {
+        match classify_call_error("contract call aborted (exit_code=239)") {
+            SubmitOutcome::Rejected {
+                reason,
+            } => assert!(reason.contains("ERR_INVALID_KECCAK_PROOF"), "{reason}"),
             other => panic!("expected Rejected, got {other:?}"),
         }
     }

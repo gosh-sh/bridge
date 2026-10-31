@@ -13,12 +13,19 @@ cargo run --release --example generate_deposit_fixtures -- \
   --set-dir fixtures/deposit_10proofs --count 10
 cargo run --release --example export_deposit_proof_set -- \
   --set-dir fixtures/deposit_10proofs --count 10
+cargo run --release --example export_keccak_shard_set -- \
+  --set-dir fixtures/deposit_10proofs --count 10
 ```
 
 The exporter checks every generated proof against one shared verification key.
 `public_inputs.bin` contains twelve little-endian BN254 scalars.
-The same key is embedded in `contracts/an/exchange/eccUSDCBridge.sol` using
-`scripts/embed_deposit_vk_blob.py` from the repository root.
+`export_keccak_shard_set` writes `keccak_vk_blob.bin` once and a
+`keccak_proof.bin` per proof: the proof that the keccak table named by public
+input 11 is real keccak. It checks that every table's commitment equals that
+input and verifies every proof it writes; it leaves the deposit proofs alone.
+Both keys are embedded in `contracts/an/exchange/eccUSDCBridge.sol` (`VK_BLOB`
+and `KECCAK_VK_BLOB`) using `scripts/embed_deposit_vk_blob.py` from the
+repository root.
 
 Check that keygen with the historical canonical Sepolia witness (block 11025192,
 five receipt-MPT nodes) produces the same key as these single-leaf fixtures:

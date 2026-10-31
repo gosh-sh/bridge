@@ -1489,7 +1489,14 @@ impl AnRead for FakeAn {
 
 #[async_trait]
 impl AnSend for FakeAn {
-    async fn send_finalize(&self, _: [u8; 32], _: [u8; 32], _: &[u8], _: &[u8]) -> FinalizeSend {
+    async fn send_finalize(
+        &self,
+        _: [u8; 32],
+        _: [u8; 32],
+        _: &[u8],
+        _: &[u8],
+        _: &[u8],
+    ) -> FinalizeSend {
         *self.sent.lock().unwrap() += 1;
         for (acc, m) in self.on_send_ext_out.lock().unwrap().drain(..) {
             self.ext_out
@@ -1581,8 +1588,9 @@ pub fn fake_prover_dir(extra: &str) -> (FakeProverHome, crate::deposit::prover_f
     );
     let prove = format!(
         "#!/bin/sh\n{help}\nwhile [ $# -gt 0 ]; do case $1 in --proof-out) p=$2; shift;; \
-         --pubin-out) i=$2; shift;; esac; shift; done\n{extra}\nprintf proof > \"$p\"\ncp \
-         expected_pi.bin \"$i\"\necho run >> data/runs.log\n"
+         --pubin-out) i=$2; shift;; --keccak-proof-out) k=$2; shift;; esac; shift; \
+         done\n{extra}\nprintf proof > \"$p\"\nprintf keccak > \"$k\"\ncp expected_pi.bin \
+         \"$i\"\necho run >> data/runs.log\n"
     );
     for (name, body) in [
         (crate::deposit::prover_files::FETCH_BIN, fetch),
@@ -1607,8 +1615,9 @@ pub fn fake_prover_dir(extra: &str) -> (FakeProverHome, crate::deposit::prover_f
 /// fails. Each run still appends a line to `data/runs.log`.
 pub fn prover_fails_after_writing(dir: &crate::deposit::prover_files::ProverDir) {
     let body = "#!/bin/sh\n[ \"$1\" = --help ] && { echo usage; exit 0; }\nwhile [ $# -gt 0 ]; do \
-                case $1 in --proof-out) p=$2; shift;; --pubin-out) i=$2; shift;; esac; shift; \
-                done\nprintf proof > \"$p\"\ncp expected_pi.bin \"$i\"\necho run >> \
+                case $1 in --proof-out) p=$2; shift;; --pubin-out) i=$2; shift;; \
+                --keccak-proof-out) k=$2; shift;; esac; shift; done\nprintf proof > \
+                \"$p\"\nprintf keccak > \"$k\"\ncp expected_pi.bin \"$i\"\necho run >> \
                 data/runs.log\necho 'the proof does not verify' >&2\nexit 1\n";
     std::fs::write(dir.bin(crate::deposit::prover_files::PROVE_BIN), body).unwrap();
 }
@@ -1709,7 +1718,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.13.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.15.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1759,7 +1768,7 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getDepositLimits", vec![
             serde_json::json!({"maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
@@ -1778,6 +1787,9 @@ impl World {
         ]);
         an.getter(W_BRIDGE_ACC, "isOwnerAnchorsEnabled", vec![
             serde_json::json!({ "value0": true }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
+            serde_json::json!({ "verifier": ":", "parentChainId": "0" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getDepositVoucherCodeHash", vec![
             serde_json::json!({ "value0": format!("0x{}", hex::encode(crate::deposit::identity::EXPECTED_VOUCHER_CODE_HASH)) }),
@@ -1882,11 +1894,11 @@ impl World {
         ]);
     }
 
-    /// The bridge as a 1.14.0 one with an Arbitrum verifier for the deposit
+    /// The bridge as a 1.15.0 one with an Arbitrum verifier for the deposit
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -2546,6 +2558,7 @@ impl World {
         let work = self.work.path().join(&r.op_id);
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(work.join("proof.bin"), b"proof").unwrap();
+        std::fs::write(work.join("keccak_proof.bin"), b"keccak").unwrap();
         std::fs::copy(
             self.prover.1.root.join("expected_pi.bin"),
             work.join("public_inputs.bin"),

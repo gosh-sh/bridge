@@ -205,6 +205,7 @@ pub async fn finalize(
     cx: &FinCtx,
     proof: &[u8],
     pi: &[u8],
+    keccak_proof: &[u8],
     ui: &dyn Ui,
 ) -> CliResult<FinalizeExit> {
     let op = rec.op_id.clone();
@@ -214,7 +215,18 @@ pub async fn finalize(
     // its send may have executed without showing yet. A refusal of another
     // message cannot settle that earlier attempt.
     let in_doubt = AtomicBool::new(rec.stage == OpStage::Finalizing);
-    let steps = attempts(an, send, store, rec, cx, proof, pi, ui, &in_doubt);
+    let steps = attempts(
+        an,
+        send,
+        store,
+        rec,
+        cx,
+        proof,
+        pi,
+        keccak_proof,
+        ui,
+        &in_doubt,
+    );
     match cx.deadline {
         None => steps.await,
         Some(d) => match tokio::time::timeout_at(d, steps).await {
@@ -238,6 +250,7 @@ async fn attempts(
     cx: &FinCtx,
     proof: &[u8],
     pi: &[u8],
+    keccak_proof: &[u8],
     ui: &dyn Ui,
     in_doubt: &AtomicBool,
 ) -> CliResult<FinalizeExit> {
@@ -353,7 +366,7 @@ async fn attempts(
         })?;
         let earlier = in_doubt.swap(true, Ordering::SeqCst);
         let outcome = send
-            .send_finalize(cx.bridge, cx.bridge_dapp, proof, pi)
+            .send_finalize(cx.bridge, cx.bridge_dapp, proof, pi, keccak_proof)
             .await;
         match react(&outcome) {
             Reaction::ToCredit => {
@@ -539,7 +552,7 @@ mod tests {
             poll: std::time::Duration::from_secs(30),
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -610,7 +623,7 @@ mod tests {
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -681,7 +694,7 @@ mod tests {
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::AnWaitTimeout);
@@ -724,7 +737,7 @@ mod tests {
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -787,7 +800,7 @@ mod tests {
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -832,7 +845,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -873,7 +886,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -915,7 +928,7 @@ mod tests {
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -942,7 +955,7 @@ mod tests {
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -975,7 +988,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::BackToAnchor);
@@ -997,7 +1010,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1026,7 +1039,7 @@ mod tests {
         });
         an.failing_getters.lock().unwrap().insert("isPaused".into());
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -1060,7 +1073,7 @@ mod tests {
             ecc3: 0,
         });
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -1091,7 +1104,7 @@ mod tests {
         an.fail_ext_messages
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::AnWaitTimeout, "{e}");
@@ -1125,7 +1138,7 @@ mod tests {
             serde_json::json!({"value0": format!("0x{}", hex::encode(H))}),
         ]);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -1150,7 +1163,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1190,7 +1203,7 @@ mod tests {
             serde_json::json!({"value0": true}),
         ]);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1215,7 +1228,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1251,7 +1264,7 @@ mod tests {
             serde_json::json!({"value0": true}),
         ]);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", b"k", &ui)
             .await
             .unwrap_err();
         assert_eq!(

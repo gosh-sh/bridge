@@ -24,6 +24,35 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **`finalizeDeposit` takes a third argument, the keccak proof:
+  `finalizeDeposit(bytes proof, bytes publicInputs, bytes keccakProof)`, `eccUSDCBridge` 1.15.0
+  (code hash `2a610ffd…`).** The deposit proof takes its keccak results (the block hash, the trie
+  roots, the receipt and transaction leaves) from a table named by public input 11, and until now
+  nothing showed that table was real keccak. `keccakProof` proves it: the bridge verifies it against
+  the new embedded `KECCAK_VK_BLOB` (zkevm-hashes `KeccakComponentShardCircuit`, k = 18, capacity
+  128, VkBlob shape byte 2 `KeccakShard`; sha256 `4ccd758c…`) with public input 11 as its one public
+  input, and refuses with the new error 239 `ERR_INVALID_KECCAK_PROOF`. The deposit verification
+  key (`VK_BLOB`) does not change, and neither do the twelve public inputs; a deposit proven before
+  the upgrade is proven again only to add the keccak proof. Upgrade in this order:
+  1. Run an Acki Nacki node release whose `ZKHALO2VERIFYWITHVK` knows the `KeccakShard` shape
+     (tvm-sdk). On an older node every `finalizeDeposit` ends with 239.
+  2. `updateCode` the bridge to 1.15.0. `ackinacki-bridge` and `deposit-relayer` builds from before
+     this change cannot finalize on it: the CLI refuses a bridge newer than it knows before any USDC
+     leaves the EVM chain, and the relayer's two-argument call cannot be decoded.
+  3. Install `ackinacki-bridge`, `deposit-relayer` and the deposit prover tools from the same
+     release, together. The CLI now requires bridge 1.15.0 (`MIN_BRIDGE_VERSION`). Point
+     `deposit-relayer --an-bridge-abi-path` (`AN_BRIDGE_ABI_PATH`) at the new
+     `USDCBridge.abi.json`.
+
+  `export_blake2b_proof` writes the keccak proof to `--keccak-proof-out` (default
+  `keccak_proof_blake2b.bin`) next to `--proof-out` and `--pubin-out`, and checks it before it
+  exits. It adds a few minutes per deposit (the keccak key is built on every run) within the same
+  memory, and needs no new SRS: the circuit uses the k = 18 `data/kzg_params_18.srs`. The CLI keeps
+  the proof as `keccak_proof.bin` in the operation's work directory; an operation resumed from
+  before the upgrade proves its deposit again, since its work directory has no keccak proof.
+  `deposit-relayer prove-one` writes `keccak_proof.bin` to `--out-dir`, and `finalize-one` requires
+  it in `--bundle-dir`. The message to Acki Nacki grows from about 30 KB to about 76 KB.
+
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'

@@ -1,12 +1,17 @@
 # eth-light-client-prover
 
-Trustless Ethereum beacon-chain **light client** for the ETH→AN deposit path.
+Ethereum beacon-chain **light client** for the ETH→AN deposit path.
 Produces a BN254 Halo2 SHPLONK proof (verified natively on Acki Nacki by
 `ZKHALO2VERIFYWITHVK`) that advances a sync-committee light-client head and marks
-finalized Ethereum **execution block hashes** canonical, so `finalizeDeposit`
-accepts a deposit only if its proven `blockHash` was finalized in-circuit.
+finalized Ethereum **execution block hashes** canonical. `finalizeDeposit` accepts a
+deposit only if its public inputs 9/10 name a block hash in `_acceptedBlockHash`; this light
+client is one writer of that map, next to the owner and the Arbitrum verifiers.
 
-Removes the trusted-attester MVP (`_acceptedBlockHash` / `setAcceptedL1Block`).
+It writes `_acceptedBlockHash` next to the owner's `setAcceptedBlockHash`, and
+`disableOwnerAnchors` / `disableOwnerAnchorsOn` turn the owner path off. That does not make
+the deposit path trustless. Inputs 9/10 are the deposit proof's header keccak
+promise output, and that proof does not show its receipt is in the named block
+([`../deposit-prover/README.md`](../deposit-prover/README.md)).
 
 - Full work plan: [`../docs/eth_light_client_trustless_deposit_plan.md`](../docs/eth_light_client_trustless_deposit_plan.md)
 - **M0 spec:** [`docs/m0_spec.md`](docs/m0_spec.md) — frozen public-input layout,

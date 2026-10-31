@@ -10,24 +10,25 @@
 
 ## 1. Problem
 
-The deposit circuit (`deposit-prover/src/circuit_v2.rs`) proves:
+The deposit circuit (`deposit-prover/src/circuit_v2.rs`) checks a `Deposit` log, a receipt
+and a header against keccak promise outputs. It does not evaluate keccak.
 
-- a `Deposit` log sits in a receipt, the receipt sits under `receiptsRoot`,
-- the receipt/tx bind `chainId` (PI[4]) and the emitting `contractAddress` (PI[3]),
-- the block header hashes to `blockHashHigh‖blockHashLow` (PI[9]/PI[10]).
+- PI[9]/PI[10] are the header promise output, not a shown keccak of the witnessed header.
+- `finalizeDeposit` does not read PI[11], the Poseidon of the loaded promise table.
+- The prover can set that output to any hash already in `_acceptedBlockHash`, including
+  the hash of a block that was mined, and put a made-up `Deposit` log in the other promise
+  rows. That passes `ZKHALO2VERIFYWITHVK` and mints.
 
-It does **not** prove that this `blockHash` belongs to Ethereum's **canonical, finalized**
-chain. A valid Halo2 proof over a **self-fabricated** header + receipt trie (attacker-authored,
-carrying a `Deposit` log that names a trusted bridge address) passes `ZKHALO2VERIFYWITHVK`
-and `finalizeDeposit` — **mint-from-nothing**. Canonicity is currently an out-of-circuit trust
-input. This plan makes it an **in-circuit** statement.
+The circuit also does not prove that this hash belongs to Ethereum's **canonical, finalized**
+chain. This plan makes canonicity an in-circuit statement. It does not check the keccak promise.
 
 ## 2. Goal & non-goals
 
 **Goal.** A Halo2/BN254 SHPLONK proof, verified natively on AN by the existing
 `ZKHALO2VERIFYWITHVK` opcode, that advances a trustless Ethereum beacon-chain **light-client
 head** and marks finalized **execution block hashes** canonical. `finalizeDeposit` then only
-accepts a deposit whose proven `blockHash` is one the light client already finalized.
+accepts a deposit whose public inputs 9 and 10 are a hash the light client already finalized.
+That gate still does not check the keccak promise.
 
 **Non-goals.**
 - Not a full Casper-FFG validator-set client (~1M validators — infeasible in-circuit). We use the
@@ -74,7 +75,8 @@ Three moving parts, mirroring how real zk light clients are deployed:
                           records finalized exec blockHash canonical
                                            │
  deposit-prover proof ──────────────────▶ finalizeDeposit:
-                        require blockHash ∈ light-client-finalized set
+                        require blockHash ∈ _acceptedBlockHash
+                        (light client, owner or L2 verifier wrote it)
 ```
 
 **Design choice — separate header-oracle circuit, two proofs cross-checked on-contract**
@@ -84,10 +86,11 @@ Three moving parts, mirroring how real zk light clients are deployed:
   or per-deposit at most a few/hour). Coupling it to every deposit would re-prove BLS on each
   deposit — wasteful.
 - Keep `deposit-prover` ~unchanged; the AN contract binds `deposit.blockHash` to the light-client's
-  finalized set. This **replaces the attester write path** (`setAcceptedL1Block`) with a ZK write
-  path — same `_acceptedL1Block`-style gate, now trustless.
+  finalized set. This adds a ZK write path to the same `_acceptedBlockHash` gate the owner
+  writes. The gate restricts which block hashes inputs 9/10 may name; it does not make the deposit
+  path trustless, because the deposit proof's keccak results are unchecked promise outputs (§1).
 - In-circuit aggregation (via `bridge-evm-aggregator`/snark-verifier) is a **later optimization**
-  (M-agg), not required for correctness.
+  (M-agg). It is not what is missing for correctness: the keccak promise check is (§1).
 
 ## 5. Light-client update circuit — spec
 

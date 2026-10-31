@@ -34,6 +34,12 @@ note here calling out the drift.
 > change. Earlier drift notes describe historical snapshots; other citations
 > have not been re-anchored by this change. Locate symbols in current source
 > before relying on their line offsets.
+>
+> **Drift note, 2026-10-30 (deposit witness padding).** The §6 bullet on the 12 public
+> inputs was rewritten against `deposit-prover` at `5e6a2569`, axiom-eth `1d61be0` and
+> halo2-lib `026e176`. That bullet cites
+> `crates/deposit-relayer-daemon/src/types.rs:100-112`, where `DepositPublicInputs` and
+> `promise_commit` are. Other citations in this document were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -286,18 +292,55 @@ Notes that matter downstream:
   `topics[1] = depositId`, `topics[2] = sender`, and reads three data words:
   `amount` at bytes 0..32, `anAccount` at 32..64, and `timestamp` at 64..96.
   Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`. The circuit constrains
-  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:834-835`) and binds the
-  account from word 1 (`:1009-1011`).
+  the 96-byte data length (`deposit-prover/src/circuit_v2.rs:839-840`) and binds the
+  account from word 1 (`:1014-1016`).
   This format requires the matching deposit VK; the earlier workchain-bearing
   event and its proofs are incompatible.
 * The proof's 12 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
   dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, promise_commit`
-  (`crates/deposit-relayer-daemon/src/types.rs:98-110`). The DApp ID remains a
+  (`crates/deposit-relayer-daemon/src/types.rs:100-112`). The DApp ID remains a
   config-supplied tag; removing workchain does not change its meaning or PI slots.
-  Those 12 values are the only deposit data the proof can change. The private witness is
-  longer: the receipt and the log sit in fixed-length buffers with an unused tail, and a
-  different tail is another witness of the same public inputs, not another deposit.
-  [`deposit-prover/README.md`](../deposit-prover/README.md) names the buffers.
+  The instance column is those 12 values. `finalizeDeposit` reads the first 9 and checks
+  the block-hash halves. It does not read `promiseCommit`, and nothing in this repository
+  checks that commitment against a keccak evaluation: the circuit's keccak results are
+  promise outputs filled from the witness. The checks in the deposit circuit compare
+  witnesses to those outputs. They do not show that the receipt, the trie or the block
+  hash are the real ones.
+  More than one witness can produce the same first 11 values. The Phase-0 bytes of `depositId`,
+  `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so any bytes
+  with the same base-256 fold (a carry of 256 between two adjacent bytes, for one) leave the
+  field element unchanged. The header's keccak-promise input packs three 8-byte words into
+  each field element, so a carry between adjacent cells inside one element, across a word
+  boundary included, leaves it unchanged. The header RLC value changes with that carry. Phase 1 still holds when the
+  `witness_subarray` copies take the same carry, so the two RLC values stay equal.
+  `receiptsRoot` and `transactionsRoot` are not public inputs, but their cells are
+  constrained equal, byte by byte, to the MPT roots, and those root bytes are
+  range-checked to 8 bits, so a carry on either field fails. On a field with neither
+  that comparison nor a public input, such as `parentHash`, the 12 public inputs stay
+  the same. Public input 11 is a Poseidon of the loaded promise table, padded to the
+  fixed keccak capacity. A row no call reads is not fixed by the witness, so one witness
+  can produce more than one value of input 11. Inputs 9 and 10 are the header row's
+  output, not necessarily the keccak of the witnessed header. `finalizeDeposit` accepts
+  any pair already in `_acceptedBlockHash`.
+  MPT value bytes past `value_byte_len`, key bytes past `key_byte_len`, leaf and node
+  bytes past each node's RLP length, key-fragment nibbles past `frag_len` or past
+  `pseudo_depth`, and the stored length of a non-last branch fragment, are range-checked
+  and are not what the hash or the RLC reads. A padding slot is not required to be a
+  branch: `DUMMY_BRANCH` with `node_type` 0 and `DUMMY_EXT` with `node_type` 1 hash the
+  same two preimages. Bytes past the hashed length of either encoding are range-checked
+  and are not an input to that hash. RLP cells
+  past `field_len` or `encoded_item_len` are outside the phase-1 RLC; cells inside the
+  length are bound by that RLC, not byte for byte. When the header has fewer than 24 fields,
+  `header[header_len]` is the next prefix the variable-length decoder reads for every slot
+  past the list. Phase 1 requires `is_not_literal` to be 0 there: `encoded_item_len` adds
+  the unmasked flag, and the concatenated lengths were masked by `field_in_list` (0). Bytes
+  `0x00`–`0x7f` pass. Any byte `≥ 0x80` fails. With this circuit's lookup bits of 8, the
+  field elements `-1` through `-64` also pass, each with `len_len` 0. Every passing value
+  has `len_len` 0, so `[header_len+1..792]` is not read, and the first tail cell is
+  constrained to one of those values. A 24-field header, which the decoder accepts, leaves
+  no slot past the list, so no cell of its tail is read or constrained. Slot 6 is 256 bytes
+  and the header `list_len` is unused, so an unused slot can be wider than 32 bytes.
+  [`deposit-prover/README.md`](../deposit-prover/README.md) lists the same places.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The

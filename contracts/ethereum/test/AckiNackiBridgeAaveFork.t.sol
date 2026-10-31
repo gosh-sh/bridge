@@ -48,7 +48,11 @@ contract AckiNackiBridgeAaveForkTest is Test {
         } else {
             vm.createSelectFork(rpc);
         }
-        require(block.chainid == 11155111, "fork must be Sepolia (chainid=11155111)");
+        if (block.chainid != 11155111) {
+            console.log("FORK_URL is not Ethereum Sepolia; skipping");
+            vm.skip(true);
+            return;
+        }
 
         oracle = new MockBlockHeaderOracle();
         usdc = IERC20(USDC);

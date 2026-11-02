@@ -18,13 +18,17 @@ proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 `treasuryBalance` (`:98`) is **book value**: the sum of user principal the bridge owes. It is not a
 token balance and is never reconciled against one.
 
-It moves in exactly two places in the whole contract:
+It moves in four places in the whole contract (lines as of gosh-sh/bridge-audit#140):
 
-* `+= amount` in `deposit` (`:590`)
-* `-= pub.amount` in `withdrawByProof` (`:1194`)
+* `+= credited` in `deposit` (`:862`)
+* `-= pub.amount` in `withdrawByProof` (`:1588`)
+* `+= amount` in `fundTreasury` (`:1818`), owner or `predecessor` only, for USDC it pulls from the
+  caller, with no `Deposit` event
+* `= 0` in `migrateTreasury` (`:1847`), owner only on a paused bridge, which hands the whole book
+  to a successor (CUST-2)
 
-Nothing else writes it. No owner function does, under any condition — including the AAVE routing
-functions, which move tokens between the bridge and the pool without touching the book at all.
+Nothing else writes it — in particular not the AAVE routing functions, which move tokens between
+the bridge and the pool without touching the book at all.
 
 ## Where the money actually is
 

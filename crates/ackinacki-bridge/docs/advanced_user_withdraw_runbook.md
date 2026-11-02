@@ -266,7 +266,9 @@ cargo run --release --bin compute_bridge_anchors -- \
 ```bash
 cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
-PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=2 ./scripts/deploy_bridge_bundle.sh
+PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=2 \
+PREDECESSOR_BRIDGE=<the paused bridge this one replaces, or 0x0000000000000000000000000000000000000000> \
+  ./scripts/deploy_bridge_bundle.sh
 ```
 
 **Post-deploy sanity — verify W²-alignment:**
@@ -467,7 +469,7 @@ logs. CLI exits 12 (ProofFailed); see [Case 3a](#case-3a--capture-timeout--advan
 Same steps as above with three deltas:
 
 - Step L0: pass `--level 1` instead of `--level 2`.
-- Step L1: run `LEVEL=1 ./scripts/deploy_bridge_bundle.sh` and
+- Step L1: run `LEVEL=1 ./scripts/deploy_bridge_bundle.sh` (with `PREDECESSOR_BRIDGE` as above) and
   verify `last_seen % 1024 == 0` instead of `% 16384`.
 - Step L5: drop `--anchor-layer 2 --i-know-the-wait`; leave
   `--anchor-layer auto` (or pass `--anchor-layer 1` explicitly).

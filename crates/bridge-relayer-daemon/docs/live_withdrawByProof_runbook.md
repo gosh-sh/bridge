@@ -322,7 +322,9 @@ and rewrites `L1_config/env`:
 ```bash
 cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
-PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
+PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 \
+PREDECESSOR_BRIDGE=<the paused bridge this one replaces, or 0x0000000000000000000000000000000000000000> \
+  ./scripts/deploy_bridge_bundle.sh
 ```
 
 ### Step 2 — Seed the bridge treasury (fresh deploy only)
@@ -330,8 +332,9 @@ PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
 `withdrawByProof` pays out from `treasuryBalance` (`AckiNackiBridge.sol:1188`).
 A fresh deploy starts at zero; the crypto path can pass and the tx will
 still revert with `WithdrawTreasuryShortfall(pub.amount, treasuryBalance)`
-(selector `0xbb651fce`). The only path that increments `treasuryBalance`
-is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
+(selector `0xbb651fce`). `deposit()` raises `treasuryBalance`, and so does
+the owner's `fundTreasury(amount)`, which pulls USDC without minting anything
+on Acki Nacki. There is no setter.
 Seed it once, then reuse across demos on the same deploy.
 
 Full recipe in [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty).

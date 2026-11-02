@@ -2210,7 +2210,7 @@ mod tests {
             storage_proof: vec![Bytes::from(vec![0xef]), Bytes::from(vec![0x01])],
         };
         let abi =
-            fixture("../../contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json");
+            fixture("../../contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.abi.json");
         let inputs: Vec<String> = abi["functions"]
             .as_array()
             .unwrap()

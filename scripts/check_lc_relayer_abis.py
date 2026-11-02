@@ -36,7 +36,7 @@ PAIRS = [
     ),
     (
         TRIMMED / "EthBeaconLightClient.abi.json",
-        REPO / "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json",
+        REPO / "contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json",
         [
             "submitUpdate",
             "submitRotate",

@@ -312,7 +312,7 @@ bridge operator.
 | `ARBITRUM_RPC_URL` | a node that serves `eth_getProof` on blocks a few minutes old, such as a free Alchemy key (which allows 10 blocks per `eth_getLogs`: add `--arbitrum-log-span 10`) | The proofs are taken when each batch lands, 40–60 s after its last block. `sepolia-rollup.arbitrum.io` and publicnode keep about 128 blocks of state, half a minute on Arbitrum, and miss many batches; a missed batch waits for the next one. |
 | `--bridge-address`, `--from-block` | `AckiNackiBridge` on the Arbitrum chain and its deploy block | Its `Deposit` logs are the blocks to anchor. Without a state file the relayer refuses to start without `--from-block`. |
 | `AN_GRAPHQL_URL`, `AN_KEYS_PATH`, `AN_BRIDGE_ABI_PATH`, `AN_TOKEN_BRIDGE` | as for `daemon` | Any key signs: `proveBlock` is permissionless. |
-| `AN_ARBITRUM_VERIFIER_ABI_PATH` | `contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json` | The verifier's address comes from the bridge (`getL2Verifier`). The relayer refuses to start before `deployL2Verifier`, and when the verifier's `getConfig()` names another chain, parent chain or rollup. |
+| `AN_ARBITRUM_VERIFIER_ABI_PATH` | `contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.abi.json` | The verifier's address comes from the bridge (`getL2Verifier`). The relayer refuses to start before `deployL2Verifier`, and when the verifier's `getConfig()` names another chain, parent chain or rollup. |
 | `ARBITRUM_ANCHOR_STATE` | an absolute path on persistent disk, backed up like `state.json` | It keeps the proofs taken at batch time until their assertion lands, 30–60 min later. They cannot be fetched again. |
 
 The proofs wait in the state file until the bridge accepts the parent-chain block

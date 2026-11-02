@@ -56,7 +56,7 @@ SEPOLIA = 11155111
 PROVER_DIR = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, "work-local"))
 GRAPHQL_URL = os.environ.get("GRAPHQL_URL", "http://localhost/graphql")
-_COMPILED = os.path.join(_HERE, "..", "..", "..", "contracts", "an", "0.81.0_compiled", "exchange")
+_COMPILED = os.path.join(_HERE, "..", "..", "..", "contracts", "an", "0.81.1_compiled", "exchange")
 VERIFIER_ABI = os.path.join(_COMPILED, "ArbitrumBlockVerifier.abi.json")
 LC_ABI = os.path.join(_COMPILED, "EthBeaconLightClient.abi.json")
 # Account state can lag a call by a block or two.

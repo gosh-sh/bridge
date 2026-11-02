@@ -5,9 +5,9 @@
 # `.env` next to this file (image tags, the two directory roots, the metrics
 # address, the service UID) and from the env files under $BRIDGE_OPT/env/
 # (chain addresses, endpoints; the withdraw relayer's EOA key). The Acki
-# Nacki keys are files under $BRIDGE_OPT/keys/, and each service is given
-# only the one it signs with. `.env.example` and `env/*.env.example` are the
-# templates.
+# Nacki keys are files under $BRIDGE_OPT/keys/: each daemon is given only
+# the one it signs with, the operator's `cli` one-shot gets the directory.
+# `.env.example` and `env/*.env.example` are the templates.
 #
 # Layout on the host (bridge-audit#132), two roots:
 #   $BRIDGE_OPT   small and not recoverable: env/, keys/, <service>/state/
@@ -307,7 +307,7 @@ services:
     entrypoint:
       - /bin/sh
       - -c
-      - 'export BRIDGE_GQL_ENDPOINT="$(sed -n "s/^BRIDGE_GQL_ENDPOINT=//p" /run/secrets/runtime-env)"; exec /opt/bridge/bin/seed_prover_bk_set "$@"'
+      - 'export BRIDGE_GQL_ENDPOINT="$(sed -n -E "s/^(export )?BRIDGE_GQL_ENDPOINT=[\"'']?([^\"'']*).*/\2/p" /run/secrets/runtime-env)"; exec /opt/bridge/bin/seed_prover_bk_set "$@"'
       - fold-bk-set
     command: ["--help"]
     environment:

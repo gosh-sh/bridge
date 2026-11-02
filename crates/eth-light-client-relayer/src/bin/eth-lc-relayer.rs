@@ -882,6 +882,7 @@ async fn set_committee(
     let state = state_dir.join(STATE_FILE_NAME);
     // The daemon's lock: a running daemon would overwrite what is recorded
     // here with its own copy of the state, so it has to be stopped first.
+    refuse_unrecognised_state(&state, STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(&state)?;
     let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter
@@ -1265,6 +1266,7 @@ async fn submit_rotate(
     prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
     let state = state_dir.join(STATE_FILE_NAME);
     // The daemon's lock, as in `set_committee`.
+    refuse_unrecognised_state(&state, STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(&state)?;
     let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter.submit_rotate(&bundle).await? {

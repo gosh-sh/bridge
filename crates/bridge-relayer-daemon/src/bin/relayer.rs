@@ -964,7 +964,11 @@ async fn main() -> anyhow::Result<()> {
             // global `--state-dir` naming another directory would be silently
             // ignored; refuse it instead.
             if let Some(dir) = &global_state_dir {
-                if dir != &prover_state_dir {
+                let same = match (dir.canonicalize(), prover_state_dir.canonicalize()) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => dir == &prover_state_dir,
+                };
+                if !same {
                     anyhow::bail!(
                         "--state-dir / RELAYER_STATE_DIR ({}) differs from --prover-state-dir \
                          ({}): daemon-live keeps {RELAYER_STATE_FILE_NAME} in the prover state \
@@ -2309,6 +2313,11 @@ async fn run_daemon_live(
 
     std::fs::create_dir_all(&prover_state_dir)?;
     std::fs::create_dir_all(&work_dir)
+        .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
+    // Absolute from here on: the provers and the aggregator run in their own
+    // directories, and `--work-dir ./work` is the documented form.
+    let work_dir = work_dir
+        .canonicalize()
         .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
     info!(
         state_dir = %prover_state_dir.display(),

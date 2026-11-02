@@ -374,7 +374,10 @@ impl SubprocessAggregatorConfig {
     /// Keep the calldata file under `dir` instead of the system temp
     /// directory.
     pub fn with_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.scratch_dir = Some(dir.into());
+        // Absolute, whatever the caller gave: the aggregator subprocess runs
+        // in its own directory, and the file is read back from this one.
+        let dir = dir.into();
+        self.scratch_dir = Some(std::path::absolute(&dir).unwrap_or(dir));
         self
     }
 }
@@ -668,9 +671,15 @@ impl ProofAggregator for SubprocessAggregator {
         std::fs::create_dir_all(&out_dir).map_err(|e| {
             RelayerError::other(format!("scratch directory {}: {e}", out_dir.display()))
         })?;
+        // The pid alone collides between containers that share the scratch
+        // directory; the time of the run tells them apart.
         let out_path = out_dir.join(format!(
-            "agg_calldata_{verifier_name}_{}.bin",
-            std::process::id()
+            "agg_calldata_{verifier_name}_{}_{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         // The subprocess is spawned in its own directory, so a
         // relative `inner_snark` (e.g. the CLI's `--snark-dir=./shplonk-snark`
@@ -1102,7 +1111,10 @@ impl PoseidonSnarkWrapper {
     /// Keep the wrapped snark files under `dir` instead of the system temp
     /// directory.
     pub fn with_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.scratch_dir = Some(dir.into());
+        // Absolute, whatever the caller gave: the aggregator subprocess runs
+        // in its own directory, and the file is read back from this one.
+        let dir = dir.into();
+        self.scratch_dir = Some(std::path::absolute(&dir).unwrap_or(dir));
         self
     }
 
@@ -1508,6 +1520,17 @@ mod tests {
     /// bridge-audit#132: with a scratch directory the calldata file is
     /// created there and nowhere else, and is gone once read back. The
     /// fake aggregator records where it was told to write.
+    #[test]
+    fn a_relative_scratch_dir_is_made_absolute() {
+        let cfg =
+            SubprocessAggregatorConfig::new("agg", "verifiers", "params").with_scratch_dir("work");
+        let dir = cfg.scratch_dir.expect("set");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with("work"), "{}", dir.display());
+        let wrapper = PoseidonSnarkWrapper::new("params").with_scratch_dir("work");
+        assert!(wrapper.scratch_dir.expect("set").is_absolute());
+    }
+
     #[tokio::test]
     async fn the_calldata_file_lives_in_the_scratch_dir_while_the_run_lasts() {
         use std::os::unix::fs::PermissionsExt;

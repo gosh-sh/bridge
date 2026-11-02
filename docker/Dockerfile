@@ -143,11 +143,8 @@ COPY --from=foundry /out/ /
 # directory skeleton the compose file mounts over.
 # ---------------------------------------------------------------------------
 FROM ${RUNTIME_IMAGE} AS runtime-base
-ARG SOURCE_COMMIT=local
 ARG BRIDGE_UID=998
 ARG BRIDGE_GID=998
-LABEL org.opencontainers.image.source="https://github.com/gosh-sh/bridge" \
-      org.opencontainers.image.revision="${SOURCE_COMMIT}"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl jq xxd libgcc-s1 \
@@ -157,10 +154,13 @@ RUN apt-get update \
          --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin bridge \
     && install -d -m 0755 /opt/bridge/bin /data \
     && install -d -m 0755 -o "${BRIDGE_UID}" -g "${BRIDGE_GID}" \
-         /data/state /data/work /data/logs /data/params \
-    && printf '%s\n' "${SOURCE_COMMIT}" >/opt/bridge/SOURCE_COMMIT \
-    && chmod 0444 /opt/bridge/SOURCE_COMMIT
+         /data/state /data/work /data/logs /data/params
 ENV PATH="/opt/bridge/bin:${PATH}"
+# The commit after the package layer, so a new commit does not rebuild it.
+ARG SOURCE_COMMIT=local
+LABEL org.opencontainers.image.source="https://github.com/gosh-sh/bridge" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}"
+RUN printf '%s\n' "${SOURCE_COMMIT}" >/opt/bridge/SOURCE_COMMIT && chmod 0444 /opt/bridge/SOURCE_COMMIT
 
 # relayer daemon-live: the withdraw relayer, with its preflight. The BK set
 # file is a mounted input (/run/config/bk_set.json), not part of the image.

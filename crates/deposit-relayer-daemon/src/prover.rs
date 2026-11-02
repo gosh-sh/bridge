@@ -317,13 +317,13 @@ impl SubprocessProofGenerator {
 
     /// `<prover dir>/data/.prove.lock`, the lock the CLI takes around its
     /// proofs: key generation in `data/` is not atomic, so proofs on one
-    /// prover directory run one at a time whoever starts them. Blocks until
-    /// the lock is free.
+    /// prover directory run one at a time whoever starts them. Waits for
+    /// the lock up to the prover timeout, then fails like a prove would.
     async fn take_prove_lock(&self) -> Result<std::fs::File, RelayerError> {
         let data = self.config.deposit_prover_dir.join("data");
         let lock = data.join(".prove.lock");
         let shown = lock.display().to_string();
-        tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        let wait = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
             std::fs::create_dir_all(&data)?;
             let f = std::fs::OpenOptions::new()
                 .create(true)
@@ -332,10 +332,17 @@ impl SubprocessProofGenerator {
                 .open(&lock)?;
             fs2::FileExt::lock_exclusive(&f)?;
             Ok(f)
-        })
-        .await
-        .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))?
-        .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))
+        });
+        tokio::time::timeout(self.config.timeout, wait)
+            .await
+            .map_err(|_| {
+                RelayerError::ProofGeneration(format!(
+                    "prove lock {shown}: not free after {:?}",
+                    self.config.timeout
+                ))
+            })?
+            .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))?
+            .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))
     }
 
     /// Run one example. `tag` names the deposit in the example's log file.

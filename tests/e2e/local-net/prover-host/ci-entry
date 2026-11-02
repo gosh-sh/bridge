@@ -87,7 +87,11 @@ case "$verb" in
     docker network ls -q --filter 'name=^ci-arbitrum-e2e-' | xargs -r docker network rm >/dev/null
     runs=$(find "$CI/runs" -mindepth 1 -maxdepth 1 | wc -l)
     find "$CI/runs" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-    echo "removed containers=$containers networks=$networks run-dirs=$runs; kept run-logs=$(find "$CI/run-logs" -mindepth 1 -maxdepth 1 -type d | wc -l)" ;;
+    # The service images of earlier commits (ci-<name>:<sha>); the build
+    # cache that made them stays in BuildKit's cache mounts.
+    images=$(docker images -q --filter 'reference=ci-*' | sort -u | wc -l)
+    docker images -q --filter 'reference=ci-*' | sort -u | xargs -r docker rmi -f >/dev/null 2>&1 || true
+    echo "removed containers=$containers networks=$networks run-dirs=$runs images=$images; kept run-logs=$(find "$CI/run-logs" -mindepth 1 -maxdepth 1 -type d | wc -l)" ;;
 
   build)
     s=$(sha "${argv[1]:-}"); b=$CI/build/$s

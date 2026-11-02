@@ -41,8 +41,10 @@ assigns it when the release is tagged.
   state file into
   its service's state directory (`deposit-relayer-state.json`, `eth-lc-relayer-state.json`,
   `arbitrum-anchors-state.json`, `relayer-state.json` next to `prover_state.json`); the
-  daemons name the files; a daemon that finds other JSON files in its state directory but not
-  its own refuses to start. `deposit-relayer status` and `prove-one`, `eth-lc-relayer prove-one`,
+  daemons name the files; `deposit-relayer`, `eth-lc-relayer daemon` and `arbitrum-anchors`
+  refuse to start when they find other JSON files in their state directory but not their own
+  (`relayer daemon-live` re-reads the bridge's on-chain state at start, so its cursor file is
+  rebuilt). `deposit-relayer status` and `prove-one`, `eth-lc-relayer prove-one`,
   `set-committee`, `submit-rotate` and the other `relayer` daemon modes take the directory flags
   too; `set-committee` and `submit-rotate` take the daemon's state lock, so the daemon is
   stopped while they run. The provers' files go under the work directory instead of the system

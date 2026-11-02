@@ -14,5 +14,5 @@ exec eth-lc-relayer arbitrum-anchors \
   --parent-rpc-url "$SEPOLIA_RPC" --arbitrum-rpc-url "$ARB_RPC" --arbitrum-log-span 10 \
   --bridge-address "$BRIDGE_ADDRESS" --from-block "$BRIDGE_DEPLOY_BLOCK" \
   --an-graphql-url "$GQL" --an-keys-path "$WORK/an.keys.json" --an-bridge-abi-path "$AN_BRIDGE_ABI" \
-  --an-verifier-abi-path /src/contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json \
+  --an-verifier-abi-path /src/contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.abi.json \
   --an-token-bridge "$AN_BRIDGE" --anchor-state "$OUT/anchors-state.json" --allow-insecure-graphql

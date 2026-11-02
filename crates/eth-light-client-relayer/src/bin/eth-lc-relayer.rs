@@ -349,7 +349,7 @@ enum Cmd {
         #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
         an_bridge_abi_path: String,
         /// `ArbitrumBlockVerifier.abi.json`
-        /// (`contracts/an/0.81.0_compiled/exchange/`).
+        /// (`contracts/an/0.81.1_compiled/exchange/`).
         #[arg(long, env = "AN_ARBITRUM_VERIFIER_ABI_PATH")]
         an_verifier_abi_path: String,
         /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).

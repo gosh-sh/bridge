@@ -190,7 +190,7 @@ cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin re
 # proof_<N>.json, and withdrawByProof on proof_event_*.json. daemon-withdraw is the payout leg alone;
 # daemon-live proves in-process.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
-    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
+    --state-dir <state dir/> --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
 # daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();
 # a bridge deployed before that field also needs --anchor-level 1|2 (BRIDGE_ANCHOR_LEVEL).
 # The fixture commands read bound_scenario.json from --fixtures-dir and the R15 calldata from

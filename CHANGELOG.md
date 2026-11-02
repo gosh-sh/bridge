@@ -35,8 +35,10 @@ assigns it when the release is tagged.
   `BRIDGE_WORK_DIR` and `BRIDGE_LOG_DIR` beside `BRIDGE_STATE_DIR` for `relayer daemon-live`).
   The state is a directory now: `deposit-relayer daemon --state` / `DEPOSIT_RELAYER_STATE`,
   `eth-lc-relayer daemon --state`, `eth-lc-relayer arbitrum-anchors --anchor-state` /
-  `ARBITRUM_ANCHOR_STATE` and `relayer --state` / `RELAYER_STATE_PATH` are gone; a command line
-  or environment that still has one fails with the migration hint. Move each state file into
+  `ARBITRUM_ANCHOR_STATE` and `relayer --state` / `RELAYER_STATE_PATH` are gone. An old
+  command line stops: without the directory flags clap names the missing ones, and an old
+  `--state` flag or `*_STATE` variable beside them fails with the migration hint. Move each
+  state file into
   its service's state directory (`deposit-relayer-state.json`, `eth-lc-relayer-state.json`,
   `arbitrum-anchors-state.json`, `relayer-state.json` next to `prover_state.json`); the
   daemons name the files; a daemon that finds other JSON files in its state directory but not

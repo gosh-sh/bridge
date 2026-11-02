@@ -447,8 +447,21 @@ enum Cmd {
     },
 }
 
+/// Rust's default for an error out of `main` is `Error: {e:?}` on stderr,
+/// unredacted: a transport error quotes the RPC URL, key included, and
+/// under compose that line lands in the container log on every restart.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    match real_main().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", redact_urls(&format!("{e:?}")));
+            std::process::ExitCode::FAILURE
+        },
+    }
+}
+
+async fn real_main() -> anyhow::Result<()> {
     let args = Args::parse();
     // Before bridge-audit#132 the state was a file path; the lock and the
     // temporary file were derived from it. Now they live in a directory
@@ -1597,7 +1610,7 @@ where
     }
 }
 
-use eth_light_client_relayer::redact::Redacting;
+use eth_light_client_relayer::redact::{redact_urls, Redacting};
 
 /// Daily files kept in the log directory before the oldest is deleted.
 const LOG_KEEP_FILES: usize = 14;

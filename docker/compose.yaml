@@ -4,8 +4,10 @@
 # Nothing here names a host, an address or a key: every value comes from
 # `.env` next to this file (image tags, the two directory roots, the metrics
 # address, the service UID) and from the env files under $BRIDGE_OPT/env/
-# (chain addresses, endpoints, keys). `.env.example` and `env/*.env.example`
-# are the templates.
+# (chain addresses, endpoints; the withdraw relayer's EOA key). The Acki
+# Nacki keys are files under $BRIDGE_OPT/keys/, and each service is given
+# only the one it signs with. `.env.example` and `env/*.env.example` are the
+# templates.
 #
 # Layout on the host (bridge-audit#132), two roots:
 #   $BRIDGE_OPT   small and not recoverable: env/, keys/, <service>/state/
@@ -112,8 +114,8 @@ services:
       DEPOSIT_RELAYER_METRICS_ADDR: 0.0.0.0:9467
     volumes:
       - type: bind
-        source: ${BRIDGE_OPT}/keys
-        target: /run/keys
+        source: ${BRIDGE_OPT}/keys/deposit-sender.keys.json
+        target: /run/keys/deposit-sender.keys.json
         read_only: true
         bind: { create_host_path: false }
       - type: bind
@@ -160,8 +162,8 @@ services:
       AN_KEYS_PATH: /run/keys/an-owner.keys.json
     volumes:
       - type: bind
-        source: ${BRIDGE_OPT}/keys
-        target: /run/keys
+        source: ${BRIDGE_OPT}/keys/an-owner.keys.json
+        target: /run/keys/an-owner.keys.json
         read_only: true
         bind: { create_host_path: false }
       - type: bind
@@ -200,8 +202,8 @@ services:
       AN_KEYS_PATH: /run/keys/deposit-sender.keys.json
     volumes:
       - type: bind
-        source: ${BRIDGE_OPT}/keys
-        target: /run/keys
+        source: ${BRIDGE_OPT}/keys/deposit-sender.keys.json
+        target: /run/keys/deposit-sender.keys.json
         read_only: true
         bind: { create_host_path: false }
       - type: bind

@@ -65,7 +65,7 @@ struct Args {
     /// Directory for `relayer-state.json`, the cursor of the daemon modes
     /// (bridge-audit#132). `daemon-live` keeps it under `--prover-state-dir`
     /// and refuses a different directory here; `sentry-watch` is stateless.
-    #[arg(long, env = "RELAYER_STATE_DIR")]
+    #[arg(long, env = "RELAYER_STATE_DIR", global = true)]
     state_dir: Option<PathBuf>,
 
     /// Removed: the state is a directory now. Kept hidden so an old command

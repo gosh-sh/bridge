@@ -72,6 +72,8 @@ assigns it when the release is tagged.
 - `deposit-relayer` reads `RPC_URL`, `BRIDGE_ADDRESS` and `EXPECT_CHAIN_ID` from the
   environment, `eth-lc-relayer arbitrum-anchors` reads `BRIDGE_ADDRESS`, `PARENT_LOG_SPAN` and
   `ARBITRUM_LOG_SPAN`: a service is configured from an env file alone.
+- `deposit-relayer` and `eth-lc-relayer` cut every URL in their logs and prover transcripts to
+  `scheme://host`: RPC URLs carry API keys, and transport errors quote them.
 - `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
 

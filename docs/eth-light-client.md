@@ -420,7 +420,7 @@ production unit in `scripts/ursus/` uses the same pieces under a different prefi
 | `config/*.keys.json` | owner key of the light client (and, in production, of `USDCBridge`); giver key on test networks | 0600, never committed, never pasted anywhere |
 | `state/eth-lc-relayer-state.json` | last finalized slot, committee period, `owner_flip_done`, `genesis_validators_root` pin (`src/state.rs:16`); its lock and the temporary file of its atomic write beside it. `state/` is `--state-dir` (bridge-audit#132) | operational; losing it is safe (the contract is the truth, the file is re-derived) |
 | `work/` (`--work-dir`) | one directory per prove while it runs, gone with the bundle; never the system temp directory | recomputable |
-| `logs/` (`--log-dir`) | the daemon's own log, a file per day beside stdout, and the provers' transcripts `step-<slot>-{stdout,stderr}.log`, `rotate-<period>-*.log` | operational |
+| `logs/` (`--log-dir`) | the daemon's own log, a file per day beside stdout, and the provers' transcripts `step-<slot>-<time>-{stdout,stderr}.log`, `rotate-<period>-<time>-*.log` | operational |
 
 ### 4.4 Configuration
 

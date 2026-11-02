@@ -38,6 +38,27 @@ fn deposit(id: u64) -> DepositEvent {
 /// line on each stream so the transcript is not empty. Written through
 /// `cp` so no file descriptor from this process holds it open when it
 /// execs (see `prover.rs` tests).
+fn install_tool_with_default_config(bin: &Path, flag: &str, canned: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!(
+        "#!/bin/sh\nout=\"\"\ncfg=deposit_eth_circuit_params.json\nwhile [ $# -gt 0 ]; do\n  if [ \
+         \"$1\" = \"{flag}\" ]; then out=$2; shift; fi\n  if [ \"$1\" = \"--config-out\" ]; then \
+         cfg=$2; shift; fi\n  shift\ndone\n[ -n \"$out\" ] || {{ echo \"no {flag}\" >&2; exit 2; \
+         }}\necho \"fake $(basename \"$0\") -> $out\"\necho \"fake stderr\" >&2\ncp \"{canned}\" \
+         \"$out\"\necho '{{}}' > \"$cfg\"\n",
+        canned = canned.display(),
+    );
+    let source = bin.with_extension("src");
+    std::fs::write(&source, script).unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(std::process::Command::new("cp")
+        .arg(&source)
+        .arg(bin)
+        .status()
+        .unwrap()
+        .success());
+}
+
 fn install_tool(bin: &Path, flag: &str, canned: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let script = format!(
@@ -95,8 +116,8 @@ async fn a_cycle_writes_only_into_the_three_directories() {
     std::fs::write(canned_dir.join("proof.bin"), &canned.proof).unwrap();
 
     // The fake `export_blake2b_proof` copies the canned proof to `--proof-out`
-    // and the canned public inputs to `--public-inputs-out`, the two files the
-    // real tool writes.
+    // and the canned public inputs to `--pubin-out`, the two files the real
+    // tool writes.
     let bins_dir = root.join("bins");
     std::fs::create_dir(&bins_dir).unwrap();
     install_tool(
@@ -104,7 +125,10 @@ async fn a_cycle_writes_only_into_the_three_directories() {
         "--output",
         &canned_dir.join("input.json"),
     );
-    install_tool(
+    // Like the real tool, writes its circuit config to `--config-out`, or to
+    // `deposit_eth_circuit_params.json` in the working directory (the prover
+    // directory) without it: that default is what the daemon must avoid.
+    install_tool_with_default_config(
         &bins_dir.join("export_vk_blob"),
         "--output",
         &canned_dir.join("vk_blob.bin"),

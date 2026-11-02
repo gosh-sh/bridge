@@ -125,13 +125,13 @@ impl AnchorsDirs {
 enum Cmd {
     /// Fetch and print the latest light-client finality update.
     BeaconWatch {
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: String,
     },
     /// Prove one step from the live beacon (or `--finality-json`) into
     /// `--out-dir`.
     ProveOne {
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: Option<String>,
         #[arg(long)]
         finality_json: Option<PathBuf>,
@@ -240,7 +240,7 @@ enum Cmd {
     },
     /// Walk the execution parent-hash chain of a checkpoint epoch.
     AncestryOne {
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: String,
         #[arg(long)]
         checkpoint_slot: u64,
@@ -251,7 +251,7 @@ enum Cmd {
     /// `submitAncestry`. `--checkpoint-hash` is the newer anchor,
     /// `--older-anchor-hash` the older one; both must already be proven.
     SubmitAncestry {
-        #[arg(long, env = "ETH_RPC_URL")]
+        #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
         eth_rpc_url: String,
         #[arg(long)]
         checkpoint_hash: String,
@@ -293,7 +293,7 @@ enum Cmd {
         /// hidden so an old unit file fails with the migration hint.
         #[arg(long, hide = true)]
         state: Option<PathBuf>,
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: String,
         /// Prebuilt `export_step_vk_blob` example; required unless
         /// `--mock-prove`. Checked to exist and be executable at startup.
@@ -336,7 +336,7 @@ enum Cmd {
         /// the span between the previous checkpoint and the new one and runs
         /// `link_headers` locally. Does **not** call `submitAncestry` unless
         /// `--submit-ancestry` is also set.
-        #[arg(long, env = "ETH_RPC_URL")]
+        #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
         eth_rpc_url: Option<String>,
         /// Send `submitAncestry` after each checkpoint. Default **off**. The
         /// span needs a proven anchor at both ends, so nothing is sent until a
@@ -1597,9 +1597,8 @@ where
     }
 }
 
-/// Log to stdout and, when `log` is given, to a file per day in that
-/// directory (`<prefix>.<date>`; bridge-audit#132). The guard flushes the
-/// file writer when dropped, so `main` holds it until exit.
+use eth_light_client_relayer::redact::Redacting;
+
 /// Daily files kept in the log directory before the oldest is deleted.
 const LOG_KEEP_FILES: usize = 14;
 
@@ -1610,7 +1609,8 @@ fn init_tracing(log: Option<(&std::path::Path, &str)>) -> std::io::Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let stdout = fmt::layer();
+    // Both sinks redact URLs: transport errors quote the RPC URL, key included.
+    let stdout = fmt::layer().with_writer(Redacting(std::io::stdout));
     match log {
         Some((dir, prefix)) => {
             let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
@@ -1619,7 +1619,9 @@ fn init_tracing(log: Option<(&std::path::Path, &str)>) -> std::io::Result<()> {
                 .max_log_files(LOG_KEEP_FILES)
                 .build(dir)
                 .map_err(std::io::Error::other)?;
-            let file = fmt::layer().with_ansi(false).with_writer(file_appender);
+            let file = fmt::layer()
+                .with_ansi(false)
+                .with_writer(Redacting(file_appender));
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)

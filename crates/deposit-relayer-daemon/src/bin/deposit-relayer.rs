@@ -1037,9 +1037,8 @@ fn log_err(stage: &'static str) -> impl Fn(anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Log to stdout and, when `log_dir` is given, to a file per day in it
-/// (`deposit-relayer.log.<date>`; bridge-audit#132). The guard flushes the
-/// file writer when dropped, so `main` holds it until exit.
+use deposit_relayer_daemon::redact::Redacting;
+
 /// Daily files kept in the log directory before the oldest is deleted.
 const LOG_KEEP_FILES: usize = 14;
 
@@ -1050,7 +1049,8 @@ fn init_tracing(log_dir: Option<&Path>) -> std::io::Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let stdout = fmt::layer();
+    // Both sinks redact URLs: transport errors quote the RPC URL, key included.
+    let stdout = fmt::layer().with_writer(Redacting(std::io::stdout));
     match log_dir {
         Some(dir) => {
             let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
@@ -1059,7 +1059,9 @@ fn init_tracing(log_dir: Option<&Path>) -> std::io::Result<()> {
                 .max_log_files(LOG_KEEP_FILES)
                 .build(dir)
                 .map_err(std::io::Error::other)?;
-            let file = fmt::layer().with_ansi(false).with_writer(file_appender);
+            let file = fmt::layer()
+                .with_ansi(false)
+                .with_writer(Redacting(file_appender));
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)

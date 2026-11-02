@@ -378,7 +378,7 @@ async fn run(
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let path = dir.join(format!("{op_id}-{what}-{stamp}.log"));
-        let transcript = redact_urls(&format!(
+        let transcript = crate::deposit::ui::redact(&format!(
             "$ {what}\n--- stderr ---\n{}\n--- exit: {} ---\n",
             String::from_utf8_lossy(&out.stderr),
             out.status
@@ -548,28 +548,6 @@ pub async fn prove(
     verify(&pi, want)
         .map_err(|m| failed(op_id, format!("the proof does not match the deposit: {m}")))?;
     Ok(Ok(files))
-}
-
-/// Every URL in `text` cut down to `scheme://host`: RPC URLs carry API keys,
-/// and a transcript is a file that gets copied around.
-fn redact_urls(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find("://") {
-        let after = &rest[i + 3..];
-        let url_end = after
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '>' | ','))
-            .unwrap_or(after.len());
-        let url = &after[..url_end];
-        let host_end = url.find(['/', '?', '#']).unwrap_or(url.len());
-        let host = url[..host_end].rsplit('@').next().unwrap_or("");
-        out.push_str(&rest[..i]);
-        out.push_str("://");
-        out.push_str(host);
-        rest = &after[url_end..];
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ pub mod dirs;
 pub mod error;
 pub mod header_rlp;
 pub mod prover;
+pub mod redact;
 pub mod relayer;
 pub mod source;
 pub mod state;

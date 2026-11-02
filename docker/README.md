@@ -94,6 +94,7 @@ sourced by its entrypoint; the other services get theirs as container environmen
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
 | `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `SUBMIT_ANCESTRY`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
 | `$BRIDGE_OPT/env/arbitrum-anchors.env` | `env/arbitrum-anchors.env.example` | `PARENT_RPC_URL`, `ARBITRUM_RPC_URL`, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE` |
+| `$BRIDGE_OPT/env/cli.env` (optional) | none | endpoints and addresses for `compose run cli`; never a private key, which goes in as `run -e …` for the one run or as a file under `keys/` |
 
 `METRICS_LISTEN_ADDR` is required and is the host's address on the monitoring network: a
 `ports:` entry without an address publishes the port on every interface, past the host

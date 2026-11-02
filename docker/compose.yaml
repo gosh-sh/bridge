@@ -327,8 +327,11 @@ services:
         bind: { create_host_path: false }
 
   # The operator's CLI with the provers and the aggregator it starts.
-  # `docker compose run --rm cli withdraw ...`; its state and work directories
-  # are /data/state and /data/work (flags), its params /data/params.
+  # `docker compose run --rm cli withdraw ...`; its state directories are
+  # /data/state/{deposit,withdraw}, its work directory /data/work, its params
+  # /data/params/relayer (environment below). Private keys never go into
+  # env/cli.env (it becomes the container's environment): pass them as
+  # `run -e …` for the one run, or as files under /run/keys.
   cli:
     <<: *service
     profiles: [ops]

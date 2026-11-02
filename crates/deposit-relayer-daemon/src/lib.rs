@@ -60,6 +60,7 @@
 pub mod an_config;
 pub mod daemon;
 pub mod dirs;
+pub mod redact;
 pub mod error;
 #[cfg(test)]
 mod fake_rpc;

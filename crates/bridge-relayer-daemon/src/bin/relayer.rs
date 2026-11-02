@@ -2736,9 +2736,6 @@ fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Log to stdout and, when `log_dir` is given, to a file per day in it
-/// (`relayer.log.<date>`; bridge-audit#132). The guard flushes the file
-/// writer when dropped, so `main` holds it until exit.
 /// Daily files kept in the log directory before the oldest is deleted.
 const LOG_KEEP_FILES: usize = 14;
 

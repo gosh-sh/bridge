@@ -298,7 +298,7 @@ impl SubprocessProofGenerator {
     /// killed on timeout and left no output.
     fn write_timeout_note(&self, tag: &str, example: &str) {
         let path = self.config.log_dir.join(format!(
-            "{tag}-{example}-{}.log",
+            "{tag}-{example}-{}-timeout.log",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -379,6 +379,7 @@ impl SubprocessProofGenerator {
         };
         let mut cmd = Command::new(bin);
         cmd.current_dir(&self.config.deposit_prover_dir)
+            .env("ETH_RPC_URL", &self.config.rpc_url)
             .args(passthrough)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -413,7 +414,7 @@ impl SubprocessProofGenerator {
         ));
         // Both streams and the command line, with every URL cut to its host:
         // the tools print the RPC URL they were given.
-        let transcript = redact_urls(&format!(
+        let transcript = crate::redact::redact_urls(&format!(
             "$ {} {}\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- exit: {} ---\n",
             bin.display(),
             passthrough.join(" "),
@@ -430,8 +431,9 @@ impl SubprocessProofGenerator {
             },
         }
 
+        // The tools' stderr quotes the RPC URL on a transport failure.
+        let stderr = crate::redact::redact_urls(&String::from_utf8_lossy(&output.stderr));
         if output.status.code() == Some(UNPROVABLE_EXIT_CODE) {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let reason = stderr
                 .lines()
                 .rev()
@@ -441,10 +443,9 @@ impl SubprocessProofGenerator {
         }
         if !output.status.success() {
             return Err(RelayerError::ProofGeneration(format!(
-                "deposit-prover example {:?} exited with {}: {}",
+                "deposit-prover example {:?} exited with {}: {stderr}",
                 args.first(),
                 output.status,
-                String::from_utf8_lossy(&output.stderr)
             )));
         }
         Ok(())
@@ -486,11 +487,11 @@ impl ProofGenerator for SubprocessProofGenerator {
         let chain_id = event.source_chain_id.to_string();
 
         // 1. Fetch witness.
+        // The RPC URL reaches the tool as ETH_RPC_URL (set on every tool
+        // run), never on a command line `ps` could show.
         self.run_example(&tag, &[
             "fetch_deposit_data".into(),
             "--".into(),
-            "--rpc-url".into(),
-            self.config.rpc_url.clone(),
             "--tx-hash".into(),
             tx_hash,
             "--contract".into(),
@@ -520,6 +521,15 @@ impl ProofGenerator for SubprocessProofGenerator {
             max_data.clone(),
             "--max-log-num".into(),
             max_log.clone(),
+            // Without it the tool writes its default `deposit_eth_circuit_params.json`
+            // into its working directory, the prover directory, which is
+            // read-only in the image.
+            "--config-out".into(),
+            workdir
+                .path()
+                .join("deposit_eth_circuit_params.json")
+                .display()
+                .to_string(),
         ])
         .await?;
 
@@ -558,40 +568,8 @@ impl ProofGenerator for SubprocessProofGenerator {
     }
 }
 
-/// Every URL in `text` cut down to `scheme://host`: RPC URLs carry API keys,
-/// and a transcript is a file that gets copied around.
-fn redact_urls(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find("://") {
-        let after = &rest[i + 3..];
-        let url_end = after
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '>' | ','))
-            .unwrap_or(after.len());
-        let url = &after[..url_end];
-        let host_end = url.find(['/', '?', '#']).unwrap_or(url.len());
-        let host = url[..host_end].rsplit('@').next().unwrap_or("");
-        out.push_str(&rest[..i]);
-        out.push_str("://");
-        out.push_str(host);
-        rest = &after[url_end..];
-    }
-    out.push_str(rest);
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn urls_in_a_transcript_are_cut_to_their_host() {
-        let t = "$ fetch --rpc-url https://eth.example/v2/SECRETKEY?x=1 --tx 0xab\n  RPC URL: http://u:p@h.local:8545/path\nnot a url: a://\n";
-        assert_eq!(
-            redact_urls(t),
-            "$ fetch --rpc-url https://eth.example --tx 0xab\n  RPC URL: http://h.local:8545\nnot \
-             a url: a://\n"
-        );
-    }
-
     use alloy::primitives::{Address, B256};
 
     use super::*;

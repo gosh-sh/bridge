@@ -329,10 +329,9 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                         // Keep the prover on the outgoing set until the
                         // next bundle target is above N. Ack the just-
                         // applied seq, not an unpinned `last_bk` read.
-                        if Self::prover_rotation_may_ack(&new_state, self.config.bundle_stride) {
-                            self.bk_update_source
-                                .ack_last_bk_update(upd.block_seq_no)
-                                .await?;
+                        // A cursor still behind N is not a failed tick: the
+                        // verifyBlock lane catches those bundles up.
+                        if self.try_ack_rotation(&new_state, upd.block_seq_no).await? {
                             self.after_ack_consistency(upd.block_seq_no, &new_state)
                                 .await?;
                         }
@@ -577,12 +576,37 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         &self,
         on_chain: &BridgeOnChainState,
     ) -> Result<(), RelayerError> {
-        if !Self::prover_rotation_may_ack(on_chain, self.config.bundle_stride) {
-            return Ok(());
-        }
-        self.bk_update_source
-            .ack_last_bk_update(on_chain.last_bk_set_update_seq_no)
+        self.try_ack_rotation(on_chain, on_chain.last_bk_set_update_seq_no)
             .await
+            .map(|_| ())
+    }
+
+    /// Ack the prover's rotation when the chain says the next bundle is past
+    /// N. A prover whose bundle cursor is still behind N returns
+    /// [`RelayerError::is_rotation_ack_waiting`]; that is not a failed tick.
+    /// The verifyBlock lane then acks the bundles the contract already has,
+    /// and a later tick rotates. Returns whether the ack landed.
+    async fn try_ack_rotation(
+        &self,
+        on_chain: &BridgeOnChainState,
+        seq_no: u64,
+    ) -> Result<bool, RelayerError> {
+        if !Self::prover_rotation_may_ack(on_chain, self.config.bundle_stride) {
+            return Ok(false);
+        }
+        match self.bk_update_source.ack_last_bk_update(seq_no).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_rotation_ack_waiting() => {
+                info!(
+                    rotation = seq_no,
+                    chain_last_seen = on_chain.last_seen_block_seq_no,
+                    "rotation is on the contract; the local bundle cursor is behind it, so the \
+                     ack waits while those bundles are caught up"
+                );
+                Ok(false)
+            },
+            Err(e) => Err(e),
+        }
     }
 
     async fn after_ack_consistency(
@@ -1162,6 +1186,91 @@ mod tests {
             }
         ));
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Prover cursor still short of a rotation the contract already accepted.
+    struct CursorBehindRotation {
+        fetched: std::sync::atomic::AtomicBool,
+        defer: std::sync::atomic::AtomicBool,
+        acks: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for CursorBehindRotation {
+        async fn fetch(&self, _target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            self.fetched
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.defer.store(false, std::sync::atomic::Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BkUpdateSource for CursorBehindRotation {
+        async fn fetch_bk_update(
+            &self,
+            _target: u64,
+        ) -> Result<Option<BkSetUpdateData>, RelayerError> {
+            Ok(None)
+        }
+
+        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+            self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.defer.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(RelayerError::AckiNacki(format!(
+                    "ack_bk_update deferred: cursor 1867776 + stride ≤ rotation {seq_no}; retry \
+                     after the next bundle ack"
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_catches_up_when_rotation_ack_is_early() {
+        // The contract has verified seq_no 1884160 and rotated at 1890758.
+        // The prover cursor is still one stride behind, so ack_bk_update
+        // refuses. That refusal must not fail the tick before the
+        // verifyBlock lane runs.
+        let dir = tempdir().unwrap();
+        let stride = 16_384u64;
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
+            U256::from(BK),
+            U256::ZERO,
+            stride,
+            Arc::new(|_| true),
+        ));
+        bridge.land_rotation_for_test(1_884_160, 1_890_758, U256::from(0xBEEFu64));
+        let source = Arc::new(CursorBehindRotation {
+            fetched: std::sync::atomic::AtomicBool::new(false),
+            defer: std::sync::atomic::AtomicBool::new(true),
+            acks: std::sync::atomic::AtomicU64::new(0),
+        });
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+            bundle_stride: stride,
+        };
+        let mut r = Relayer::new(cfg, source.clone(), source.clone(), bridge).unwrap();
+        let out = r
+            .tick()
+            .await
+            .expect("a deferred rotation ack must not fail the tick");
+        assert!(
+            matches!(out, TickOutcome::NotYetAvailable {
+                target_seq_no: 1_884_161
+            }),
+            "got {out:?}"
+        );
+        assert!(source.fetched.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(source.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable { .. }
+        ));
+        assert_eq!(source.acks.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

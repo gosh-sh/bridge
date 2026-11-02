@@ -100,7 +100,7 @@ Nothing is accepted by hand. The one trusted input is the Sepolia light client's
 (`https://lodestar-sepolia.chainsafe.io`, `BEACON_URL` in `prover-host/jobs/common.sh`), and
 `lc-bootstrap` sets the committee that signed it, then switches the owner off. From there the
 light client accepts one finalized checkpoint per epoch and, with `--submit-ancestry`, the
-blocks between two consecutive ones; `arbitrum-anchors` proves the deposit's Arbitrum block
+blocks between two consecutive ones; `eth-lc-relayer arbitrum-anchors` proves the deposit's Arbitrum block
 from the assertion in one of those Sepolia blocks. The light client follows a new sync
 committee (every ~27 h) only by a rotate proof, which does not run live yet, so a run must
 not cross one: `test_02` refuses to start a run that would.

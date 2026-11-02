@@ -300,9 +300,10 @@ bridge operator.
 
 `daemon` finalizes a deposit only once its block is in the bridge's anchor set
 (`isAcceptedBlockHash`). For a bridge on Arbitrum Sepolia or Arbitrum One,
-`deposit-relayer arbitrum-anchors` puts it there: it calls
-`ArbitrumBlockVerifier.proveBlock` on Acki Nacki (`src/arbitrum.rs`). Run one per
-Arbitrum chain, next to that chain's `daemon`.
+`eth-lc-relayer arbitrum-anchors` puts it there: it calls
+`ArbitrumBlockVerifier.proveBlock` on Acki Nacki
+(`crates/eth-light-client-relayer/src/arbitrum.rs`). Build `eth-lc-relayer` with
+`--features live-submit`. Run one per Arbitrum chain, next to that chain's `daemon`.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -328,7 +329,7 @@ owner's `setAcceptedBlockHash` can anchor it then, and only while owner anchors
 are on. A fresh state file starts from the current
 parent-chain block.
 
-`deposit-relayer arbitrum-vector --out <file>` writes one `proveBlock` vector from
+`eth-lc-relayer arbitrum-vector --out <file>` writes one `proveBlock` vector from
 the live chains, built the way `arbitrum-anchors` builds its calls, and sends
 nothing. The bench (`scripts/l2-block-proof-bench`) and the local-network test take
 that file.

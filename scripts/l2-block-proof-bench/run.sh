@@ -15,7 +15,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 AN=$(cd "$HERE/../../contracts/an" && pwd)
 VERIFIER=${VERIFIER:-$AN/0.81.0_compiled/exchange/ArbitrumBlockVerifier}
 # Vectors `proveBlock` runs end to end on: the synthetic one and one the relayer
-# wrote from live Arbitrum Sepolia (`deposit-relayer arbitrum-vector`).
+# wrote from live Arbitrum Sepolia (`eth-lc-relayer arbitrum-vector`).
 # VECTORS="a.json b.json" (or SYNTH=a.json) runs others.
 if [ -n "${SYNTH:-}" ]; then VECTORS=("$SYNTH")
 elif [ -n "${VECTORS:-}" ]; then read -r -a VECTORS <<<"$VECTORS"

@@ -3,7 +3,7 @@ Arbitrum block proof on a live Acki Nacki network (local devnet or shellnet).
 
 No Ethereum or Arbitrum node: the vectors are in
 `scripts/l2-block-proof-bench/fixtures/`, a synthetic one and one
-`deposit-relayer arbitrum-vector` wrote from live Arbitrum Sepolia. Each holds
+`eth-lc-relayer arbitrum-vector` wrote from live Arbitrum Sepolia. Each holds
 a parent-chain block whose receipt trie has the rollup's `AssertionCreated`,
 and the Arbitrum block M that assertion names with block N's hash in M's
 state. What this runs on the network is everything after the data: the bridge

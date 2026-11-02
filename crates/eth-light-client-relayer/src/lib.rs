@@ -15,9 +15,14 @@
 //! `ETH_RPC_URL` each accepted tick then `rePushAnchor`s the checkpoint and
 //! runs `link_headers` locally on the span back to the previous checkpoint.
 //! On-chain `submitAncestry` is `--submit-ancestry` (default off).
+//!
+//! [`arbitrum`] gets the Arbitrum blocks that hold deposits accepted through
+//! `ArbitrumBlockVerifier.proveBlock`, on top of the parent-chain blocks the
+//! light client accepts (`arbitrum-anchors`).
 
 pub mod an_config;
 pub mod ancestry;
+pub mod arbitrum;
 pub mod contract_model;
 pub mod daemon;
 pub mod error;

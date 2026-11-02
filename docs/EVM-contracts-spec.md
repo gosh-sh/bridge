@@ -322,6 +322,10 @@ Notes that matter downstream:
   `crates/deposit-relayer-daemon/src/types.rs:45,155-156`). `token` is **appended** at slot 11 so
   that slots 0..10 keep their positions: the AN side reads public inputs positionally. The DApp ID
   remains a config-supplied tag.
+  Those 13 values are the only deposit data the proof can change. The private witness is
+  longer: the receipt and the log sit in fixed-length buffers with an unused tail, and a
+  different tail is another witness of the same public inputs, not another deposit.
+  [`deposit-prover/README.md`](../deposit-prover/README.md) names the buffers.
 * Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
   Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
   (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The

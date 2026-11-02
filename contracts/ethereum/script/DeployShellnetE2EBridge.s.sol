@@ -167,7 +167,8 @@ contract DeployShellnetE2EBridge is Script {
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
                 altTokenId: wd.altTokenId,
-                predecessor: IPredecessorBridge(PredecessorEnv.read())
+                predecessor: IPredecessorBridge(PredecessorEnv.read()),
+                legacyPredecessors: PredecessorEnv.readLegacy()
             })
         );
     }

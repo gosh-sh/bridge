@@ -219,8 +219,10 @@ minute, and miss many batches; a free Alchemy key keeps it. When an assertion en
 ## Transfer and network limits
 
 Deposits and withdrawals are limited to **50 USDC** (50,000,000 base units).
-Each L1 bridge limits `treasuryBalance` (deposited principal minus completed
-payouts) to **10,000 USDC**, including principal supplied to Aave. Yield and
+Each L1 bridge refuses a deposit that would take `treasuryBalance` (deposited
+principal minus completed payouts) past **10,000 USDC**, including principal
+supplied to Aave. Owner `fundTreasury` and `migrateTreasury` top-ups are not
+checked against that cap. Yield and
 direct token donations do not increase that counter or its capacity.
 `MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the first deposit width guard;
 the lower product ceiling is `MAX_TRANSFER_AMOUNT`.

@@ -80,7 +80,8 @@ contract DeployGenesisCursorBridge is Script {
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
             altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)),
-            predecessor: IPredecessorBridge(PredecessorEnv.read())
+            predecessor: IPredecessorBridge(PredecessorEnv.read()),
+            legacyPredecessors: PredecessorEnv.readLegacy()
         });
 
         uint64 genesisLastSeen = uint64(vm.envUint("GENESIS_LAST_SEEN_BLOCK_SEQ_NO"));

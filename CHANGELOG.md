@@ -28,18 +28,26 @@ assigns it when the release is tagged.
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
   flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
-- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains a last field, `predecessor`** — the
-  bridge this one replaces on the same chain, or zero for the first. Nullifiers the predecessor
-  line paid count as used (`NullifierAlreadyUsed`); a predecessor that is not a bridge for the same
-  `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR` reverts `InvalidPredecessor`. Update tooling that encodes
-  the constructor; deployed bridges are unchanged.
-- **`AckiNackiBridge.isNullifierUsed(uint256)` also answers for the predecessor line**: it returns
-  true for a nullifier any earlier bridge paid, and reverts when a predecessor reverts. The new view
-  `predecessor()` returns the bridge this one replaces, or zero.
+- `EthBeaconLightClient` and `ArbitrumBlockVerifier` are built with the `sold` 0.81.1 release and
+  move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
+  are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
+  folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
+- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains two last fields** —
+  `predecessor`, the bridge this one replaces on the same chain or zero for the first, and
+  `legacyPredecessors`, every other earlier bridge for the same identity that `predecessor` does
+  not answer for (bridges deployed before this release answer only for themselves). Nullifiers
+  any of them paid count as used (`NullifierAlreadyUsed`); an entry that is not a bridge for the
+  same `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR` reverts `InvalidPredecessor`. Update tooling that
+  encodes the constructor; deployed bridges are unchanged.
+- **`AckiNackiBridge.isNullifierUsed(uint256)` also answers for earlier bridges**: it returns true
+  for a nullifier `predecessor`, its own line or a `legacyPredecessors` entry paid, and reverts when
+  one of them reverts. New views: `predecessor()` and `legacyPredecessors()`.
 - Every bridge deploy script (`DeployRealBridge`, `DeployShellnetE2EBridge`,
   `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge`) and `deploy_bridge_bundle.sh` require
   `PREDECESSOR_BRIDGE` — zero for the first bridge on a chain — and refuse a predecessor that is not
-  paused. Keep a replaced bridge paused for good; the cutover is in `docs/aave-yield.md`,
+  paused. When `PREDECESSOR_BRIDGE` is a bridge from before this release they also require
+  `LEGACY_PREDECESSOR_BRIDGES`: comma-separated, paused, every earlier bridge for the same
+  `WITHDRAW_ACC_FR`, empty if there is none. Keep a replaced bridge paused for good; the cutover is in `docs/aave-yield.md`,
   "Replacing a bridge on the same chain".
 
 ### New / Improvements
@@ -49,7 +57,7 @@ assigns it when the release is tagged.
   `TreasuryMigrated`. The bridge cannot tell a real successor from any contract giving that answer:
   the owner key decides where the book goes. Pull AAVE principal back first (`TreasuryNotLiquid`).
 - `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
-  `treasuryBalance` with no `Deposit` event; emits `TreasuryFunded`.
+  `treasuryBalance` with no `Deposit` event and no `MAX_BRIDGE_TVL` check; emits `TreasuryFunded`.
 - `DeployRealBridge` accepts Arbitrum Sepolia (421614) and wires its AAVE V3 USDC market only with
   `USE_AAVE=true`: pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
   `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, aToken `0x460b97BD498E1157530AEb3086301d5225b91216`.
@@ -57,10 +65,6 @@ assigns it when the release is tagged.
   `USE_AAVE=true` cannot turn AAVE on later. Replacing the live 421614 bridge
   `0x3FB082a905a895151224F6d93bD074E816338638` follows `docs/aave-yield.md`; it predates
   `migrateTreasury`, so the new bridge's owner covers its `treasuryBalance()` with `fundTreasury`.
-- `EthBeaconLightClient` and `ArbitrumBlockVerifier` are built with the `sold` 0.81.1 release and
-  move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
-  are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
-  folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
 
 ### Fixes
 

@@ -1,7 +1,7 @@
 # l2-block-proof-bench
 
 Runs `ArbitrumBlockVerifier` on a real TVM instead of reasoning about it. `run.sh` takes the tracked
-`contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc` and gives it the code salt that
+`contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc` and gives it the code salt that
 `eccUSDCBridge.deployL2Verifier` gives it. It then sends the constructor and `initialize` as internal
 messages from the bridge address, calls `proveBlock` and decodes the message the verifier sends to
 the bridge. It does this once per vector: a synthetic one, and one the relayer wrote from live
@@ -10,9 +10,9 @@ whose state trie is deeper.
 
 Everything runs offline in `tvm-debugger run`: no network, no keys. You need:
 
-- `sold` 0.81.0 built from
-  [gosh-sh/TVM-Solidity-Compiler `132c6ec8`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/132c6ec8fb468c556ea6aa6a9a73760e38a1ad51).
-  A stock 0.81.0 does not assemble `KECCAK256`. The same compiler builds the tracked artefact,
+- `sold` 0.81.1, release
+  [`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1).
+  Earlier releases do not assemble `KECCAK256`. The same compiler builds the tracked artefact,
   see `contracts/an/exchange/Makefile`.
 - `tvm_debugger` from [tvmlabs/tvm-sdk](https://github.com/tvmlabs/tvm-sdk) `fd76a8a9` or later
   (`cargo build --release -p tvm_debugger`). 3.0.4 fails the instruction with exit 6.

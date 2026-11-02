@@ -158,6 +158,8 @@ def test_23_trust_set(an, arb, ctx):
     """Acki Nacki trusts the new bridge for 421614, and the bridge holds the genesis anchor."""
     got = an("trust", ctx["bridge"])
     assert got.get("TRUSTED") == "true", f"isTrustedL1Bridge({ARB_CHAIN}, bridge) is false after setTrustedL1Bridge"
+    assert int(got.get("EVM_BRIDGE", "0"), 16) == int(ctx["bridge"], 16), \
+        f"getEvmBridge({ARB_CHAIN}) is {got.get('EVM_BRIDGE')} after setEvmBridge, want {ctx['bridge']}"
     g = ctx["genesis"]
     assert arb.call(ctx["bridge"], "storedBkSetCommitment()") == int(g["GENESIS_BK_SET_COMMITMENT"], 16)
     assert arb.call(ctx["bridge"], "storedPrevMaxLevelLayerHash()") == int(g["GENESIS_PREV_MAX_LEVEL_LAYER_HASH"], 16)

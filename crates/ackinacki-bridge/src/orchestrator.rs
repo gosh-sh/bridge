@@ -424,6 +424,7 @@ pub async fn run(
         &from,
         &args.from_keys,
         &to,
+        args.bridge_address,
         &amount,
         &args.gql_endpoint,
         &args.usdc_bridge_account,
@@ -905,6 +906,12 @@ pub async fn run(
             .as_deref(),
     )
     .map_err(|e| with_resume_note(e, &resume))?;
+    crate::event_identity::check_event_bridge(
+        &captured.event_boc_b64,
+        args.bridge_address,
+        &an_tx_hash,
+    )
+    .map_err(|e| with_resume_note(e, &resume))?;
     info!(
         msg_id = %captured.message_id,
         block_seq_no = captured.block_seq_no,
@@ -1153,14 +1160,14 @@ pub async fn run(
                     ),
                     source: Some(anyhow::Error::new(e)),
                 })?;
-        /// Byte offset of word 23 of the withdraw calldata, where the adapter
+        /// Byte offset of word 24 of the withdraw calldata, where the adapter
         /// vkDigest sits.
-        const DIGEST_OFF: usize = (12 + 11) * 32;
+        const DIGEST_OFF: usize = (12 + 12) * 32;
         let produced = proof_bytes
             .get(DIGEST_OFF..DIGEST_OFF + 32)
             .ok_or_else(|| CliError::EthSubmitFailed {
                 reason: format!(
-                    "produced withdraw calldata is {} bytes, shorter than word 23. The burn is \
+                    "produced withdraw calldata is {} bytes, shorter than word 24. The burn is \
                      already on the wire; regenerate the proof with this build's aggregator.",
                     proof_bytes.len()
                 ),
@@ -1169,7 +1176,7 @@ pub async fn run(
         if produced != on_chain_digest.as_slice() {
             return Err(CliError::EthSubmitFailed {
                 reason: format!(
-                    "produced calldata word 23 does not match the withdrawal adapter's vkDigest \
+                    "produced calldata word 24 does not match the withdrawal adapter's vkDigest \
                      ({on_chain_digest}). A dry-run would revert WithdrawalProofRejected and a \
                      re-run would produce the same proof. The burn is already on the wire. The \
                      local Circuit-4 keys do not match the deployed pin; redeploying the adapter \

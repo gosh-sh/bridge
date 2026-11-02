@@ -25,9 +25,8 @@ import "./ShplonkDeployLib.sol";
 ///      env var is kept only so CI runs against a fresh anvil can opt out; setting it to
 ///      `false` off anvil reverts.
 ///
-///      `PREDECESSOR_BRIDGE` is required: the bridge this deploy replaces on the
-///      same chain for the same AN-side identity, already paused, or the zero
-///      address for the first bridge there (`PredecessorEnv`).
+///      `PREDECESSOR_BRIDGE` is optional: the bridge on this chain whose
+///      treasury this one may take over (`PredecessorEnv`).
 contract DeployShellnetE2EBridge is Script {
     // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
     // The previous constant (0x94a9D9AC...) was a Pruvendo-owned mock with
@@ -167,8 +166,7 @@ contract DeployShellnetE2EBridge is Script {
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
                 altTokenId: wd.altTokenId,
-                predecessor: IPredecessorBridge(PredecessorEnv.read()),
-                legacyPredecessors: PredecessorEnv.readLegacy()
+                predecessor: IPredecessorBridge(PredecessorEnv.read())
             })
         );
     }

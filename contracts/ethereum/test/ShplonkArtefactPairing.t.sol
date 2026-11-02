@@ -47,6 +47,7 @@ contract ShplonkArtefactPairingTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.dstBridge = _word(cd, ACC + 11);
         assertTrue(
             v.verifyWithdrawal(cd, pub), "Withdrawal .bin must accept its committed calldata"
         );
@@ -78,6 +79,7 @@ contract ShplonkArtefactPairingTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.dstBridge = _word(cd, ACC + 11);
         uint256 g0 = gasleft();
         bool ok = v.verifyWithdrawal(cd, pub);
         uint256 used = g0 - gasleft();

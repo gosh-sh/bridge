@@ -39,7 +39,7 @@ impl std::fmt::Display for BridgeVersion {
 /// that changes it brings a block cutoff), so a deposit is not minted twice.
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 14, 0));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 15, 0);
 /// The first supported bridge with this build's deposit key and mandatory
 /// per-chain limit getters. Refuse older deployments before USDC leaves L1.
 pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 13, 0);

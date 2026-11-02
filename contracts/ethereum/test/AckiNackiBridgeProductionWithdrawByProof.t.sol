@@ -74,6 +74,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.dstBridge = _word(cd, ACC + 11);
     }
 
     function test_productionWithdrawal_isolated_verifies() public {
@@ -92,7 +93,7 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
         );
     }
 
-    /// Tampering a byte in the proof region (past the 24 instance words) makes the
+    /// Tampering a byte in the proof region (past the 25 instance words) makes the
     /// SHPLONK pairing fail -> the Yul verifier reverts.
     function test_productionWithdrawal_tamperedProof_reverts() public {
         require(_artefactsPresent(), "C4 verifier artefacts required");
@@ -128,5 +129,44 @@ contract AckiNackiBridgeProductionWithdrawByProofTest is Test {
             verifier.verifyWithdrawal(cd, pub),
             "amount mismatch vs re-exposed instance must be rejected"
         );
+    }
+
+    /// The proof names one EVM bridge (`dstBridge`). Claiming another one in
+    /// `pub` fails the adapter's instance check.
+    function test_productionWithdrawal_otherDstBridgeInPub_returnsFalse() public {
+        require(_artefactsPresent(), "C4 verifier artefacts required");
+        IBridgeWithdrawalVerifier verifier =
+            ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
+        bytes memory cd = vm.readFileBinary(_calldataPath());
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromCalldata(cd);
+
+        pub.dstBridge = uint256(uint160(address(0xB0B)));
+
+        assertFalse(verifier.verifyWithdrawal(cd, pub), "dstBridge mismatch must be rejected");
+    }
+
+    /// Rewriting the `dstBridge` instance in the calldata and in `pub` together
+    /// keeps the adapter's check happy, so only the circuit stands in the way:
+    /// the pairing must fail, i.e. `dstBridge` is not a free witness.
+    function test_productionWithdrawal_swappedDstBridgeInstance_rejected() public {
+        require(_artefactsPresent(), "C4 verifier artefacts required");
+        IBridgeWithdrawalVerifier verifier =
+            ShplonkDeployLib.deployWithdrawalAdapter(WITHDRAWAL_BIN);
+        bytes memory cd = vm.readFileBinary(_calldataPath());
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromCalldata(cd);
+
+        uint256 other = uint256(uint160(address(0xB0B)));
+        assertTrue(other != pub.dstBridge);
+        uint256 off = (ACC + 11) * 32;
+        assembly {
+            mstore(add(add(cd, 0x20), off), other)
+        }
+        pub.dstBridge = other;
+
+        try verifier.verifyWithdrawal(cd, pub) returns (bool ok) {
+            assertFalse(ok, "proof re-labelled with another dstBridge must not verify");
+        } catch {
+            // revert is an acceptable rejection
+        }
     }
 }

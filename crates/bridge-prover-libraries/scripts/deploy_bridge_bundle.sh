@@ -15,7 +15,7 @@
 #
 # Usage:
 #   CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=1 PRIVATE_KEY=<burner> \
-#   WITHDRAW_ACC_FR=<AN bridge account Fr> PREDECESSOR_BRIDGE=<paused bridge or 0x0…0> \
+#   WITHDRAW_ACC_FR=<AN bridge account Fr> PREDECESSOR_BRIDGE=<previous bridge or 0x0…0> \
 #     ./scripts/deploy_bridge_bundle.sh   # L1 anchor; LEVEL=2 for the L2 anchor
 #
 # Inputs (env):
@@ -28,16 +28,12 @@
 #                              (relative to crates/bridge-prover-libraries)
 #   WITHDRAW_ACC_FR            authoritative AN bridge account field element;
 #                              required and immutable after deployment
-#   PREDECESSOR_BRIDGE         the Sepolia bridge this deploy replaces, already
-#                              paused, or 0x0000000000000000000000000000000000000000
-#                              for the first one; required and immutable — a zero
-#                              in place of a live predecessor pays its withdrawals
-#                              again
-#   LEGACY_PREDECESSOR_BRIDGES comma-separated, each paused: the earlier bridges
-#                              for this WITHDRAW_ACC_FR that PREDECESSOR_BRIDGE
-#                              does not answer for. Required, possibly empty,
-#                              when PREDECESSOR_BRIDGE predates the
-#                              `predecessor` field (the forge script checks)
+#   PREDECESSOR_BRIDGE         the Sepolia bridge whose treasury this deploy may
+#                              take over (migrateTreasury / fundTreasury), or
+#                              0x0000000000000000000000000000000000000000 for none;
+#                              required and immutable. The previous bridge keeps
+#                              paying the burns made before the AN bridge's
+#                              setEvmBridge names the new one
 set -euo pipefail
 set +x
 umask 077
@@ -45,7 +41,7 @@ umask 077
 : "${LEVEL:?set LEVEL=1 or LEVEL=2}"
 : "${PRIVATE_KEY:?set PRIVATE_KEY=<sepolia burner>}"
 : "${WITHDRAW_ACC_FR:?set authoritative WITHDRAW_ACC_FR (or an explicit dummy for verifyBlock-only smoke)}"
-: "${PREDECESSOR_BRIDGE:?set PREDECESSOR_BRIDGE to the paused bridge this deploy replaces, or the zero address for the first one}"
+: "${PREDECESSOR_BRIDGE:?set PREDECESSOR_BRIDGE to the bridge whose treasury this deploy may take over, or the zero address for none}"
 [[ "${CONFIRM_NEW_BRIDGE_DEPLOY:-}" == DEPLOY_NEW_CONTRACTS ]] || {
   echo "Refusing broadcast: set CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS" >&2
   exit 2
@@ -106,7 +102,6 @@ export PRIVATE_KEY
 export WIRE_WITHDRAW_BY_PROOF=true
 export WITHDRAW_ACC_FR
 export PREDECESSOR_BRIDGE
-if [[ -v LEGACY_PREDECESSOR_BRIDGES ]]; then export LEGACY_PREDECESSOR_BRIDGES; fi
 
 echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \

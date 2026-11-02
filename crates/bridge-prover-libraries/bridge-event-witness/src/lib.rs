@@ -1,7 +1,7 @@
 //! Per-transaction private witness data Circuit 4 needs to prove a
 //! `WithdrawalInitiated` event from `TokenBridge.sol`.
 //!
-//! Output schema pinned at `schema_version = 1` in [`schema::SCHEMA_VERSION`].
+//! Output schema pinned at `schema_version = 2` in [`schema::SCHEMA_VERSION`].
 //!
 //! ### Library API
 //!

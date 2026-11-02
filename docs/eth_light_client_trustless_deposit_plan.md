@@ -2,9 +2,13 @@
 
 **Status:** proposed · **Created:** 2026-08-20 · **Owner:** Sergey (ZK) · **Direction:** ETH → Acki Nacki (deposit)
 
-> Supersedes the trusted-attester MVP (`_acceptedBlockHash` / `setAcceptedL1Block`).
-> The team has **not** accepted an attester/oracle trust assumption; this plan removes
-> it entirely by proving Ethereum finality in-circuit.
+> The plan proposed replacing the owner-written anchor set with a light client. What
+> shipped keeps the anchor set: `eccUSDCBridge` still gates `finalizeDeposit` on
+> `_acceptedBlockHash`, and `EthBeaconLightClient` is one of its three writers, next to the
+> owner (`setAcceptedBlockHash`, until `disableOwnerAnchorsOn`) and the Arbitrum block
+> verifiers — see §4 and `contracts/an/README.md`. `setAcceptedL1Block`, `_acceptedL1Block`,
+> `setL1Attester` and `_l1AttesterPubkey` in §7 and §9 are names from the plan; none of them
+> exists in `contracts/an/`.
 
 ---
 

@@ -38,8 +38,8 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   has already admitted, and pushes the block's hash into the anchor set. See
   *Arbitrum blocks* below.
 
-`finalizeDeposit` is permissionless — the proof is the authorization. It
-rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
+`finalizeDeposit` is permissionless: anyone may submit a proof. It
+rejects a deposit whose `(chainId, contractAddress)` public inputs are not a
 trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
 verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
 and then requires public inputs 9 and 10 to sit in the anchor set. Those halves are

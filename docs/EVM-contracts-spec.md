@@ -39,7 +39,9 @@ note here calling out the drift.
 > inputs was rewritten against `deposit-prover` at `5e6a2569`, axiom-eth `1d61be0` and
 > halo2-lib `026e176`. That bullet cites
 > `crates/deposit-relayer-daemon/src/types.rs:100-112`, where `DepositPublicInputs` and
-> `promise_commit` are. Other citations in this document were not re-anchored.
+> `promise_commit` are. The preceding bullet's circuit citations were re-anchored to the
+> same `circuit_v2.rs`: the 96-byte data length at `:839-840`, the account at `:1014-1016`.
+> Other citations in this document were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -309,9 +311,10 @@ Notes that matter downstream:
   More than one witness can produce the same first 11 values. The Phase-0 bytes of `depositId`,
   `sender`, `amount`, `contractAddress` and `anAccount` are not range-checked, so any bytes
   with the same base-256 fold (a carry of 256 between two adjacent bytes, for one) leave the
-  field element unchanged. The header's keccak-promise input packs three 8-byte words into
-  each field element, so a carry between adjacent cells inside one element, across a word
-  boundary included, leaves it unchanged. The header RLC value changes with that carry. Phase 1 still holds when the
+  field element unchanged. The header's keccak-promise input packs 8-byte words into field
+  elements three slots at a time, after a length slot at the start of each 17-word block
+  (`deposit-prover/README.md`, item on the block header), so a carry between adjacent cells
+  inside one element, across a word boundary included, leaves it unchanged. The header RLC value changes with that carry. Phase 1 still holds when the
   `witness_subarray` copies take the same carry, so the two RLC values stay equal.
   `receiptsRoot` and `transactionsRoot` are not public inputs, but their cells are
   constrained equal, byte by byte, to the MPT roots, and those root bytes are

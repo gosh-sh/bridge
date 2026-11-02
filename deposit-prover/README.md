@@ -49,8 +49,10 @@ trie or the block hash are the real ones.
    (`assign_and_compute_commitment`, implemented in axiom-eth
    `promise_loader/comp_loader.rs` and called from `promise_loader/single.rs` at
    `1d61be0`), not a commitment to the calls. The lookup only requires each call to
-   appear as a row. `mock_fulfill_keccak_promises` (`examples/export_blake2b_proof.rs`,
-   `src/prover.rs`, `src/provable.rs`) pads that table to `FIXED_KECCAK_CAPACITY`. A row
+   appear as a row. `mock_fulfill_keccak_promises` (`src/prover.rs`, `src/provable.rs`,
+   `examples/export_blake2b_proof.rs`, and `examples/export_vk_blob.rs` and
+   `examples/export_deposit_proof_set.rs`, which build the embedded VK and the proof
+   sets) pads that table to `FIXED_KECCAK_CAPACITY`. A row
    no call reads is not fixed by the deposit witness, so the same witness can carry a
    different input 11. `finalizeDeposit` does not read input 11, and nothing in this
    repository checks a row against a keccak evaluation.
@@ -146,11 +148,13 @@ can differ for one witness: a row no call reads is not fixed by that witness (it
 
 * **Block header.** The witness is `MAX_BLOCK_HEADER_BYTES` (792) cells, `load_witness` only,
   zero-filled past the true header. None of them, inside the length or past it, is passed to
-  `range_check`. `format_input` (halo2-lib `keccak/component/encode.rs`) packs them into 8-byte
-  words, then three words into each field element, with base-256 and base-2^64 multipliers. Any
-  cells with the same packed elements give the same promise input: for example, raising one
-  cell by 256 and lowering the next cell by 1, inside one word or across a word boundary inside
-  one element.
+  `range_check`. `format_input` (halo2-lib `keccak/component/encode.rs:200-260` at `026e176`)
+  packs them into 8-byte words with base-256 multipliers. Each 17-word keccak block becomes an
+  18-slot buffer, slot 0 holding the length in the first block and zero after it, and the buffer
+  is cut into field elements of three slots with base-2^64 multipliers: the slot and words 0–1,
+  then words 2–4, 5–7, and so on. Any cells with the same packed elements give the same promise
+  input: for example, raising one cell by 256 and lowering the next cell by 1, inside one word
+  or across a word boundary inside one element (words 2 and 3 of a block, not words 1 and 2).
   Phase 1 checks an RLC of the header against an RLC of the `witness_subarray` copies, not
   byte equality. `receiptsRoot` and `transactionsRoot` are not public inputs, but their
   `field_cells` are constrained equal, byte by byte, to the MPT chip's `root_hash_bytes`

@@ -63,7 +63,7 @@ Paths are relative to the repository root.
 
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
 a no-op, because the `DepositVoucher` address is derived from the deposit's identity
-(`contracts/an/exchange/eccUSDCBridge.sol:1048`) and a voucher is deployed once.
+(`contracts/an/exchange/eccUSDCBridge.sol:1056`) and a voucher is deployed once.
 
 ## Executables and state files
 

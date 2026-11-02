@@ -40,8 +40,9 @@ interface IShellAccumulator {
 ///            `finalizeDeposit` / `confirmDeposit` (verify proof, deploy
 ///            deterministic `DepositVoucher` for anti-replay, mint ECC).
 ///            The destination chain of a withdrawal is opaque; the SOURCE of a
-///            deposit is proof-bound (chainId + emitting contract) and gated by
-///            the owner-managed `_trustedL1Bridge` allowlist.
+///            deposit (chainId + emitting contract) is read from the proof's
+///            public inputs and gated by the owner-managed `_trustedL1Bridge`
+///            allowlist.
 ///            Counters: per-tokenId `_totalMintedBridgeByToken` /
 ///            `_totalBurnedBridgeByToken`. `initiateWithdrawal` refuses a
 ///            burn that would take burned above minted for that token
@@ -87,9 +88,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint256 depositId;     // fr[0] — anti-replay anchor (per source chain/contract/dapp)
         uint128 amount;        // fr[2]
         uint256 contractAddr;  // fr[3] — L1 bridge contract that emitted the event
-        uint256 chainId;       // fr[4] — source chain id (typed-tx field 0, proof-bound)
+        uint256 chainId;       // fr[4] — source chain id (typed-tx field 0)
         uint256 dappId;        // pinned to 0 — see _parsePublicInputs
-        uint256 anAccount;     // fr[7]<<128 | fr[8] — AN recipient (256-bit, proof-bound)
+        uint256 anAccount;     // fr[7]<<128 | fr[8] — AN recipient (256-bit)
     }
 
     uint256 _ownerPubkey;
@@ -117,7 +118,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     // Source-chain allowlist: L1 chainId -> SET of bridge contracts on that
     // chain whose deposit events this bridge accepts. A deposit passes if its
-    // proof-bound (chainId, contractAddr) hits any present entry — so an L1
+    // (chainId, contractAddr) public inputs hit any present entry — so an L1
     // bridge rotation can keep the old and the new address trusted at once for
     // a migration window, then drop the old one. An absent entry (false) means
     // that address is not accepted. Owner-managed via `setTrustedL1Bridge`;
@@ -137,8 +138,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // a code upgrade the anchors start empty and have to be re-established.
     mapping(uint256 => mapping(uint256 => bool)) _acceptedBlockHash;
 
-    // Code of the beacon light client (`EthBeaconLightClient`), the only
-    // non-owner writer of `_acceptedBlockHash`. The bridge is the sole account
+    // Code of the beacon light client (`EthBeaconLightClient`), one of the two
+    // non-owner writers of `_acceptedBlockHash` (the Arbitrum block verifiers
+    // are the other). The bridge is the sole account
     // that may deploy it, and its address follows from this code, so there is
     // no address to set and none to spoof. Empty = no light client yet; like
     // `_trustedL1Bridge` it is not carried through `onCodeUpgrade`.
@@ -990,8 +992,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         out of the verified instances — amount, recipient and source
     ///         identity — rather than from separate arguments. Whoever builds
     ///         the proof chooses those instances. A deterministic
-    ///         `DepositVoucher` (keyed on the proof-bound deposit identity) gives
-    ///         replay protection; it calls back `confirmDeposit` to mint + pay.
+    ///         `DepositVoucher` (keyed on the deposit identity those instances
+    ///         carry) gives replay protection; it calls back `confirmDeposit`
+    ///         to mint + pay.
     /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
     ///                         `proof_cell` operand of TVM opcode
     ///                         ZKHALO2VERIFYWITHVK (0xC7 0x4A).
@@ -1020,8 +1023,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
-        // pre-accept gas limit. Permissionless submission — the proof itself is
-        // the authorization; a garbage proof only wastes the bridge's own gas.
+        // pre-accept gas limit. Permissionless submission: a proof that does not
+        // verify only wastes the bridge's own gas.
         tvm.accept();
         require(
             gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof),
@@ -1043,12 +1046,13 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         tvm.commit();
         ensureBalance();
 
-        // Anti-replay anchor = proof-bound (deposit_id, source contract, source
-        // chain); the dapp component is pinned to 0 (see _parsePublicInputs).
-        // chainId is IN the key: two different L1s may legitimately emit the
-        // same (deposit_id, contract) pair. amount/recipient are NOT in the
-        // key — they are fixed by the proof, so a replay can never re-route or
-        // re-mint: same key ⇒ same voucher ⇒ no-op.
+        // Anti-replay anchor = (deposit_id, source contract, source chain) from
+        // the public inputs; the dapp component is pinned to 0 (see
+        // _parsePublicInputs). chainId is IN the key: two different L1s may
+        // legitimately emit the same (deposit_id, contract) pair. amount and
+        // recipient are NOT in the key: the first proof that verifies for a
+        // key deploys its voucher and decides both, and any later proof for
+        // the same key is a no-op.
         uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId, f.chainId));
 
         TvmCell stateInit = abi.encodeStateInit({
@@ -1065,9 +1069,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     }
 
     /// @notice Internal callback from a freshly deployed `DepositVoucher`. Mints
-    ///         USDC ECC and sends it to the proof-bound AN recipient. The caller
-    ///         must be the deterministic voucher address derived from the
-    ///         deposit identity — replay attempts hit the existing voucher
+    ///         USDC ECC and sends it to the AN recipient from the proof's
+    ///         public inputs. The caller must be the deterministic voucher
+    ///         address derived from the deposit identity — replay attempts hit the existing voucher
     ///         account whose constructor was already consumed. If this call
     ///         aborts after that constructor has run, the voucher is spent
     ///         and the owner pays the recipient with `mintAndSendBridged`.
@@ -1284,9 +1288,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // Halo2 public-inputs assembly (consumer side of opcode 0xC7 0x4A)
     // ========================================================
 
-    /// @dev Read the deposit fields out of the PROVEN public-inputs blob (the
-    ///      contract verified the proof over this exact blob, so every value
-    ///      here is proof-bound). Layout = 12 × 32-byte LE Fr; offsets per the
+    /// @dev Read the deposit fields out of the public-inputs blob.
+    ///      `finalizeDeposit` calls this before it verifies the proof, so the
+    ///      amount, cap and allowlist checks run on caller-supplied bytes and
+    ///      can only refuse; the same blob is then verified. Layout = 12 × 32-byte LE Fr; offsets per the
     ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
     ///      3=contract, 4=chain_id, 5..6=dapp_id(hi..lo),
     ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=promise commit

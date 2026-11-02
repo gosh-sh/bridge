@@ -26,8 +26,9 @@ ARG RUST_IMAGE=rust:1-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 
 # ---------------------------------------------------------------------------
-# Sources, once. rustup installs the toolchain each workspace's
-# rust-toolchain.toml names on the first cargo call in it.
+# Sources, once, with the two pinned toolchains installed up front: every
+# builder stage inherits them instead of downloading them on its first cargo
+# call (one layer, cached while the rust-toolchain.toml files do not change).
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS source
 # The cargo home is a cache mount in every builder stage: the lock file must
@@ -36,6 +37,16 @@ FROM ${RUST_IMAGE} AS source
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true \
     CARGO_HOME=/cargo
 WORKDIR /src
+COPY rust-toolchain.toml ./
+COPY deposit-prover/rust-toolchain.toml deposit-prover/
+# `rustup` itself lives in the image's cargo home, hence the explicit
+# CARGO_HOME for this one command; cargo's proxies find the toolchains in
+# RUSTUP_HOME whatever CARGO_HOME is.
+RUN channel() { sed -n 's/^channel = "\(.*\)"/\1/p' "$1"; } \
+    && CARGO_HOME=/usr/local/cargo rustup toolchain install "$(channel rust-toolchain.toml)" \
+         --profile minimal --component rustfmt --component clippy \
+    && CARGO_HOME=/usr/local/cargo rustup toolchain install \
+         "$(channel deposit-prover/rust-toolchain.toml)" --profile minimal
 COPY . .
 
 # relayer daemon-live, compute_bridge_anchors, the CLI and the BK-set seeder:

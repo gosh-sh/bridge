@@ -71,6 +71,10 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
   params/lc-prover/                  # kzg_bn254_19.srs; step-key/ from `compose run lc-keygen`
 ```
 
+Each daemon logs to stdout and to one file per day in its `logs/` directory, keeping the newest
+14; the prover transcripts it writes beside them are not pruned, so that directory needs a
+retention rule of its own (logrotate, a cron `find -mtime`).
+
 Inside every container the same four paths: `/data/state`, `/data/work`, `/data/logs` and
 `/data/params` (read-only for the relayer except `pk_cache`, writable for the two provers that
 generate keys). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and

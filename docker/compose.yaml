@@ -299,12 +299,21 @@ services:
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-relayer:${BRIDGE_IMAGE_TAG:?}
     pull_policy: ${BRIDGE_PULL_POLICY:-missing}
     restart: "no"
-    entrypoint: ["/opt/bridge/bin/seed_prover_bk_set"]
+    # Reads one value, BRIDGE_GQL_ENDPOINT, out of the withdraw relayer's env
+    # file: the file is mounted like a secret, not loaded as the container's
+    # environment, so the EOA key stays out of `docker inspect`.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'export BRIDGE_GQL_ENDPOINT="$(sed -n "s/^BRIDGE_GQL_ENDPOINT=//p" /run/secrets/runtime-env)"; exec /opt/bridge/bin/seed_prover_bk_set "$@"'
+      - fold-bk-set
     command: ["--help"]
-    env_file:
-      - path: ${BRIDGE_OPT}/env/daemon-live.env
-        required: true
     volumes:
+      - type: bind
+        source: ${BRIDGE_OPT}/env/daemon-live.env
+        target: /run/secrets/runtime-env
+        read_only: true
+        bind: { create_host_path: false }
       - type: bind
         source: ${BRIDGE_OPT}/daemon-live/state
         target: /data/state
@@ -328,6 +337,16 @@ services:
     env_file:
       - path: ${BRIDGE_OPT}/env/cli.env
         required: false
+    # The mounts are the CLI's defaults, so `run --rm cli deposit …` and
+    # `withdraw …` need no directory flags.
+    environment:
+      HOME: /data/work
+      BRIDGE_DEPOSIT_STATE_DIR: /data/state/deposit
+      BRIDGE_WITHDRAW_STATE_DIR: /data/state/withdraw
+      BRIDGE_WORK_DIR: /data/work
+      BRIDGE_DEPOSIT_LOG_DIR: /data/logs
+      BRIDGE_PARAMS_DIR: /data/params/relayer
+      BRIDGE_PK_CACHE_DIR: /data/params/relayer/pk_cache
     volumes:
       - type: bind
         source: ${BRIDGE_OPT}/keys

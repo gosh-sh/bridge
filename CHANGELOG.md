@@ -64,8 +64,7 @@ assigns it when the release is tagged.
   `docker.gosh.sh/bridge-relayer`, `bridge-deposit-relayer`, `bridge-eth-lc-relayer` and
   `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and
   on a version tag, tagged `sha-<12>`, `latest` and the release). `--target tools` gives
-  every binary as plain files. The local-network e2e builds and runs the services from these
-  images, and runs `deposit-relayer daemon` beside the CLI.
+  every binary as plain files.
 - `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
 

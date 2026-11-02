@@ -131,10 +131,12 @@ circuit-shape change can never silently load a stale PK.
 ## Recompile eccUSDCBridge
 
 Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.0 for
-`eccUSDCBridge`, sold 0.81.0 for the voucher and light client.
+`eccUSDCBridge`, sold 0.81.0 for the voucher, sold 0.81.1 for the light client and the
+Arbitrum block verifier.
 
 ```bash
-make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
+make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
+    SOLD_0_81_1=/path/to/sold-0.81.1
 ```
 
 The Makefile writes beside the sources. Copy the rebuilt bridge TVC to

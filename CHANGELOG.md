@@ -36,6 +36,10 @@ assigns it when the release is tagged.
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
   flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+- `EthBeaconLightClient` and `ArbitrumBlockVerifier` are built with the `sold` 0.81.1 release and
+  move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
+  are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
+  folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
 
 - `ackinacki-bridge` requires AN bridge 1.15.0 (`MIN_BRIDGE_VERSION`) for the token-bearing
   deposit key. Withdrawal preflight also requires EVM `usdcTokenId()` and

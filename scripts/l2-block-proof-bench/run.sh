@@ -6,14 +6,14 @@
 #
 #   SOLD=/path/to/sold TVM_DEBUGGER=/path/to/tvm-debugger ./run.sh
 #
-# SOLD has to know the KECCAK256 instruction: sold 0.81.0 from
-# gosh-sh/TVM-Solidity-Compiler branch feature/keccak256-builtin. TVM_DEBUGGER
+# SOLD has to know the KECCAK256 instruction: sold 0.81.1 (release
+# gosh_0.81.1) or later. TVM_DEBUGGER
 # has to execute it: tvm_debugger from tvmlabs/tvm-sdk fd76a8a9 or later (3.0.4
 # fails the instruction with exit 6). Exits non-zero when any check fails.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 AN=$(cd "$HERE/../../contracts/an" && pwd)
-VERIFIER=${VERIFIER:-$AN/0.81.0_compiled/exchange/ArbitrumBlockVerifier}
+VERIFIER=${VERIFIER:-$AN/0.81.1_compiled/exchange/ArbitrumBlockVerifier}
 # Vectors `proveBlock` runs end to end on: the synthetic one and one the relayer
 # wrote from live Arbitrum Sepolia (`eth-lc-relayer arbitrum-vector`).
 # VECTORS="a.json b.json" (or SYNTH=a.json) runs others.

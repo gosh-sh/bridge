@@ -250,9 +250,14 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
     ///      the owner covers its stranded treasury with `fundTreasury`.
     function test_fork_replacesLiveBridgeAsPredecessor() public {
         IPredecessorBridge old = IPredecessorBridge(LIVE_BRIDGE);
+        // A fork from before the live bridge paid this nullifier has nothing to refuse.
+        if (!old.isNullifierUsed(LIVE_PAID_NULLIFIER)) vm.skip(true);
         uint256 oldTreasury = AckiNackiBridge(LIVE_BRIDGE).treasuryBalance();
-        vm.prank(AckiNackiBridge(LIVE_BRIDGE).owner());
-        AckiNackiBridge(LIVE_BRIDGE).pause();
+        // Step 1 of the cutover pauses it for good; a fork after that finds it paused.
+        if (!AckiNackiBridge(LIVE_BRIDGE).paused()) {
+            vm.prank(AckiNackiBridge(LIVE_BRIDGE).owner());
+            AckiNackiBridge(LIVE_BRIDGE).pause();
+        }
 
         AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdrawAfter(
             IBridgeWithdrawalVerifier(address(new MockBridgeWithdrawalVerifier())),

@@ -401,6 +401,9 @@ contract AckiNackiBridgePredecessorTest is Test {
         oldBridge.migrateTreasury(address(usdc));
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.NotSuccessor.selector, address(0)));
         oldBridge.migrateTreasury(address(0));
+        address eoa = makeAddr("eoa");
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.NotSuccessor.selector, eoa));
+        oldBridge.migrateTreasury(eoa);
         vm.stopPrank();
     }
 

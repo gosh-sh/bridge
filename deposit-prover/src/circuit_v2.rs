@@ -50,12 +50,12 @@ pub const PRODUCTION_MAX_LOG_NUM: usize = 20;
 /// [`PRODUCTION_MAX_DATA_BYTE_LEN`] data bytes and still fit.
 pub const PRODUCTION_MAX_ENCODED_LOG_LEN: usize =
     max_encoded_log_len(PRODUCTION_MAX_DATA_BYTE_LEN, TOPIC_NUM_BOUNDS.1);
-/// 1-of-1 Safe `execTransaction` with a 68 B inner call:
-/// `4 + 320 + 32 + 96 + 32 + 96 = 580` (not 489).
-pub const SAFE_EXECTX_MIN_CALLDATA: usize = 580;
+/// 1-of-1 Safe `execTransaction` with a 100 B inner call:
+/// `4 + 320 + 32 + 128 + 32 + 96 = 612`.
+pub const SAFE_EXECTX_MIN_CALLDATA: usize = 612;
 /// Two-signer SafeL2 `SafeMultiSigTransaction` MultiSend of approve+deposit.
-/// (`352+32+416+32+160+128 = 1120`.)
-pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1120;
+/// (`352+32+448+32+160+128 = 1152`.)
+pub const SAFEL2_MULTISIG_LOG_DATA: usize = 1152;
 
 /// Public-input layout, in slot order. This is the wire contract the AN-side
 /// `USDCBridge._parsePublicInputs` reads by fixed offset, so it must not drift
@@ -94,8 +94,8 @@ pub const DEPOSIT_NUM_PUBLIC_INPUTS: usize = DEPOSIT_PUBLIC_INPUT_LAYOUT.len();
 pub const PI_CHAIN_ID: usize = 4;
 /// Max depth of the transactions-trie MPT proof (mirrors receipt path).
 pub const TX_PF_MAX_DEPTH: usize = 10;
-/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is 68 B;
-/// a 1-of-1 Safe `execTransaction` is [`SAFE_EXECTX_MIN_CALLDATA`] (580 B).
+/// Max calldata bytes of the enclosing typed tx. Direct `deposit()` is 100 B;
+/// a 1-of-1 Safe `execTransaction` is [`SAFE_EXECTX_MIN_CALLDATA`] (612 B).
 /// 2048 covers that and a modest ERC-4337 `handleOps`. Larger batches
 /// still cannot be proven.
 pub const MAX_TX_CALLDATA_BYTE_LEN: usize = 2048;
@@ -246,8 +246,8 @@ fn bytes_to_field<F: ScalarField>(
 
 /// Max payload lengths of the three fields of the selected receipt log,
 /// `[address, topics, data]`: a 20-byte address, up to four topics behind their
-/// one-byte prefixes, and a 128-byte data capacity. `Deposit` uses three ABI
-/// words (96 bytes); its exact data length is constrained separately.
+/// one-byte prefixes, and a 128-byte data capacity. `Deposit` uses four ABI
+/// words (128 bytes); its exact data length is constrained separately.
 const DEPOSIT_LOG_MAX_FIELD_LENS: [usize; 3] = [20, 150, 128];
 
 /// Witnesses the RLP decomposition of the selected receipt log.
@@ -685,16 +685,16 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
 
         // 5. chainId - extracted typed-tx RLP field 0 (EIP-2930 / EIP-1559, already
         //    computed above). Exposed as a public input so `eccUSDCBridge` can
-        //    allowlist the proven bridge in `_trustedL1Bridge[chainId][bridge]`.
-        //    Not constrained to a constant.
+        //    allowlist the proven bridge in `_trustedL1Bridge[chainId][bridge]`. Not
+        //    constrained to a constant.
 
         // 6. dappId - Acki Nacki destination dApp identifier (UInt256), supplied from
         //    the bridge config (NOT from the Ethereum event). It replaced `anWorkchain`
         //    on 2026-06-02. A full UInt256 dappId can exceed the BN254 scalar modulus,
         //    so it is split into high/low 16-byte halves (mirrors the
         //    anAccount/block-hash split). These are witness values promoted to public
-        //    instances; they are NOT constrained against event data. The AN-side
-        //    bridge pins `dappId` to 0 and does not check the proven halves.
+        //    instances; they are NOT constrained against event data. The AN-side bridge
+        //    pins `dappId` to 0 and does not check the proven halves.
         //
         //    BC-D05: unlike every other 32-byte input here, `dappId` has no
         //    Phase-1 counterpart to be constrained against, so these witnesses
@@ -1405,7 +1405,7 @@ mod tests {
         assert_eq!(ENABLE_TX_TYPES, [false, true, true]);
         assert!(
             MAX_TX_CALLDATA_BYTE_LEN >= SAFE_EXECTX_MIN_CALLDATA,
-            "1-of-1 Safe execTransaction with a 68 B inner call is {SAFE_EXECTX_MIN_CALLDATA} B"
+            "1-of-1 Safe execTransaction with a 100 B inner call is {SAFE_EXECTX_MIN_CALLDATA} B"
         );
         assert!(
             PRODUCTION_MAX_DATA_BYTE_LEN >= SAFEL2_MULTISIG_LOG_DATA,

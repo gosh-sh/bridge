@@ -37,6 +37,14 @@ assigns it when the release is tagged.
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
   flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
 
+- `ackinacki-bridge` requires AN bridge 1.15.0 (`MIN_BRIDGE_VERSION`) for the token-bearing
+  deposit key. Withdrawal preflight also requires EVM `usdcTokenId()` and
+  `maxWithdrawalAmount(uint32)` getters. Upgrade the paired contracts and CLI together.
+- `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
+  or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted.
+- The EVM storage layout adds `_tokens`, `_tokenIdOf`, `_tokenRegistered` and `_listedTokenIds`
+  after `treasuryBalance`, shifting later slots. Redeploy; do not reuse historical storage offsets.
+
 ### New / Improvements
 
 - The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
@@ -48,12 +56,22 @@ assigns it when the release is tagged.
 - `--token` (`DEPOSIT_TOKEN`) defaults to the EVM bridge's `usdc()`. Amounts use the listing's
   decimals, checked against the ERC-20. Deposits retain exact-balance and uint64 width checks.
 
+- Registry changes emit `TokenListed`, `TokenLimitsSet`, `TokenDepositsEnabledSet` and
+  `TokenDelisted`. Deposits can revert with `TokenNotListed` or `TokenDepositsDisabled`;
+  registry administration can return `InvalidTokenAddress`, `TokenAlreadyListed`,
+  `TokenIdAlreadyUsed`, `TokenLimitsInvalid`, `TokenLimitExceedsMintCeiling`,
+  `TokenStillHasLiabilities`, `CannotDelistUsdc` or `CannotListAToken`.
+
 ### Fixes
 
 - USDC deposit limits cannot exceed AN's 50 USDC per transfer and 10,000 USDC per-chain
   outstanding caps. Lowering deposit limits leaves existing withdrawals payable; payout caps
   retain the highest accepted deposit limit. Withdrawal preflight checks the payout cap and ECC
   id before a burn. Configuration-dependent payout reverts retry the existing proof file.
+- Deposit preflight retries transient failures of `usdc()`, `tokenIdOf()` and `tokenInfo()`
+  for up to 120 seconds; wrong-chain and missing-contract errors are reported before those reads.
+- The web UI checks USDC's current `tokenInfo` transfer limit, TVL capacity and deposit switch
+  before approval and again before deposit. A closed, absent or unreadable listing refuses the request.
 - `eth-lc-relayer arbitrum-anchors` discovers the new token-bearing `Deposit` event.
 
 - Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
@@ -89,8 +107,6 @@ assigns it when the release is tagged.
   retry on the next tick, instead of waiting forever on a node that does not answer.
 - `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
   refuses to start while another instance holds it.
-- `ackinacki-bridge` requires bridge 1.15.0 for the token-bearing deposit key
-  (`MIN_BRIDGE_VERSION`); upgrade the CLI and bridge together. `release.yaml` publishes binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
   first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
   (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`

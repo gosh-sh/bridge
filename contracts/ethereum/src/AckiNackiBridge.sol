@@ -891,12 +891,12 @@ contract AckiNackiBridge {
     // User-facing: deposit
     // ---------------------------------------------------------------------
 
-    /// @notice Deposit USDC to be bridged to Acki Nacki.
+    /// @notice Deposit a listed ERC-20 to be bridged to Acki Nacki.
     /// @dev Caller must `approve` this contract for `amount` before calling.
     ///      Emits a `Deposit` event that is later proven by a ZK circuit.
-    ///      Funds stay as USDC in this contract; a keeper supplies them to AAVE
-    ///      in batches via `supplyToAave()`.
-    /// @param amount      USDC amount (6 decimals) to bridge.
+    ///      Funds stay in custody; only USDC can be supplied to AAVE.
+    /// @param token       Listed ERC-20 to transfer.
+    /// @param amount      Amount in the token's base units.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -1797,9 +1797,10 @@ contract AckiNackiBridge {
     ///      (well-formedness check against malformed split inputs).
     ///
     /// State updates (CEI):
-    ///   - **Effects**: mark `nullifier` used; decrement `treasuryBalance`.
-    ///   - **Interactions**: (optional) `_pullFromAave(shortfall)` to top up
-    ///     liquid USDC; `usdc.transfer(recipient, amount)` to pay out.
+    ///   - **Effects**: mark `nullifier` used; debit the listing's liabilities
+    ///     (and `treasuryBalance` for USDC).
+    ///   - **Interactions**: optionally pull USDC from AAVE, then pay the
+    ///     listed ERC-20 through `_pushExact`.
     ///
     /// @dev Permissionless. The caller pays gas but the payout goes to
     ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).

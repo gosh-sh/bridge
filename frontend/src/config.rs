@@ -77,6 +77,7 @@ pub const BLOCK_EXPLORER_URL: &str = "https://sepolia.etherscan.io";
 pub const BRIDGE_ABI: &str = r#"[
     {
         "inputs": [
+            {"internalType": "address", "name": "token", "type": "address"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {"internalType": "bytes32", "name": "anAccount", "type": "bytes32"}
         ],

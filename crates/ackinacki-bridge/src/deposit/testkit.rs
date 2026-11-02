@@ -120,6 +120,7 @@ pub struct FakeEvm {
     pub fail_receipts: AtomicU32,
     /// `Some(n)`: n more `call`s answer, then every one fails.
     pub calls_before_failing: Mutex<Option<u32>>,
+    pub call_failures: Mutex<HashMap<(Address, [u8; 4]), u32>>,
     /// How long every `call` takes before it answers.
     pub call_delay: Mutex<std::time::Duration>,
     /// The next N `transaction` calls answer `None`, as a lagging backend does.
@@ -171,6 +172,7 @@ impl Default for FakeEvm {
             fail_tx_reads: AtomicU32::default(),
             fail_receipts: AtomicU32::default(),
             calls_before_failing: Mutex::default(),
+            call_failures: Mutex::default(),
             call_delay: Mutex::default(),
             miss_tx_reads: AtomicU32::default(),
             vanish_tx_after: Mutex::default(),
@@ -315,6 +317,12 @@ impl EvmRead for FakeEvm {
             .get(..4)
             .ok_or_else(|| anyhow::anyhow!("calldata without a selector"))?
             .try_into()?;
+        if let Some(left) = self.call_failures.lock().unwrap().get_mut(&(to, sel)) {
+            if *left > 0 {
+                *left -= 1;
+                anyhow::bail!("503 Service Unavailable");
+            }
+        }
         let first = match at {
             BlockTag::Number(n) => {
                 self.pinned_reads.lock().unwrap().push(n);

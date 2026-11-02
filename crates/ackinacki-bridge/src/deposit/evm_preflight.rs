@@ -44,7 +44,7 @@ pub const READ_WINDOW: Duration = Duration::from_secs(120);
 /// cannot change — a call that reverts, or a reply that does not decode as
 /// the bridge's — is not tried again: a wrong `--bridge-address` says so at
 /// once.
-async fn read<T, F, Fut>(ui: &dyn Ui, what: &str, mut f: F) -> anyhow::Result<T>
+pub(super) async fn read<T, F, Fut>(ui: &dyn Ui, what: &str, mut f: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
@@ -72,20 +72,13 @@ fn is_final(e: &anyhow::Error) -> bool {
     revert_of(e).is_some() || e.downcast_ref::<alloy::sol_types::Error>().is_some()
 }
 
-/// Checks the chain, the bridge, the pause, the deposited token's
-/// precision, the depositor's balance in that token and that the RPC can
-/// serve what the prover fetches. The per-token caps are the caller's: it
-/// read the listing to resolve `token` and `listed_decimals`.
-pub async fn run(
+/// Checks the RPC chain and bridge before any registry getter is called.
+pub async fn check_bridge(
     evm: &dyn EvmRead,
     ui: &dyn Ui,
     net: Network,
     bridge: Address,
-    token: Address,
-    listed_decimals: u8,
-    amount: u64,
-    from: Option<Address>,
-) -> CliResult<EvmPreflight> {
+) -> CliResult<()> {
     let id = read(ui, "reading the EVM chain id", || evm.chain_id())
         .await
         .map_err(|e| refuse("RPC: eth_chainId failed".into(), Some(e)))?;
@@ -122,6 +115,22 @@ pub async fn run(
             None,
         ));
     }
+    Ok(())
+}
+
+/// After `check_bridge`, checks the deposited token's precision, the
+/// depositor's balance in that token and that the RPC can serve what the prover
+/// fetches. The per-token caps are the caller's: it read the listing to resolve
+/// `token` and `listed_decimals`.
+pub async fn run(
+    evm: &dyn EvmRead,
+    ui: &dyn Ui,
+    bridge: Address,
+    token: Address,
+    listed_decimals: u8,
+    amount: u64,
+    from: Option<Address>,
+) -> CliResult<EvmPreflight> {
     let dec = read(ui, "reading the token's decimals", || {
         read_decimals(evm, token)
     })
@@ -200,6 +209,20 @@ mod tests {
 
     const BRIDGE: Address = address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7");
     const USDC: Address = address!("1c7d4b196cb0c7b01d743fbc6116a902379c7238");
+
+    async fn run(
+        evm: &dyn EvmRead,
+        ui: &dyn Ui,
+        net: Network,
+        bridge: Address,
+        token: Address,
+        decimals: u8,
+        amount: u64,
+        from: Option<Address>,
+    ) -> CliResult<EvmPreflight> {
+        check_bridge(evm, ui, net, bridge).await?;
+        super::run(evm, ui, bridge, token, decimals, amount, from).await
+    }
 
     fn healthy() -> FakeEvm {
         let f = FakeEvm::sepolia();

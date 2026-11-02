@@ -60,6 +60,8 @@ contract DeployTestBridge is Script {
         console.log("Bridge:", address(bridge));
         console.log("\nTo make a test deposit (fund USDC from Aave faucet first):");
         console.log("  mint USDC via faucet 0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D");
-        console.log("  then approve + deposit(uint256 amount) on the bridge");
+        console.log(
+            "  then approve + deposit(address token, uint256 amount, bytes32 anAccount) on the bridge"
+        );
     }
 }

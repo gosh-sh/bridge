@@ -55,7 +55,7 @@ public endpoints do not (`crates/deposit-relayer-daemon/docs/operator_runbook.md
 ## The two directions
 
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
-`deposit(uint256 amount, bytes32 anAccount)`. The contract takes custody via
+`deposit(address token, uint256 amount, bytes32 anAccount)`. The contract takes custody via
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
 the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
 (receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`

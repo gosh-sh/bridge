@@ -43,29 +43,24 @@ fn provider_error(context: &str, e: JsValue) -> String {
             // MetaMask does not raise its own window for this; the request
             // waits behind the toolbar icon, which is easy to miss on a
             // browser with many extensions. Say where to look.
-            "MetaMask already has a connection request waiting, and it does \
-             not open a window on its own.\n\nClick the extensions button \
-             (the puzzle piece, right of the address bar), pick MetaMask, and \
-             approve or reject the request there. The MetaMask icon shows a \
-             small badge while one is pending.\n\nIf nothing is waiting, the \
-             request is stale: in MetaMask open Settings and remove this site \
-             from its connected sites, then connect again."
+            "MetaMask already has a connection request waiting, and it does not open a window on \
+             its own.\n\nClick the extensions button (the puzzle piece, right of the address bar), \
+             pick MetaMask, and approve or reject the request there. The MetaMask icon shows a \
+             small badge while one is pending.\n\nIf nothing is waiting, the request is stale: in \
+             MetaMask open Settings and remove this site from its connected sites, then connect \
+             again."
                 .to_string()
         },
         // EIP-1193: the person pressed Reject. Not a failure worth shouting about.
         Some(4001) => format!("{context} was rejected in MetaMask."),
         // EIP-1193: the wallet is locked or the site is not authorised.
-        Some(4100) => {
-            "MetaMask has not authorised this site. Unlock the extension and \
-             connect again."
-                .to_string()
-        },
+        Some(4100) => "MetaMask has not authorised this site. Unlock the extension and connect \
+                       again."
+            .to_string(),
         // EIP-3085: the chain is unknown to the wallet and must be added first.
-        Some(4902) => {
-            "MetaMask does not know the Sepolia network yet. Approve the \
-             prompt that offers to add it."
-                .to_string()
-        },
+        Some(4902) => "MetaMask does not know the Sepolia network yet. Approve the prompt that \
+                       offers to add it."
+            .to_string(),
         _ => match message {
             Some(m) => format!("{context} failed: {m}"),
             None => format!("{context} failed: {e:?}"),
@@ -354,32 +349,132 @@ fn validate_transfer_amount(amount: u128) -> Result<(), String> {
     Ok(())
 }
 
-async fn check_deposit_capacity(bridge: &str, amount: u128) -> Result<(), String> {
-    async fn read(bridge: &str, selector: &str) -> Result<u128, String> {
-        let out = call_to(bridge, selector).await?;
-        let word = out
-            .strip_prefix("0x")
-            .ok_or("Invalid bridge limit response")?;
-        if word.len() != 64 || !word.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("Invalid bridge limit response".into());
-        }
-        parse_uint128(&out)
+fn abi_words(raw: &str, count: usize) -> Result<Vec<&str>, String> {
+    let hex = raw
+        .strip_prefix("0x")
+        .ok_or("Invalid token registry response")?;
+    if hex.len() != 64 * count || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Invalid token registry response".into());
     }
-    let max_transfer = read(bridge, "0xfc1b3113").await?;
-    let max_tvl = read(bridge, "0x09f67ed1").await?;
-    let outstanding = read(bridge, "0x313dab20").await?;
+    Ok((0..count).map(|i| &hex[64 * i..64 * (i + 1)]).collect())
+}
+
+fn registry_uint(word: &str) -> Result<u128, String> {
+    if word[..32].bytes().any(|b| b != b'0') {
+        return Err("Token registry value exceeds the UI's supported range".into());
+    }
+    u128::from_str_radix(&word[32..], 16).map_err(|_| "Invalid token registry value".into())
+}
+
+fn listed_token_id(raw: &str) -> Result<u32, String> {
+    let words = abi_words(raw, 2)?;
+    match registry_uint(words[0])? {
+        0 => return Err("USDC is not listed on this bridge".into()),
+        1 => {},
+        _ => return Err("Invalid token registry response".into()),
+    }
+    u32::try_from(registry_uint(words[1])?).map_err(|_| "Invalid token id".into())
+}
+
+fn check_token_capacity(raw: &str, amount: u128) -> Result<(), String> {
+    let words = abi_words(raw, 6)?;
+    if !words[0].eq_ignore_ascii_case(&encode_address(USDC_CONTRACT_ADDRESS))
+        || registry_uint(words[1])? != u128::from(USDC_DECIMALS)
+    {
+        return Err("The bridge's USDC listing does not match this UI".into());
+    }
+    match registry_uint(words[2])? {
+        0 => return Err("USDC deposits are closed; withdrawals are unaffected".into()),
+        1 => {},
+        _ => return Err("Invalid token registry response".into()),
+    }
+    let max_transfer = registry_uint(words[3])?;
+    let max_tvl = registry_uint(words[4])?;
+    let outstanding = registry_uint(words[5])?;
     if amount > max_transfer {
-        return Err("Deposit exceeds the bridge's transfer limit".into());
+        return Err("Deposit exceeds the bridge's current USDC transfer limit".into());
     }
     if outstanding > max_tvl || amount > max_tvl - outstanding {
-        return Err("The bridge's TVL cap is reached; wait for withdrawals and retry".into());
+        return Err("The bridge's USDC TVL cap is reached; wait for withdrawals and retry".into());
     }
     Ok(())
+}
+
+async fn check_deposit_capacity(bridge: &str, amount: u128) -> Result<(), String> {
+    // tokenIdOf(address), followed by tokenInfo(uint32).
+    let id = call_to(
+        bridge,
+        &format!("0x773c02d4{}", encode_address(USDC_CONTRACT_ADDRESS)),
+    )
+    .await?;
+    let id = listed_token_id(&id)?;
+    let info = call_to(
+        bridge,
+        &format!("0x68fb1109{}", encode_uint256(u128::from(id))),
+    )
+    .await?;
+    check_token_capacity(&info, amount)
 }
 
 #[cfg(test)]
 mod deposit_tests {
     use super::deposit_calldata;
+
+    fn token_info(enabled: u128, max_transfer: u128, cap: u128, outstanding: u128) -> String {
+        format!(
+            "0x{}{}{}{}{}{}",
+            super::encode_address(super::USDC_CONTRACT_ADDRESS),
+            super::encode_uint256(6),
+            super::encode_uint256(enabled),
+            super::encode_uint256(max_transfer),
+            super::encode_uint256(cap),
+            super::encode_uint256(outstanding)
+        )
+    }
+
+    #[test]
+    fn registry_limits_and_closed_deposits_are_checked_before_transactions() {
+        use super::check_token_capacity as check;
+        assert!(check(&token_info(1, 5_000_000, 20_000_000, 15_000_000), 5_000_000).is_ok());
+        assert!(check(&token_info(1, 5_000_000, 20_000_000, 0), 5_000_001)
+            .unwrap_err()
+            .contains("transfer limit"));
+        assert!(check(
+            &token_info(1, 50_000_000, 20_000_000, 15_000_001),
+            5_000_000
+        )
+        .unwrap_err()
+        .contains("TVL cap"));
+        assert!(check(&token_info(1, 50_000_000, 20_000_000, 20_000_001), 1).is_err());
+        assert!(check(&token_info(0, 50_000_000, 20_000_000, 0), 1)
+            .unwrap_err()
+            .contains("closed"));
+    }
+
+    #[test]
+    fn missing_or_malformed_registry_data_fails_closed() {
+        let id = |listed, id| {
+            format!(
+                "0x{}{}",
+                super::encode_uint256(listed),
+                super::encode_uint256(id)
+            )
+        };
+        assert_eq!(super::listed_token_id(&id(1, 3)).unwrap(), 3);
+        assert!(super::listed_token_id(&id(0, 3))
+            .unwrap_err()
+            .contains("not listed"));
+        assert!(super::listed_token_id(&id(2, 3)).is_err());
+        assert!(super::listed_token_id(&id(1, u128::from(u32::MAX) + 1)).is_err());
+        assert!(super::check_token_capacity("0x", 1).is_err());
+        assert!(super::check_token_capacity(&token_info(2, 50_000_000, 20_000_000, 0), 1).is_err());
+        let mut info = token_info(1, 50_000_000, 20_000_000, 0);
+        info.replace_range(2..3, "1");
+        assert!(super::check_token_capacity(&info, 1).is_err());
+        let mut info = token_info(1, 50_000_000, 20_000_000, 0);
+        info.replace_range(2 + 3 * 64..3 + 3 * 64, "1");
+        assert!(super::check_token_capacity(&info, 1).is_err());
+    }
 
     #[test]
     fn deposit_encodes_token_amount_and_account() {

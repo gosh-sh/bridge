@@ -172,24 +172,29 @@ pub async fn check(
     let to = p.to.expect("validated for a fresh run");
     let bridge = p.bridge.expect("validated");
     let bridge_acc = p.usdc_bridge_account.expect("validated");
+    evm_preflight::check_bridge(d.evm.as_ref(), d.ui.as_ref(), net, bridge).await?;
     // Which ERC-20 this deposit moves. `--token` names it; left out, the
     // bridge's own `usdc()` is deposited, which is what every single-token
     // invocation meant. Either way it has to be listed and open for
     // deposits, and the per-token caps are the bridge's, not the USDC
     // constants.
-    let bridge_usdc = crate::deposit::evm::read_usdc(d.evm.as_ref(), bridge)
-        .await
-        .map_err(|e| refuse(format!("cannot read the bridge's usdc(): {e}")))?;
+    let bridge_usdc = evm_preflight::read(d.ui.as_ref(), "reading the bridge's USDC", || {
+        crate::deposit::evm::read_usdc(d.evm.as_ref(), bridge)
+    })
+    .await
+    .map_err(|e| refuse(format!("cannot read the bridge's usdc(): {e}")))?;
     let token = p.token.unwrap_or(bridge_usdc);
-    let listing = crate::deposit::evm::read_token_listing(d.evm.as_ref(), bridge, token)
-        .await
-        .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
-        .ok_or_else(|| {
-            refuse(format!(
-                "{token} is not listed on bridge {bridge}; the owner lists a token with \
-                 listToken(token, tokenId, decimals, maxTransfer, tvlCap)"
-            ))
-        })?;
+    let listing = evm_preflight::read(d.ui.as_ref(), "reading the token's listing", || {
+        crate::deposit::evm::read_token_listing(d.evm.as_ref(), bridge, token)
+    })
+    .await
+    .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
+    .ok_or_else(|| {
+        refuse(format!(
+            "{token} is not listed on bridge {bridge}; the owner lists a token with \
+             listToken(token, tokenId, decimals, maxTransfer, tvlCap)"
+        ))
+    })?;
     if !listing.deposits_enabled {
         return Err(refuse(format!(
             "deposits are closed for {token} (token id {}); withdrawals are unaffected",
@@ -216,7 +221,6 @@ pub async fn check(
     let evm = evm_preflight::run(
         d.evm.as_ref(),
         d.ui.as_ref(),
-        net,
         bridge,
         token,
         listing.decimals,
@@ -714,6 +718,108 @@ mod tests {
         testkit::*,
         ui::RecordingUi,
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn registry_transport_failures_are_retried_before_the_wallet() {
+        use alloy::sol_types::SolCall;
+
+        use crate::deposit::evm::IDeposit;
+        for selector in [
+            IDeposit::usdcCall::SELECTOR,
+            IDeposit::tokenIdOfCall::SELECTOR,
+            IDeposit::tokenInfoCall::SELECTOR,
+        ] {
+            let world = World::healthy();
+            world
+                .evm
+                .call_failures
+                .lock()
+                .unwrap()
+                .insert((W_BRIDGE, selector), 2);
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let ui = Arc::new(RecordingUi::new(true));
+            let mut deps = world.deps();
+            deps.ui = ui.clone();
+            check(&p, &deps, &store, None).await.unwrap();
+            assert_eq!(
+                ui.events()
+                    .iter()
+                    .filter(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..)))
+                    .count(),
+                2
+            );
+            assert!(store.list().unwrap().is_empty());
+            assert_eq!(*world.an.sent.lock().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreadable_registry_refuses_without_sending_or_creating_an_operation() {
+        use alloy::sol_types::SolCall;
+        use alloy_primitives::Bytes;
+
+        use crate::deposit::evm::IDeposit;
+        for permanent_transport in [true, false] {
+            let world = World::healthy();
+            if permanent_transport {
+                world
+                    .evm
+                    .call_failures
+                    .lock()
+                    .unwrap()
+                    .insert((W_BRIDGE, IDeposit::tokenInfoCall::SELECTOR), u32::MAX);
+            } else {
+                world
+                    .evm
+                    .set_call(W_BRIDGE, IDeposit::tokenInfoCall::SELECTOR, Bytes::new());
+            }
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let ui = Arc::new(RecordingUi::new(true));
+            let mut deps = world.deps();
+            deps.ui = ui.clone();
+            let error = check(&p, &deps, &store, None).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot read the bridge's listing"),
+                "{error}"
+            );
+            let retries = ui
+                .events()
+                .iter()
+                .filter(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..)))
+                .count();
+            assert_eq!(retries > 0, permanent_transport);
+            assert!(store.list().unwrap().is_empty());
+            assert_eq!(*world.an.sent.lock().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registry_getters_do_not_mask_wrong_chain_or_missing_contract() {
+        for wrong_chain in [true, false] {
+            let mut world = World::healthy();
+            if wrong_chain {
+                Arc::get_mut(&mut world.evm).unwrap().chain_id = 1;
+            } else {
+                world.evm.codes.lock().unwrap().clear();
+            }
+            // No registry answer is available: the deployment error must win.
+            world.evm.calls.lock().unwrap().clear();
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let error = check(&p, &world.deps(), &store, None).await.unwrap_err();
+            let expected = if wrong_chain {
+                "chain id 1"
+            } else {
+                "no contract"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(store.list().unwrap().is_empty());
+        }
+    }
 
     #[tokio::test]
     async fn a_dry_run_sends_nothing_and_writes_nothing() {

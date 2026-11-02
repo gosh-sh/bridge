@@ -7,7 +7,7 @@
 #   SOLD=/path/to/sold TVM_DEBUGGER=/path/to/tvm-debugger ./run.sh
 #
 # SOLD has to know the KECCAK256 instruction: sold 0.81.0 from
-# gosh-sh/TVM-Solidity-Compiler branch feature/keccak256-builtin. TVM_DEBUGGER
+# gosh-sh/TVM-Solidity-Compiler commit 132c6ec8. TVM_DEBUGGER
 # has to execute it: tvm_debugger from tvmlabs/tvm-sdk fd76a8a9 or later (3.0.4
 # fails the instruction with exit 6). Exits non-zero when any check fails.
 set -euo pipefail

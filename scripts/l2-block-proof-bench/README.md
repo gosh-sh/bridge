@@ -11,7 +11,7 @@ whose state trie is deeper.
 Everything runs offline in `tvm-debugger run`: no network, no keys. You need:
 
 - `sold` 0.81.0 built from
-  [gosh-sh/TVM-Solidity-Compiler `feature/keccak256-builtin`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/feature/keccak256-builtin).
+  [gosh-sh/TVM-Solidity-Compiler `132c6ec8`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/132c6ec8fb468c556ea6aa6a9a73760e38a1ad51).
   A stock 0.81.0 does not assemble `KECCAK256`. The same compiler builds the tracked artefact,
   see `contracts/an/exchange/Makefile`.
 - `tvm_debugger` from [tvmlabs/tvm-sdk](https://github.com/tvmlabs/tvm-sdk) `fd76a8a9` or later

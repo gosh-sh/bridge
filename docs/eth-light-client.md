@@ -336,9 +336,13 @@ After a bridge upgrade, restore configuration and repeat the flips intended for
 each chain, then check `isOwnerAnchorsEnabled(chainId)`.
 
 **Do not flip yet.** The flip is per chain: `disableOwnerAnchorsOn(chainId)` turns the
-owner writer off for one chain and needs a light client deployed for it (226 otherwise,
-227 for chain id 0), while the no-argument `disableOwnerAnchors` does the same for the
-chain deployed last. After an upgrade, `onCodeUpgrade` clears the installed code and
+owner writer off for one chain and needs a light client or an Arbitrum block verifier
+deployed for it (226 otherwise, 227 for chain id 0), while the no-argument
+`disableOwnerAnchors` does the same for the chain deployed last. A chain with an Arbitrum
+verifier closes only after its parent chain: until the owner writer is off there, the call
+throws 239 (`ERR_PARENT_OWNER_ANCHORS_ENABLED`), because a parent-chain block the owner
+accepts lets the verifier admit any block of the Arbitrum chain. Close Sepolia before
+421614 and Ethereum before 42161. After an upgrade, `onCodeUpgrade` clears the installed code and
 every recorded client: `setLightClientCode` has to run first, then `deployLightClient`
 for each chain — it derives the address from the code salted with that chain id and
 records it, so pass the chain the existing client was initialized with. L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining

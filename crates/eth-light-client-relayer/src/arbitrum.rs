@@ -58,9 +58,9 @@ use tvm_client::crypto::KeyPair;
 use crate::{error::RelayerError, header_rlp::encode_header_rlp, source::get_logs_with_retry};
 
 /// `Deposit(uint256 indexed depositId, address indexed sender, uint256 amount,
-/// bytes32 anAccount, uint256 timestamp)` of `AckiNackiBridge`. Only the
-/// blocks that hold one are read, not the logs themselves.
-pub const DEPOSIT: B256 = b256!("6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe");
+/// bytes32 anAccount, uint256 timestamp, uint256 dappId)` of `AckiNackiBridge`.
+/// Only the blocks that hold one are read, not the logs themselves.
+pub const DEPOSIT: B256 = b256!("fa647be3c21bb35d3e9e53f50fa07d7385b76dcdf2608472a4c3cae986c655c9");
 
 /// The EIP-2935 history contract as ArbOS 40 deploys it, and its window.
 pub const HISTORY_ADDRESS: Address = address!("0000F90827F1C53a10cb7A02335B175320002935");
@@ -1372,7 +1372,7 @@ mod tests {
     fn the_deposit_topic_is_the_bridge_event() {
         assert_eq!(
             DEPOSIT,
-            keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
+            keccak256("Deposit(uint256,address,uint256,bytes32,uint256,uint256)")
         );
     }
 

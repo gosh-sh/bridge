@@ -790,6 +790,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         Any chain with a light client in `_lightClients` is accepted;
     ///         a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226),
     ///         and chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
+    ///         A chain with an Arbitrum block verifier reverts
+    ///         `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) until the owner
+    ///         writer is off for the verifier's parent chain: the verifier
+    ///         admits blocks under any parent-chain block the bridge accepts,
+    ///         so an owner who still anchors the parent still reaches the
+    ///         Arbitrum chain. Turn off the parent chain first.
     ///         Sold does not allow a public overload of
     ///         `disableOwnerAnchors`.
     function disableOwnerAnchorsOn(uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
@@ -802,6 +808,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         // which is not address(0), so that comparison passed for any chain.
         require(_lightClients.exists(chainId) || _l2Verifiers.exists(chainId),
                 ERR_LIGHT_CLIENT_UNSET);
+        require(!_l2Verifiers.exists(chainId) || _ownerAnchorsDisabled[_l2VerifierParent[chainId]],
+                ERR_PARENT_OWNER_ANCHORS_ENABLED);
         ensureBalance();
         _ownerAnchorsDisabled[chainId] = true;
     }
@@ -893,6 +901,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         through that chain's light client. Re-running it with new
     ///         verifier code replaces the recorded verifier; with the code of
     ///         the recorded one it throws `ERR_L2_VERIFIER_DEPLOYED` (238).
+    ///         On a chain whose owner writer is already off it throws
+    ///         `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) unless the owner
+    ///         writer is off for `parentChainId` too, so a new verifier cannot
+    ///         reopen the chain through a parent the owner still anchors.
     /// @param l2ChainId     — EIP-155 id of the Arbitrum chain (42161, 421614).
     /// @param parentChainId — EIP-155 id of the chain its rollup lives on (1, 11155111).
     /// @param rollup        — the rollup contract that emits `AssertionCreated`.
@@ -913,6 +925,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         // bridge and the verifier on different parent chains.
         require(!_l2Verifiers.exists(l2ChainId) || _l2Verifiers[l2ChainId] != verifier,
                 ERR_L2_VERIFIER_DEPLOYED);
+        require(!_ownerAnchorsDisabled[l2ChainId] || _ownerAnchorsDisabled[parentChainId],
+                ERR_PARENT_OWNER_ANCHORS_ENABLED);
         ensureBalance();
         new ArbitrumBlockVerifierDeploy{
             stateInit: stateInit,

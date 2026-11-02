@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 
 - Deposits now use `deposit(uint256 amount, uint256 dappId, bytes32 anAccount)` and a six-field
   `Deposit` event; upgrade the EVM contract, AN bridge 1.14.0 (`contracts/an/0.80.0_compiled/
-  exchange/`, code hash `4ed1fcc1…`), prover and deposit clients together, and finish old-key
+  exchange/`, code hash `9bdb2b78…`), prover and deposit clients together, and finish old-key
   deposits before switching because the deposit verification key has rotated.
 - The web form and `AN_RECEIVER` now require `dapp_id::account_id`, with 64 hex characters per part.
 - Remove deposit-daemon `AN_DAPP_ID` / `--dapp-id`: the Ethereum event supplies each destination.
@@ -38,6 +38,17 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `eth-lc-relayer arbitrum-anchors` detects the DApp-bearing `Deposit` event; upgrade it
+  together with the EVM bridge so new Arbitrum deposits can be anchored.
+- `eccUSDCBridge` 1.14.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `9bdb2b78…`):
+  `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
+  `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) until the owner's anchors are off for the verifier's
+  parent chain, and `deployL2Verifier` throws 239 on a closed chain for a parent chain the owner
+  still anchors. Before, the owner could still reach a closed Arbitrum chain by accepting a
+  parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
+  (or Ethereum) first, then the Arbitrum chain. The version string stays 1.14.0, so released CLIs
+  keep working. `updateCode` drops the verifier code and the verifiers, as for 1.14.0: install and
+  deploy them again after the upgrade.
 - Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
   `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
   `install.sh` needs a tag cut after this change.

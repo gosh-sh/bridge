@@ -1045,15 +1045,10 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 build of eccUSDCBridge 1.14.0 carrying both lines of
-        // work this branch merges: main's Arbitrum block verifier (deploy and
-        // writer path, and the refusal to deploy the recorded verifier again),
-        // and this branch's limits, replay protection and the DApp-bound
-        // deposit key. Neither side's hash survives the merge, so this is the
-        // rebuild from the merged source.
+        // sold 0.80.0: the event-bound DApp key and parent-first Arbitrum guard.
         assert_eq!(
             &hash[..8],
-            "4ed1fcc1",
+            "9bdb2b78",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }
@@ -1197,6 +1192,8 @@ mod l2_verifier_tests {
 
     const VERIFIER_TVC: &[u8] =
         include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc");
+    const LIGHT_CLIENT_TVC: &[u8] =
+        include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc");
     const ARB_SEPOLIA: u64 = 421_614;
     const SEPOLIA: u64 = 11_155_111;
     const ROLLUP: &str = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4";
@@ -1209,6 +1206,7 @@ mod l2_verifier_tests {
     const ERR_LIGHT_CLIENT_UNSET: i64 = 226;
     const ERR_L2_VERIFIER_UNSET: i64 = 237;
     const ERR_L2_VERIFIER_DEPLOYED: i64 = 238;
+    const ERR_PARENT_OWNER_ANCHORS_ENABLED: i64 = 239;
 
     fn ctx() -> Arc<ClientContext> {
         Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"))
@@ -1219,9 +1217,16 @@ mod l2_verifier_tests {
     }
 
     fn verifier_code() -> String {
-        let init = tvm_block::StateInit::construct_from_bytes(VERIFIER_TVC)
-            .expect("the verifier TVC parses");
-        let code = init.code.expect("the verifier TVC carries code");
+        code_of(VERIFIER_TVC)
+    }
+
+    fn light_client_code() -> String {
+        code_of(LIGHT_CLIENT_TVC)
+    }
+
+    fn code_of(tvc: &[u8]) -> String {
+        let init = tvm_block::StateInit::construct_from_bytes(tvc).expect("the TVC parses");
+        let code = init.code.expect("the TVC carries code");
         tvm_types::base64_encode(tvm_types::write_boc(&code).expect("the code serializes"))
     }
 
@@ -1389,6 +1394,41 @@ mod l2_verifier_tests {
         (bridge, boc, verifier)
     }
 
+    /// Deploys the Sepolia light client and turns the owner writer off for
+    /// Sepolia, the parent chain of the Arbitrum Sepolia verifier.
+    async fn close_parent_chain(bridge: &str, boc: String) -> String {
+        let (boc, exit) = owner_call(
+            bridge,
+            &boc,
+            "setLightClientCode",
+            json!({ "code": light_client_code() }),
+        )
+        .await;
+        assert_eq!(exit, 0, "setLightClientCode");
+        let (boc, exit) = owner_call(
+            bridge,
+            &boc,
+            "deployLightClient",
+            json!({
+                "pubkey": format!("0x{PAIR_PUBLIC}"),
+                "l1ChainId": SEPOLIA,
+                "bootstrapCommittee": "0",
+                "bootstrapPeriod": "0",
+            }),
+        )
+        .await;
+        assert_eq!(exit, 0, "deployLightClient");
+        let (boc, exit) = owner_call(
+            bridge,
+            &boc,
+            "disableOwnerAnchorsOn",
+            json!({ "chainId": SEPOLIA }),
+        )
+        .await;
+        assert_eq!(exit, 0, "the parent chain closes");
+        boc
+    }
+
     #[tokio::test]
     async fn a_verifier_is_deployed_only_from_installed_code() {
         let (id, boc) = deployed_usdc_bridge(false).await;
@@ -1508,6 +1548,19 @@ mod l2_verifier_tests {
         assert_eq!(exit, ERR_LIGHT_CLIENT_UNSET, "no verifier, no light client");
 
         let (bridge, boc, _) = bridge_with_verifier().await;
+        let (_, exit) = owner_call(
+            &bridge,
+            &boc,
+            "disableOwnerAnchorsOn",
+            json!({ "chainId": ARB_SEPOLIA }),
+        )
+        .await;
+        assert_eq!(
+            exit, ERR_PARENT_OWNER_ANCHORS_ENABLED,
+            "the owner still anchors Sepolia, whose blocks the verifier builds on"
+        );
+
+        let boc = close_parent_chain(&bridge, boc).await;
         let (boc, exit) = owner_call(
             &bridge,
             &boc,
@@ -1516,13 +1569,47 @@ mod l2_verifier_tests {
         )
         .await;
         assert_eq!(exit, 0);
-        let (_, exit) = owner_call(
+        for chain in [ARB_SEPOLIA, SEPOLIA] {
+            let (_, exit) = owner_call(
+                &bridge,
+                &boc,
+                "setAcceptedBlockHash",
+                json!({ "chainId": chain, "blockHash": BLOCK, "accepted": true }),
+            )
+            .await;
+            assert_eq!(exit, ERR_OWNER_ANCHORS_DISABLED, "chain {chain}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_verifier_cannot_hang_a_closed_chain_from_an_anchored_parent() {
+        let (bridge, boc, _) = bridge_with_verifier().await;
+        let boc = close_parent_chain(&bridge, boc).await;
+        let (boc, exit) = owner_call(
             &bridge,
             &boc,
-            "setAcceptedBlockHash",
-            json!({ "chainId": ARB_SEPOLIA, "blockHash": BLOCK, "accepted": true }),
+            "disableOwnerAnchorsOn",
+            json!({ "chainId": ARB_SEPOLIA }),
         )
         .await;
-        assert_eq!(exit, ERR_OWNER_ANCHORS_DISABLED);
+        assert_eq!(exit, 0);
+        // Other code deploys at another address, as a new verifier build
+        // does; the bridge does not look inside it.
+        let (boc, exit) = owner_call(
+            &bridge,
+            &boc,
+            "setL2VerifierCode",
+            json!({ "code": light_client_code() }),
+        )
+        .await;
+        assert_eq!(exit, 0);
+        let redeploy = |parent: u64| json!({ "l2ChainId": ARB_SEPOLIA, "parentChainId": parent, "rollup": ROLLUP });
+        let (_, exit) = owner_call(&bridge, &boc, "deployL2Verifier", redeploy(1)).await;
+        assert_eq!(
+            exit, ERR_PARENT_OWNER_ANCHORS_ENABLED,
+            "the owner still anchors Ethereum mainnet"
+        );
+        let (_, exit) = owner_call(&bridge, &boc, "deployL2Verifier", redeploy(SEPOLIA)).await;
+        assert_eq!(exit, 0, "a parent the owner no longer anchors");
     }
 }

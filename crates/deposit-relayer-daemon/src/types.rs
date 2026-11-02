@@ -186,7 +186,8 @@ impl DepositPublicInputs {
 /// Parse and normalize a UInt256 DApp ID (optional `0x` prefix).
 ///
 /// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
-/// `0x`-prefixed hex form used in proofs and `state.json`.
+/// `0x`-prefixed hex form. Deposit proofs read their destination from the event;
+/// this helper is not used to select a deployment destination.
 ///
 /// Zero is valid: `eccUSDCBridge._parsePublicInputs` pins the deposit's
 /// dappId to 0 and does not read the proof's dappId halves (QC-OFF-09).

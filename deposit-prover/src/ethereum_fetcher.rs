@@ -54,7 +54,7 @@ impl EthereumFetcher {
     ///
     /// Expected event signature: Deposit(uint256 indexed depositId, address
     /// indexed sender, uint256 amount, bytes32 anAccount,
-    /// uint256 timestamp)
+    /// uint256 timestamp, uint256 dappId)
     pub fn parse_deposit_event(
         &self,
         receipt: &TransactionReceipt,

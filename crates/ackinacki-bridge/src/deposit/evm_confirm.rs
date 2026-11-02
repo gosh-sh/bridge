@@ -29,7 +29,7 @@ pub struct Expect {
     pub bridge: Address,
     /// The paired wallet's address.
     pub from: Address,
-    /// The requested `deposit(amount, 0, account)` calldata.
+    /// The requested `deposit(amount, dappId, account)` calldata.
     pub calldata: Bytes,
     /// The requested amount, in USDC units.
     pub amount: u64,

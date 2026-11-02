@@ -464,7 +464,7 @@ pub async fn run_with(
 
 /// The bridge's Arbitrum verifier for `chain_id`; `None` when the bridge
 /// has none for that chain, as for every chain that is not a rollup. A
-/// bridge that reports 1.14.1 without `getL2Verifier` is read as having
+/// bridge that reports 1.14.0 without `getL2Verifier` is read as having
 /// none, with a warning: `transient` would retry an unknown function for
 /// ever.
 async fn read_l2_verifier(

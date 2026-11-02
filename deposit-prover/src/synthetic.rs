@@ -39,7 +39,7 @@ impl SyntheticSpec {
     pub fn type2_direct() -> Self {
         Self {
             tx: EnclosingTx::Type2 {
-                data_len: 68,
+                data_len: 100,
             },
             extra_log_data: 0,
         }
@@ -48,7 +48,7 @@ impl SyntheticSpec {
     pub fn type1_with_access_list() -> Self {
         Self {
             tx: EnclosingTx::Type1WithAccessList {
-                data_len: 68,
+                data_len: 100,
             },
             extra_log_data: 0,
         }

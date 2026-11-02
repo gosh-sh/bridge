@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.14.0, `DepositVoucher` at 1.4.0,
+`exchange/` — `eccUSDCBridge` at version 1.14.1, `DepositVoucher` at 1.4.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -279,7 +279,7 @@ fourth non-indexed event word and is proven in `dappIdHigh` / `dappIdLow`.
 The twelve public-input positions and the AN entrypoint ABI are unchanged,
 but the new event constraints require the matching embedded deposit key.
 
-This release changes the AN bridge key, TVC and version to 1.14.0.
+This release changes the AN bridge key, TVC and version to 1.14.1.
 The CLI refuses earlier bridge versions before requesting a deposit. `_parsePublicInputs`
 still uses zero for the voucher identity's DApp component, preserving deposit
 replay protection. `makeAddrStd(0, anAccount)` uses workchain zero; it does not
@@ -370,7 +370,7 @@ chain's outstanding amount.
 
 ### Deployment
 
-Deploy the 1.14.0 bridge with its newly paired EVM deployment. Its
+Deploy the 1.14.1 bridge with its newly paired EVM deployment. Its
 eleven-field upgrade tuple is unchanged from 1.13.0, retaining chain balances
 and external-message hashes; the previous 1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
 Normal upgrades within this format retain balances and unexpired replay hashes.

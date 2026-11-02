@@ -49,17 +49,10 @@ contract AckiNackiBridge {
     /// @notice One USDC base unit (USD Coin uses 6 decimals on Ethereum).
     uint256 public constant USDC_UNIT = 10 ** 6;
 
-    /// @notice Maximum per-tx deposit amount, for every token. Capped at
-    ///         `type(uint64).max` so the amount fits the AN mint path
-    ///         (`gosh.mintecc` takes a uint64, and the AN bridge reads the
-    ///         circuit's amount as `fr[2]` under the same bound). Not a
-    ///         global TVL limit (QC-A1-1 / QC-AN-J1).
-    /// @dev This is a protocol ceiling, not a policy limit, and it bites
-    ///      harder the more decimals a token has: for an 18-decimal ERC-20 it
-    ///      caps a single deposit at ~18.44 whole tokens. `listToken` refuses
-    ///      a `maxTransfer` above it rather than letting a listing promise a
-    ///      size the AN side cannot mint. Lifting it needs the AN mint path to
-    ///      carry a per-token scale, which is out of scope here.
+    /// @notice Amount-width ceiling for every token, not an AN policy limit.
+    ///         `gosh.mintecc` takes a uint64 (~18.44 tokens at 18 decimals).
+    ///         The current AN bridge additionally enforces 50 USDC per transfer
+    ///         and does not yet credit non-USDC. Match AN policy before opening a listing.
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
     /// @notice Default per-tx cap applied to USDC when the constructor lists
@@ -641,8 +634,8 @@ contract AckiNackiBridge {
     /// @notice `maxTransfer` must be non-zero and must not exceed `tvlCap`.
     error TokenLimitsInvalid(uint256 maxTransfer, uint256 tvlCap);
     /// @notice `maxTransfer` exceeds `MAX_DEPOSIT_AMOUNT`, the uint64 ceiling
-    ///         the Acki Nacki mint path imposes. A listing may not promise a
-    ///         deposit size AN cannot mint.
+    ///         the Acki Nacki mint instruction accepts. Per-token policy limits
+    ///         must also match the receiving AN deployment.
     error TokenLimitExceedsMintCeiling(uint256 maxTransfer, uint256 ceiling);
     /// @notice `delistToken` refuses while the bridge still owes this token
     ///         to depositors — removing the listing would strand their
@@ -1933,7 +1926,9 @@ contract AckiNackiBridge {
     ///      tokens out, so listing one does not quietly make the books wrong.
     function _pullExact(IERC20 token, uint256 amount) internal returns (uint256 credited) {
         uint256 before = token.balanceOf(address(this));
-        if (!token.transferFrom(msg.sender, address(this), amount)) {
+        if (!_callToken(
+                token, abi.encodeCall(IERC20.transferFrom, (msg.sender, address(this), amount))
+            )) {
             revert TransferFromFailed();
         }
         uint256 afterBal = token.balanceOf(address(this));
@@ -1946,13 +1941,31 @@ contract AckiNackiBridge {
     /// @dev Debit exactly `amount` of `token`. Same FoT/rebase fail-closed.
     function _pushExact(IERC20 token, address recipient, uint256 amount) internal {
         uint256 before = token.balanceOf(address(this));
-        if (!token.transfer(recipient, amount)) {
+        if (!_callToken(token, abi.encodeCall(IERC20.transfer, (recipient, amount)))) {
             revert WithdrawTransferFailed(recipient, amount);
         }
         uint256 afterBal = token.balanceOf(address(this));
         if (before < afterBal || before - afterBal != amount) {
             revert WithdrawTransferFailed(recipient, amount);
         }
+    }
+
+    /// @dev Accept both standard ERC-20 success and legacy empty-return success.
+    ///      A false or malformed return is a failure; token reverts keep their reason.
+    function _callToken(IERC20 token, bytes memory callData) private returns (bool) {
+        (bool success, bytes memory result) = address(token).call(callData);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(result, 32), mload(result))
+            }
+        }
+        if (result.length == 0) return true;
+        if (result.length != 32) return false;
+        uint256 returned;
+        assembly ("memory-safe") {
+            returned := mload(add(result, 32))
+        }
+        return returned == 1;
     }
 
     /// @dev Recombine a split-α `recipient` (10/10 byte halves) back into the

@@ -127,7 +127,8 @@ pub const BRIDGE_ABI: &str = r#"[
             {"indexed": true, "internalType": "address", "name": "sender", "type": "address"},
             {"indexed": false, "internalType": "uint256", "name": "amount", "type": "uint256"},
             {"indexed": false, "internalType": "bytes32", "name": "anAccount", "type": "bytes32"},
-            {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"}
+            {"indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256"},
+            {"indexed": false, "internalType": "address", "name": "token", "type": "address"}
         ],
         "name": "Deposit",
         "type": "event"
@@ -136,7 +137,7 @@ pub const BRIDGE_ABI: &str = r#"[
 
 /// Optional default Acki Nacki receiver account (build-time `AN_RECEIVER`).
 ///
-/// The bridge's `deposit(uint256 amount, bytes32 anAccount)`
+/// The bridge's `deposit(address token, uint256 amount, bytes32 anAccount)`
 /// takes the AN account explicitly.
 /// This constant is only a convenience default the UI may prefill; an empty
 /// value means "no prefill — the user types their AN account".

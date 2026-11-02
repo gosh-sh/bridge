@@ -80,7 +80,7 @@ pub struct ProveRequest {
 pub struct ProofFiles {
     /// The proof bytes.
     pub proof: Vec<u8>,
-    /// The twelve public inputs, 32 bytes each.
+    /// The thirteen public inputs, 32 bytes each.
     pub public_inputs: Vec<u8>,
 }
 

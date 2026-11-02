@@ -68,6 +68,8 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
+  False and malformed returns still revert, and exact custody-delta checks remain in force.
 - USDC deposit limits cannot exceed AN's 50 USDC per transfer and 10,000 USDC per-chain
   outstanding caps. Lowering deposit limits leaves existing withdrawals payable; payout caps
   retain the highest accepted deposit limit. Withdrawal preflight checks the payout cap and ECC

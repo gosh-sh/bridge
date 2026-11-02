@@ -891,7 +891,7 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 | `crates/bridge-relayer-daemon` | `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`, reads `storedLastSeenBlockSeqNo`, `storedBkSetCommitment`, `expectedPrevAnchor(numLayers)`, `storedPrevMaxLevelLayerHash`. Its `MockBridgeClient` mirrors the contract's cheap pre-flight checks exactly (`src/bridge.rs:15-23`). |
 | `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
 | `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. |
-| `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:58-153`), emits the 12-PI SHPLONK proof. |
+| `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:58-153`), emits the 13-PI SHPLONK proof. |
 | `frontend/` (WASM) | Calls `deposit(address,uint256,bytes32)` = `0x26b3293f` and `depositCounter()` — **current**. |
 | `crates/eth-frontend` | Declares `deposit(address,uint256,bytes32)` and the six-field `Deposit` event (`src/contract.rs:42,47`); its wrapper approves and deposits the named token (`src/contract.rs:133-162`). |
 

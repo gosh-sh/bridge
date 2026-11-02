@@ -55,6 +55,56 @@ contract FeeOnTransferERC20 {
     }
 }
 
+/// @dev USDT-style transfers have no declared return value. Other modes exercise
+///      tokens that return false, malformed bytes or a noncanonical bool.
+contract OptionalReturnERC20 {
+    uint8 public constant decimals = 6;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint8 public returnMode;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function setReturnMode(uint8 mode) external {
+        returnMode = mode;
+    }
+
+    function approve(address spender, uint256 amount) external {
+        allowance[msg.sender][spender] = amount;
+    }
+
+    function transfer(address to, uint256 amount) external {
+        _move(msg.sender, to, amount);
+        _finish();
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external {
+        allowance[from][msg.sender] -= amount;
+        _move(from, to, amount);
+        _finish();
+    }
+
+    function _move(address from, address to, uint256 amount) private {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+    }
+
+    function _finish() private view {
+        uint8 mode = returnMode;
+        if (mode == 0) return;
+        if (mode == 4) revert("token transfer reverted");
+        assembly ("memory-safe") {
+            mstore(0, 0)
+            if eq(mode, 1) { return(0, 32) }
+            if eq(mode, 2) { return(0, 1) }
+            mstore(0, 2)
+            return(0, 32)
+        }
+    }
+}
+
 /// @title AckiNackiBridgeTokenRegistryTest
 /// @notice The owner-managed ERC-20 allowlist: who may list, what a listing
 ///         must satisfy, how liabilities are tracked per token, and which
@@ -555,6 +605,66 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     // -----------------------------------------------------------------
     // withdrawByProof
     // -----------------------------------------------------------------
+
+    function _optionalTokenDeposit() internal returns (OptionalReturnERC20 token) {
+        token = new OptionalReturnERC20();
+        bridge.listToken(address(token), 5, 6, 1e6, 10e6);
+        bridge.setTokenDepositsEnabled(5, true);
+        token.mint(funder, 1e6);
+        vm.prank(funder);
+        token.approve(address(bridge), 1e6);
+    }
+
+    function test_emptyReturnToken_depositAndWithdrawalKeepExactAccounting() public {
+        OptionalReturnERC20 token = _optionalTokenDeposit();
+        vm.prank(funder);
+        bridge.deposit(address(token), 1e6, bytes32(uint256(1)));
+        assertEq(token.balanceOf(address(bridge)), 1e6);
+        assertEq(bridge.liabilitiesOf(5), 1e6);
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(5, 1e6, Bn254FrLib.toFr(uint256(keccak256("emptyReturn"))))
+        );
+        assertEq(token.balanceOf(RECIPIENT), 1e6);
+        assertEq(token.balanceOf(address(bridge)), 0);
+        assertEq(bridge.liabilitiesOf(5), 0);
+        assertEq(bridge.treasuryBalance(), 0);
+    }
+
+    function test_falseOrMalformedTokenReturn_revertsDepositsWithoutMovingCustody() public {
+        OptionalReturnERC20 token = _optionalTokenDeposit();
+        for (uint8 mode = 1; mode <= 3; ++mode) {
+            token.setReturnMode(mode);
+            vm.expectRevert(AckiNackiBridge.TransferFromFailed.selector);
+            vm.prank(funder);
+            bridge.deposit(address(token), 1e6, bytes32(uint256(1)));
+            assertEq(token.balanceOf(funder), 1e6);
+            assertEq(token.balanceOf(address(bridge)), 0);
+            assertEq(bridge.liabilitiesOf(5), 0);
+        }
+    }
+
+    function test_falseOrMalformedTokenReturn_keepsWithdrawalRetryable() public {
+        OptionalReturnERC20 token = _optionalTokenDeposit();
+        vm.prank(funder);
+        bridge.deposit(address(token), 1e6, bytes32(uint256(1)));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _pubFor(5, 1e6, Bn254FrLib.toFr(uint256(keccak256("retryOptional"))));
+        for (uint8 mode = 1; mode <= 3; ++mode) {
+            token.setReturnMode(mode);
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    AckiNackiBridge.WithdrawTransferFailed.selector, RECIPIENT, uint256(1e6)
+                )
+            );
+            bridge.withdrawByProof(_dummyProof(), pub);
+            assertEq(token.balanceOf(RECIPIENT), 0);
+            assertEq(bridge.liabilitiesOf(5), 1e6);
+        }
+        token.setReturnMode(0);
+        bridge.withdrawByProof(_dummyProof(), pub);
+        assertEq(token.balanceOf(RECIPIENT), 1e6);
+        assertEq(bridge.liabilitiesOf(5), 0);
+    }
 
     function test_withdrawByProof_paysTheTokenTheIdMapsTo() public {
         bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);

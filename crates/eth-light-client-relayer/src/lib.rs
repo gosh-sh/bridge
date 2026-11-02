@@ -40,8 +40,8 @@ pub use an_config::AnConfig;
 pub use ancestry::{covers_deposit, ExecLink};
 pub use daemon::{BackoffConfig, RelayerMetrics};
 pub use dirs::{
-    prepare_dir, ServiceDirs, ANCHORS_LOG_FILE_PREFIX, ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX,
-    STATE_FILE_NAME,
+    prepare_dir, refuse_unrecognised_state, ServiceDirs, ANCHORS_LOG_FILE_PREFIX,
+    ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 pub use error::RelayerError;
 pub use prover::{

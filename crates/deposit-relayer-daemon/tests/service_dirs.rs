@@ -219,7 +219,12 @@ async fn a_cycle_writes_only_into_the_three_directories() {
     // Nowhere else: not the read-only temp/home, not the prover tree, not
     // beside the test's own directories.
     assert_eq!(entries(&ro), Vec::<String>::new());
-    assert_eq!(entries(&prover_dir), Vec::<String>::new());
+    // The prover tree holds only the lock the daemon shares with the CLI
+    // (`data/.prove.lock`: proofs on one prover directory run one at a time).
+    assert_eq!(entries(&prover_dir), vec!["data".to_string()]);
+    assert_eq!(entries(&prover_dir.join("data")), vec![
+        ".prove.lock".to_string()
+    ]);
     let mut top = entries(root);
     top.retain(|n| {
         !["bins", "canned", "logs", "prover", "ro", "state", "work"].contains(&n.as_str())

@@ -162,5 +162,5 @@ cat <<EOF
     cd $PROVER_DIR
     export BRIDGE_CONFIG_DIR=./L${LEVEL}_config
     set -a && source "\$BRIDGE_CONFIG_DIR/env" && set +a
-    ./target/release/relayer --state "\$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live
+    mkdir -p work logs && ./target/release/relayer daemon-live --work-dir ./work --log-dir ./logs
 EOF

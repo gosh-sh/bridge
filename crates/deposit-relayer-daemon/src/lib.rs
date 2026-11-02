@@ -77,7 +77,9 @@ pub use an_config::{bridge_abi, AnConfig, BRIDGE_ABI_JSON};
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
 };
-pub use dirs::{prepare_dir, ServiceDirs, LOG_FILE_PREFIX, STATE_FILE_NAME};
+pub use dirs::{
+    prepare_dir, refuse_unrecognised_state, ServiceDirs, LOG_FILE_PREFIX, STATE_FILE_NAME,
+};
 pub use error::RelayerError;
 pub use prover::{
     require_executable, DepositProverBins, MockProofGenerator, ProofGenerator,

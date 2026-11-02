@@ -294,6 +294,50 @@ impl SubprocessProofGenerator {
         }
     }
 
+    /// Written where the transcript of a run would be when the run was
+    /// killed on timeout and left no output.
+    fn write_timeout_note(&self, tag: &str, example: &str) {
+        let path = self.config.log_dir.join(format!(
+            "{tag}-{example}-{}.log",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ));
+        let note = format!(
+            "{example} killed after {:?} (timeout); no output was kept\n",
+            self.config.timeout
+        );
+        if let Err(e) =
+            std::fs::create_dir_all(&self.config.log_dir).and_then(|()| std::fs::write(&path, note))
+        {
+            warn!(example, log = %path.display(), error = %e, "timeout note not written");
+        }
+    }
+
+    /// `<prover dir>/data/.prove.lock`, the lock the CLI takes around its
+    /// proofs: key generation in `data/` is not atomic, so proofs on one
+    /// prover directory run one at a time whoever starts them. Blocks until
+    /// the lock is free.
+    async fn take_prove_lock(&self) -> Result<std::fs::File, RelayerError> {
+        let data = self.config.deposit_prover_dir.join("data");
+        let lock = data.join(".prove.lock");
+        let shown = lock.display().to_string();
+        tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+            std::fs::create_dir_all(&data)?;
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock)?;
+            fs2::FileExt::lock_exclusive(&f)?;
+            Ok(f)
+        })
+        .await
+        .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))?
+        .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))
+    }
+
     /// Run one example. `tag` names the deposit in the example's log file.
     async fn run_example(&self, tag: &str, args: &[String]) -> Result<(), RelayerError> {
         let example = args
@@ -328,6 +372,11 @@ impl SubprocessProofGenerator {
                 "no binary configured for deposit-prover example {example:?}"
             ))
         })?;
+        let _prove_lock = if example == "export_blake2b_proof" {
+            Some(self.take_prove_lock().await?)
+        } else {
+            None
+        };
         let mut cmd = Command::new(bin);
         cmd.current_dir(&self.config.deposit_prover_dir)
             .args(passthrough)
@@ -341,6 +390,9 @@ impl SubprocessProofGenerator {
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
             .map_err(|_| {
+                // The killed process leaves no output to keep; the note says
+                // why the transcript is missing.
+                self.write_timeout_note(tag, example);
                 RelayerError::ProofGeneration(format!(
                     "deposit-prover example timed out after {:?}",
                     self.config.timeout
@@ -359,18 +411,16 @@ impl SubprocessProofGenerator {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         ));
-        let transcript = format!(
+        // Both streams and the command line, with every URL cut to its host:
+        // the tools print the RPC URL they were given.
+        let transcript = redact_urls(&format!(
             "$ {} {}\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- exit: {} ---\n",
             bin.display(),
-            passthrough
-                .iter()
-                .map(|a| without_url_secrets(a))
-                .collect::<Vec<_>>()
-                .join(" "),
+            passthrough.join(" "),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
             output.status,
-        );
+        ));
         match std::fs::create_dir_all(&self.config.log_dir)
             .and_then(|()| std::fs::write(&log_path, transcript))
         {
@@ -508,22 +558,40 @@ impl ProofGenerator for SubprocessProofGenerator {
     }
 }
 
-/// An argument with any URL cut down to `scheme://host`: RPC URLs carry API
-/// keys and the transcript is a file that gets copied around.
-fn without_url_secrets(arg: &str) -> String {
-    match arg.find("://") {
-        None => arg.to_string(),
-        Some(i) => {
-            let rest = &arg[i + 3..];
-            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            let host = rest[..end].rsplit('@').next().unwrap_or("");
-            format!("{}://{host}", &arg[..i])
-        },
+/// Every URL in `text` cut down to `scheme://host`: RPC URLs carry API keys,
+/// and a transcript is a file that gets copied around.
+fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let after = &rest[i + 3..];
+        let url_end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '>' | ','))
+            .unwrap_or(after.len());
+        let url = &after[..url_end];
+        let host_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+        let host = url[..host_end].rsplit('@').next().unwrap_or("");
+        out.push_str(&rest[..i]);
+        out.push_str("://");
+        out.push_str(host);
+        rest = &after[url_end..];
     }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn urls_in_a_transcript_are_cut_to_their_host() {
+        let t = "$ fetch --rpc-url https://eth.example/v2/SECRETKEY?x=1 --tx 0xab\n  RPC URL: http://u:p@h.local:8545/path\nnot a url: a://\n";
+        assert_eq!(
+            redact_urls(t),
+            "$ fetch --rpc-url https://eth.example --tx 0xab\n  RPC URL: http://h.local:8545\nnot \
+             a url: a://\n"
+        );
+    }
+
     use alloy::primitives::{Address, B256};
 
     use super::*;

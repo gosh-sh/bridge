@@ -30,8 +30,11 @@ CI (`.woodpecker/images.yaml`) builds all four on every pull request and pushes 
 Locally:
 
 ```bash
-docker build -f docker/Dockerfile --target bridge-relayer -t bridge-relayer:dev .
-docker compose -f docker/compose.yaml --project-directory docker build   # all four
+# the names the compose file runs: ${BRIDGE_REGISTRY}/<image>:${BRIDGE_IMAGE_TAG}
+for t in bridge-relayer bridge-deposit-relayer bridge-eth-lc-relayer bridge-cli; do
+  docker build -f docker/Dockerfile --target $t -t docker.gosh.sh/$t:dev .
+done
+# then BRIDGE_IMAGE_TAG=dev and BRIDGE_PULL_POLICY=never in docker/.env
 ```
 
 The first build compiles every workspace (tens of minutes); BuildKit cache mounts keep the
@@ -52,8 +55,8 @@ $BRIDGE_OPT/                         # e.g. /opt/bridge-shellnet, root:bridge
   env/eth-lc-relayer.env             # 0640
   env/arbitrum-anchors.env           # 0640
   env/cli.env                        # optional, for `compose run cli`
-  keys/an-owner.keys.json            # 0600: the light client's owner (eth-lc-relayer)
-  keys/deposit-sender.keys.json      # 0600: finalizeDeposit and proveBlock signer
+  keys/an-owner.keys.json            # bridge:bridge 0600: the light client's owner (eth-lc-relayer)
+  keys/deposit-sender.keys.json      # bridge:bridge 0600: finalizeDeposit and proveBlock signer
   keys/bk_set.json                   # the BK set the bridge was deployed with
   daemon-live/state/                 # relayer-state.json, prover_state.json, prover_bk_set.json
   deposit-relayer/state/             # deposit-relayer-state.json, .lock
@@ -123,9 +126,14 @@ directory now: its scripts are `docker/relayer/`, its runtime env template is
 ran the kit moves `L2_config/relayer-state.json` and `L2_config/state/*` into
 `$BRIDGE_OPT/daemon-live/state/`, `params/` into `$BRIDGE_DATA/params/relayer/` and the BK
 set file into `keys/bk_set.json`; `EXPECTED_BRIDGE_COMMIT` becomes the commit of the image,
-since the BK set is no longer baked into it. A host that ran the systemd units moves each
-state file into its service's `state/` directory (the daemons name the files; an old
-`--state` flag or `*_STATE` variable fails with the hint).
+since the BK set is no longer baked into it; `RELAYER_STATE_PATH` and `BRIDGE_CONFIG_DIR` in a
+reused env file are ignored. A host that ran the systemd units moves each state file into its
+service's `state/` directory **under the name the daemon expects** (`deposit-relayer-state.json`,
+`eth-lc-relayer-state.json`, `arbitrum-anchors-state.json`): a daemon that finds other JSON files
+there but not its own refuses to start rather than begin from an empty state, and an old
+`--state` flag or `*_STATE` variable fails with the hint. `eth-lc-relayer set-committee` and
+`submit-rotate` write the daemon's state file and take its lock: stop `eth-lc-relayer` first,
+start it again after.
 
 ## Upgrade
 

@@ -290,9 +290,9 @@ services:
         target: /data/params
         bind: { create_host_path: false }
 
-  # The BK set file for a (re)deploy: the live set folded forward to the seed
-  # height. `docker compose run --rm fold-bk-set --cap-height <seed>
-  # --genesis /data/state/prover_bk_set.json --out /data/work/bk_set.json`
+  # The BK set file for a (re)deploy: the genesis set (keys/bk_set.json,
+  # BRIDGE_BK_SET_CONFIG) folded forward to the seed height.
+  # `docker compose run --rm fold-bk-set --cap-height <seed> --out /data/work/bk_set.json`
   fold-bk-set:
     <<: *service
     profiles: [ops]
@@ -308,6 +308,8 @@ services:
       - 'export BRIDGE_GQL_ENDPOINT="$(sed -n "s/^BRIDGE_GQL_ENDPOINT=//p" /run/secrets/runtime-env)"; exec /opt/bridge/bin/seed_prover_bk_set "$@"'
       - fold-bk-set
     command: ["--help"]
+    environment:
+      BRIDGE_BK_SET_CONFIG: /run/config/bk_set.json
     volumes:
       - type: bind
         source: ${BRIDGE_OPT}/env/daemon-live.env
@@ -315,8 +317,8 @@ services:
         read_only: true
         bind: { create_host_path: false }
       - type: bind
-        source: ${BRIDGE_OPT}/daemon-live/state
-        target: /data/state
+        source: ${BRIDGE_OPT}/keys/bk_set.json
+        target: /run/config/bk_set.json
         read_only: true
         bind: { create_host_path: false }
       - type: bind
@@ -338,7 +340,8 @@ services:
       - path: ${BRIDGE_OPT}/env/cli.env
         required: false
     # The mounts are the CLI's defaults, so `run --rm cli deposit …` and
-    # `withdraw …` need no directory flags.
+    # `withdraw …` need no directory flags (the keys and endpoints come from
+    # env/cli.env or the command line).
     environment:
       HOME: /data/work
       BRIDGE_DEPOSIT_STATE_DIR: /data/state/deposit

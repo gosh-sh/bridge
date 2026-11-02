@@ -37,11 +37,11 @@ use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
     bridge_abi, fetch_deposit_from_receipt, parse_and_validate_dapp_id, prepare_dir,
-    resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig,
-    DeploymentIdentity, DepositProofBundle, DepositProverBins, DepositSource, EthLogSource,
-    MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, RelayerState,
-    ServiceDirs, StateLock, SubmitOutcome, SubprocessProofGenerator, SubprocessProverConfig,
-    BRIDGE_DEPLOY_BLOCK_ENV, LOG_FILE_PREFIX,
+    refuse_unrecognised_state, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
+    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle, DepositProverBins,
+    DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig,
+    RelayerMetrics, RelayerState, ServiceDirs, StateLock, SubmitOutcome, SubprocessProofGenerator,
+    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -820,6 +820,7 @@ async fn run_daemon(
     allow_insecure_graphql: bool,
     expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
+    refuse_unrecognised_state(&state_path, STATE_FILE_NAME)?;
     let _state_lock = StateLock::acquire(&state_path)
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
 

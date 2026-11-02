@@ -46,10 +46,11 @@ use eth_light_client_relayer::{
     RotateProofBundle, StepProofBundle,
 };
 use eth_light_client_relayer::{
-    arbitrum, prepare_dir, AnConfig, AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc,
-    HttpBeaconSource, MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig,
-    RelayerMetrics, ServiceDirs, StateLock, SubprocessProofGenerator, SubprocessProverConfig,
-    ANCHORS_LOG_FILE_PREFIX, ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX, STATE_FILE_NAME,
+    arbitrum, prepare_dir, refuse_unrecognised_state, AnConfig, AnSubmitter, BackoffConfig,
+    BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter, MockProofGenerator,
+    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, ServiceDirs, StateLock,
+    SubprocessProofGenerator, SubprocessProverConfig, ANCHORS_LOG_FILE_PREFIX,
+    ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 use tracing::{error, info, warn};
 #[cfg(feature = "live-submit")]
@@ -413,10 +414,10 @@ enum Cmd {
         #[arg(long, default_value_t = 12)]
         poll_secs: u64,
         /// Blocks per `eth_getLogs` on the parent chain.
-        #[arg(long, default_value_t = 1_000)]
+        #[arg(long, env = "PARENT_LOG_SPAN", default_value_t = 1_000)]
         parent_log_span: u64,
         /// Blocks per `eth_getLogs` on the Arbitrum chain.
-        #[arg(long, default_value_t = 10_000)]
+        #[arg(long, env = "ARBITRUM_LOG_SPAN", default_value_t = 10_000)]
         arbitrum_log_span: u64,
         /// Allow non-HTTPS GraphQL endpoints (local dev only).
         #[arg(long)]
@@ -866,6 +867,9 @@ async fn set_committee(
     // unrecorded.
     prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
     let state = state_dir.join(STATE_FILE_NAME);
+    // The daemon's lock: a running daemon would overwrite what is recorded
+    // here with its own copy of the state, so it has to be stopped first.
+    let _lock = StateLock::acquire(&state)?;
     let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter
         .set_committee_commitment(commitment, period)
@@ -1247,6 +1251,8 @@ async fn submit_rotate(
     // `set_committee`).
     prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
     let state = state_dir.join(STATE_FILE_NAME);
+    // The daemon's lock, as in `set_committee`.
+    let _lock = StateLock::acquire(&state)?;
     let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter.submit_rotate(&bundle).await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {
@@ -1456,6 +1462,7 @@ async fn run_daemon(
             dirs.log.clone(),
         )?)
     };
+    refuse_unrecognised_state(&state_path, STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(&state_path)?;
     let source = Arc::new(HttpBeaconSource::new(beacon_url)?);
     let mut cfg = RelayerConfig::new(state_path.clone());
@@ -1739,6 +1746,7 @@ async fn arbitrum_anchors(
 ) -> anyhow::Result<()> {
     // One relayer per state file: two would overwrite each other's proofs,
     // which cannot be fetched again.
+    refuse_unrecognised_state(state_path, ANCHORS_STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(state_path)?;
     let view = arbitrum_view(
         parent_rpc_url,
@@ -2103,8 +2111,9 @@ mod tests {
     /// `deposit-relayer` with their flags, environment variables and
     /// defaults; bridge-audit#132 then replaced the state file with the
     /// three directories (`--anchor-state` stays hidden, for the migration
-    /// hint), built the ABIs in and gave `--bridge-address` its environment
-    /// variable, so a service can be configured from an env file alone.
+    /// hint), built the ABIs in and gave `--bridge-address` and the anchors'
+    /// log spans environment variables, so a service can be configured from
+    /// an env file alone.
     #[test]
     fn the_arbitrum_subcommands_keep_the_deposit_relayer_flags() {
         assert_eq!(
@@ -2122,8 +2131,8 @@ mod tests {
                 ("log-dir", Some("ARBITRUM_ANCHORS_LOG_DIR"), &[]),
                 ("anchor-state", Some("ARBITRUM_ANCHOR_STATE"), &[]),
                 ("poll-secs", None, &["12"]),
-                ("parent-log-span", None, &["1000"]),
-                ("arbitrum-log-span", None, &["10000"]),
+                ("parent-log-span", Some("PARENT_LOG_SPAN"), &["1000"]),
+                ("arbitrum-log-span", Some("ARBITRUM_LOG_SPAN"), &["10000"]),
                 ("allow-insecure-graphql", None, &["false"]),
             ])
         );

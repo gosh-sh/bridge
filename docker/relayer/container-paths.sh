@@ -24,4 +24,8 @@ remap_compose_runtime_paths() {
   export PARAMS_SHA256SUMS BRIDGE_PK_CACHE_DIR
   export BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_BK_SET_CONFIG
   export BRIDGE_AGGREGATE_PROOF_BIN BRIDGE_VERIFIERS_DIR
+  # Settings of the old kit's env file that the daemon would refuse (the
+  # state is a directory now, bridge-audit#132): a reused file must not
+  # stop the container on every start.
+  unset RELAYER_STATE_PATH BRIDGE_CONFIG_DIR
 }

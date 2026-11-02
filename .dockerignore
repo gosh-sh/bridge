@@ -27,6 +27,14 @@ Thumbs.db
 # Environment
 .env
 .env.local
+docker/.env
+docker/env/*.env
+**/deploy.env
+**/runtime.env
+**/*.key
+**/*.secret
+**/*.keys.json
+**/*.log
 
 # Not needed in any image (crate READMEs, CHANGELOG.md and
 # crates/ackinacki-bridge/docs/ are built into the CLI and stay)

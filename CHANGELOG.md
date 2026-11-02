@@ -27,7 +27,8 @@ assigns it when the release is tagged.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
-  flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+  flags and environment variables carry over; the `ARBITRUM_ANCHOR_STATE` file gives way to the
+  state directory of the next entry.
 - Every long-running service takes three directories and writes nowhere else
   (bridge-audit#132): `--state-dir`, `--work-dir`, `--log-dir`, each with an environment
   variable (`DEPOSIT_RELAYER_*_DIR`, `ETH_LC_RELAYER_*_DIR`, `ARBITRUM_ANCHORS_*_DIR`,
@@ -38,10 +39,13 @@ assigns it when the release is tagged.
   or environment that still has one fails with the migration hint. Move each state file into
   its service's state directory (`deposit-relayer-state.json`, `eth-lc-relayer-state.json`,
   `arbitrum-anchors-state.json`, `relayer-state.json` next to `prover_state.json`); the
-  daemons name the files. `set-committee`, `submit-rotate` and the other `relayer` daemon
-  modes take `--state-dir` too. The provers' files go under the work directory instead of the
-  system temp directory, their transcripts and each daemon's own log (a file per day, beside
-  stdout) into the log directory.
+  daemons name the files; a daemon that finds other JSON files in its state directory but not
+  its own refuses to start. `deposit-relayer status` and `prove-one`, `eth-lc-relayer prove-one`,
+  `set-committee`, `submit-rotate` and the other `relayer` daemon modes take the directory flags
+  too; `set-committee` and `submit-rotate` take the daemon's state lock, so the daemon is
+  stopped while they run. The provers' files go under the work directory instead of the system
+  temp directory, their transcripts and each daemon's own log (a file per day, the newest 14
+  kept, beside stdout) into the log directory.
 - The contract ABIs are built into the binaries: `AN_BRIDGE_ABI_PATH`,
   `AN_ARBITRUM_VERIFIER_ABI_PATH`, `AN_LC_ABI_PATH`, `AN_USDC_ABI_PATH` and their flags are
   removed from `deposit-relayer` and `eth-lc-relayer`; `crates/eth-light-client-relayer/abi/`
@@ -65,6 +69,9 @@ assigns it when the release is tagged.
   `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and
   on a version tag, tagged `sha-<12>`, `latest` and the release). `--target tools` gives
   every binary as plain files.
+- `deposit-relayer` reads `RPC_URL`, `BRIDGE_ADDRESS` and `EXPECT_CHAIN_ID` from the
+  environment, `eth-lc-relayer arbitrum-anchors` reads `BRIDGE_ADDRESS`, `PARENT_LOG_SPAN` and
+  `ARBITRUM_LOG_SPAN`: a service is configured from an env file alone.
 - `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
 

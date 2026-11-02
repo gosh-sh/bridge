@@ -124,14 +124,19 @@ async fn a_step_cycle_writes_only_into_the_three_directories() {
     assert_eq!(entries(&dirs.state), vec![STATE_FILE_NAME.to_string()]);
     // Work: the per-prove directory is gone with the bundle.
     assert_eq!(entries(&dirs.work), Vec::<String>::new());
-    // Logs: the prover's transcript, both streams, named after the step.
-    assert_eq!(entries(&dirs.log), vec![
-        "step-5-stderr.log".to_string(),
-        "step-5-stdout.log".to_string()
-    ]);
-    assert!(std::fs::read_to_string(dirs.log.join("step-5-stderr.log"))
-        .unwrap()
-        .contains("fake stderr"));
+    // Logs: the prover's transcript, both streams, named after the step and
+    // the time of the run (a retry must not overwrite a failed run's files).
+    let logs = entries(&dirs.log);
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    for (stream, text) in [("stderr", "fake stderr"), ("stdout", "")] {
+        let name = logs
+            .iter()
+            .find(|n| n.starts_with("step-5-") && n.ends_with(&format!("-{stream}.log")))
+            .unwrap_or_else(|| panic!("no step-5-<time>-{stream}.log in {logs:?}"));
+        assert!(std::fs::read_to_string(dirs.log.join(name))
+            .unwrap()
+            .contains(text));
+    }
     // Nowhere else.
     assert_eq!(entries(&ro), Vec::<String>::new());
     assert_eq!(entries(&prover_dir), Vec::<String>::new());

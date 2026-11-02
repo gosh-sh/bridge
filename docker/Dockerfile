@@ -261,12 +261,20 @@ COPY contracts/ethereum/verifiers/PrimaryAggregatorVerifier.bin \
      contracts/ethereum/verifiers/LayerHashesAggregatorVerifier.sol \
      contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.sol \
      /opt/bridge/verifiers/
+# The CLI looks for the deposit prover's tools inside its prover directory
+# (configs/ in the image, data/ the mounted params) and for `aggregate-proof`
+# under `<aggregator dir>/target/release`, the layout of a source checkout:
+# links give the image that layout. The params are given by flags or env/cli.env.
 RUN chmod 0555 /opt/bridge/bin/* && chmod 0444 /opt/bridge/verifiers/* \
     && ln -s /data/params/deposit-prover /opt/bridge/deposit-prover/data \
+    && ln -s /opt/bridge/bin/fetch_deposit_data /opt/bridge/deposit-prover/fetch_deposit_data \
+    && ln -s /opt/bridge/bin/export_blake2b_proof /opt/bridge/deposit-prover/export_blake2b_proof \
+    && mkdir -p /opt/bridge/aggregator/target/release \
+    && ln -s /opt/bridge/bin/aggregate-proof /opt/bridge/aggregator/target/release/aggregate-proof \
     && cd /opt/bridge && sha256sum bin/* verifiers/* >IMAGE-SHA256SUMS && chmod 0444 IMAGE-SHA256SUMS
-# The CLI's deposit prover directory (configs/ in the image, data/ the mounted
-# params); the withdrawal's aggregator and params are given by flags.
-ENV BRIDGE_DEPOSIT_PROVER_DIR=/opt/bridge/deposit-prover
+ENV BRIDGE_DEPOSIT_PROVER_DIR=/opt/bridge/deposit-prover \
+    BRIDGE_AGGREGATOR_DIR=/opt/bridge/aggregator \
+    BRIDGE_VERIFIERS_DIR=/opt/bridge/verifiers
 USER bridge
 WORKDIR /data/work
 ENTRYPOINT ["/opt/bridge/bin/ackinacki-bridge"]

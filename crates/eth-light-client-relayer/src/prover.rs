@@ -205,16 +205,38 @@ impl SubprocessProofGenerator {
     /// directory. Written even when the prover failed: that is when it is
     /// read.
     fn write_transcript(&self, stem: &str, output: &std::process::Output) {
-        let write = |name: String, bytes: &[u8]| {
-            let path = self.cfg.log_dir.join(name);
-            if let Err(e) = std::fs::create_dir_all(&self.cfg.log_dir)
-                .and_then(|()| std::fs::write(&path, bytes))
-            {
-                tracing::warn!(log = %path.display(), error = %e, "prover transcript not written");
-            }
-        };
-        write(format!("{stem}-stdout.log"), &output.stdout);
-        write(format!("{stem}-stderr.log"), &output.stderr);
+        // A timestamp in the name: a retry of the same slot or period must
+        // not overwrite the transcript of the failed run.
+        let ts = unix_now();
+        self.write_log(
+            format!("{stem}-{ts}-stdout.log"),
+            redact_urls(&String::from_utf8_lossy(&output.stdout)),
+        );
+        self.write_log(
+            format!("{stem}-{ts}-stderr.log"),
+            redact_urls(&String::from_utf8_lossy(&output.stderr)),
+        );
+    }
+
+    /// Written where the transcript would be when the prover was killed on
+    /// timeout and left no output.
+    fn write_timeout_note(&self, stem: &str) {
+        self.write_log(
+            format!("{stem}-{}-timeout.log", unix_now()),
+            format!(
+                "killed after {:?} (timeout); no output was kept\n",
+                self.cfg.timeout
+            ),
+        );
+    }
+
+    fn write_log(&self, name: String, text: String) {
+        let path = self.cfg.log_dir.join(name);
+        if let Err(e) =
+            std::fs::create_dir_all(&self.cfg.log_dir).and_then(|()| std::fs::write(&path, text))
+        {
+            tracing::warn!(log = %path.display(), error = %e, "prover transcript not written");
+        }
     }
 
     async fn run_step(&self, update: &FinalityUpdate) -> Result<StepProofBundle, RelayerError> {
@@ -264,7 +286,10 @@ impl SubprocessProofGenerator {
 
         let output = tokio::time::timeout(self.cfg.timeout, output)
             .await
-            .map_err(|_| RelayerError::ProofGeneration("step prove timed out".into()))?
+            .map_err(|_| {
+                self.write_timeout_note(&format!("step-{}", update.attested_slot));
+                RelayerError::ProofGeneration("step prove timed out".into())
+            })?
             .map_err(|e| {
                 RelayerError::ProofGeneration(format!(
                     "spawn {}: {e}",
@@ -376,7 +401,10 @@ impl SubprocessProofGenerator {
             .output();
         let output = tokio::time::timeout(self.cfg.timeout, output)
             .await
-            .map_err(|_| RelayerError::ProofGeneration("rotate prove timed out".into()))?
+            .map_err(|_| {
+                self.write_timeout_note(&format!("rotate-{to_period}"));
+                RelayerError::ProofGeneration("rotate prove timed out".into())
+            })?
             .map_err(|e| {
                 RelayerError::ProofGeneration(format!("spawn {}: {e}", rotate_bin.display()))
             })?;
@@ -464,6 +492,35 @@ impl ProofGenerator for SubprocessProofGenerator {
     ) -> Result<RotateProofBundle, RelayerError> {
         self.run_rotate(to_period, chain).await
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Every URL in `text` cut down to `scheme://host`: RPC URLs carry API keys,
+/// and a transcript is a file that gets copied around.
+fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let after = &rest[i + 3..];
+        let url_end = after
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | '>' | ','))
+            .unwrap_or(after.len());
+        let url = &after[..url_end];
+        let host_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+        let host = url[..host_end].rsplit('@').next().unwrap_or("");
+        out.push_str(&rest[..i]);
+        out.push_str("://");
+        out.push_str(host);
+        rest = &after[url_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]

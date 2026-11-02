@@ -66,8 +66,51 @@ pub fn prepare_dir(what: &str, dir: &Path) -> Result<(), RelayerError> {
     Ok(())
 }
 
+/// Refuses a state directory that holds JSON files but not `expected`, the
+/// file this service names: an old state file moved in without being
+/// renamed would otherwise start the service from an empty state
+/// (bridge-audit#132). `state_file` is the expected file's path.
+pub fn refuse_unrecognised_state(state_file: &Path, expected: &str) -> Result<(), RelayerError> {
+    if state_file.exists() {
+        return Ok(());
+    }
+    let Some(dir) = state_file.parent() else {
+        return Ok(());
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    let mut others: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".json") && n != expected)
+        .collect();
+    if others.is_empty() {
+        return Ok(());
+    }
+    others.sort();
+    Err(RelayerError::other(format!(
+        "state directory {} holds {} but not {expected}: rename the old state file to {expected} \
+         (bridge-audit#132) or point the service at an empty directory",
+        dir.display(),
+        others.join(", ")
+    )))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_state_directory_with_a_foreign_json_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().join("x-state.json");
+        assert!(refuse_unrecognised_state(&expected, "x-state.json").is_ok());
+        std::fs::write(dir.path().join("state.json"), b"{}").unwrap();
+        let err = refuse_unrecognised_state(&expected, "x-state.json").unwrap_err();
+        assert!(err.to_string().contains("state.json"), "{err}");
+        std::fs::write(&expected, b"{}").unwrap();
+        assert!(refuse_unrecognised_state(&expected, "x-state.json").is_ok());
+    }
+
     use super::*;
 
     #[test]

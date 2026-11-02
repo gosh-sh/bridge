@@ -245,9 +245,17 @@ set -a; source L2_config/env; set +a          # your key (.env) and endpoints
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=2 \
 PRIVATE_KEY="$RELAYER_PRIVATE_KEY" \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
+PREDECESSOR_BRIDGE=<the paused Sepolia bridge this one replaces, or the zero address> \
 BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   ./scripts/deploy_bridge_bundle.sh 2>&1 | tee "logs/deploy_L2_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
+
+- `PREDECESSOR_BRIDGE` has no default. Name the Sepolia bridge for the same
+  `WITHDRAW_ACC_FR` that this deploy replaces, after pausing it: the new bridge
+  refuses the withdrawals it paid. Use the zero address only for the first
+  bridge for that identity; a zero in place of a live one pays its
+  withdrawals again. The cutover is in `docs/aave-yield.md`, "Replacing a
+  bridge on the same chain".
 
 - `BRIDGE_SEED_SEQNO` pins the seed to S; without it the script picks the
   newest boundary at deploy time, which can be later than the S the set was

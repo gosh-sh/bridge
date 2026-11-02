@@ -10,6 +10,7 @@ import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 import "./ShplonkDeployLib.sol";
+import "./PredecessorEnv.sol";
 
 /**
  * @title DeployRealBridge
@@ -118,15 +119,6 @@ contract DeployRealBridge is Script {
             // pair. Same class as altTokenId: envOr defaults to 0, then
             // immutable.
         }
-        if (w.predecessor != address(0)) {
-            // The predecessor does not consult its successor's nullifiers,
-            // so it must not pay anything once the successor is live.
-            require(
-                AckiNackiBridge(w.predecessor).paused(),
-                "pause PREDECESSOR_BRIDGE before the deploy"
-            );
-        }
-
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
 
         (address oracleAddr, string memory oracleType) = _deployOracle(useAxiomOracle);
@@ -177,9 +169,7 @@ contract DeployRealBridge is Script {
         w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
         w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
         w.altTokenId = vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(0));
-        // No default: forgetting the bridge being replaced would let the new
-        // one pay withdrawals the old one already paid.
-        w.predecessor = vm.envAddress("PREDECESSOR_BRIDGE");
+        w.predecessor = PredecessorEnv.read();
     }
 
     function _deployBridge(address oracleAddr, WireInputs memory w)

@@ -38,8 +38,8 @@ note here calling out the drift.
 > **Drift note, 2026-10-30 (Arbitrum Sepolia AAVE).** §10, §12.1, §12.2, §12.3 and §13
 > now include chain id 421614. `DeployRealBridge._resolveTokenAddresses` accepts it.
 > `USE_AAVE` defaults false, and `USE_AXIOM_ORACLE=true` reverts on this chain. The
-> `DeployRealBridge.s.sol` citations in the constructor table (`:169`) and in §12
-> (`:161`, `:174-175`, `:189`) were re-anchored to this script. The constructor table's
+> `DeployRealBridge.s.sol` citations in the constructor table (`:161`) and in §12
+> (`:156`, `:166-167`, `:172`) were re-anchored to this script. The constructor table's
 > `genesisBkSetCommitment` row cites `src/AckiNackiBridge.sol` as of this note (`:763`).
 > The verifier-triple row was wrong: the constructor reverts `PartialVerifyBlockWiring` on a
 > partial triple (`:743`); it and its `VerifyBlockDisabled` citation (`:940`) are re-anchored.
@@ -47,9 +47,10 @@ note here calling out the drift.
 > citations were not re-anchored.
 >
 > **Drift note, 2026-10-30 (predecessor bridge, gosh-sh/bridge-audit#140).** §4.2's `predecessor`
-> row, §5's `BridgeWithdrawConfig` and predecessor rows, §7.2's check 7 and *Replay scope*, §7.4's
-> `isNullifierUsed` row, §10's `fundTreasury` / `migrateTreasury` rows, §12.1's `DeployRealBridge` predecessor sentence and §12.2's
-> `PREDECESSOR_BRIDGE` row cite `src/AckiNackiBridge.sol` and `script/DeployRealBridge.s.sol` as of
+> row, §5's `BridgeWithdrawConfig`, predecessor and `genesisBkSetCommitment` rows, §7.2's check 7
+> and *Replay scope*, §7.4's `isNullifierUsed` row, §10's `fundTreasury` / `migrateTreasury` rows,
+> §12.1's `DeployRealBridge` row and §12.2's `WIRE_VERIFY_BLOCK` and `PREDECESSOR_BRIDGE` rows cite
+> `src/AckiNackiBridge.sol`, `script/DeployRealBridge.s.sol` and `script/PredecessorEnv.sol` as of
 > this change. Other citations were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
@@ -253,7 +254,7 @@ whether a second rotation would cross an unverified bundle boundary. When the ve
 wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); when the triple is
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
-`BridgeWithdrawConfig` (`:644-675`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
+`BridgeWithdrawConfig` (`:662-693`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
 `altDstHostChainId`, `altTokenId`, `predecessor`. `predecessor` is the `AckiNackiBridge` this
 deployment replaces on the same chain (zero for the first one there); it is the last field, so
 the constructor's ABI signature changed when it was added.
@@ -267,7 +268,7 @@ Validation performed (and *not* performed):
 | AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
-| `genesisBkSetCommitment != 0` when the verifier triple is wired | 763 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:169` checks it before the deploy too. |
+| `genesisBkSetCommitment != 0` when the verifier triple is wired | 763 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:161` checks it before the deploy too. |
 | `predecessor != 0` ⇒ C4 verifier set, `predecessor` has code, answers `isNullifierUsed(0)`, and returns this deployment's `dappFr` and `accFr` from `bridgeWithdrawalDappFr()` / `bridgeWithdrawalAccFr()` | 793-796, 813-832 | else `InvalidPredecessor(predecessor)`. Code at the address on this chain is what ties the predecessor to this chain; the identity check ties it to the same AN-side bridge. A probe that reverts gives `InvalidPredecessor`; one whose return data does not decode reverts the deployment without a reason. |
 | verifier triple is all-or-nothing | 743 | else `PartialVerifyBlockWiring`. Test `test/AckiNackiBridgeWithdrawByProof.t.sol:305` pins it. With no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` at call time (`:940`). |
 
@@ -783,7 +784,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:161`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:174-175`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. Requires `PREDECESSOR_BRIDGE` (`:182`) and refuses a non-zero one that is not paused (`:121-128`). |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:156`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:166-167`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. Requires `PREDECESSOR_BRIDGE` (`:172`) and refuses a non-zero one that is not paused (`script/PredecessorEnv.sol:20-26`). |
 | `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
@@ -798,7 +799,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle` on chain ids 1 and 11155111. On 421614 `true` reverts; leave it unset for `MockBlockHeaderOracle`. |
 | `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:147`, unconditional). On mainnet the value is `envBool` with no default (`:144`); on other nets it used to default false and no longer may. |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:156`, unconditional). On mainnet the value is `envBool` with no default (`:153`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned** at L1; under L2 anchoring it must be a multiple of `BUNDLE_STRIDE` = 16384. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
@@ -807,7 +808,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
-| `PREDECESSOR_BRIDGE` | RealBridge (required, no default), Shellnet, Reuse, GenesisCursor (default zero) | Immutable `predecessor`: the bridge this deploy replaces on the same chain, or the zero address for the first bridge there. `DeployRealBridge` requires it to be paused. |
+| `PREDECESSOR_BRIDGE` | RealBridge, Shellnet, Reuse, GenesisCursor (required, no default) | Immutable `predecessor`: the bridge this deploy replaces on the same chain, or the zero address for the first bridge there. A non-zero one must already be paused. All four read it through `script/PredecessorEnv.sol`. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |

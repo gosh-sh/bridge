@@ -52,13 +52,13 @@ replaces it on the same chain. Follow
 
 1. `pause()` `0x3FB0…8638` and record its `treasuryBalance()` (1.999999 USDC on 2026-10-30).
 2. Deploy with `USE_AAVE=true` and `PREDECESSOR_BRIDGE=0x3FB082a905a895151224F6d93bD074E816338638`.
-   Deploy it already paused if anything could reach it before step 4: the deploying account calls
-   `pause()` right after the deploy.
+   The constructor leaves it live: the deploying account calls `pause()` right after the deploy.
 3. `0x3FB0…8638` predates `migrateTreasury`, so its USDC stays in it. From the new bridge's owner,
    `approve` the new bridge for the recorded amount and call `fundTreasury(<amount>)`.
-4. `setTrustedL1Bridge(421614, <new bridge>, true)` and
-   `setTrustedL1Bridge(421614, 0x3FB0…8638, false)` on `eccUSDCBridge`; reconfigure the relayers
-   below and the `ackinacki-bridge` users; `unpause()` the new bridge.
+4. `setTrustedL1Bridge(421614, <new bridge>, true)` on `eccUSDCBridge`; reconfigure the relayers
+   below and the `ackinacki-bridge` users. Once every deposit id below `0x3FB0…8638`'s
+   `depositCounter()` is finalized on Acki Nacki, `setTrustedL1Bridge(421614, 0x3FB0…8638, false)`.
+   `unpause()` the new bridge.
 
 `AckiNackiBridgeArbSepoliaAaveForkTest` exercises the AAVE calls against the live market on a
 fork, with a bridge it deploys there. The web form deposits on Ethereum Sepolia only
@@ -278,13 +278,19 @@ bridge pays those withdrawals out of other depositors' money and eventually stop
    reverts `InvalidPredecessor` unless that address has code on this chain, answers
    `isNullifierUsed`, and was deployed for the same `WITHDRAW_DAPP_FR` and `WITHDRAW_ACC_FR`.
    For a third bridge, name the second one: each bridge answers for its own predecessor, so
-   one address covers the whole line.
+   one address covers the whole line. The constructor leaves the new bridge unpaused, so it
+   takes deposits and pays withdrawals from its first block; its owner calls `pause()` in the
+   next transaction and keeps it paused until step 4. A deposit made in between is not lost:
+   Acki Nacki finalizes it once it trusts the new bridge.
 3. **Move the principal.**
    - An old bridge that has `migrateTreasury(address)` (this release onwards): its owner calls
      `migrateTreasury(<new bridge>)`. It needs the old bridge paused, its `treasuryBalance`
      liquid (`TreasuryNotLiquid` otherwise), and a target whose `predecessor()` is the old
-     bridge (`NotSuccessor` otherwise). The whole `treasuryBalance` moves; the old bridge's
-     book drops to 0, so it cannot pay anything even if unpaused. USDC above the book and any
+     bridge (`NotSuccessor` otherwise). The whole `treasuryBalance` moves and the old bridge's
+     book drops to 0. That is not final: the old bridge's owner can still `unpause()` it, and
+     a new `deposit` or `fundTreasury` raises its book again, after which it pays withdrawals
+     without consulting the new bridge's nullifiers. Keep the old bridge paused for good.
+     USDC above the book and any
      aUSDC yield stay behind for `skimExcessUsdc` / `harvestYield`. The new bridge emits
      `TreasuryFunded`, the old one `TreasuryMigrated`.
    - An older bridge, such as the 421614 bridge `0x3FB082a905a895151224F6d93bD074E816338638`, has
@@ -295,9 +301,13 @@ bridge pays those withdrawals out of other depositors' money and eventually stop
    `fundTreasury` credits `treasuryBalance` without a `Deposit` event, so nothing is minted on
    Acki Nacki. Only the owner and `predecessor` may call it, and it works while the bridge is
    paused.
-4. **Move Acki Nacki and the off-chain services over**: trust the new bridge on `eccUSDCBridge`,
-   stop trusting the old one, point relayers and `ackinacki-bridge` at the new address, then
-   `unpause()` the new bridge if it was deployed paused.
+4. **Move Acki Nacki and the off-chain services over**: trust the new bridge on `eccUSDCBridge`
+   (`setTrustedL1Bridge(<chainId>, <new>, true)`) and point relayers and `ackinacki-bridge` at
+   the new address. Stop trusting the old bridge only after every deposit it took has been
+   finalized on Acki Nacki — every deposit id below its `depositCounter`, which the pause
+   froze. `eccUSDCBridge` refuses a deposit from an untrusted bridge (`ERR_UNSUPPORTED_SRC_CHAIN`),
+   and step 3 has already moved that deposit's USDC to the new bridge, so a deposit refused
+   here has no way back. Then `unpause()` the new bridge.
 
 Check the new bridge before unpausing anything that depends on it:
 

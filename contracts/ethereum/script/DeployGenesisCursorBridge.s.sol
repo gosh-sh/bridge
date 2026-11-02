@@ -8,6 +8,7 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "./PredecessorEnv.sol";
 
 /// @title GenesisCursorBridge
 /// @notice Thin test/E2E subclass of `AckiNackiBridge` that lets a deployment
@@ -44,6 +45,8 @@ contract GenesisCursorBridge is AckiNackiBridge {
 ///         `GENESIS_LAST_SEEN_BLOCK_SEQ_NO`. Used for the AN→ETH mid-chain
 ///         replay E2E where the local proof window starts above the true chain
 ///         segment genesis.
+///         `PREDECESSOR_BRIDGE` is required, as in every live deploy
+///         (`PredecessorEnv`): the zero address unless this bridge replaces one.
 contract DeployGenesisCursorBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
@@ -77,7 +80,7 @@ contract DeployGenesisCursorBridge is Script {
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
             altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)),
-            predecessor: IPredecessorBridge(vm.envOr("PREDECESSOR_BRIDGE", address(0)))
+            predecessor: IPredecessorBridge(PredecessorEnv.read())
         });
 
         uint64 genesisLastSeen = uint64(vm.envUint("GENESIS_LAST_SEEN_BLOCK_SEQ_NO"));

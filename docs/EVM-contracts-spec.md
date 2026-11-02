@@ -970,7 +970,7 @@ code contradicts them on:
 
 * `deposit()` takes **USDC via `transferFrom`**, not ETH; the signature is
   `deposit(uint256, uint256, bytes32)`; `MAX_DEPOSIT_AMOUNT` is `type(uint64).max`, not `100 ether`.
-* The `Deposit` event carries five fields including the AN destination, not four.
+* The `Deposit` event carries six fields, including the AN DApp ID and destination account.
 * Verification is **SHPLONK aggregator Yul** for all four circuits; the gnark Groth16 wrappers and
   the `*Groth16VerifierGenerated.sol` files described in the README no longer exist in `src/`.
 * `verifyBlock`'s anchor check is the per-layer `expectedPrevAnchor(numLayers)` pick, not a flat

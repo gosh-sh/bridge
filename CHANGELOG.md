@@ -25,8 +25,8 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - Deposits now use `deposit(uint256 amount, uint256 dappId, bytes32 anAccount)` and a six-field
-  `Deposit` event; upgrade the EVM contract, AN bridge 1.14.0 (`contracts/an/0.80.0_compiled/
-  exchange/`, code hash `9bdb2b78…`), prover and deposit clients together, and finish old-key
+  `Deposit` event; upgrade the EVM contract, AN bridge 1.14.1 (`contracts/an/0.80.0_compiled/
+  exchange/`, code hash `d1adeb26…`), prover and deposit clients together, and finish old-key
   deposits before switching because the deposit verification key has rotated.
 - The web form and `AN_RECEIVER` now require `dapp_id::account_id`, with 64 hex characters per part.
 - Remove deposit-daemon `AN_DAPP_ID` / `--dapp-id`: the Ethereum event supplies each destination.
@@ -40,14 +40,14 @@ assigns it when the release is tagged.
 
 - `eth-lc-relayer arbitrum-anchors` detects the DApp-bearing `Deposit` event; upgrade it
   together with the EVM bridge so new Arbitrum deposits can be anchored.
-- `eccUSDCBridge` 1.14.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `9bdb2b78…`):
+- `eccUSDCBridge` 1.14.1 (`contracts/an/0.80.0_compiled/exchange/`, code hash `d1adeb26…`):
   `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) until the owner's anchors are off for the verifier's
   parent chain, and `deployL2Verifier` throws 239 on a closed chain for a parent chain the owner
   still anchors. Before, the owner could still reach a closed Arbitrum chain by accepting a
   parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
-  (or Ethereum) first, then the Arbitrum chain. The version string stays 1.14.0, so released CLIs
-  keep working. `updateCode` drops the verifier code and the verifiers, as for 1.14.0: install and
+  (or Ethereum) first, then the Arbitrum chain. Upgrade the CLI with bridge 1.14.1 for the new
+  deposit key. `updateCode` drops the verifier code and the verifiers, as for 1.14.0: install and
   deploy them again after the upgrade.
 - Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
   `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
@@ -82,8 +82,8 @@ assigns it when the release is tagged.
   retry on the next tick, instead of waiting forever on a node that does not answer.
 - `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
   refuses to start while another instance holds it.
-- `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
-  with the deployed bridge, and `release.yaml` publishes the binaries again.
+- `ackinacki-bridge` requires bridge 1.14.1 for the event-bound DApp deposit key
+  (`MIN_BRIDGE_VERSION`); upgrade the CLI and bridge together. `release.yaml` publishes binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
   first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
   (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`

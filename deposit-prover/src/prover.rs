@@ -941,7 +941,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
     let mut log_buf = Vec::new();
     vec![0u8; 20].encode(&mut log_buf); // contract address
     log_buf.extend_from_slice(&topics_list); // topics (already has list header)
-    vec![0u8; 128].encode(&mut log_buf); // amount, dappId, anAccount, timestamp
+    vec![0u8; 128].encode(&mut log_buf); // amount, anAccount, timestamp, dappId
     let mut log_list = Vec::new();
     alloy_rlp::Header {
         list: true,

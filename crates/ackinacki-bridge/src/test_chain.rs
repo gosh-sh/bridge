@@ -1048,7 +1048,7 @@ mod tests {
         // sold 0.80.0: the event-bound DApp key and parent-first Arbitrum guard.
         assert_eq!(
             &hash[..8],
-            "9bdb2b78",
+            "d1adeb26",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

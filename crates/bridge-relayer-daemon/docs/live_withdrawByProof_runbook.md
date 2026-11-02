@@ -368,10 +368,10 @@ cast call $USDC 'balanceOf(address)(uint256)' $WALLET --rpc-url $RPC
 cast send $USDC 'approve(address,uint256)' $BRIDGE $AMOUNT \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
-# 3. bridge.deposit($AMOUNT, anAccount=$AN_RECIPIENT) — target is $BRIDGE.
+# 3. bridge.deposit($AMOUNT, dappId=${AN_DAPP_ID:-0}, anAccount=$AN_RECIPIENT) — target is $BRIDGE.
 #    This is a real deposit; the relayer can credit the AN recipient.
-cast send $BRIDGE 'deposit(uint256,bytes32)' \
-  $AMOUNT "$AN_RECIPIENT" \
+cast send $BRIDGE 'deposit(uint256,uint256,bytes32)' \
+  $AMOUNT "${AN_DAPP_ID:-0}" "$AN_RECIPIENT" \
   --rpc-url $RPC --private-key $RELAYER_PRIVATE_KEY
 
 # 4. Verify
@@ -935,8 +935,8 @@ cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
 
 # 3. bridge.deposit(...) — target is $BRIDGE_ADDRESS
 #    This is a real deposit; use an AN account you control.
-cast send $BRIDGE_ADDRESS 'deposit(uint256,bytes32)' \
-  $AMOUNT "$AN_RECIPIENT" \
+cast send $BRIDGE_ADDRESS 'deposit(uint256,uint256,bytes32)' \
+  $AMOUNT "${AN_DAPP_ID:-0}" "$AN_RECIPIENT" \
   --rpc-url $RPC_URL --private-key $RELAYER_PRIVATE_KEY
 
 # 4. Confirm

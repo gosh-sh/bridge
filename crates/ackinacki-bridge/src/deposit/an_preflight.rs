@@ -34,15 +34,16 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The oldest bridge this build accepts: 1.14.0, the deployed one. Its
-/// voucher code is not changed by `updateCode` (bridge-audit#107: an upgrade
-/// that changes it brings a block cutoff), so a deposit is not minted twice.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 14, 0));
+/// The oldest bridge this build accepts: 1.14.1, with the event-bound DApp key.
+/// Its voucher code is not changed by `updateCode` (bridge-audit#107: an
+/// upgrade that changes it brings a block cutoff), so a deposit is not minted
+/// twice.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 14, 1));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 1);
 /// The first supported bridge with this build's deposit key and mandatory
 /// per-chain limit getters. Refuse older deployments before USDC leaves L1.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 1);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
@@ -463,7 +464,7 @@ pub async fn run_with(
 
 /// The bridge's Arbitrum verifier for `chain_id`; `None` when the bridge
 /// has none for that chain, as for every chain that is not a rollup. A
-/// bridge that reports 1.14.0 without `getL2Verifier` is read as having
+/// bridge that reports 1.14.1 without `getL2Verifier` is read as having
 /// none, with a warning: `transient` would retry an unknown function for
 /// ever.
 async fn read_l2_verifier(
@@ -536,7 +537,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.1", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": false })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![json!({ "value0": true })]);
@@ -588,44 +589,46 @@ mod tests {
             json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.14.0"), "{error}");
+        assert!(error.to_string().contains("1.14.1"), "{error}");
         assert!(error.to_string().contains("per-chain limit"), "{error}");
     }
 
     #[tokio::test]
-    async fn the_old_1_13_deposit_key_is_refused_even_in_development_mode() {
-        let an = healthy();
-        an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.13.0", "value1": "eccUSDCBridge" }),
-        ]);
-        let target = AnTarget {
-            dapp_id: [0; 32],
-            account_id: ACC,
-        };
-        let error = run_with(
-            &an,
-            BRIDGE,
-            11_155_111,
-            address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
-            &target,
-            &RecordingUi::new(true),
-            None,
-            true,
-            false,
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("1.14.0"), "{error}");
+    async fn old_deposit_keys_are_refused_even_in_development_mode() {
+        for version in ["1.13.0", "1.14.0"] {
+            let an = healthy();
+            an.getter(BRIDGE, "getVersion", vec![
+                json!({ "value0": version, "value1": "eccUSDCBridge" }),
+            ]);
+            let target = AnTarget {
+                dapp_id: [0; 32],
+                account_id: ACC,
+            };
+            let error = run_with(
+                &an,
+                BRIDGE,
+                11_155_111,
+                address!("0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7"),
+                &target,
+                &RecordingUi::new(true),
+                None,
+                true,
+                false,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("1.14.1"), "{error}");
+        }
     }
 
-    /// A bridge whose version says 1.14.0 but whose code has no
+    /// A bridge whose version says 1.14.1 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.1", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -671,7 +674,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.1", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -790,10 +793,9 @@ mod tests {
     /// called themselves 1.11.0 left this constant pointing at a bridge
     /// carrying the previous key.
     ///
-    /// The floor moves with the deposit key, not with every release. This
-    /// 1.14.0 carries both lines of work: the Arbitrum block verifier, which
-    /// left 1.13.0's key alone, and the DApp-bound deposit key, which rotated
-    /// it — so the floor is 1.14.0 and no older bridge holds this key. The
+    /// The floor moves with the deposit key, not with every release. Version
+    /// 1.14.1 rotates the 1.14.0 deposit key to bind the event's DApp ID.
+    /// The old and new keys must have distinct versions. The
     /// key's VkBlob sha256, which the contract source records next to the
     /// embedded key, is pinned here with the floor: a rotated key fails this
     /// test until both are moved to the release that carries it.
@@ -878,14 +880,17 @@ mod tests {
         let p = go(&healthy(), [0; 32]).await.unwrap();
         assert_eq!(p.light_client, Some([0x20; 32]));
         assert!(p.owner_anchors_enabled);
-        assert_eq!(p.l2_verifier, None, "1.13.0 has no Arbitrum verifiers");
+        assert_eq!(
+            p.l2_verifier, None,
+            "this bridge has no configured Arbitrum verifier"
+        );
     }
 
     #[tokio::test]
     async fn a_1_14_bridge_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.1", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -905,7 +910,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.14.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.14.1", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),

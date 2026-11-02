@@ -38,7 +38,7 @@ pub enum TxPurpose {
         /// The allowance, in token units.
         amount: U256,
     },
-    /// `bridge.deposit(amount, 0, account)`.
+    /// `bridge.deposit(amount, dappId, account)`.
     Deposit {
         /// The bridge.
         bridge: Address,

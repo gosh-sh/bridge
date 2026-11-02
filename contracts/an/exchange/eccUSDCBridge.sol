@@ -51,7 +51,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.14.0";
+    string constant version = "1.14.1";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;

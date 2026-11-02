@@ -81,7 +81,7 @@ user believe funds had been returned when nothing had happened. Verified 2026-08
 ### Deposit Flow
 1. Connect MetaMask wallet (Sepolia). The token is Circle Sepolia USDC
    (`0x1c7D4B19…`); get it from https://faucet.circle.com/ if needed.
-2. Enter the amount and the Acki Nacki destination account (64 hex chars).
+2. Enter the amount and the Acki Nacki destination as `dapp_id::account_id` (64 hex characters per identifier).
    `AN_RECEIVER` at build time prefills that field.
 3. Submit — if the allowance is short the form sends `approve` first, then
    the contract takes custody via `transferFrom` and emits a `Deposit` event.
@@ -130,7 +130,7 @@ docker run -p 8080:80 acki-nacki-bridge-frontend
 
 Set `BRIDGE_CONTRACT_ADDRESS` when building with Trunk. It must be a new
 Sepolia deployment exposing `deposit(uint256,uint256,bytes32)`, paired with an
-`eccUSDCBridge` 1.14.0 or newer that embeds this build's deposit key. The old
+`eccUSDCBridge` 1.14.1 or newer that embeds this build's deposit key. The old
 workchain-bearing deployment addresses are incompatible.
 
 There is no default bridge address. Without a valid non-zero 20-byte address,

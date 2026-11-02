@@ -219,7 +219,7 @@ command itself:
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(uint256,uint256,bytes32)`
-   on EVM and `eccUSDCBridge` >= 1.14.0 with this build's deposit key on AN.
+   on EVM and `eccUSDCBridge` >= 1.14.1 with this build's deposit key on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -1384,7 +1384,7 @@ cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
 
 `deposit --network` takes Sepolia (`sepolia`) and Arbitrum Sepolia
 (`arbitrum-sepolia`) in this version; an Arbitrum Sepolia deposit needs a
-bridge at 1.14.0 or newer with a verifier for 421614. **Ethereum mainnet is
+bridge at 1.14.1 or newer with a verifier for 421614. **Ethereum mainnet is
 not a deposit network**: the deposit circuit accepts OP Mainnet, World Chain,
 Mantle, Base, Arbitrum One, Blast, Sepolia and Arbitrum Sepolia
 (`crates/deposit-chain-ids`), so production deposits come from L2s. `bridge_config.mainnet` cannot be used for
@@ -1717,10 +1717,10 @@ version is the build constant `MIN_BRIDGE_VERSION`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
 already. Independently of that minimum, preflight also refuses a bridge
-older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
+older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.14.1`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.14.0`) gets a warning.
+than the newest this build was checked against (`1.14.1`) is refused by a released CLI. Development builds may bypass the version-range check, but never the deposit-key minimum.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

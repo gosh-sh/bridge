@@ -79,7 +79,7 @@ The header buffer and a short log are not this tail:
   header, and that length must equal the RLP list length. Appending a byte and counting it as part
   of the header is rejected (`mock_fixture --mutate header-pad`).
 * A short log is not read past its payload. The address is 20 bytes, the topics list is 99 bytes,
-  and the data is 96 bytes. Those lengths are constrained, so `depositId` and `sender` cannot come
+  and the data is 128 bytes. Those lengths are constrained, so `depositId` and `sender` cannot come
   from the padding.
 
 ### Circuit parameters

@@ -236,7 +236,7 @@ fn bytes_to_field<F: ScalarField>(
 
 /// Max payload lengths of the three fields of the selected receipt log,
 /// `[address, topics, data]`: a 20-byte address, up to four topics behind their
-/// one-byte prefixes, and a 128-byte data capacity. `Deposit` uses three ABI
+/// one-byte prefixes, and a 128-byte data capacity. `Deposit` uses four ABI
 /// words (128 bytes); its exact data length is constrained separately.
 const DEPOSIT_LOG_MAX_FIELD_LENS: [usize; 3] = [20, 150, 128];
 

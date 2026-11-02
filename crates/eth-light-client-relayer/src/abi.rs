@@ -7,7 +7,7 @@
 /// `EthBeaconLightClient`: `submitUpdate`, `submitRotate`, `submitAncestry`,
 /// `rePushAnchor`, the owner calls and the getters.
 pub const LIGHT_CLIENT_ABI_JSON: &str =
-    include_str!("../../../contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json");
+    include_str!("../../../contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json");
 
 /// `eccUSDCBridge`: the flip (`getLightClient`, `isOwnerAnchorsEnabled`,
 /// `disableOwnerAnchorsOn`) and the anchors (`getL2Verifier`,
@@ -17,7 +17,7 @@ pub const BRIDGE_ABI_JSON: &str = include_str!("../../ackinacki-bridge/abi/USDCB
 
 /// `ArbitrumBlockVerifier`: `proveBlock` and `getConfig`.
 pub const ARBITRUM_VERIFIER_ABI_JSON: &str =
-    include_str!("../../../contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json");
+    include_str!("../../../contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.abi.json");
 
 #[cfg(feature = "live-submit")]
 pub fn light_client_abi() -> tvm_client::abi::Abi {

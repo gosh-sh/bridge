@@ -38,9 +38,9 @@ log "compiling EthBeaconLightClient.sol"
 [[ -f "$OUT/EthBeaconLightClient.tvc" ]] || die "no tvc produced"
 rm -f "$OUT/EthBeaconLightClient.debug.json" "$OUT/EthBeaconLightClient.code"
 
-# The relayer builds in the compiled ABI of contracts/an/0.81.0_compiled; the
+# The relayer builds in the compiled ABI of contracts/an/0.81.1_compiled; the
 # ABI compiled here must agree with it on every function the relayer calls.
-python3 - "$OUT/EthBeaconLightClient.abi.json" "$SRC/contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json" <<'PY'
+python3 - "$OUT/EthBeaconLightClient.abi.json" "$SRC/contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json" <<'PY'
 import json, sys
 full = {f["name"]: f for f in json.load(open(sys.argv[1]))["functions"]}
 slim = json.load(open(sys.argv[2]))["functions"]

@@ -3,7 +3,7 @@
 
 The relayer reads no ABI file at runtime (bridge-audit#132): it builds in the
 compiled ABIs of `EthBeaconLightClient` and `ArbitrumBlockVerifier`
-(`contracts/an/0.81.0_compiled/exchange/`) and the full `eccUSDCBridge` ABI the
+(`contracts/an/0.81.1_compiled/exchange/`) and the full `eccUSDCBridge` ABI the
 CLI ships (`crates/ackinacki-bridge/abi/USDCBridge.abi.json`, kept in sync with
 the deployed contract by `scripts/check_bridge_abi_in_sync.sh`). The TVM
 function id is a hash of the name and the input and output types, so a function
@@ -35,7 +35,7 @@ ABI_RS = REPO / "crates/eth-light-client-relayer/src/abi.rs"
 # `crates/eth-light-client-relayer/src/submitter.rs` and `src/arbitrum.rs`)
 BUILT_IN = [
     (
-        REPO / "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json",
+        REPO / "contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json",
         None,
         [
             "submitUpdate",
@@ -62,7 +62,7 @@ BUILT_IN = [
         ],
     ),
     (
-        REPO / "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json",
+        REPO / "contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.abi.json",
         None,
         ["proveBlock", "getConfig"],
     ),

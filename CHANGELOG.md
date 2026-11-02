@@ -29,6 +29,10 @@ assigns it when the release is tagged.
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
   flags and environment variables carry over; the `ARBITRUM_ANCHOR_STATE` file gives way to the
   state directory of the next entry.
+- `EthBeaconLightClient` and `ArbitrumBlockVerifier` are built with the `sold` 0.81.1 release and
+  move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
+  are unchanged, and the relayers build them in from the new folder. Rebuild with
+  `make SOLD_0_81_1=<sold 0.81.1>`.
 - Every long-running service takes three directories and writes nowhere else
   (bridge-audit#132): `--state-dir`, `--work-dir`, `--log-dir`, each with an environment
   variable (`DEPOSIT_RELAYER_*_DIR`, `ETH_LC_RELAYER_*_DIR`, `ARBITRUM_ANCHORS_*_DIR`,

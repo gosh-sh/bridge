@@ -136,8 +136,8 @@ There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface c
 |---|---|---:|---|
 | `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
 | `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | First deposit width guard (`DepositTooLarge`); the product limit below is lower. |
-| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 57 | The per-transaction cap the constructor **lists USDC with**. Not enforced directly any more: `deposit` and `withdrawByProof` read the listing's `maxTransfer`, which `setTokenLimits` can move (`TransferTooLarge`). |
-| `MAX_BRIDGE_TVL` | `10_000 * USDC_UNIT` | 58 | The outstanding-liability cap the constructor lists USDC with, including Aave principal; per listing thereafter (`TvlCapReached`). |
+| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 57 | Hard upper bound on the USDC deposit cap, and the USDC withdrawal cap (`TransferTooLarge`). `setTokenLimits` can lower the deposit cap only. |
+| `MAX_BRIDGE_TVL` | `10_000 * USDC_UNIT` | 58 | Hard upper bound on USDC outstanding liabilities, including Aave principal; `setTokenLimits` may lower the deposit cap (`TvlCapReached`). |
 | `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
 | `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
 | `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
@@ -286,8 +286,8 @@ Sequence (`:906-929`):
    it. Withdrawals ignore that switch.
 4. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge` — still `type(uint64).max`, the ceiling
    `gosh.mintecc` imposes on the AN side — then `amount <= info.maxTransfer` else
-   `TransferTooLarge`. The cap is **per listing**, not the global `MAX_TRANSFER_AMOUNT` constant,
-   which is only the value the constructor lists USDC with.
+   `TransferTooLarge`. The cap is **per listing**; for USDC it cannot exceed the
+   `MAX_TRANSFER_AMOUNT` ceiling.
 5. `liabilitiesOf(tokenId) + amount <= info.tvlCap` else `TvlCapReached`, before any token call.
    `liabilitiesOf` (`:1055`) answers `treasuryBalance` for `usdcTokenId` and the listing's own
    counter for every other token, so USDC keeps one book and the Aave accounting is untouched.
@@ -336,11 +336,12 @@ Notes that matter downstream:
 
 ## 7. AN → ETH
 
-`withdrawByProof` also refuses `pub.amount` above the **current** `maxTransfer` of the listing
-the proof's `tokenId` names, with `TransferTooLarge`, before proof verification or nullifier
-consumption. That cap is owner-movable through `setTokenLimits`, so a client must read
-`tokenInfo(tokenId).maxTransfer` rather than the `MAX_TRANSFER_AMOUNT` constant before burning
-ECC. The outstanding-liability cap applies per listing and per funded L1 bridge separately. Pair it with AN
+`withdrawByProof` refuses `pub.amount` above `maxWithdrawalAmount(tokenId)`, with
+`TransferTooLarge`, before proof verification or nullifier consumption. This is the highest
+deposit cap accepted for that listing and never decreases while the listing exists; lowering
+`tokenInfo(tokenId).maxTransfer` throttles new deposits without blocking existing payouts.
+USDC deposit caps cannot exceed 50 USDC per transfer or 10,000 USDC outstanding; its payout cap
+stays 50 USDC. The CLI checks `usdcTokenId() == 3` and reads the payout cap before burning ECC. The outstanding-liability cap applies per listing and per funded L1 bridge separately. Pair it with AN
 1.13.0 chain accounting and complete old transfers before activating a fresh
 pair; see [the deployment procedure](../contracts/an/README.md#deployment).
 No EVM storage slots or deposit/withdrawal argument shapes change with these limits.
@@ -443,7 +444,7 @@ finalRoot, anchorLayer`.
 |---:|---|---:|---|
 | 1 | C4 verifier wired | 1806 | `WithdrawByProofDisabled` |
 | 2 | `pub.tokenId ≤ type(uint32).max` **and** that id is listed (`_tokens[id].token != 0`) | 1814-1817 | `UnsupportedTokenId` |
-| 3 | `pub.amount ≤` that listing's **current** `maxTransfer` | 1819 | `TransferTooLarge` |
+| 3 | `pub.amount ≤ maxWithdrawalAmount(tokenId)` | 1819 | `TransferTooLarge` |
 | 4 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1822 | `WithdrawIdentityMismatch` |
 | 5 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1826-1833 | `DstChainIdMismatch` |
 | 6 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1834-1839 | `RecipientHalfOutOfRange` |
@@ -455,11 +456,10 @@ finalRoot, anchorLayer`.
 | 12 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1868 | `WithdrawalProofRejected` |
 | 13 | `pub.amount ≤ liabilitiesOf(tokenId)` | 1871-1873 | `WithdrawTreasuryShortfall` |
 
-**The payout cap is the listing's, not `MAX_TRANSFER_AMOUNT`.** The constant is only the value the
-constructor lists USDC with; `setTokenLimits` moves the enforced cap afterwards. A client that
-preflights a withdrawal against the constant can burn ECC for an amount the payout then always
-reverts — read `tokenInfo(usdcTokenId()).maxTransfer` instead (`ackinacki-bridge` does, through
-`BridgeClient::usdc_payout_cap`).
+Read `maxWithdrawalAmount(usdcTokenId())` before burning ECC (`ackinacki-bridge` does through
+`BridgeClient::usdc_payout_cap`). The payout cap is stored in `TokenInfo.maxWithdrawal`; it is
+initialized on listing and can increase with `setTokenLimits`, but lowering deposit limits never
+reduces it. The existing six-value `tokenInfo` getter continues to report deposit limits.
 
 Effects then interactions (`:1875-1900`): mark the nullifier used, debit the token's book —
 `treasuryBalance` for `usdcTokenId`, the listing's own `liabilities` for every other id, both
@@ -807,7 +807,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID` | same | Shellnet destination aliases (§7.2). `DeployRealBridge` on mainnet requires both 0. |
-| `USDC_TOKEN_ID` | same | The ECC currency id USDC is listed under (**was** `WITHDRAW_ALT_TOKEN_ID`); carry the old value over. |
+| `USDC_TOKEN_ID` | same | The ECC currency id USDC is listed under (**was** `WITHDRAW_ALT_TOKEN_ID`); use `3` with the current AN bridge. `DeployRealBridge` defaults to `3` and requires it on mainnet. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |

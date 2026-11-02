@@ -25,6 +25,9 @@ The CLI, relayers and web form take their addresses from configuration.
 | deployment block | `323405848` |
 | USDC | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` |
 
+This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.15.0
+for deposits. The deployment addresses below describe the existing shellnet pair.
+
 ### Acki Nacki (shellnet)
 
 | | |
@@ -95,7 +98,7 @@ Every component and the interface each connection goes through, with its call si
                                   │                                 ▼
                             AAVE V3 (optional)          deposit-prover (Halo2, off-chain)
                                                                     │
-                                                        SHPLONK proof + 12 public inputs
+                                                        SHPLONK proof + 13 public inputs
                                                                     ▼
                                                     AN USDCBridge.finalizeDeposit
                                                     (ZKHALO2VERIFYWITHVK opcode)

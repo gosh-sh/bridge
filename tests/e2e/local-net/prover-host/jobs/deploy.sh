@@ -6,7 +6,7 @@ load genesis.env
 export PRIVATE_KEY; PRIVATE_KEY=$(tr -d '[:space:]' </run/input)
 export GENESIS_LAST_SEEN_BLOCK_SEQNO=$GENESIS_SEED_SEQNO
 export WITHDRAW_ACC_FR=0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a WITHDRAW_DAPP_FR=0
-export WITHDRAW_ALT_TOKEN_ID=3 USDC_ADDRESS=$ARB_USDC
+export USDC_TOKEN_ID=3 USDC_ADDRESS=$ARB_USDC
 rm -rf "$WORK/evm" && cp -r /bin-ci/evm "$WORK/evm" && cd "$WORK/evm"
 log "deployer $(cast wallet address --private-key "$PRIVATE_KEY"), $(cast balance --ether "$(cast wallet address --private-key "$PRIVATE_KEY")" --rpc-url "$ARB_RPC") ETH"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge --rpc-url "$ARB_RPC" --broadcast --slow \

@@ -1577,6 +1577,11 @@ async fn shutdown_signal() {
     }
 }
 
+fn withdrawal_configuration_revert(reason: &str) -> bool {
+    bridge_relayer_daemon::bridge::decode_withdraw_revert(reason)
+        .is_some_and(|error| matches!(error.name, "TransferTooLarge" | "UnsupportedTokenId"))
+}
+
 /// Run **one full scan** of `proofs_dir` for ready `proof_event_*.json`
 /// bundles, submitting `withdrawByProof` for each. Skips nullifiers already
 /// consumed on-chain, and (when `dry_run`) only `eth_call`-simulates.
@@ -1697,7 +1702,9 @@ where
                         WithdrawRevertKind::Transient => {
                             warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
                             had_transient_failure = true;
-                            break;
+                            if !withdrawal_configuration_revert(&reason) {
+                                break;
+                            }
                         },
                     }
                 },
@@ -1743,7 +1750,9 @@ where
             } => {
                 warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
                 had_transient_failure = true;
-                break;
+                if !withdrawal_configuration_revert(&reason) {
+                    break;
+                }
             },
         }
     }
@@ -2808,30 +2817,49 @@ mod withdraw_scan_tests {
     }
 
     #[tokio::test]
-    async fn transfer_cap_revert_does_not_block_the_next_payout() {
-        let selector = alloy::primitives::keccak256("TransferTooLarge()");
-        let reason = format!("execution reverted: 0x{}", hex::encode(&selector[..4]));
-        let permanent = classify_withdraw_revert(&reason) == WithdrawRevertKind::Permanent;
-        for dry_run in [true, false] {
-            let tmp = tempfile::tempdir().unwrap();
-            let first = write_valid_proof_fixture(tmp.path(), 0);
-            let next = write_valid_proof_fixture(tmp.path(), 1);
-            let bridge = StubBridge {
-                dry_run_reason: Some(reason.clone()),
-                submit_reason: Some((reason.clone(), permanent)),
-                fail_first_only: true,
-                ..Default::default()
-            };
-            let mut state = WithdrawScanState::default();
-            assert!(
-                !withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
-                    .await
-                    .unwrap()
+    async fn configuration_reverts_retry_the_same_proof_without_blocking_the_next_payout() {
+        for (signature, argument) in [
+            ("TransferTooLarge()", String::new()),
+            ("UnsupportedTokenId(uint256)", format!("{:064x}", 3)),
+        ] {
+            let selector = alloy::primitives::keccak256(signature);
+            let reason = format!(
+                "execution reverted: 0x{}{argument}",
+                hex::encode(&selector[..4])
             );
-            assert_eq!(state.parked_permanent, 1);
-            assert!(state.done.contains(&first));
-            assert!(state.done.contains(&next));
-            assert_eq!(state.paid, if dry_run { 0 } else { 1 });
+            assert_eq!(
+                classify_withdraw_revert(&reason),
+                WithdrawRevertKind::Transient
+            );
+            for dry_run in [true, false] {
+                let tmp = tempfile::tempdir().unwrap();
+                let first = write_valid_proof_fixture(tmp.path(), 0);
+                let original = std::fs::read(&first).unwrap();
+                let next = write_valid_proof_fixture(tmp.path(), 1);
+                let bridge = StubBridge {
+                    dry_run_reason: Some(reason.clone()),
+                    submit_reason: Some((reason.clone(), false)),
+                    fail_first_only: true,
+                    ..Default::default()
+                };
+                let mut state = WithdrawScanState::default();
+                assert!(withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
+                    .await
+                    .unwrap());
+                assert_eq!(state.parked_permanent, 0);
+                assert!(!state.done.contains(&first));
+                assert!(state.done.contains(&next));
+                assert_eq!(state.paid, if dry_run { 0 } else { 1 });
+                assert_eq!(std::fs::read(&first).unwrap(), original);
+                assert!(
+                    !withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
+                        .await
+                        .unwrap()
+                );
+                assert!(state.done.contains(&first));
+                assert_eq!(state.paid, if dry_run { 0 } else { 2 });
+                assert_eq!(std::fs::read(&first).unwrap(), original);
+            }
         }
     }
 

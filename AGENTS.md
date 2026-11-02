@@ -20,7 +20,7 @@ Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/
 multi-threaded). USDC deposited on Ethereum is proven on Acki Nacki and minted there; Acki Nacki
 state is proven on Ethereum, which pays withdrawals out against it. Both directions use Halo2
 proofs. [`README.md`](README.md) walks through both directions and the repository. In more depth:
-the deposit circuit and its 12 public inputs in [`deposit-prover/README.md`](deposit-prover/README.md),
+the deposit circuit and its 13 public inputs in [`deposit-prover/README.md`](deposit-prover/README.md),
 the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 

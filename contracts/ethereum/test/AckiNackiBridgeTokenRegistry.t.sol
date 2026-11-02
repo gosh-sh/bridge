@@ -430,6 +430,52 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(tvlCap, 20e18);
     }
 
+    function test_usdcLimits_cannotExceedANLimits() public {
+        uint32 id = bridge.usdcTokenId();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.TokenLimitsInvalid.selector, 50_000_001, 10_000_000_000
+            )
+        );
+        bridge.setTokenLimits(id, 50_000_001, 10_000_000_000);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.TokenLimitsInvalid.selector, 50_000_000, 10_000_000_001
+            )
+        );
+        bridge.setTokenLimits(id, 50_000_000, 10_000_000_001);
+        bridge.setTokenLimits(id, 1_000_000, 1_000_000);
+        assertEq(bridge.maxWithdrawalAmount(id), 50_000_000);
+    }
+
+    function test_loweringDepositLimits_preservesUSDCWithdrawal() public {
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50_000_000);
+        uint32 id = bridge.usdcTokenId();
+        bridge.setTokenLimits(id, 1_000_000, 1_000_000);
+        uint256 before = usdc.balanceOf(RECIPIENT);
+        bridge.withdrawByProof(
+            _dummyProof(),
+            _pubFor(id, 50_000_000, Bn254FrLib.toFr(uint256(keccak256("loweredUsdc"))))
+        );
+        assertEq(usdc.balanceOf(RECIPIENT) - before, 50_000_000);
+        assertEq(bridge.treasuryBalance(), 0);
+    }
+
+    function test_withdrawalCap_keepsHighestAcceptedDepositLimit() public {
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
+        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
+        bridge.setTokenLimits(DAI_TOKEN_ID, 2e18, 20e18);
+        _depositDai(funder, 2e18);
+        bridge.setTokenLimits(DAI_TOKEN_ID, 1e18, 1e18);
+        assertEq(bridge.maxWithdrawalAmount(DAI_TOKEN_ID), 2e18);
+        uint256 before = dai.balanceOf(RECIPIENT);
+        bridge.withdrawByProof(
+            _dummyProof(),
+            _pubFor(DAI_TOKEN_ID, 2e18, Bn254FrLib.toFr(uint256(keccak256("loweredDai"))))
+        );
+        assertEq(dai.balanceOf(RECIPIENT) - before, 2e18);
+    }
+
     function test_setTokenLimits_unlistedIdReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.UnsupportedTokenId.selector, DAI_TOKEN_ID)

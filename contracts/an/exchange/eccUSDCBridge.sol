@@ -181,7 +181,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // anyway until the owner re-seeds them.
     bool _paused;
 
-    // ZK verifying key (VkBlob) for the ETH-deposit circuit (12 public
+    // ZK verifying key (VkBlob) for the ETH-deposit circuit (13 public
     // inputs, chainId at instance index 4): type 1 and 2 enclosing
     // transactions, 2048 B calldata, 2048 B per receipt log, keccak 128.
     // Keyed on the Hermez Perpetual Powers of Tau SRS (s_g2 = 928fafb3…).
@@ -1289,11 +1289,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     /// @dev Read the deposit fields out of the PROVEN public-inputs blob (the
     ///      contract verified the proof over this exact blob, so every value
-    ///      here is proof-bound). Layout = 12 × 32-byte LE Fr; offsets per the
+    ///      here is proof-bound). Layout = 13 × 32-byte LE Fr; offsets per the
     ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
     ///      3=contract, 4=chain_id, 5..6=dapp_id(hi..lo),
-    ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=promise commit
-    ///      (9..11 ignored on the AN side). Only the first 9 Fr are needed.
+    ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=token, 12=promise commit
+    ///      (9..12 ignored by this parser). Only the first 9 Fr are needed.
     function _parsePublicInputs(bytes publicInputs) private pure returns (DepositPI f) {
         TvmSlice s = TvmSlice(publicInputs);
         uint256[] fr;

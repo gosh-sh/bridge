@@ -92,7 +92,7 @@ required=(
   BRIDGE_BK_SET_EXPECTED_SHA256 EXPECTED_BK_SET_COMMITMENT
   EXPECTED_GENESIS_PREV_ANCHOR EXPECTED_WITHDRAW_DAPP_FR
   EXPECTED_WITHDRAW_ACC_FR EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID
-  EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID EXPECTED_WITHDRAW_ALT_TOKEN_ID
+  EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID EXPECTED_USDC_TOKEN_ID
   EXPECTED_USDC_ADDRESS
   BRIDGE_AGGREGATE_PROOF_BIN EXPECTED_AGGREGATE_PROOF_SHA256 BRIDGE_VERIFIERS_DIR
   BRIDGE_PK_CACHE_DIR BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_ANCHOR_LEVEL
@@ -124,7 +124,7 @@ BRIDGE_DEPLOY_BLOCK=$((10#$BRIDGE_DEPLOY_BLOCK)) # decimal even with leading zer
 [[ "$EXPECTED_WITHDRAW_DAPP_FR" =~ ^(0x[0-9a-fA-F]{1,64}|[0-9]+)$ ]] || die "bad withdraw dApp Fr"
 [[ "$EXPECTED_WITHDRAW_ACC_FR" =~ ^(0x[0-9a-fA-F]{1,64}|[0-9]+)$ ]] || die "bad withdraw acc Fr"
 for value in "$EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID" \
-  "$EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID" "$EXPECTED_WITHDRAW_ALT_TOKEN_ID"; do
+  "$EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID" "$EXPECTED_USDC_TOKEN_ID"; do
   [[ "$value" =~ ^[0-9]+$ ]] || die "bad withdraw destination/token ID"
 done
 
@@ -295,8 +295,8 @@ withdraw_alt_chain=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalAltDstChainId(
 [[ "$withdraw_alt_chain" == "$EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID" ]] || die "withdraw alt chain mismatch"
 withdraw_alt_host=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalAltDstHostChainId()(uint256)')
 [[ "$withdraw_alt_host" == "$EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID" ]] || die "withdraw alt host mismatch"
-withdraw_alt_token=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalAltTokenId()(uint256)')
-[[ "$withdraw_alt_token" == "$EXPECTED_WITHDRAW_ALT_TOKEN_ID" ]] || die "withdraw alt token mismatch"
+usdc_token_id=$(call_word "$BRIDGE_ADDRESS" 'usdcTokenId()(uint32)')
+[[ "$usdc_token_id" == "$EXPECTED_USDC_TOKEN_ID" ]] || die "USDC token id mismatch"
 
 if [[ ! -f "$BRIDGE_STATE_DIR/prover_state.json" ]]; then
   [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]] ||

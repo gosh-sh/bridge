@@ -91,13 +91,12 @@ contract DeployRealBridge is Script {
         if (mainnet) {
             require(useAxiomOracle, "mainnet forbids MockBlockHeaderOracle");
             require(w.wireVerifyBlock, "mainnet requires WIRE_VERIFY_BLOCK=true");
-            require(w.usdcTokenId == 0, "mainnet usdcTokenId must be 0");
+            require(w.usdcTokenId == 3, "mainnet USDC_TOKEN_ID must match AN ECC id 3");
             require(w.altDstChainId == 0, "mainnet altDstChainId must be 0");
             require(w.altDstHostChainId == 0, "mainnet altDstHostChainId must be 0");
             // Owner 2026-09-08 (sauin Q5): this script-level require is the
             // intended guarantee. The contract does not enforce the alias
-            // pair. Same class as usdcTokenId: envOr defaults to 0, then
-            // immutable.
+            // pair. USDC_TOKEN_ID is separately checked against the AN ECC id.
         }
 
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
@@ -148,7 +147,9 @@ contract DeployRealBridge is Script {
         w.withdrawDappFr = vm.envOr("WITHDRAW_DAPP_FR", uint256(0));
         w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
         w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
-        w.usdcTokenId = uint32(vm.envOr("USDC_TOKEN_ID", uint256(0)));
+        uint256 tokenId = vm.envOr("USDC_TOKEN_ID", uint256(3));
+        require(tokenId <= type(uint32).max, "USDC_TOKEN_ID exceeds uint32");
+        w.usdcTokenId = uint32(tokenId);
     }
 
     function _deployBridge(address oracleAddr, WireInputs memory w)

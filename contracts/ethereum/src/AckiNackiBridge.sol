@@ -145,13 +145,15 @@ contract AckiNackiBridge {
         ///         ignores it, so closing deposits never strands funds that
         ///         are already paid in.
         bool depositsEnabled;
-        /// @notice Per-transaction cap, token base units.
+        /// @notice Per-deposit cap, token base units.
         uint256 maxTransfer;
         /// @notice Cap on outstanding liabilities for this token, base units.
         uint256 tvlCap;
         /// @notice Outstanding liabilities, base units. Unused for USDC,
         ///         whose liabilities live in `treasuryBalance`.
         uint256 liabilities;
+        /// @notice Highest deposit cap accepted for this listing; never decreases.
+        uint256 maxWithdrawal;
     }
 
     /// @notice ECC currency id → listing.
@@ -463,9 +465,7 @@ contract AckiNackiBridge {
     /// @param recipient The 20-byte EVM address reconstructed from
     ///        `(recipientHi, recipientLo)`.
     /// @param amount Amount of USDC transferred to `recipient`.
-    /// @param tokenId Token id from the event body (only `tokenId == 0` =
-    ///        bridged USDC is currently supported; non-zero reserved for
-    ///        multi-token wiring in a future milestone).
+    /// @param tokenId Listed AN ECC currency id from the event body.
     /// @param submitter `msg.sender` of the `withdrawByProof` call (typically
     ///        a relayer; the payout goes to `recipient`, not `submitter`).
     event WithdrawalByProofExecuted(
@@ -971,7 +971,7 @@ contract AckiNackiBridge {
         _listToken(tokenId, token, decimals, maxTransfer, tvlCap, false);
     }
 
-    /// @notice Change the caps on an already listed id.
+    /// @notice Change the deposit caps on an already listed id.
     /// @dev Lowering `tvlCap` below the current liabilities is allowed: it
     ///      stops new deposits without touching what is already owed.
     function setTokenLimits(uint32 tokenId, uint256 maxTransfer, uint256 tvlCap)
@@ -980,6 +980,12 @@ contract AckiNackiBridge {
     {
         TokenInfo storage info = _requireListedId(tokenId);
         _requireSaneLimits(maxTransfer, tvlCap);
+        if (
+            tokenId == usdcTokenId && (maxTransfer > MAX_TRANSFER_AMOUNT || tvlCap > MAX_BRIDGE_TVL)
+        ) {
+            revert TokenLimitsInvalid(maxTransfer, tvlCap);
+        }
+        if (maxTransfer > info.maxWithdrawal) info.maxWithdrawal = maxTransfer;
         info.maxTransfer = maxTransfer;
         info.tvlCap = tvlCap;
         emit TokenLimitsSet(tokenId, maxTransfer, tvlCap);
@@ -1046,6 +1052,11 @@ contract AckiNackiBridge {
         );
     }
 
+    /// @notice Per-withdrawal cap in base units. Lowering deposit limits leaves this unchanged.
+    function maxWithdrawalAmount(uint32 tokenId) external view returns (uint256) {
+        return _tokens[tokenId].maxWithdrawal;
+    }
+
     /// @notice The ECC currency id `token` is listed under.
     /// @dev `listed` is the answer to check: id `0` is a legal listing, so a
     ///      zero `tokenId` alone does not mean "absent".
@@ -1100,7 +1111,8 @@ contract AckiNackiBridge {
             depositsEnabled: depositsEnabled,
             maxTransfer: maxTransfer,
             tvlCap: tvlCap,
-            liabilities: 0
+            liabilities: 0,
+            maxWithdrawal: maxTransfer
         });
         _tokenIdOf[token] = tokenId;
         _tokenRegistered[token] = true;
@@ -1780,8 +1792,7 @@ contract AckiNackiBridge {
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
     ///   4. `pub.nullifier` has not been used before (replay protection).
-    ///   5. `pub.tokenId == 0` (only bridged USDC is currently supported;
-    ///      non-zero token ids reserved for multi-token in a future milestone).
+    ///   5. `pub.tokenId` names a listed ERC-20 and the amount fits its withdrawal cap.
     ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
     ///
@@ -1816,7 +1827,7 @@ contract AckiNackiBridge {
         TokenInfo storage payoutInfo = _tokens[payoutTokenId];
         if (payoutInfo.token == address(0)) revert UnsupportedTokenId(pub.tokenId);
 
-        if (pub.amount > payoutInfo.maxTransfer) revert TransferTooLarge();
+        if (pub.amount > payoutInfo.maxWithdrawal) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {

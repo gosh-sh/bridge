@@ -955,11 +955,9 @@ mod sol_bindings {
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
             function MAX_TRANSFER_AMOUNT() external view returns (uint256);
-            /// The id USDC is listed under, and that listing. The payout cap
-            /// `withdrawByProof` enforces is the listing's `maxTransfer`,
-            /// which the owner can move with `setTokenLimits`; the constant
-            /// above is only the value the constructor listed USDC with.
+            /// The payout cap remains valid when deposit limits are lowered.
             function usdcTokenId() external view returns (uint32);
+            function maxWithdrawalAmount(uint32 tokenId) external view returns (uint256);
             function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 maxTransfer, uint256 tvlCap, uint256 liabilities);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
@@ -1626,14 +1624,8 @@ where
             .map_err(map_contract_err)
     }
 
-    /// The cap `withdrawByProof` actually enforces on a USDC payout: the
-    /// current `maxTransfer` of the listing USDC is registered under.
-    ///
-    /// Two reads, both propagated on failure: a bridge that cannot answer
-    /// them is not one to burn ECC against. `MAX_TRANSFER_AMOUNT` is the
-    /// value the constructor listed USDC with and stays put while
-    /// `setTokenLimits` moves the real cap, so reading the constant would
-    /// let a burn through that the payout always reverts.
+    /// Refuse a USDC payout lane that does not match the AN bridge's ECC id,
+    /// then read the withdrawal cap, independently of the mutable deposit cap.
     pub async fn usdc_payout_cap(&self) -> Result<U256, RelayerError> {
         let token_id = self
             .contract
@@ -1641,13 +1633,16 @@ where
             .call()
             .await
             .map_err(map_contract_err)?;
-        let info = self
-            .contract
-            .tokenInfo(token_id)
+        if token_id != 3 {
+            return Err(RelayerError::other(format!(
+                "USDC token id {token_id} does not match AN ECC id 3"
+            )));
+        }
+        self.contract
+            .maxWithdrawalAmount(token_id)
             .call()
             .await
-            .map_err(map_contract_err)?;
-        Ok(info.maxTransfer)
+            .map_err(map_contract_err)
     }
 
     /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`
@@ -2241,12 +2236,10 @@ pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmi
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 10] = [
+    let permanent_selectors: [[u8; 4]; 8] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
-        AckiNackiBridge::TransferTooLarge::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
-        AckiNackiBridge::UnsupportedTokenId::SELECTOR,
         AckiNackiBridge::RecipientHalfOutOfRange::SELECTOR,
         AckiNackiBridge::InvalidRecipient::SELECTOR,
         AckiNackiBridge::FieldElementOutOfRange::SELECTOR,
@@ -2951,18 +2944,30 @@ mod tests {
     }
 
     #[test]
-    fn excessive_withdrawal_is_parked_and_names_the_limit() {
+    fn excessive_withdrawal_is_retried_and_names_the_limit() {
         let reason = format!(
             "execution reverted: {}",
             selector_hex_of::<AckiNackiBridge::TransferTooLarge>()
         );
         assert_eq!(
             classify_withdraw_revert(&reason),
-            WithdrawRevertKind::Permanent
+            WithdrawRevertKind::Transient
         );
         assert_eq!(
             decode_withdraw_revert(&reason).unwrap().rendered,
             "TransferTooLarge()"
+        );
+    }
+
+    #[test]
+    fn a_token_listing_change_retries_the_existing_proof() {
+        let reason = format!(
+            "execution reverted: {}",
+            selector_hex_of::<AckiNackiBridge::UnsupportedTokenId>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient
         );
     }
 

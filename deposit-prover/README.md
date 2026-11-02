@@ -62,7 +62,7 @@ and chain-binding inputs were added later.*
 
 ### Fixed-size witness padding
 
-The private witness is longer than those 12 public inputs. axiom-eth passes the receipt and the
+The private witness is longer than those 13 public inputs. axiom-eth passes the receipt and the
 enclosing transaction to the MPT chip as fixed-length byte vectors. `MPTInput::assign` appends
 zeros until `value` reaches `value_max_byte_len` — `receipt_max_byte_len` for the receipt,
 `calc_max_val_len` for the transaction — and until each proof node and key fragment fills
@@ -73,7 +73,7 @@ The receipt hash, and every byte copied into a public input, uses only the prefi
 length witness (`value_byte_len`, `rlp_len`, `field_len`). Bytes after that length are range-checked
 as bytes and are not copied into `depositId`, `sender`, `amount`, `contractAddress`, `chainId`,
 the destination, or `blockHash`. A different assignment of that tail is another valid witness of
-the same 12 public inputs, and so another Halo2 proof of the same deposit. `finalizeDeposit`
+the same 13 public inputs, and so another Halo2 proof of the same deposit. `finalizeDeposit`
 reads the public inputs, not the witness, so the tail cannot mint a second deposit or a deposit
 that was not in the receipt. The relayer submits the proof and the public inputs. The tail stays in the witness.
 
@@ -83,7 +83,7 @@ The header buffer and a short log are not this tail:
   header, and that length must equal the RLP list length. Appending a byte and counting it as part
   of the header is rejected (`mock_fixture --mutate header-pad`).
 * A short log is not read past its payload. The address is 20 bytes, the topics list is 99 bytes,
-  and the data is 96 bytes. Those lengths are constrained, so `depositId` and `sender` cannot come
+  and the data is 128 bytes. Those lengths are constrained, so `depositId` and `sender` cannot come
   from the padding.
 
 ### Circuit parameters

@@ -263,17 +263,19 @@ available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec
 A withdrawal proof names the destination chain, not a bridge contract, and each bridge keeps its
 own record of the withdrawals it paid. A new bridge on a chain that already has one therefore has
 to be told about the old one: it is deployed with `predecessor` set to the old bridge's address
-(`PREDECESSOR_BRIDGE` for `DeployRealBridge`, which requires the variable on every deploy — the
-zero address for the first bridge on a chain). The new bridge then refuses, with
-`NullifierAlreadyUsed`, every withdrawal the old bridge — or any bridge before it — already paid,
-and its `isNullifierUsed` reports those as used. The old bridge does not consult the new one, so
-once the new bridge is live the old one never pays again.
+(`PREDECESSOR_BRIDGE`, which every bridge deploy script requires: `DeployRealBridge` on chains 1,
+11155111 and 421614, `DeployShellnetE2EBridge`, `DeployGenesisCursorBridge` and
+`DeployReuseVerifiersBridge`; the zero address for the first bridge on a chain). The new bridge
+then refuses, with `NullifierAlreadyUsed`, every withdrawal the old bridge — or any bridge before
+it — already paid, and its `isNullifierUsed` reports those as used. The old bridge does not consult
+the new one: it stays safe only while it stays paused, and nothing in the contract stops its owner
+from unpausing it.
 
 The old bridge's user principal (`treasuryBalance`) has to follow the eccUSDC it backs, or the new
 bridge pays those withdrawals out of other depositors' money and eventually stops with
 `WithdrawTreasuryShortfall`. So the order is:
 
-1. **Pause the old bridge** (`pause()`) and leave it paused for good. `DeployRealBridge`
+1. **Pause the old bridge** (`pause()`) and leave it paused for good. Every deploy script
    refuses a predecessor that is not paused. The yield controls keep working while it is
    paused: pull its AAVE position back with `withdrawFromAave` or `emergencyWithdrawAll`, so
    its whole `treasuryBalance` is liquid USDC.

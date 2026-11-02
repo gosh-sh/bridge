@@ -435,7 +435,7 @@ mod tests {
         wrong_block.block_hash = B256::repeat_byte(0x88);
         assert!(bundle.check_binds_to(&wrong_block).is_err());
 
-        // Proven chainId must match the RPC eth_chainId used to fetch.
+        // The public-input chainId must match the RPC eth_chainId used to fetch.
         let mut wrong_chain = event.clone();
         wrong_chain.source_chain_id = 1;
         assert!(bundle.check_binds_to(&wrong_chain).is_err());

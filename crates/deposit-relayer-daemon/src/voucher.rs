@@ -27,7 +27,7 @@ use crate::error::RelayerError;
 const VOUCHER_ABI: &str =
     include_str!("../../../contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json");
 
-/// Proof-bound deposit identity, as `finalizeDeposit` hashes it.
+/// Deposit identity from the public inputs, as `finalizeDeposit` hashes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepositIdentity {
     pub deposit_id: U256,

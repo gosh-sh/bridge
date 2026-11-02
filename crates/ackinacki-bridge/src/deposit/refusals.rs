@@ -19,7 +19,7 @@ pub const ERR_UNKNOWN_BLOCK: i32 = 224;
 pub const ERR_ZERO_RECIPIENT: i32 = 230;
 /// Deposits are paused.
 pub const ERR_PAUSED: i32 = 231;
-/// The proven amount exceeds the per-transfer ceiling.
+/// The deposit amount exceeds the per-transfer ceiling.
 pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
 /// The source chain has no remaining deposit capacity.
 pub const ERR_TVL_CAP: i32 = 235;

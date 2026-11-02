@@ -24,6 +24,9 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `scripts/deposit_anchor_params.py` no longer takes `--call`, and `attestBlockHash` is no longer
+  an option. It always prints `setAcceptedBlockHash` arguments; drop `--call` from any command
+  line that passes it, or the script refuses to start.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
@@ -76,13 +79,6 @@ assigns it when the release is tagged.
   `bridge-prover-daemon` refuse to start and name the layer: for `relayer daemon-live` remove the
   file and restart; for `bridge-prover-daemon` move it and `prover_bk_set.json` aside and restart
   with `BRIDGE_BOOTSTRAP_SEQNO` set to the bridge's seed seq_no.
-
-### Removed
-
-- `scripts/deposit_anchor_params.py --call` is gone, with its `attestBlockHash` choice:
-  `eccUSDCBridge` has no such function, so the arguments it printed could not be sent. The
-  script prints the owner's `setAcceptedBlockHash` arguments, as it did by default; drop
-  `--call setAcceptedBlockHash` from any command line that passes it.
 
 ## [0.7.0] – 2026-10-27
 

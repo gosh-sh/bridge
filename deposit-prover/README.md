@@ -49,10 +49,12 @@ trie or the block hash are the real ones.
    (`assign_and_compute_commitment`, implemented in axiom-eth
    `promise_loader/comp_loader.rs` and called from `promise_loader/single.rs` at
    `1d61be0`), not a commitment to the calls. The lookup only requires each call to
-   appear as a row. `mock_fulfill_keccak_promises` (`src/prover.rs`, `src/provable.rs`,
-   `examples/export_blake2b_proof.rs`, and `examples/export_vk_blob.rs` and
-   `examples/export_deposit_proof_set.rs`, which build the embedded VK and the proof
-   sets) pads that table to `FIXED_KECCAK_CAPACITY`. A row
+   appear as a row. Every call to `mock_fulfill_keccak_promises` that builds a key or a
+   proof passes `Some(FIXED_KECCAK_CAPACITY)` and pads the table to that size: in
+   `src/prover.rs`, `src/provable.rs`, `examples/export_blake2b_proof.rs`, and
+   `examples/export_vk_blob.rs` and `examples/export_deposit_proof_set.rs`, which build the
+   embedded VK and the proof sets. Only the MockProver check `test_circuit_mock` passes
+   `None` and leaves the table at the calls' size. A row
    no call reads is not fixed by the deposit witness, so the same witness can carry a
    different input 11. `finalizeDeposit` does not read input 11, and nothing in this
    repository checks a row against a keccak evaluation.

@@ -309,7 +309,7 @@ Slot table in §4.5.
 stateDiagram-v2
   direction LR
   state "USDCBridge anchors" as UBA {
-    OwnerAnchors: owner or attesters write _acceptedBlockHash
+    OwnerAnchors: owner writes _acceptedBlockHash
     LightClientAnchors: LC writes L1; owner still writes L2
     OwnerAnchors --> LightClientAnchors: disableOwnerAnchorsOn(chainId)
     LightClientAnchors --> OwnerAnchors: bridge updateCode resets flags

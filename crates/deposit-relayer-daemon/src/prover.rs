@@ -109,7 +109,7 @@ impl MockProofGenerator {
             sender: addr_to_field(event.sender.as_slice()),
             amount: event.amount,
             contract_address: addr_to_field(event.source_contract.as_slice()),
-            // Proven chainId mirrors RPC eth_chainId stamped on the event.
+            // The public-input chainId mirrors RPC eth_chainId stamped on the event.
             chain_id: U256::from(event.source_chain_id),
             // dappId is the config tag, split into 16-byte halves (not from the
             // event). The AN account is bound from the event, split likewise.

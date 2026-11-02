@@ -10,16 +10,16 @@
 //! `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)` (opcode `0xC7
 //! 0x4A`; the `VK_BLOB` is the deploy-time 12-input deposit VkBlob embedded in
 //! the contract, **not** a per-call argument), reconstructs the recipient
-//! account as `(anAccountHigh << 128 | anAccountLow)` from the proven inputs,
-//! consumes a proof-bound deposit nullifier (deployed as a per-deposit
-//! `DepositVoucher`), and credits that proven account. An EVM address is not a
-//! valid AN recipient, so binding the destination account in the proof (rather
-//! than trusting an off-circuit relayer hint) is what makes the credit
-//! trust-minimised.
+//! account as `(anAccountHigh << 128 | anAccountLow)` from the public inputs,
+//! consumes a deposit nullifier keyed on the identity in them (deployed as a
+//! per-deposit `DepositVoucher`), and credits that account. Every field comes
+//! from the public inputs the opcode verifies, not from a relayer hint; what
+//! the proof does and does not show about those fields is in
+//! `deposit-prover/README.md`.
 //!
 //! Because the contract reads the operand directly, the relayer forwards only
-//! the two raw byte blobs — there are no per-field scalar call arguments, and
-//! the relayer cannot tamper with any proven field.
+//! the two raw byte blobs — there are no per-field scalar call arguments, so
+//! changing a field means building a different proof.
 //!
 //! Two implementations:
 //!
@@ -310,8 +310,8 @@ pub struct AnSubmitConfig {
 ///   the operand the AN-side opcode's `public_inputs_cell` carries.
 ///
 /// Both are encoded as plain hex (no `0x`) for the tvm_client ABI JSON encoder.
-/// The relayer cannot tamper with any proven field — the contract reads them
-/// from the operand the opcode verifies.
+/// The relayer passes no field separately — the contract reads every one from
+/// the operand the opcode verifies.
 pub fn build_finalize_deposit_params(bundle: &DepositProofBundle) -> serde_json::Value {
     json!({
         "proof": hex::encode(&bundle.proof),
@@ -519,14 +519,16 @@ const EXIT_TVL_CAP: i32 = 235;
 /// first deposit after a redeploy reads as a broken bridge.
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
-        EXIT_ZERO_AMOUNT => Some("ERR_ZERO_AMOUNT — the proven deposit amount is zero"),
+        EXIT_ZERO_AMOUNT => {
+            Some("ERR_ZERO_AMOUNT — the deposit amount in the public inputs is zero")
+        },
         EXIT_INVALID_ZKPROOF => Some(
             "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
              this prover's VkBlob",
         ),
         EXIT_UNSUPPORTED_SRC_CHAIN => Some(
-            "ERR_UNSUPPORTED_SRC_CHAIN — the proven (chainId, source contract) pair is not \
-             allowlisted; owner must call setTrustedL1Bridge(chainId, l1Bridge, true)",
+            "ERR_UNSUPPORTED_SRC_CHAIN — the (chainId, source contract) pair in the public inputs \
+             is not allowlisted; owner must call setTrustedL1Bridge(chainId, l1Bridge, true)",
         ),
         EXIT_UNKNOWN_BLOCK => Some(
             "ERR_UNKNOWN_BLOCK — the deposit's block is not in the canonical-chain anchor set; \
@@ -534,9 +536,11 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
              anchor writer must admit it — setAcceptedBlockHash(chainId, blockHash, true) while \
              owner anchors are enabled, otherwise the light client",
         ),
-        EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
+        EXIT_ZERO_RECIPIENT => {
+            Some("ERR_ZERO_RECIPIENT — the AN recipient in the public inputs is zero")
+        },
         EXIT_TRANSFER_TOO_LARGE => {
-            Some("ERR_TRANSFER_TOO_LARGE — the proven deposit exceeds the per-transfer ceiling")
+            Some("ERR_TRANSFER_TOO_LARGE — the deposit amount exceeds the per-transfer ceiling")
         },
         _ => None,
     }
@@ -829,9 +833,9 @@ mod tests {
         assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
         assert_eq!(scalars[0], U256::from(7u64)); // depositId
         assert_eq!(scalars[2], U256::from(42u64)); // amount
-        assert_eq!(scalars[4], b.parsed.chain_id); // proven chainId
+        assert_eq!(scalars[4], b.parsed.chain_id); // chainId
                                                    // dappId is the config tag (scalars 5/6); the AN account high/low halves
-                                                   // (scalars 7/8) reconstruct the proven recipient account.
+                                                   // (scalars 7/8) reconstruct the recipient account.
         let dapp_id = (scalars[5] << 128) | scalars[6];
         assert_eq!(dapp_id, b.parsed.dapp_id());
         let reconstructed = (scalars[7] << 128) | scalars[8];

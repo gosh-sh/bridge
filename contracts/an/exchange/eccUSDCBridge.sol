@@ -83,7 +83,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint256 anAccount
     );
 
-    /// @notice Deposit fields read out of the proven public-inputs blob.
+    /// @notice Deposit fields read out of the public-inputs blob.
     struct DepositPI {
         uint256 depositId;     // fr[0] — anti-replay anchor (per source chain/contract/dapp)
         uint128 amount;        // fr[2]
@@ -989,7 +989,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         the proof does not show the deposit event happened on L1. The
     ///         relayer passes the proof and its public-inputs blob verbatim; we
     ///         verify against `VK_BLOB` and read every deposit field straight
-    ///         out of the verified instances — amount, recipient and source
+    ///         out of the instances it verifies — amount, recipient and source
     ///         identity — rather than from separate arguments. Whoever builds
     ///         the proof chooses those instances. A deterministic
     ///         `DepositVoucher` (keyed on the deposit identity those instances
@@ -1011,9 +1011,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(f.amount > 0, ERR_ZERO_AMOUNT);
         require(f.amount <= MAX_TRANSFER_AMOUNT, ERR_TRANSFER_TOO_LARGE);
         require(_outstandingByChain[f.chainId] + f.amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
-        // (chainId, contractAddr) come from the verified instances; the
-        // allowlist pins which (chain, bridge contract) pairs this side trusts. The deposit
-        // passes if its proven address is in the chain's trusted set — an absent
+        // (chainId, contractAddr) come from the public inputs, which the proof
+        // check below verifies; until then they are caller-supplied, so this
+        // check can only refuse. The allowlist pins which (chain, bridge
+        // contract) pairs this side trusts. The deposit passes if its contract
+        // address is in the chain's trusted set — an absent
         // entry is false, so unknown chains/addresses reject. The != 0 guard
         // keeps a stray `_trustedL1Bridge[chainId][0]=true` from ever admitting a
         // zero contract.
@@ -1328,7 +1330,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     }
 
     /// @dev Read ONLY the block-hash halves (Fr #9 = hi, #10 = lo) out of the
-    ///      same proven blob, and recombine them the way the circuit splits
+    ///      same public-inputs blob, and recombine them the way the circuit splits
     ///      them: `hi << 128 | lo`. Kept separate from `_parsePublicInputs` so
     ///      the pre-accept path does not pay for the extra two field elements.
     function _parseBlockHash(bytes publicInputs) private pure returns (uint256) {

@@ -7,8 +7,10 @@
 > `_acceptedBlockHash`, and `EthBeaconLightClient` is one of its three writers, next to the
 > owner (`setAcceptedBlockHash`, until `disableOwnerAnchorsOn`) and the Arbitrum block
 > verifiers — see §4 and `contracts/an/README.md`. `setAcceptedL1Block`, `_acceptedL1Block`,
-> `setL1Attester` and `_l1AttesterPubkey` in §7 and §9 are names from the plan; none of them
-> exists in `contracts/an/`.
+> `setL1Attester` and `_l1AttesterPubkey` in §7 and §13 are names from the plan, and so is the
+> attester MVP §13 migrates from; none of them exists in `contracts/an/`. §13 is not how the
+> light client was rolled out: the owner writer is turned off per chain with
+> `disableOwnerAnchorsOn`.
 
 ---
 
@@ -51,10 +53,13 @@ That gate still does not check the keccak promise.
    recent finalized period.
 3. Fork schedule (fork_version per epoch) — needed for the domain and for fork-versioned gindices.
 
-Everything after the anchor is **trustless**: each accepted update is a ZK proof that the *current*
+Everything after the anchor is **trustless** about which execution block is finalized: each
+accepted update is a ZK proof that the *current*
 committee (already trusted transitively from genesis) signed a beacon header, that this header is
 finalized, that it carries the given execution block hash, and (on period boundaries) that it
-attests the *next* committee.
+attests the *next* committee. That covers the block, not the deposit: the deposit proof's link
+from the block hash to the event rests on keccak promise outputs that `finalizeDeposit` does not
+check (§1, §4).
 
 **Residual, documented, non-trust properties:**
 - **Weak subjectivity / long-range.** If the light client falls behind > ~1 sync-committee period
@@ -63,7 +68,7 @@ attests the *next* committee.
 - **Sync-committee honest-supermajority** for the *signing* period (same assumption Ethereum's own
   light clients make). We require ≥ 2/3 participation in-circuit.
 - **Finality lag.** "Finalized" = 2 epochs (~12.8 min) behind head. Deposits confirm with that
-  inherent latency (acceptable; today's attester used confirmation depth anyway).
+  inherent latency (acceptable; the owner writer uses confirmation depth anyway).
 
 ## 4. Architecture
 
@@ -189,7 +194,8 @@ State: `genesisValidatorsRoot`, `currentSyncCommitteeRoot`, `nextSyncCommitteeRo
 
 ## 9. Deposit-side changes (minimal)
 
-- `deposit-prover`: **no circuit change** (already exposes `blockHashHigh/Low`). Optionally also
+- `deposit-prover`: no circuit change for the light client (it already exposes
+  `blockHashHigh/Low`). That does not close the unchecked keccak promise of §1, which is separate. Optionally also
   expose the beacon `finalized_slot`/state-root binding if we later want single-proof aggregation.
 - `deposit-relayer-daemon`: before submit, ensure the target block is light-client-finalized
   (poll `EthBeaconLightClient`), else wait/trigger a light-client update. Decode unchanged.
@@ -210,7 +216,7 @@ Estimates assume 1 strong ZK engineer reusing the existing chips; parallelizable
 | **M-agg (optional)** | Aggregate light-client + deposit into one proof (snark-verifier) if we want atomic single-proof deposits. | 3–4 wk |
 | **M-audit** | Internal + external audit of the new circuit + contract **and the opcode-side KZG-accumulator decider** (tvm-sdk#284 — the only check that a recursive rotate's inner proofs were actually verified); close BLS subgroup finding. | 3–4 wk |
 
-**Critical path (correctness-complete, attester removed):** M0→M6 ≈ **3–4 months** solo, ~**2–3
+**Critical path (correctness-complete, owner writer disabled):** M0→M6 ≈ **3–4 months** solo, ~**2–3
 months** with two engineers. M-agg and hardening extend from there.
 
 ## 11. Testing
@@ -247,6 +253,8 @@ months** with two engineers. M-agg and hardening extend from there.
 
 ## 13. Rollout / migration from the attester MVP
 
+The plan as written. There was no attester and the anchor set stayed; see the banner.
+
 1. Ship M0–M5 behind an unused contract (no deposit binding yet).
 2. Run the relayer in shadow: advance the light-client head on shellnet, compare its finalized set
    against the attester's `_acceptedL1Block` (should agree).
@@ -261,4 +269,4 @@ months** with two engineers. M-agg and hardening extend from there.
 - Existing prior art: Succinct Telepathy / SP1-Helios, Electron zk light client.
 - In-repo: `deposit-prover/src/circuit_v2.rs` (12-PI layout, `blockHashHigh/Low` at 9/10),
   `docs/zkhalo2verifywithvk_reference.md`, `docs/bridge_deposit_chain_binding_fix_proposal_2026_07_20.md`,
-  AN-side `USDCBridge`/`eccUSDCBridge` `_acceptedBlockHash` (attester MVP being replaced).
+  AN-side `USDCBridge`/`eccUSDCBridge` `_acceptedBlockHash` (the anchor set the light client writes to).

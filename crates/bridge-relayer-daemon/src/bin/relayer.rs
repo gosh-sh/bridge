@@ -2407,10 +2407,23 @@ async fn run_daemon_live(
             (state, policy)
         },
         bridge_relayer_daemon::StartupDecision::WarmResume => {
-            info!(
-                last_seen = state.stored_last_seen_block_seq_no,
-                "startup: WarmResume — local state matches chain byte-for-byte",
-            );
+            let behind = state.stored_last_seen_block_seq_no < chain_full.last_seen_block_seq_no
+                || state.stored_last_bk_set_update_seq_no < chain_full.last_bk_set_update_seq_no;
+            if behind {
+                info!(
+                    local_last_seen = state.stored_last_seen_block_seq_no,
+                    chain_last_seen = chain_full.last_seen_block_seq_no,
+                    local_bk_upd = state.stored_last_bk_set_update_seq_no,
+                    chain_bk_upd = chain_full.last_bk_set_update_seq_no,
+                    "startup: WarmResume — local cursor is behind the contract in the BK-set hold \
+                     window; bundles the chain already verified are acked before the rotation"
+                );
+            } else {
+                info!(
+                    last_seen = state.stored_last_seen_block_seq_no,
+                    "startup: WarmResume — local state matches the chain",
+                );
+            }
             (state, SeedPolicy::Resume)
         },
         bridge_relayer_daemon::StartupDecision::Resurrect {
@@ -2458,8 +2471,9 @@ async fn run_daemon_live(
     // The pre-decide drift-audit that used to live here is now subsumed
     // by `startup_decide::decide()`: `Stop` bails with a precise reason,
     // `Resurrect` rebuilds the local mirror before the driver is even
-    // constructed, and `WarmResume` is only reached when local and chain
-    // match byte-for-byte.
+    // constructed, and `WarmResume` is also the hold window, where the
+    // local cursor is behind a rotation the contract already accepted.
+    // The log just above says which of the two it was.
     let bridge = Arc::new(bridge_probe);
 
     // Anchor-level cross-check. Decision logic and the full truth table

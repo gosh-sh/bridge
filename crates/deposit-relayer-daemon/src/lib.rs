@@ -60,7 +60,6 @@
 //!   `tvm-sdk` and is authoritative for its semantics.
 
 pub mod an_config;
-pub mod arbitrum;
 pub mod daemon;
 pub mod error;
 #[cfg(test)]

@@ -14,8 +14,10 @@
 # crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3 (Case 1).
 #
 # Usage:
-#   LEVEL=1 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh   # L1 anchor
-#   LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh   # L2 anchor
+#   LEVEL=1 PRIVATE_KEY=<burner> PREDECESSOR_BRIDGE=<paused bridge or 0x0…0> \
+#     ./scripts/deploy_bridge_bundle.sh   # L1 anchor
+#   LEVEL=2 PRIVATE_KEY=<burner> PREDECESSOR_BRIDGE=<paused bridge or 0x0…0> \
+#     ./scripts/deploy_bridge_bundle.sh   # L2 anchor
 #
 # Inputs (env):
 #   LEVEL                      1 or 2 (required)

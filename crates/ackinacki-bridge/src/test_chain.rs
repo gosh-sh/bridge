@@ -1191,9 +1191,9 @@ mod l2_verifier_tests {
     use super::*;
 
     const VERIFIER_TVC: &[u8] =
-        include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc");
+        include_bytes!("../../../contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc");
     const LIGHT_CLIENT_TVC: &[u8] =
-        include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc");
+        include_bytes!("../../../contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc");
     const ARB_SEPOLIA: u64 = 421_614;
     const SEPOLIA: u64 = 11_155_111;
     const ROLLUP: &str = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4";

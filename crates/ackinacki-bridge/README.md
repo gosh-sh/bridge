@@ -1797,6 +1797,7 @@ Vendored ABIs live under `abi/`:
   body cell, and for `deposit` its getters, `finalizeDeposit` and its events
 - `UpdateCustodianMultisigWallet.abi.json` — for the outer `sendTransaction`
 
-`deposit` also compiles in `DepositVoucher.tvc` and the voucher and
-light-client ABIs from `contracts/an/0.81.0_compiled/exchange/`: the
-voucher's address is computed from its code.
+`deposit` also compiles in `DepositVoucher.tvc` and its ABI from
+`contracts/an/0.81.0_compiled/exchange/` and the light-client ABI from
+`contracts/an/0.81.1_compiled/exchange/`: the voucher's address is computed
+from its code.

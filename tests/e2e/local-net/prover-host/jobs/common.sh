@@ -23,7 +23,7 @@ emit() { local f=$1; shift; for kv in "$@"; do printf '%s\n' "$kv" >>"$OUT/$f"; 
 derive_key() { cast keccak "$(cast concat-hex "$1" "$(cast from-utf8 "$2")")"; }
 # The Sepolia light client: its beacon source, ABI, and the Gloas fork slot it proves against.
 BEACON_URL=${BEACON_URL:-https://lodestar-sepolia.chainsafe.io}
-LC_ABI=/src/contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json
+LC_ABI=/src/contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json
 SEPOLIA_GLOAS_FORK_SLOT=11296768
 # The step proving key lc-keygen generates once per run; the prover reads it from STEP_KEY_DIR.
 LC_STEP_KEY_DIR=$WORK/lc-step-key

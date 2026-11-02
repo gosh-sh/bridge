@@ -77,7 +77,8 @@ flags. Both owner keys therefore remain trusted after a flip.
 | `exchange/` | Sources and a `Makefile` that builds them in place |
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
 | `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
-| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
+| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json` |
+| `0.81.1_compiled/exchange/` | `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 | `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
@@ -177,7 +178,7 @@ than 393 168 blocks past N.
 
 1. The zerostate installs the verifier code. On a bridge without it, send
    `setL2VerifierCode` with the code of
-   `0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc`.
+   `0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc`.
 2. Deploy a light client for the parent chain first: its accepted blocks are
    what the verifier's assertions are checked against.
 3. `deployL2Verifier(421614, 11155111, 0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4)`
@@ -368,22 +369,21 @@ AN identity/history. That migration is not implemented. Amounts above
 
 ## Rebuilding
 
-    make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
+    make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
+        SOLD_0_81_1=/path/to/sold-0.81.1
 
 The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
-`eccUSDCBridge.tvc` and 0.81.0 for `DepositVoucher.tvc`,
+`eccUSDCBridge.tvc`, 0.81.0 for `DepositVoucher.tvc` and 0.81.1 for
 `EthBeaconLightClient.tvc` and `ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
 Any other compiler changes the code hash, so the `Makefile` builds each contract
-with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
+with its own compiler, `SOLD_0_80`, `SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is
 unset or the binary reports a different version.
 
 `sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
 but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` and
-`ArbitrumBlockVerifier.tvc` need more than the version: their sources call
-`gosh.keccak256`, so `SOLD_0_81` has to be the `sold` 0.81.0 built from
-[gosh-sh/TVM-Solidity-Compiler `feature/keccak256-builtin`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/feature/keccak256-builtin),
-whose tvm-sdk carries the `KECCAK256` instruction. A stock 0.81.0 emits the
-mnemonic its assembler does not know. The bridge does not import the verifier,
+`ArbitrumBlockVerifier.tvc` call `gosh.keccak256`, which release
+[`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1) is the first to
+assemble. The bridge does not import the verifier,
 only `ArbitrumBlockVerifierDeploy.sol`, a contract with the verifier's state
 variables and the two calls the bridge makes: importing the verifier would
 compile `EthTrie` into the bridge, which `sold` 0.80.0 cannot build. Keep the

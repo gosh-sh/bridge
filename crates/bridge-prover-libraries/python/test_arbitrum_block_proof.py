@@ -41,7 +41,7 @@ from helper.bridge_e2e import (
 )
 
 REPO = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
-VERIFIER_ABI = os.path.join(REPO, "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.abi.json")
+VERIFIER_ABI = os.path.join(REPO, "contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.abi.json")
 _FIXTURES = os.path.join(REPO, "scripts/l2-block-proof-bench/fixtures")
 VECTORS = os.environ.get("L2_VECTORS", "").split() or [
     os.path.join(_FIXTURES, "synthetic_421614.json"),

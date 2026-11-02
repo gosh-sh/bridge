@@ -322,7 +322,8 @@ and rewrites `L1_config/env`:
 ```bash
 cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
-PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 \
+CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 \
+WITHDRAW_ACC_FR=<AN bridge account field element> \
 PREDECESSOR_BRIDGE=<the paused bridge this one replaces, or 0x0000000000000000000000000000000000000000> \
   ./scripts/deploy_bridge_bundle.sh
 ```

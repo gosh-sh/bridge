@@ -44,7 +44,8 @@ contract GenDepositSetup is Script {
             altDstChainId: 0,
             altDstHostChainId: 0,
             altTokenId: 0,
-            predecessor: IPredecessorBridge(address(0))
+            predecessor: IPredecessorBridge(address(0)),
+            legacyPredecessors: new IPredecessorBridge[](0)
         });
 
         AckiNackiBridge bridge = new AckiNackiBridge(

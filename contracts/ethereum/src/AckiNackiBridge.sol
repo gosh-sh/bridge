@@ -277,8 +277,9 @@ contract AckiNackiBridge {
     ///         predecessor already paid would otherwise verify here too.
     ///         `withdrawByProof` refuses a nullifier the predecessor reports
     ///         as used, and the predecessor answers for its own predecessor
-    ///         in turn (see `isNullifierUsed`), so one address covers the
-    ///         whole line of earlier deployments.
+    ///         and `legacyPredecessors` in turn (see `isNullifierUsed`). A
+    ///         bridge deployed before this field existed answers only for
+    ///         itself; the line past it is `legacyPredecessors`.
     /// @dev    The predecessor does not consult this bridge. It must stay
     ///         paused for good once this bridge is live.
     IPredecessorBridge public immutable predecessor;
@@ -316,6 +317,12 @@ contract AckiNackiBridge {
     }
 
     mapping(uint8 => HistoryWindow) private _layerWindows;
+
+    /// @notice Earlier bridges on this chain, for the same AN-side
+    ///         `(dappFr, accFr)`, that `predecessor` does not answer for:
+    ///         bridges deployed before `predecessor` existed answer only for
+    ///         their own nullifiers. Set once by the constructor.
+    IPredecessorBridge[] private _legacyPredecessors;
 
     // ---------------------------------------------------------------------
     // Events
@@ -537,7 +544,8 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
     error InvalidBridgeWithdrawalIdentity();
-    /// @notice `BridgeWithdrawConfig.predecessor` is not an `AckiNackiBridge`
+    /// @notice `BridgeWithdrawConfig.predecessor`, or an entry of
+    ///         `legacyPredecessors`, is not an `AckiNackiBridge`
     ///         on this chain wired to the same AN-side `(dappFr, accFr)`, or
     ///         it was set while `withdrawByProof` is disabled.
     error InvalidPredecessor(address predecessor);
@@ -690,6 +698,11 @@ contract AckiNackiBridge {
         ///         `(dappFr, accFr)`; else `InvalidPredecessor`. Requires
         ///         `bridgeWithdrawalVerifier` to be non-zero.
         IPredecessorBridge predecessor;
+        /// @notice Every other earlier bridge on this chain for the same
+        ///         `(dappFr, accFr)` that `predecessor` does not answer for —
+        ///         those deployed before the `predecessor` field. Each is
+        ///         checked like `predecessor`. Empty when there are none.
+        IPredecessorBridge[] legacyPredecessors;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -791,9 +804,13 @@ contract AckiNackiBridge {
         bridgeWithdrawalAltDstHostChainId = _bw.altDstHostChainId;
         bridgeWithdrawalAltTokenId = _bw.altTokenId;
         if (address(_bw.predecessor) != address(0)) {
-            _requirePredecessor(_bw);
+            _requirePredecessor(_bw.predecessor, _bw);
         }
         predecessor = _bw.predecessor;
+        for (uint256 i = 0; i < _bw.legacyPredecessors.length; ++i) {
+            _requirePredecessor(_bw.legacyPredecessors[i], _bw);
+            _legacyPredecessors.push(_bw.legacyPredecessors[i]);
+        }
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -810,8 +827,10 @@ contract AckiNackiBridge {
     ///      walks its own predecessors), and bound to the same AN-side bridge.
     ///      A wrong address would either refuse nothing or revert every
     ///      withdrawal, and the field is immutable.
-    function _requirePredecessor(BridgeWithdrawConfig memory _bw) private view {
-        IPredecessorBridge p = _bw.predecessor;
+    function _requirePredecessor(IPredecessorBridge p, BridgeWithdrawConfig memory _bw)
+        private
+        view
+    {
         if (address(_bw.bridgeWithdrawalVerifier) == address(0) || address(p).code.length == 0) {
             revert InvalidPredecessor(address(p));
         }
@@ -1487,14 +1506,14 @@ contract AckiNackiBridge {
     ///      same proof is rejected because `dstChainId` must match the
     ///      executing chain (or its scoped alias). On one chain, nullifiers
     ///      are per-contract: a replacement bridge sees the ones its
-    ///      `predecessor` line paid, nothing else does.
+    ///      `predecessor` line and `legacyPredecessors` paid, nothing else does.
     ///   3. `pub.dappFr == bridgeWithdrawalDappFr` and
     ///      `pub.accFr == bridgeWithdrawalAccFr` (defensive — also enforced
     ///      by the verifier under the same identity, but checked here so
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
     ///   4. `pub.nullifier` has not been used before, here or by
-    ///      `predecessor` (replay protection; see `isNullifierUsed`).
+    ///      an earlier bridge (replay protection; see `isNullifierUsed`).
     ///   5. `pub.tokenId == 0` (only bridged USDC is currently supported;
     ///      non-zero token ids reserved for multi-token in a future milestone).
     ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
@@ -1605,8 +1624,9 @@ contract AckiNackiBridge {
         return true;
     }
 
-    /// @notice View helper: has `nullifier` already been consumed, here or by
-    ///         `predecessor` (which answers for its own predecessor in turn)?
+    /// @notice View helper: has `nullifier` already been consumed, here, by
+    ///         `predecessor` (which answers for its own line in turn) or by
+    ///         one of `legacyPredecessors`?
     ///         `true` means `withdrawByProof` refuses it with
     ///         `NullifierAlreadyUsed`.
     /// @dev Useful for relayers / front-ends to skip re-submission of an
@@ -1619,7 +1639,19 @@ contract AckiNackiBridge {
     /// @dev A predecessor that reverts makes the caller revert: a withdrawal
     ///      then waits rather than risk paying twice.
     function _predecessorUsed(uint256 nullifier) internal view returns (bool) {
-        return address(predecessor) != address(0) && predecessor.isNullifierUsed(nullifier);
+        if (address(predecessor) != address(0) && predecessor.isNullifierUsed(nullifier)) {
+            return true;
+        }
+        uint256 n = _legacyPredecessors.length;
+        for (uint256 i = 0; i < n; ++i) {
+            if (_legacyPredecessors[i].isNullifierUsed(nullifier)) return true;
+        }
+        return false;
+    }
+
+    /// @notice See `BridgeWithdrawConfig.legacyPredecessors`.
+    function legacyPredecessors() external view returns (IPredecessorBridge[] memory) {
+        return _legacyPredecessors;
     }
 
     /// @dev Revert unless `value` is a canonical BN254 Fr. Public inputs that

@@ -25,4 +25,36 @@ library PredecessorEnv {
             );
         }
     }
+
+    /// @notice `LEGACY_PREDECESSOR_BRIDGES`: comma-separated earlier bridges for
+    ///         the same `WITHDRAW_ACC_FR` that `PREDECESSOR_BRIDGE` does not
+    ///         answer for. Required, possibly empty, when `PREDECESSOR_BRIDGE`
+    ///         predates the `predecessor` field: such a bridge answers only for
+    ///         its own nullifiers, so every bridge before it has to be listed.
+    function readLegacy() internal view returns (IPredecessorBridge[] memory legacy) {
+        address predecessor = VM.envAddress("PREDECESSOR_BRIDGE");
+        if (predecessor != address(0) && !_answersForItsLine(predecessor)) {
+            require(
+                VM.envExists("LEGACY_PREDECESSOR_BRIDGES"),
+                "PREDECESSOR_BRIDGE predates the predecessor field: set LEGACY_PREDECESSOR_BRIDGES to every earlier bridge before it, empty if none"
+            );
+        }
+        address[] memory addrs = VM.envOr("LEGACY_PREDECESSOR_BRIDGES", ",", new address[](0));
+        legacy = new IPredecessorBridge[](addrs.length);
+        for (uint256 i = 0; i < addrs.length; ++i) {
+            require(
+                AckiNackiBridge(addrs[i]).paused(),
+                "pause every LEGACY_PREDECESSOR_BRIDGES entry before the deploy"
+            );
+            legacy[i] = IPredecessorBridge(addrs[i]);
+        }
+    }
+
+    function _answersForItsLine(address bridge) private view returns (bool) {
+        try AckiNackiBridge(bridge).predecessor() returns (IPredecessorBridge) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
 }

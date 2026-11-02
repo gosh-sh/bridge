@@ -14,10 +14,9 @@
 # crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3 (Case 1).
 #
 # Usage:
-#   LEVEL=1 PRIVATE_KEY=<burner> PREDECESSOR_BRIDGE=<paused bridge or 0x0…0> \
-#     ./scripts/deploy_bridge_bundle.sh   # L1 anchor
-#   LEVEL=2 PRIVATE_KEY=<burner> PREDECESSOR_BRIDGE=<paused bridge or 0x0…0> \
-#     ./scripts/deploy_bridge_bundle.sh   # L2 anchor
+#   CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=1 PRIVATE_KEY=<burner> \
+#   WITHDRAW_ACC_FR=<AN bridge account Fr> PREDECESSOR_BRIDGE=<paused bridge or 0x0…0> \
+#     ./scripts/deploy_bridge_bundle.sh   # L1 anchor; LEVEL=2 for the L2 anchor
 #
 # Inputs (env):
 #   LEVEL                      1 or 2 (required)
@@ -34,6 +33,11 @@
 #                              for the first one; required and immutable — a zero
 #                              in place of a live predecessor pays its withdrawals
 #                              again
+#   LEGACY_PREDECESSOR_BRIDGES comma-separated, each paused: the earlier bridges
+#                              for this WITHDRAW_ACC_FR that PREDECESSOR_BRIDGE
+#                              does not answer for. Required, possibly empty,
+#                              when PREDECESSOR_BRIDGE predates the
+#                              `predecessor` field (the forge script checks)
 set -euo pipefail
 set +x
 umask 077
@@ -102,6 +106,7 @@ export PRIVATE_KEY
 export WIRE_WITHDRAW_BY_PROOF=true
 export WITHDRAW_ACC_FR
 export PREDECESSOR_BRIDGE
+if [[ -v LEGACY_PREDECESSOR_BRIDGES ]]; then export LEGACY_PREDECESSOR_BRIDGES; fi
 
 echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \

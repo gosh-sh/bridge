@@ -254,7 +254,11 @@ BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   `WITHDRAW_ACC_FR` that this deploy replaces, after pausing it: the new bridge
   refuses the withdrawals it paid. Use the zero address only for the first
   bridge for that identity; a zero in place of a live one pays its
-  withdrawals again. The cutover is in `docs/aave-yield.md`, "Replacing a
+  withdrawals again. If that bridge predates the `predecessor` field it
+  answers only for itself: also set `LEGACY_PREDECESSOR_BRIDGES` to every
+  earlier Sepolia bridge for the same `WITHDRAW_ACC_FR`, comma-separated and
+  each paused, or to an empty string if there is none; the deploy refuses to
+  run without it. The cutover is in `docs/aave-yield.md`, "Replacing a
   bridge on the same chain".
 
 - `BRIDGE_SEED_SEQNO` pins the seed to S; without it the script picks the

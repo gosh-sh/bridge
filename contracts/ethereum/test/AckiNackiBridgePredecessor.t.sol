@@ -89,8 +89,11 @@ contract AckiNackiBridgePredecessorTest is Test {
     }
 
     /// @dev A funded bridge with one anchored block, ready to pay.
-    function _liveBridge(address predecessor) internal returns (AckiNackiBridge b) {
-        b = _newBridge(_withdrawConfig(predecessor, DAPP_FR, ACC_FR));
+    function _liveBridge(address predecessor) internal returns (AckiNackiBridge) {
+        return _fund(_newBridge(_withdrawConfig(predecessor, DAPP_FR, ACC_FR)));
+    }
+
+    function _fund(AckiNackiBridge b) internal returns (AckiNackiBridge) {
         UsdcTestLib.depositUsdc(vm, usdc, b, funder, 40 * UsdcTestLib.UNIT);
         uint256[10] memory layers;
         layers[0] = anchor;
@@ -105,6 +108,7 @@ contract AckiNackiBridgePredecessorTest is Test {
             layers,
             b.expectedPrevAnchor(1)
         );
+        return b;
     }
 
     function _pub(uint256 nullifier)
@@ -248,6 +252,84 @@ contract AckiNackiBridgePredecessorTest is Test {
 
         _pay(third, 63);
         assertEq(usdc.balanceOf(RECIPIENT), 3 * AMOUNT);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Bridges from before the `predecessor` field
+    // ─────────────────────────────────────────────────────────────────────
+
+    function _withLegacy(address predecessor, address[] memory legacy)
+        internal
+        view
+        returns (AckiNackiBridge.BridgeWithdrawConfig memory bw)
+    {
+        bw = _withdrawConfig(predecessor, DAPP_FR, ACC_FR);
+        bw.legacyPredecessors = new IPredecessorBridge[](legacy.length);
+        for (uint256 i = 0; i < legacy.length; ++i) {
+            bw.legacyPredecessors[i] = IPredecessorBridge(legacy[i]);
+        }
+    }
+
+    /// @dev Two older bridges: the one named as `predecessor` answers only for
+    ///      itself, so the one before it has to be listed.
+    function test_legacyPredecessors_coverOlderBridgesThePredecessorDoesNotReach() public {
+        MockPredecessorBridge older = new MockPredecessorBridge(DAPP_FR, ACC_FR);
+        MockPredecessorBridge old = new MockPredecessorBridge(DAPP_FR, ACC_FR);
+        older.setUsed(71);
+        old.setUsed(72);
+
+        AckiNackiBridge withoutList = _liveBridge(address(old));
+        assertFalse(withoutList.isNullifierUsed(71));
+
+        address[] memory legacy = new address[](1);
+        legacy[0] = address(older);
+        AckiNackiBridge b = _fund(_newBridge(_withLegacy(address(old), legacy)));
+        assertEq(address(b.legacyPredecessors()[0]), address(older));
+        assertTrue(b.isNullifierUsed(71));
+        _expectRefused(b, 71);
+        _expectRefused(b, 72);
+        _pay(b, 73);
+        assertEq(usdc.balanceOf(RECIPIENT), AMOUNT);
+    }
+
+    function test_legacyPredecessors_answeredForByTheNextBridgeInTheLine() public {
+        MockPredecessorBridge older = new MockPredecessorBridge(DAPP_FR, ACC_FR);
+        MockPredecessorBridge old = new MockPredecessorBridge(DAPP_FR, ACC_FR);
+        older.setUsed(81);
+        address[] memory legacy = new address[](1);
+        legacy[0] = address(older);
+        AckiNackiBridge second = _newBridge(_withLegacy(address(old), legacy));
+        vm.prank(second.owner());
+        second.pause();
+
+        AckiNackiBridge third = _liveBridge(address(second));
+        assertTrue(third.isNullifierUsed(81));
+        _expectRefused(third, 81);
+    }
+
+    function test_revertingLegacyPredecessorBlocksPayout() public {
+        MockPredecessorBridge older = new MockPredecessorBridge(DAPP_FR, ACC_FR);
+        address[] memory legacy = new address[](1);
+        legacy[0] = address(older);
+        AckiNackiBridge b = _fund(_newBridge(_withLegacy(address(0), legacy)));
+        older.setReverts(true);
+        vm.expectRevert(bytes("predecessor down"));
+        _pay(b, 91);
+    }
+
+    function test_constructor_rejectsInvalidLegacyPredecessor() public {
+        MockPredecessorBridge good = new MockPredecessorBridge(DAPP_FR, ACC_FR);
+        MockPredecessorBridge otherIdentity = new MockPredecessorBridge(DAPP_FR, ACC_FR + 1);
+        address[] memory legacy = new address[](2);
+        legacy[0] = address(good);
+
+        legacy[1] = address(usdc);
+        _expectInvalid(address(usdc));
+        _newBridge(_withLegacy(address(good), legacy));
+
+        legacy[1] = address(otherIdentity);
+        _expectInvalid(address(otherIdentity));
+        _newBridge(_withLegacy(address(good), legacy));
     }
 
     // ─────────────────────────────────────────────────────────────────────

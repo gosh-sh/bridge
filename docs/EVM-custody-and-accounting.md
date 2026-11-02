@@ -20,11 +20,11 @@ token balance and is never reconciled against one.
 
 It moves in four places in the whole contract (lines as of gosh-sh/bridge-audit#140):
 
-* `+= credited` in `deposit` (`:862`)
-* `-= pub.amount` in `withdrawByProof` (`:1588`)
-* `+= amount` in `fundTreasury` (`:1818`), owner or `predecessor` only, for USDC it pulls from the
+* `+= credited` in `deposit` (`:881`)
+* `-= pub.amount` in `withdrawByProof` (`:1607`)
+* `+= amount` in `fundTreasury` (`:1850`), owner or `predecessor` only, for USDC it pulls from the
   caller, with no `Deposit` event
-* `= 0` in `migrateTreasury` (`:1847`), owner only on a paused bridge, which hands the whole book
+* `= 0` in `migrateTreasury` (`:1879`), owner only on a paused bridge, which hands the whole book
   to a successor (CUST-2)
 
 Nothing else writes it — in particular not the AAVE routing functions, which move tokens between
@@ -74,8 +74,10 @@ Two consequences worth naming:
 
 * `MAX_DEPOSIT_AMOUNT` is the first width guard, `type(uint64).max`.
   `MAX_TRANSFER_AMOUNT` adds the lower 50 USDC ceiling on deposits and withdrawals;
-  `MAX_BRIDGE_TVL` caps `treasuryBalance` at 10,000 USDC per L1 bridge. Aave supply,
-  yield and donations do not reset that capacity. The amount remains a parameter;
+  `MAX_BRIDGE_TVL` refuses a deposit that would take `treasuryBalance` past 10,000 USDC
+  per L1 bridge. Aave supply, yield and donations do not reset that capacity.
+  `fundTreasury` is not checked against it, so a migrated or owner-funded book can sit
+  above the cap; deposits then stop until payouts bring it back under. The amount remains a parameter;
   deposits are not payable and have no minimum beyond `amount != 0`.
 * The booked figure is the **requested** `amount`, not an observed balance delta. Exact for USDC;
   it would understate custody for a fee-on-transfer token, which is why the token is fixed at

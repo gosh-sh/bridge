@@ -43,6 +43,9 @@ import "./PredecessorEnv.sol";
  *     same chain, or the zero address for the first bridge there. A non-zero
  *     predecessor must already be paused; the new bridge refuses the
  *     withdrawals it paid.
+ *   - LEGACY_PREDECESSOR_BRIDGES (comma-separated, paused): earlier bridges
+ *     PREDECESSOR_BRIDGE does not answer for. Required, possibly empty, when
+ *     PREDECESSOR_BRIDGE predates the `predecessor` field.
  */
 contract DeployRealBridge is Script {
     struct WireInputs {
@@ -331,7 +334,8 @@ contract DeployRealBridge is Script {
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
             altTokenId: altTokenId,
-            predecessor: IPredecessorBridge(predecessor)
+            predecessor: IPredecessorBridge(predecessor),
+            legacyPredecessors: PredecessorEnv.readLegacy()
         });
     }
 

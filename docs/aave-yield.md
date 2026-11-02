@@ -175,8 +175,10 @@ to be told about the old one: it is deployed with `predecessor` set to the old b
 (`PREDECESSOR_BRIDGE`, which every bridge deploy script requires: `DeployRealBridge` on chains 1
 and 11155111, `DeployShellnetE2EBridge` elsewhere, such as 421614, and `DeployGenesisCursorBridge`
 and `DeployReuseVerifiersBridge`; the zero address for the first bridge on a chain). The new bridge
-then refuses, with `NullifierAlreadyUsed`, every withdrawal the old bridge — or any bridge before
-it — already paid, and its `isNullifierUsed` reports those as used. The old bridge does not consult
+then refuses, with `NullifierAlreadyUsed`, every withdrawal the old bridge already paid, and its
+`isNullifierUsed` reports those as used. A bridge from this release on also answers for its own
+predecessors; a bridge deployed before this release answers only for itself, so every bridge before
+it goes into `LEGACY_PREDECESSOR_BRIDGES` (the constructor's `legacyPredecessors`). The old bridge does not consult
 the new one: it stays safe only while it stays paused, and nothing in the contract stops its owner
 from unpausing it.
 
@@ -191,8 +193,11 @@ bridge pays those withdrawals out of other depositors' money and eventually stop
 2. **Deploy the new bridge** with `PREDECESSOR_BRIDGE` set to the old one. The constructor
    reverts `InvalidPredecessor` unless that address has code on this chain, answers
    `isNullifierUsed`, and was deployed for the same `WITHDRAW_DAPP_FR` and `WITHDRAW_ACC_FR`.
-   For a third bridge, name the second one: each bridge answers for its own predecessor, so
-   one address covers the whole line. The constructor leaves the new bridge unpaused, so it
+   For a third bridge, name the second one: a bridge from this release on answers for its own
+   predecessors. If the bridge you name predates this release, the deploy script also requires
+   `LEGACY_PREDECESSOR_BRIDGES`: every other earlier bridge on this chain for the same
+   `WITHDRAW_ACC_FR`, comma-separated and each paused, or an empty string if there is none.
+   A bridge left off that list has its paid withdrawals paid again. The constructor leaves the new bridge unpaused, so it
    takes deposits and pays withdrawals from its first block; its owner calls `pause()` in the
    next transaction and keeps it paused until step 4. A deposit made in between is not lost:
    Acki Nacki finalizes it once it trusts the new bridge.

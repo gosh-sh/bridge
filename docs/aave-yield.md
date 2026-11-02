@@ -160,7 +160,9 @@ capped at 50 % (`:67`). Ours, not an AAVE convention. `setAaveEnabled` — gate 
 `emergencyWithdrawAll` turns it off, and only an explicit call turns it back on.
 
 The owner cannot replace a verifier — those bindings are immutable — and can reduce
-`treasuryBalance` only by handing all of it to a successor bridge with `migrateTreasury` (see
+`treasuryBalance` only by handing all of it to a successor with `migrateTreasury`. The bridge checks
+only that the target has code and returns it from `predecessor()`, which any contract can do, so
+the owner key decides where that money goes (see
 [Replacing a bridge on the same chain](#replacing-a-bridge-on-the-same-chain)). The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
 `applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield controls above stay
 available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec.md`, §10.1).
@@ -195,8 +197,9 @@ bridge pays those withdrawals out of other depositors' money and eventually stop
 3. **Move the principal.**
    - An old bridge that has `migrateTreasury(address)` (this release onwards): its owner calls
      `migrateTreasury(<new bridge>)`. It needs the old bridge paused, its `treasuryBalance`
-     liquid (`TreasuryNotLiquid` otherwise), and a target whose `predecessor()` is the old
-     bridge (`NotSuccessor` otherwise). The whole `treasuryBalance` moves and the old bridge's
+     liquid (`TreasuryNotLiquid` otherwise), and a target with code whose `predecessor()` is
+     the old bridge (`NotSuccessor` otherwise). Check the target address yourself: that test
+     catches a typo, not a contract written to pass it. The whole `treasuryBalance` moves and the old bridge's
      book drops to 0. That is not final: the old bridge's owner can still `unpause()` it, and
      a new `deposit` or `fundTreasury` raises its book again, after which it pays withdrawals
      without consulting the new bridge's nullifiers. Keep the old bridge paused for good.

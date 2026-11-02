@@ -660,7 +660,7 @@ applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` d
 | `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
 | `setYieldRecipient(addr)` | 1557 | Non-zero. |
 | `fundTreasury(amount)` | 1813 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
-| `migrateTreasury(successor)` | 1828 | Owner only, while paused (`NotPaused`). `successor.predecessor()` must be this bridge (`NotSuccessor`); the whole `treasuryBalance` must be liquid (`TreasuryNotLiquid`); zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
+| `migrateTreasury(successor)` | 1832 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid (`TreasuryNotLiquid`); zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
 | `transferOwnership(addr)` | 1565 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
@@ -911,10 +911,10 @@ Read off the code, without a formal audit claim.
 5. Payout uniqueness: nullifier map + `dstChainId == block.chainid` (or scoped alias) confine a proof
    to one execution on one deployment; on one chain, `predecessor` extends that to a line of
    deployments that replace each other, provided each replaced bridge stays paused.
-6. User principal is not owner-reachable except as a whole, into a successor: owner functions move
-   funds only between the contract and AAVE, skim strictly above `treasuryBalance`, or — paused,
-   and only into the bridge whose `predecessor` is this one — hand all of it over
-   (`migrateTreasury`).
+6. User principal is owner-reachable only as a whole: owner functions move funds only between the
+   contract and AAVE, skim strictly above `treasuryBalance`, or — paused — hand all of it to a
+   contract whose `predecessor()` returns this bridge (`migrateTreasury`). Any contract can
+   return that, so the owner key decides where the book goes.
 
 **Deliberate trade-offs and limitations (all flagged in-code)**
 

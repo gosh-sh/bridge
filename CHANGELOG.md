@@ -28,35 +28,25 @@ assigns it when the release is tagged.
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
   flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
-- **A second `AckiNackiBridge` on the same chain no longer pays withdrawals the first one already
-  paid.** A withdrawal proof names the chain, not the bridge, and each bridge keeps its own
-  nullifiers, so a replacement bridge could pay an old burn again out of new deposits. The
-  constructor's `BridgeWithdrawConfig` gains a last field, `predecessor`: the bridge this one
-  replaces on the same chain, or zero for the first one there. `withdrawByProof` and
-  `isNullifierUsed` then treat every nullifier the predecessor — or its own predecessor, and so
-  on — paid as used (`NullifierAlreadyUsed`). The constructor reverts `InvalidPredecessor` unless
-  the address is a bridge on this chain for the same `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`.
-  The constructor ABI changes, so tooling that encodes it must be updated. Already deployed
-  bridges are unchanged. Every bridge deploy script — `DeployRealBridge`, `DeployShellnetE2EBridge`
-  (the one for Arbitrum Sepolia), `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge` — and
-  `deploy_bridge_bundle.sh` now require `PREDECESSOR_BRIDGE` (the zero address for the first bridge
-  on a chain) and refuse a predecessor that is not paused. `scripts/production_env.example` no
-  longer fills it in. The old bridge does not consult the new
-  one: keep it paused for good. The cutover order is in `docs/aave-yield.md`, "Replacing a bridge
-  on the same chain".
+- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains a last field, `predecessor`** — the
+  bridge this one replaces on the same chain, or zero for the first. Nullifiers the predecessor
+  line paid count as used (`NullifierAlreadyUsed`); a predecessor that is not a bridge for the same
+  `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR` reverts `InvalidPredecessor`. Update tooling that encodes
+  the constructor; deployed bridges are unchanged.
+- Every bridge deploy script (`DeployRealBridge`, `DeployShellnetE2EBridge`,
+  `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge`) and `deploy_bridge_bundle.sh` require
+  `PREDECESSOR_BRIDGE` — zero for the first bridge on a chain — and refuse a predecessor that is not
+  paused. Keep a replaced bridge paused for good; the cutover is in `docs/aave-yield.md`,
+  "Replacing a bridge on the same chain".
 
-### Added
+### New / Improvements
 
-- `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused bridge only) hands the whole
-  `treasuryBalance` to the bridge whose `predecessor()` is this one, so the eccUSDC it backs stays
-  backed after a cutover. Pull AAVE principal back first (`TreasuryNotLiquid` otherwise). Emits
-  `TreasuryMigrated`. This is not final: unpaused, the old bridge takes deposits again and pays
-  withdrawals from them, so keep it paused.
+- `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused only) sends the whole
+  `treasuryBalance` to a contract whose `predecessor()` returns this bridge; emits
+  `TreasuryMigrated`. The bridge cannot tell a real successor from any contract giving that answer:
+  the owner key decides where the book goes. Pull AAVE principal back first (`TreasuryNotLiquid`).
 - `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
-  `treasuryBalance` without a `Deposit` event, so nothing is minted on Acki Nacki. It is how
-  `migrateTreasury` delivers, and how the owner covers a predecessor deployed before
-  `migrateTreasury` existed, such as the Arbitrum Sepolia bridge
-  `0x3FB082a905a895151224F6d93bD074E816338638`. Emits `TreasuryFunded`.
+  `treasuryBalance` with no `Deposit` event; emits `TreasuryFunded`.
 
 ### Fixes
 

@@ -1825,9 +1825,13 @@ contract AckiNackiBridge {
     ///         (`excessUsdc`, aUSDC yield) stays here for the owner.
     /// @dev Paused only: a live bridge would keep paying from the book it
     ///      just gave away. AAVE-supplied principal must be pulled back first.
+    ///      The `predecessor()` check catches a wrong address, not a hostile
+    ///      one: any contract can return this bridge from `predecessor()` and
+    ///      take the approved USDC in its `fundTreasury`, so this is an owner
+    ///      power over the whole book.
     function migrateTreasury(address successor) external onlyOwner nonReentrant {
         if (!paused) revert NotPaused();
-        if (successor == address(0) || successor == address(this)) {
+        if (successor == address(this) || successor.code.length == 0) {
             revert NotSuccessor(successor);
         }
         try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {

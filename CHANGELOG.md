@@ -40,6 +40,34 @@ assigns it when the release is tagged.
   (or Ethereum) first, then the Arbitrum chain. The version string stays 1.14.0, so released CLIs
   keep working. `updateCode` drops the verifier code and the verifiers, as for 1.14.0: install and
   deploy them again after the upgrade.
+- Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
+  `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
+  `install.sh` needs a tag cut after this change.
+- `relayer daemon-live` no longer stalls after a late `applyBkSetUpdate` or `verifyBlock` receipt,
+  or when its bundle cursor is behind a rotation the contract already accepted. If the receipt is
+  not back within 180 seconds, the update counts as applied when the contract already shows that
+  seq_no — and, for a rotation, the new BK-set commitment. A deferred rotation ack no longer fails
+  the tick: the daemon acks the bundles the contract already has, then rotates. The rotation
+  proof already built for that ack is kept until the cursor passes it, instead of being proved
+  again on every tick of the catch-up. Restart the relayer. Do not delete `prover_state.json`
+  because of this stall. Verification keys are unchanged.
+- **A withdrawal in the last 128 blocks before an L2 boundary can be proven.**
+  The Circuit 4 witness put that boundary's own L2 root into leaf 0 of its L1
+  tree (every 16 384 blocks). The rebuilt root did not match the root the bridge
+  stores, so `withdrawByProof` reverted `UnknownAnchor` on an L1 anchor, and an
+  L2 anchor failed while the witness was built. The USDC was already burned on
+  Acki Nacki. Leaf 0 is now the L2 root of the previous L2 boundary, or 32 zero
+  bytes at the first boundary (block 16 384). A missing layer root fails the
+  build instead of becoming a tree of zeros, and the rebuilt L1 root must match
+  the root the key block published. No verification key changes.
+  A `proof_event_*.json` already built with the old leaf 0 still makes
+  `withdrawByProof` revert `UnknownAnchor`. `relayer daemon-withdraw` and
+  `relayer daemon-bridge` treat that revert as transient and submit the same
+  file again. Move those files out of `--proofs-dir`. Prove the withdrawal
+  again with `ackinacki-bridge withdraw --allow-retry` (the burn is already
+  recorded), or let `daemon-withdraw` / `daemon-bridge` pick up the new
+  `proof_event_*.json`. Do this while that L2 root is still inside the bridge
+  window (about 8 days at 3 blocks/s).
 - `eth-lc-relayer daemon` exits cleanly on SIGTERM, as it does on SIGINT.
 - `eth-lc-relayer arbitrum-anchors` and `arbitrum-vector` give up an RPC request after 60 s and
   retry on the next tick, instead of waiting forever on a node that does not answer.

@@ -1270,7 +1270,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 | `--state-dir` | `BRIDGE_DEPOSIT_STATE_DIR` | `$HOME/.bridge-deposit-state`; none when `HOME` is unset or empty | Operation records, their locks and claims. Keep it the same for one sender: [why](#operations-resume-and-abandon) |
 | `--work-dir` | `BRIDGE_WORK_DIR` | `$HOME/.bridge-deposit-work`; none when `HOME` is unset or empty | `<op-id>/input.json`, `proof.bin` and `public_inputs.bin` of each operation. Each operation records its own, so only a new deposit needs this setting |
 | `--confirmations` | `BRIDGE_DEPOSIT_CONFIRMATIONS` | `12` | How deep the receipt must be before step 5 decides |
-| `--wc-project-id` | `BRIDGE_WC_PROJECT_ID` | compiled into release builds | WalletConnect Cloud project id. A build from source has none: pass it, or set `ACKINACKI_BRIDGE_WC_PROJECT_ID` when building |
+| `--wc-project-id` | `BRIDGE_WC_PROJECT_ID` | none | WalletConnect Cloud project id. Neither a release nor a build from source has one: pass it, set it in the profile, or set `ACKINACKI_BRIDGE_WC_PROJECT_ID` when building |
 
 **Time limits**, flags only:
 

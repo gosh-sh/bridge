@@ -89,4 +89,14 @@ impl RelayerError {
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
     }
+
+    /// The live prover refused `ack_bk_update` because its bundle cursor has
+    /// not yet passed the rotation. The bundles in between may already be on
+    /// the contract; the tick acks those and retries the rotation.
+    pub fn is_rotation_ack_waiting(&self) -> bool {
+        match self {
+            RelayerError::AckiNacki(msg) => msg.starts_with("ack_bk_update deferred:"),
+            _ => false,
+        }
+    }
 }

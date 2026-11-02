@@ -47,28 +47,73 @@ impl StatePaths {
     }
 }
 
+/// What a test driver answers to `ack_bk_update`.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum AckStubKind {
+    TooEarly,
+    Other,
+}
+
+#[cfg(test)]
+struct AckStub {
+    last_bk_seq: u64,
+    kind: AckStubKind,
+}
+
 /// Live source sharing one [`LiveProverDriver`] across both lanes.
 pub struct LiveBlockSource {
-    driver: Arc<Mutex<LiveProverDriver>>,
+    driver: Option<Arc<Mutex<LiveProverDriver>>>,
     pending_bundle: Mutex<Option<BundleProofArtifacts>>,
     pending_bk_update: Mutex<Option<BkUpdateProofArtifacts>>,
     state_paths: StatePaths,
     chain_behind: Mutex<ChainBehindGuard>,
+    /// Stands in for the driver in tests. `None` in the daemon: every ack
+    /// and poll goes to [`LiveProverDriver`]. A test sets it so a deferred
+    /// ack can be exercised without loading a proving ceremony.
+    #[cfg(test)]
+    stub: Mutex<Option<AckStub>>,
+    #[cfg(test)]
+    poll_bk_calls: Mutex<u32>,
 }
 
 impl LiveBlockSource {
     pub fn new(driver: Arc<Mutex<LiveProverDriver>>, state_paths: StatePaths) -> Self {
         Self {
-            driver,
+            driver: Some(driver),
             pending_bundle: Mutex::new(None),
             pending_bk_update: Mutex::new(None),
             state_paths,
             chain_behind: Mutex::new(ChainBehindGuard::default()),
+            #[cfg(test)]
+            stub: Mutex::new(None),
+            #[cfg(test)]
+            poll_bk_calls: Mutex::new(0),
         }
     }
 
+    fn live(&self) -> &Arc<Mutex<LiveProverDriver>> {
+        self.driver.as_ref().expect("live prover driver")
+    }
+
     pub fn driver(&self) -> Arc<Mutex<LiveProverDriver>> {
-        Arc::clone(&self.driver)
+        Arc::clone(self.live())
+    }
+
+    #[cfg(test)]
+    fn stubbed(kind: AckStubKind) -> Self {
+        Self {
+            driver: None,
+            pending_bundle: Mutex::new(None),
+            pending_bk_update: Mutex::new(None),
+            state_paths: StatePaths::under(std::env::temp_dir()),
+            chain_behind: Mutex::new(ChainBehindGuard::default()),
+            stub: Mutex::new(Some(AckStub {
+                last_bk_seq: 0,
+                kind,
+            })),
+            poll_bk_calls: Mutex::new(0),
+        }
     }
 
     /// Read-only clone of the driver's post-ack `BridgeState` (~40 KiB).
@@ -77,7 +122,7 @@ impl LiveBlockSource {
     }
 
     pub async fn driver_prover_bk_set_snapshot(&self) -> ProverBkSet {
-        self.driver.lock().await.snapshot_prover_bk_set().clone()
+        self.live().lock().await.snapshot_prover_bk_set().clone()
     }
 
     /// Read-only clone of the pending bundle artifact, if any. Used by the
@@ -105,6 +150,10 @@ impl LiveBlockSource {
     /// Takes the pending update only on an exact seq match. If the
     /// driver already has `stored_last_bk_set_update_seq_no >= seq_no`,
     /// the ack is a no-op and a different pending N is left in place.
+    ///
+    /// `AckTooEarly` puts that proof back. The driver contract is to
+    /// re-ack the same artifacts once the cursor has passed N, not to
+    /// build the rotation again.
     pub async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
         self.do_ack_bk_update(seq_no).await
     }
@@ -122,34 +171,70 @@ impl LiveBlockSource {
         }
         let b = pending.take().expect("matched pending bundle");
         drop(pending);
-        let mut d = self.driver.lock().await;
+        let mut d = self.live().lock().await;
         d.ack_bundle(&b).map_err(map_driver_err)?;
         persist_driver(&d, &self.state_paths)?;
         Ok(())
     }
 
-    async fn do_ack_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
-        {
-            let d = self.driver.lock().await;
-            if d.snapshot_state().stored_last_bk_set_update_seq_no >= seq_no {
-                return Ok(());
-            }
+    async fn stored_last_bk_seq(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(stub) = self.stub.lock().await.as_ref() {
+            return stub.last_bk_seq;
         }
-        let mut pending = self.pending_bk_update.lock().await;
-        let matches = pending.as_ref().is_some_and(|u| u.block_seq_no == seq_no);
-        if !matches {
-            return Ok(());
+        self.live()
+            .lock()
+            .await
+            .snapshot_state()
+            .stored_last_bk_set_update_seq_no
+    }
+
+    async fn ack_bk_on_driver(&self, u: &BkUpdateProofArtifacts) -> Result<(), RelayerError> {
+        #[cfg(test)]
+        if let Some(kind) = self.stub.lock().await.as_ref().map(|stub| stub.kind) {
+            return match kind {
+                AckStubKind::TooEarly => Err(map_driver_err(DriverError::AckTooEarly {
+                    cursor: 0,
+                    rotation_seqno: u.block_seq_no,
+                })),
+                AckStubKind::Other => Err(map_driver_err(DriverError::Other(anyhow::anyhow!(
+                    "bk ack failed"
+                )))),
+            };
         }
-        let u = pending.take().expect("matched pending");
-        drop(pending);
-        let mut d = self.driver.lock().await;
-        d.ack_bk_update(&u).map_err(map_driver_err)?;
+        let mut d = self.live().lock().await;
+        d.ack_bk_update(u).map_err(map_driver_err)?;
         persist_driver(&d, &self.state_paths)?;
         Ok(())
     }
 
+    async fn do_ack_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+        if self.stored_last_bk_seq().await >= seq_no {
+            return Ok(());
+        }
+        let u = {
+            let mut pending = self.pending_bk_update.lock().await;
+            let matches = pending.as_ref().is_some_and(|u| u.block_seq_no == seq_no);
+            if !matches {
+                return Ok(());
+            }
+            pending.take().expect("matched pending")
+        };
+        match self.ack_bk_on_driver(&u).await {
+            Ok(()) => Ok(()),
+            // The proof is already built. Dropping it here makes the next
+            // tick call `poll_next_bk_update` and prove the same rotation
+            // again. `AckTooEarly` is retryable against these artifacts.
+            Err(e) if e.is_rotation_ack_waiting() => {
+                *self.pending_bk_update.lock().await = Some(u);
+                Err(e)
+            },
+            Err(e) => Err(e),
+        }
+    }
+
     async fn snapshot_bridge_state(&self) -> BridgeState {
-        self.driver.lock().await.snapshot_state().clone()
+        self.live().lock().await.snapshot_state().clone()
     }
 }
 
@@ -218,7 +303,7 @@ impl BlockSource for LiveBlockSource {
             }
         }
 
-        let mut d = self.driver.lock().await;
+        let mut d = self.live().lock().await;
         match d.poll_next_bundle().await.map_err(map_driver_err)? {
             LiveBundleEvent::Bootstrapping {
                 ..
@@ -280,7 +365,15 @@ impl BkUpdateSource for LiveBlockSource {
             }
         }
 
-        let mut d = self.driver.lock().await;
+        #[cfg(test)]
+        if self.stub.lock().await.is_some() {
+            *self.poll_bk_calls.lock().await += 1;
+            return Err(RelayerError::other(
+                "poll_next_bk_update called while the pending rotation should have been reused",
+            ));
+        }
+
+        let mut d = self.live().lock().await;
         match d.poll_next_bk_update().await.map_err(map_driver_err)? {
             LiveBkUpdateEvent::Bootstrapping {
                 ..
@@ -303,5 +396,89 @@ impl BkUpdateSource for LiveBlockSource {
 
     async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
         self.do_ack_bk_update(seq_no).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use bridge_prover_lib::{
+        live_driver::{BkUpdateProofArtifacts, BundleFinalizationType},
+        transcript::TranscriptKind,
+    };
+
+    use super::{AckStubKind, LiveBlockSource};
+    use crate::source::BkUpdateSource;
+
+    fn rotation(seq: u64) -> BkUpdateProofArtifacts {
+        BkUpdateProofArtifacts {
+            block_seq_no: seq,
+            block_height: seq,
+            last_seen_bk_update_seq_no: 0,
+            block_id_be: [0; 32],
+            fin_type: BundleFinalizationType::Primary,
+            old_bk_set_commitment_be: [0; 32],
+            new_bk_set_commitment_be: [1; 32],
+            merkle_sibling_h01_be: [0; 32],
+            merkle_sibling_h4_7_be: [0; 32],
+            merkle_sibling_h8_15_be: [0; 32],
+            transcript_kind: TranscriptKind::Blake2b,
+            attestation_proof: vec![9, 9, 9],
+            new_pubkeys: HashMap::new(),
+            attestation_proof_gen_ms: 0,
+        }
+    }
+
+    /// A catch-up tick that is told `AckTooEarly` must keep the proof it
+    /// already built. The next fetch holds that slot and does not poll
+    /// the driver, which is what would rebuild the rotation.
+    #[tokio::test]
+    async fn deferred_rotation_ack_keeps_the_proof_for_the_next_tick() {
+        let src = LiveBlockSource::stubbed(AckStubKind::TooEarly);
+        let proved = rotation(1_890_758);
+        *src.pending_bk_update.lock().await = Some(proved.clone());
+
+        let err = src
+            .ack_last_bk_update(proved.block_seq_no)
+            .await
+            .unwrap_err();
+        assert!(err.is_rotation_ack_waiting(), "{err}");
+
+        let kept = src
+            .peek_pending_bk_update()
+            .await
+            .expect("proof still pending");
+        assert_eq!(kept.block_seq_no, proved.block_seq_no);
+        assert_eq!(kept.attestation_proof, proved.attestation_proof);
+
+        let held = src.fetch_bk_update(proved.block_seq_no + 1).await.unwrap();
+        assert!(
+            held.is_none(),
+            "a rotation waiting on the cursor is not served again"
+        );
+        assert_eq!(*src.poll_bk_calls.lock().await, 0);
+        assert!(src.peek_pending_bk_update().await.is_some());
+
+        let err = src
+            .ack_last_bk_update(proved.block_seq_no)
+            .await
+            .unwrap_err();
+        assert!(err.is_rotation_ack_waiting(), "{err}");
+    }
+
+    /// Any other ack failure still drops the slot, so the next tick polls.
+    #[tokio::test]
+    async fn other_rotation_ack_failure_drops_the_pending_proof() {
+        let src = LiveBlockSource::stubbed(AckStubKind::Other);
+        *src.pending_bk_update.lock().await = Some(rotation(100));
+
+        let err = src.ack_last_bk_update(100).await.unwrap_err();
+        assert!(!err.is_rotation_ack_waiting(), "{err}");
+        assert!(src.peek_pending_bk_update().await.is_none());
+
+        let err = src.fetch_bk_update(100).await.unwrap_err();
+        assert!(err.to_string().contains("poll_next_bk_update"), "{err}");
+        assert_eq!(*src.poll_bk_calls.lock().await, 1);
     }
 }

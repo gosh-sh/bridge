@@ -25,16 +25,16 @@
 # identical for every release:
 #
 #   kzg_bn254_21.srs     257 MB, for withdrawals. The `ceremony` step carries it
-#                        forward from the previous release; it was uploaded by
-#                        hand once, to the first release that has it.
+#                        forward from the newest earlier release that has it; it
+#                        was uploaded by hand once, to the first release that has it.
 #   kzg_params_18.srs    33 MB, for deposits; the installer puts it into
 #                        deposit-prover/data/. Never downloaded: derived from
 #                        kzg_bn254_21.srs with deposit-prover's `downsize_srs`
 #                        (the same tau, cut to k=18) in `verify-deposit-prover`,
 #                        which checks it before it is published.
 #
-# A tag whose previous release lacks kzg_bn254_21.srs fails in `ceremony`,
-# before the builds: without it the deposit file cannot be derived and the
+# A tag fails in `ceremony`, before the builds, when no earlier release has
+# kzg_bn254_21.srs: without it the deposit file cannot be derived and the
 # deposit prover cannot be checked.
 #
 # The build fails at once while `MIN_BRIDGE_VERSION` in
@@ -54,11 +54,6 @@
 # and cron. One token doing both jobs means the review pipelines can write to
 # the repository too; a separate RELEASE_GH_TOKEN is the alternative, and only
 # the two `from_secret: REVIEW_GH_TOKEN` lines change.
-#
-# Secret: WC_PROJECT_ID, the WalletConnect Cloud project id the CLI compiles in
-# as the default for `deposit --wc-project-id`, with the `tag` event ticked.
-# Without it the release has no default, and a WalletConnect deposit needs the
-# flag.
 
 when:
   - event: tag
@@ -79,19 +74,26 @@ steps:
         REPO="$CI_REPO_OWNER/$CI_REPO_NAME"
         TAG="$CI_COMMIT_TAG"
 
-        # Carry the ceremony forward from the latest release before this tag.
-        # Release assets do not inherit, so without this every tag would need the
-        # 257 MB upload repeated by hand.
-        PREVIOUS=$(gh release list -R "$REPO" --limit 20 --json tagName,isDraft \
-          --jq '[.[] | select(.isDraft | not) | .tagName] | map(select(. != "'"$TAG"'")) | .[0] // empty')
-        if [ -n "$PREVIOUS" ] && gh release download "$PREVIOUS" -R "$REPO" \
-             --pattern kzg_bn254_21.srs --output kzg_bn254_21.srs; then
+        # Carry the ceremony forward from the newest earlier release that has it,
+        # newest first. Release assets do not inherit, so without this every tag
+        # would need the 257 MB upload repeated by hand.
+        PREVIOUS=""
+        for t in $(gh release list -R "$REPO" --limit 50 --json tagName,isDraft \
+            --jq '.[] | select(.isDraft | not) | .tagName'); do
+          [ "$t" = "$TAG" ] && continue
+          if gh release download "$t" -R "$REPO" \
+               --pattern kzg_bn254_21.srs --output kzg_bn254_21.srs 2>/dev/null; then
+            PREVIOUS=$t
+            break
+          fi
+        done
+        if [ -n "$PREVIOUS" ]; then
           echo "Ceremony carried over from $PREVIOUS."
         else
-          echo "No kzg_bn254_21.srs on $${PREVIOUS:-any earlier release}. The deposit prover's"
+          echo "No earlier release has kzg_bn254_21.srs. The deposit prover's"
           echo "kzg_params_18.srs is derived from it, so no release goes out without it."
-          echo "Upload it once by hand to $${PREVIOUS:-an earlier release}, then re-run this pipeline:"
-          echo "  gh release upload $${PREVIOUS:-<tag>} kzg_bn254_21.srs -R $REPO"
+          echo "Upload it once by hand to an earlier release, then re-run this pipeline:"
+          echo "  gh release upload <tag> kzg_bn254_21.srs -R $REPO"
           exit 1
         fi
 
@@ -100,22 +102,12 @@ steps:
     environment:
       # Keep cargo's data inside the workspace so the next step still sees it.
       CARGO_HOME: .cargo_home
-      # Read at compile time (`option_env!`) as the default --wc-project-id.
-      ACKINACKI_BRIDGE_WC_PROJECT_ID:
-        from_secret: WC_PROJECT_ID
     commands:
       # A release must know the bridge version it requires; see an_preflight.rs.
       # Checked before the builds, so such a tag fails in seconds.
       - |
         grep -q '^pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(' crates/ackinacki-bridge/src/deposit/an_preflight.rs ||
           { echo "MIN_BRIDGE_VERSION is None: this build would refuse every bridge"; exit 1; }
-      # A secret that is not set arrives as an empty string, which the CLI would
-      # compile in as a project id; unset, it compiles in none.
-      - |
-        if [ -z "$ACKINACKI_BRIDGE_WC_PROJECT_ID" ]; then
-          unset ACKINACKI_BRIDGE_WC_PROJECT_ID
-          echo "WC_PROJECT_ID is not set: this release has no default --wc-project-id"
-        fi
       # All gosh-sh git repos in the dependency graph are public
       # post-vendoring, so no token is required for cargo to fetch them.
       # The CLI builds as a member of the prover workspace — the symlink at

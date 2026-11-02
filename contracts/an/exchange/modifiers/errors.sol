@@ -28,6 +28,7 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_CHAIN_BALANCE_EXCEEDED = 236;
     uint16 constant ERR_L2_VERIFIER_UNSET = 237;
     uint16 constant ERR_L2_VERIFIER_DEPLOYED = 238;
+    uint16 constant ERR_INVALID_KECCAK_PROOF = 239;
     uint16 constant ERR_MESSAGE_IS_EXIST = 400;
     uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
     uint16 constant ERR_MESSAGE_EXPIRED = 402;

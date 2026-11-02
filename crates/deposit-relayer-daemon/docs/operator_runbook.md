@@ -205,6 +205,7 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | Exit | Where | Cause | Fix |
 |---|---|---|---|
 | 220 `ERR_INVALID_ZKPROOF` | `finalizeDeposit` | the bridge's `VK_BLOB` is not this prover's VkBlob | deploy the matching pair (bridge VK and prover) |
+| 239 `ERR_INVALID_KECCAK_PROOF` | `finalizeDeposit` | the keccak proof does not verify under the bridge's `KECCAK_VK_BLOB`, or the node does not know the `KeccakShard` VkBlob shape | deploy the matching pair (bridge keys and prover); run a node release that verifies the shape |
 | 222 `ERR_UNSUPPORTED_SRC_CHAIN` | `finalizeDeposit` | `(chainId, source contract)` not allowlisted | owner: `setTrustedL1Bridge(chainId, l1Bridge, true)` |
 | 224 `ERR_UNKNOWN_BLOCK` | `finalizeDeposit` | the deposit's block hash is not an accepted anchor | confirm with `scripts/deposit_anchor_params.py --verify`, then admit it (`setAcceptedBlockHash` while owner anchors are on, otherwise the light client) |
 | 204 / 230 | `finalizeDeposit` | zero amount / zero recipient was proven | genuinely bad deposit; leave it parked |

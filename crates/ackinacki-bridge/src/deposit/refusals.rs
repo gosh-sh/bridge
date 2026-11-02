@@ -21,6 +21,8 @@ pub const ERR_ZERO_RECIPIENT: i32 = 230;
 pub const ERR_PAUSED: i32 = 231;
 /// The proven amount exceeds the per-transfer ceiling.
 pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
+/// The bridge rejected the proof of the deposit proof's keccak table.
+pub const ERR_INVALID_KECCAK_PROOF: i32 = 239;
 /// The source chain has no remaining deposit capacity.
 pub const ERR_TVL_CAP: i32 = 235;
 /// The message expiry is too far ahead of the chain's clock.
@@ -112,6 +114,12 @@ fn by_code(code: i32) -> Reaction {
             code,
             hint: "the bridge rejected the proof: the installed prover does not match the \
                    bridge's verification key; keep the work directory and report it",
+        },
+        ERR_INVALID_KECCAK_PROOF => Reaction::Refused {
+            code,
+            hint: "the bridge rejected the keccak proof: the installed prover does not match the \
+                   bridge's keccak verification key, or the node does not verify that key; keep \
+                   the work directory and report it",
         },
         ERR_OVERFLOW | ERR_ZERO_AMOUNT | ERR_ZERO_RECIPIENT => Reaction::Refused {
             code,
@@ -207,6 +215,10 @@ mod tests {
             code: 220,
             ..
         }));
+        assert!(matches!(react(&executed(239)), Reaction::Refused {
+            code: 239,
+            hint
+        } if hint.contains("keccak")));
         assert_eq!(react(&executed(224)), Reaction::BackToAnchor);
         assert_eq!(
             react(&FinalizeSend::Executed {
@@ -261,7 +273,7 @@ mod tests {
 
     #[test]
     fn hints_never_name_setters_the_bridge_does_not_have() {
-        for c in [214, 204, 220, 222, 230] {
+        for c in [214, 204, 220, 222, 230, 239] {
             if let Reaction::Refused {
                 hint, ..
             } = react(&rejected(c))

@@ -47,6 +47,10 @@ class BridgeLimits(unittest.TestCase):
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
         source = source.replace(verification, "testVerifyProof()")
+        keccak = re.compile(r"gosh\.zkhalo2VerifyWithVK\(\s*KECCAK_VK_BLOB,\s*(.*?),\s*keccakProof\s*\)",
+                            re.S)
+        assert len(keccak.findall(source)) == 1
+        source = keccak.sub(r"testVerifyKeccakProof(\1)", source)
         source = re.sub(r"emit WithdrawalRefused\{dest: addrExtern\}\(.*?\);",
                         "_testLastRefusal = reason;", source, flags=re.S)
         source = source.replace(
@@ -62,6 +66,14 @@ class BridgeLimits(unittest.TestCase):
     bool _testRejectProof;
     function testRejectProof() public { tvm.accept(); _testRejectProof = true; }
     function testVerifyProof() private view returns (bool) { return !_testRejectProof; }
+    bool _testRejectKeccakProof;
+    uint256 _testKeccakCommit;
+    function testRejectKeccakProof() public { tvm.accept(); _testRejectKeccakProof = true; }
+    function testKeccakCommit() public view returns (uint256 commit) { commit = _testKeccakCommit; }
+    function testVerifyKeccakProof(bytes commit) private returns (bool) {
+        _testKeccakCommit = TvmSlice(commit).load(uint256);
+        return !_testRejectKeccakProof;
+    }
     function testSeed(TvmCell voucherCode, uint128 first, uint128 second) public {
         tvm.accept();
         _depositVoucherCode = voucherCode;
@@ -137,9 +149,9 @@ class BridgeLimits(unittest.TestCase):
     def limits(self, chain=1):
         return self.call("getDepositLimits", {"chainId": str(chain)})["response"]
 
-    def finalize(self, deposit=0, amount=TRANSFER, chain=1, expect=0, header=None):
-        pi = [deposit, 1, amount, 42, chain, 0, 0, 0, 43, 0, 123, 0]
-        return self.call("finalizeDeposit", {"proof": "", "publicInputs": b"".join(
+    def finalize(self, deposit=0, amount=TRANSFER, chain=1, expect=0, header=None, commit=0):
+        pi = [deposit, 1, amount, 42, chain, 0, 0, 0, 43, 0, 123, commit]
+        return self.call("finalizeDeposit", {"proof": "", "keccakProof": "", "publicInputs": b"".join(
             n.to_bytes(32, "little") for n in pi).hex()}, expect=expect, header=header)
 
     def confirm(self, deposit=0, amount=TRANSFER, chain=1, source=None, expect=0):
@@ -175,6 +187,18 @@ class BridgeLimits(unittest.TestCase):
         self.finalize(amount=TRANSFER + 1, expect=234)
         self.seed(TVL)
         self.finalize(amount=1, expect=235)
+
+    def test_keccak_proof_is_checked_against_public_input_11(self):
+        commit = 0x0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20
+        self.finalize(commit=commit)
+        self.assertEqual(int(self.call("testKeccakCommit")["response"]["commit"], 0),
+                         int.from_bytes(commit.to_bytes(32, "little"), "big"))
+
+    def test_a_rejected_keccak_proof_mints_nothing(self):
+        self.call("testRejectKeccakProof")
+        before = self.limits()
+        self.finalize(expect=239)
+        self.assertEqual(self.limits(), before)
 
     def test_confirmation_enforces_cap_and_sender(self):
         self.confirm(source=SENDER, expect=207)

@@ -136,7 +136,8 @@ enum Cmd {
         /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
-        /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
+        /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin` /
+        /// `keccak_proof.bin`.
         #[arg(long)]
         out_dir: PathBuf,
         /// Optional expected `eth_chainId` (must be a supported deposit chain).
@@ -255,14 +256,17 @@ enum Cmd {
     /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
     /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
     ///
-    /// Reads `public_inputs.bin` + `proof.bin` (the layout `prove-one` writes;
+    /// Reads `public_inputs.bin`, `proof.bin` and `keccak_proof.bin` (the
+    /// layout `prove-one` writes;
     /// `vk_blob.bin` is optional — the deployed contract uses its embedded
     /// `VK_BLOB`) from `--bundle-dir` and fires the live `(proof,
-    /// publicInputs)` call. This is the operator path for finalising a
-    /// specific deposit and the contract/node readiness self-test (does
-    /// shellnet's `ZKHALO2VERIFYWITHVK` accept a real deposit proof?).
+    /// publicInputs, keccakProof)` call. This is the operator path for
+    /// finalising a specific deposit and the contract/node readiness
+    /// self-test (does shellnet's `ZKHALO2VERIFYWITHVK` accept a real
+    /// deposit proof?).
     FinalizeOne {
-        /// Directory holding `public_inputs.bin`, `proof.bin` (and optionally
+        /// Directory holding `public_inputs.bin`, `proof.bin`,
+        /// `keccak_proof.bin` (and optionally
         /// `vk_blob.bin`) — e.g. a `prove-one --out-dir`.
         #[arg(long)]
         bundle_dir: PathBuf,
@@ -495,8 +499,10 @@ async fn finalize_one(
         .map_err(|e| anyhow::anyhow!("read {}/public_inputs.bin: {e}", bundle_dir.display()))?;
     let proof = std::fs::read(bundle_dir.join("proof.bin"))
         .map_err(|e| anyhow::anyhow!("read {}/proof.bin: {e}", bundle_dir.display()))?;
+    let keccak_proof = std::fs::read(bundle_dir.join("keccak_proof.bin"))
+        .map_err(|e| anyhow::anyhow!("read {}/keccak_proof.bin: {e}", bundle_dir.display()))?;
 
-    let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof)?;
+    let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof, keccak_proof)?;
     let pi = &bundle.parsed;
     info!(
         deposit_id = %pi.deposit_id,
@@ -507,7 +513,8 @@ async fn finalize_one(
         dapp_id = %pi.dapp_id(),
         proof_len = bundle.proof.len(),
         public_inputs_len = bundle.public_inputs.len(),
-        "submitting finalizeDeposit(proof, publicInputs) to AN",
+        keccak_proof_len = bundle.keccak_proof.len(),
+        "submitting finalizeDeposit(proof, publicInputs, keccakProof) to AN",
     );
 
     let keys_json = std::fs::read_to_string(&an_keys_path)?;
@@ -702,6 +709,7 @@ async fn prove_one(
     std::fs::write(out_dir.join("vk_blob.bin"), &bundle.vk_blob)?;
     std::fs::write(out_dir.join("public_inputs.bin"), &bundle.public_inputs)?;
     std::fs::write(out_dir.join("proof.bin"), &bundle.proof)?;
+    std::fs::write(out_dir.join("keccak_proof.bin"), &bundle.keccak_proof)?;
 
     info!(
         out_dir = %out_dir.display(),

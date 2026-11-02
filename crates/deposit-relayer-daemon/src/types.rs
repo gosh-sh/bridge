@@ -232,26 +232,39 @@ pub struct DepositProofBundle {
     pub public_inputs: Bytes,
     /// Raw Blake2b-transcript SHPLONK proof bytes.
     pub proof: Bytes,
+    /// Raw Blake2b-transcript SHPLONK proof of the deposit proof's keccak
+    /// table; its one public input is `promise_commit`. `finalizeDeposit`
+    /// verifies it against the bridge's embedded `KECCAK_VK_BLOB`.
+    pub keccak_proof: Bytes,
     /// Decoded public inputs (parsed from `public_inputs`).
     pub parsed: DepositPublicInputs,
 }
 
 impl DepositProofBundle {
-    /// Assemble a bundle from the three raw operands, decoding the public
-    /// inputs and validating their length.
+    /// Assemble a bundle from the raw operands, decoding the public inputs
+    /// and validating their length.
     pub fn from_operands(
         vk_blob: impl Into<Bytes>,
         public_inputs: impl Into<Bytes>,
         proof: impl Into<Bytes>,
+        keccak_proof: impl Into<Bytes>,
     ) -> Result<Self, RelayerError> {
         let vk_blob = vk_blob.into();
         let public_inputs = public_inputs.into();
         let proof = proof.into();
+        let keccak_proof = keccak_proof.into();
+        if keccak_proof.is_empty() {
+            return Err(RelayerError::ProofGeneration(
+                "the keccak proof is empty; finalizeDeposit needs it next to the deposit proof"
+                    .into(),
+            ));
+        }
         let parsed = DepositPublicInputs::from_operand(&public_inputs)?;
         Ok(Self {
             vk_blob,
             public_inputs,
             proof,
+            keccak_proof,
             parsed,
         })
     }
@@ -374,6 +387,16 @@ mod tests {
     }
 
     #[test]
+    fn a_bundle_without_a_keccak_proof_is_refused() {
+        let operand = vec![0u8; NUM_PUBLIC_INPUTS * 32];
+        let err =
+            DepositProofBundle::from_operands(vec![1u8], operand.clone(), vec![2u8], Vec::new())
+                .unwrap_err();
+        assert!(matches!(err, RelayerError::ProofGeneration(_)));
+        DepositProofBundle::from_operands(vec![1u8], operand, vec![2u8], vec![3u8]).unwrap();
+    }
+
+    #[test]
     fn bundle_binding_check() {
         let pi = DepositPublicInputs {
             deposit_id: U256::from(3u64),
@@ -397,6 +420,7 @@ mod tests {
             vk_blob: Bytes::from(vec![1u8; 4]),
             public_inputs: Bytes::from(pi.to_operand()),
             proof: Bytes::from(vec![2u8; 8]),
+            keccak_proof: Bytes::from(vec![3u8; 8]),
             parsed: pi,
         };
         let event = DepositEvent {

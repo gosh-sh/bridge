@@ -42,6 +42,9 @@ const INPUT_FILE: &str = "input.json";
 const PROOF_FILE: &str = "proof.bin";
 /// The proof's public inputs, in the work directory.
 const PUBIN_FILE: &str = "public_inputs.bin";
+/// The proof of the keccak table behind public input 11, in the work
+/// directory.
+const KECCAK_PROOF_FILE: &str = "keccak_proof.bin";
 /// What the prover writes to, next to the final names: they get those
 /// names only once it has exited successfully. The exporter writes its
 /// files before it checks the proof itself, and leaves them when that
@@ -82,6 +85,8 @@ pub struct ProofFiles {
     pub proof: Vec<u8>,
     /// The twelve public inputs, 32 bytes each.
     pub public_inputs: Vec<u8>,
+    /// The keccak table's proof; its one public input is public input 11.
+    pub keccak_proof: Vec<u8>,
 }
 
 /// Exit 32: only the proof is missing, and the operation can be resumed.
@@ -105,12 +110,13 @@ fn failed_with_output(op_id: &str, why: impl std::fmt::Display, output: &str) ->
     )
 }
 
-/// The proof an earlier run left in `work`, if both files are there. They
-/// are there only if the prover finished.
+/// The proof an earlier run left in `work`, if all its files are there.
+/// They are there only if the prover finished.
 pub fn load(work: &Path) -> Option<ProofFiles> {
     Some(ProofFiles {
         proof: std::fs::read(work.join(PROOF_FILE)).ok()?,
         public_inputs: std::fs::read(work.join(PUBIN_FILE)).ok()?,
+        keccak_proof: std::fs::read(work.join(KECCAK_PROOF_FILE)).ok()?,
     })
 }
 
@@ -381,10 +387,10 @@ async fn run(
 /// directory and checks its public inputs against `want`.
 ///
 /// The files an earlier proof left go first, and the prover writes under
-/// other names, renamed to `proof.bin` and `public_inputs.bin` only after
-/// it exits successfully: a pair under the final names is always one the
-/// prover finished, and nothing a crash or a failed check left behind is
-/// taken for a proof later.
+/// other names, renamed to `proof.bin`, `keccak_proof.bin` and
+/// `public_inputs.bin` only after it exits successfully: a set under the
+/// final names is always one the prover finished, and nothing a crash or a
+/// failed check left behind is taken for a proof later.
 ///
 /// The prover lock is taken before the fetcher starts and held until the
 /// prover exits; a held lock is waited for, and the status says why.
@@ -417,7 +423,7 @@ pub async fn prove(
         .map_err(|e| failed(op_id, format!("{}: {e}", req.work.display())))?;
     std::fs::create_dir_all(&work)
         .map_err(|e| failed(op_id, format!("cannot create {}: {e}", work.display())))?;
-    for name in [PROOF_FILE, PUBIN_FILE] {
+    for name in [PROOF_FILE, PUBIN_FILE, KECCAK_PROOF_FILE] {
         for path in [work.join(name), partial(&work, name)] {
             remove(&path).map_err(|e| {
                 failed(
@@ -477,6 +483,8 @@ pub async fn prove(
             .arg(partial(&work, PROOF_FILE))
             .arg("--pubin-out")
             .arg(partial(&work, PUBIN_FILE))
+            .arg("--keccak-proof-out")
+            .arg(partial(&work, KECCAK_PROOF_FILE))
             .args(["--degree", &PROVER_DEGREE.to_string()])
             .args(["--max-data-byte-len", &MAX_LOG_DATA_BYTE_LEN.to_string()])
             .args(["--max-log-num", &MAX_RECEIPT_LOGS.to_string()]),
@@ -493,8 +501,8 @@ pub async fn prove(
             reason,
         }));
     }
-    // The proof first: a crash between the two leaves no pair to load.
-    for name in [PROOF_FILE, PUBIN_FILE] {
+    // The public inputs last: a crash before them leaves nothing to load.
+    for name in [KECCAK_PROOF_FILE, PROOF_FILE, PUBIN_FILE] {
         let from = partial(&work, name);
         if from.exists() {
             std::fs::rename(&from, work.join(name)).map_err(|e| {
@@ -598,6 +606,7 @@ mod tests {
         assert_eq!(p.public_inputs, PI);
         assert_eq!(load(w.path()).unwrap(), p);
         assert_eq!(load(w.path()).unwrap().proof, b"proof");
+        assert_eq!(p.keccak_proof, b"keccak");
         let left: Vec<_> = std::fs::read_dir(w.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -633,6 +642,7 @@ mod tests {
         let w = tempfile::tempdir().unwrap();
         std::fs::write(w.path().join(PROOF_FILE), b"old proof").unwrap();
         std::fs::write(w.path().join(PUBIN_FILE), PI).unwrap();
+        std::fs::write(w.path().join(KECCAK_PROOF_FILE), b"old keccak proof").unwrap();
         prove(
             &dir,
             &req(w.path()),
@@ -643,7 +653,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(load(w.path()), None, "the old pair is gone");
+        assert_eq!(load(w.path()), None, "the old set is gone");
+        for name in [PROOF_FILE, PUBIN_FILE, KECCAK_PROOF_FILE] {
+            assert!(!w.path().join(name).exists(), "{name} is gone");
+        }
     }
 
     #[tokio::test]
@@ -685,6 +698,21 @@ mod tests {
         assert_eq!(load(w.path()), None);
         std::fs::write(w.path().join("proof.bin"), b"proof").unwrap();
         assert_eq!(load(w.path()), None, "a proof without its public inputs");
+        std::fs::write(w.path().join("public_inputs.bin"), PI).unwrap();
+        assert_eq!(
+            load(w.path()),
+            None,
+            "a proof from before the keccak proof, which the bridge refuses"
+        );
+        std::fs::write(w.path().join("keccak_proof.bin"), b"keccak").unwrap();
+        assert_eq!(
+            load(w.path()),
+            Some(ProofFiles {
+                proof: b"proof".to_vec(),
+                public_inputs: PI.to_vec(),
+                keccak_proof: b"keccak".to_vec(),
+            })
+        );
     }
 
     #[tokio::test]
@@ -733,6 +761,8 @@ mod tests {
             &at("proof.bin.partial"),
             "--pubin-out",
             &at("public_inputs.bin.partial"),
+            "--keccak-proof-out",
+            &at("keccak_proof.bin.partial"),
             "--degree",
             "18",
             "--max-data-byte-len",
@@ -934,6 +964,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(w.path().join("proof.bin").exists());
+        assert!(w.path().join("keccak_proof.bin").exists());
     }
 
     #[tokio::test]

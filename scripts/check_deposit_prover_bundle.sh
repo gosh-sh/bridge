@@ -2,7 +2,8 @@
 # Check a staged deposit prover outside the source tree, before it is
 # published: its SRS must be the Hermez ceremony, its verification key must be
 # the one the Acki Nacki bridge embeds, and it must prove the fixture deposit
-# to the fixture's public inputs. A missing file or a prover the bridge would
+# to the fixture's public inputs, with a keccak proof under the keccak key the
+# bridge embeds. A missing file or a prover the bridge would
 # reject is caught here rather than on a user's machine after their USDC is in
 # the bridge.
 #
@@ -35,6 +36,11 @@ got=$(sha256sum < "$work/vk.bin" | cut -d' ' -f1)
 
 ./export_blake2b_proof --chain-id 11155111 --input "$fix/proof_00/input.json" \
   --proof-out "$work/proof.bin" --pubin-out "$work/pi.bin" \
+  --keccak-proof-out "$work/keccak_proof.bin" --keccak-vk-out "$work/keccak_vk.bin" \
   --degree 18 --max-data-byte-len 2048 --max-log-num 20
 cmp "$work/pi.bin" "$fix/proof_00/public_inputs.bin" || { echo "public inputs differ from the fixture"; exit 1; }
-echo "deposit prover bundle OK: vk $got"
+[ -s "$work/keccak_proof.bin" ] || { echo "export_blake2b_proof wrote no keccak proof"; exit 1; }
+want_keccak=$(sha256sum < "$fix/keccak_vk_blob.bin" | cut -d' ' -f1)
+got_keccak=$(sha256sum < "$work/keccak_vk.bin" | cut -d' ' -f1)
+[ "$want_keccak" = "$got_keccak" ] || { echo "keccak verification key $got_keccak, the bridge embeds $want_keccak"; exit 1; }
+echo "deposit prover bundle OK: vk $got, keccak vk $got_keccak"

@@ -11,6 +11,11 @@
 //!     `proof_cell` operand.
 //!   * `--pubin-out`    : the 12 public inputs as `N × 32` LE `Fr` — the
 //!     `public_inputs_cell` operand.
+//!   * `--keccak-proof-out` : the keccak shard proof (Blake2b, no header) for
+//!     the keccak table the deposit proof loads; its only public input is
+//!     public input 11 of the deposit proof. `finalizeDeposit` verifies both.
+//!   * `--keccak-vk-out` (optional): the keccak shard `VkBlob` that proof
+//!     verified under — compare it with the `KECCAK_VK_BLOB` the bridge embeds.
 //!
 //! It then verifies the (vk, instances, proof) triple in-process with
 //! `verify_proof::<KZG, VerifierSHPLONK, _, Blake2bRead, SingleStrategy>`
@@ -22,6 +27,7 @@
 //!     --input /tmp/deposit_e2e/deposit_proof_input.json \
 //!     --proof-out /tmp/deposit_e2e/deposit_proof_blake2b.bin \
 //!     --pubin-out /tmp/deposit_e2e/deposit_public_inputs.bin \
+//!     --keccak-proof-out /tmp/deposit_e2e/keccak_proof_blake2b.bin \
 //!     --degree 18 --max-data-byte-len 2048 --max-log-num 20
 
 use std::{fs, path::Path};
@@ -32,6 +38,7 @@ use axiom_eth::utils::{
 use clap::Parser;
 use deposit_prover::{
     circuit_v2::{DepositEventCircuitV2, PRODUCTION_MAX_DATA_BYTE_LEN, PRODUCTION_MAX_LOG_NUM},
+    keccak_shard::{self, PROMISE_COMMIT_INDEX},
     provable::exit_if_unprovable,
     prover::{
         get_or_create_proving_key, load_kzg_params_from_trusted_setup, CircuitConfig,
@@ -69,6 +76,10 @@ struct Args {
     proof_out: String,
     #[arg(long, default_value = "deposit_public_inputs.bin")]
     pubin_out: String,
+    #[arg(long, default_value = "keccak_proof_blake2b.bin")]
+    keccak_proof_out: String,
+    #[arg(long)]
+    keccak_vk_out: Option<String>,
     #[arg(long, default_value_t = PRODUCTION_DEGREE)]
     degree: u32,
     #[arg(long, default_value_t = PRODUCTION_MAX_DATA_BYTE_LEN)]
@@ -118,6 +129,7 @@ fn main() -> anyhow::Result<()> {
     // Pin the keccak promise-loader capacity to FIXED_KECCAK_CAPACITY so this
     // proof verifies against the witness-independent VK that `export_vk_blob`
     // (and the live prover) produce.
+    let preimages = keccak_shard::keccak_preimages(&input, &config);
     let circuit_input = DepositEventCircuitV2::new(input, &config);
     let fixed_keccak = PromiseLoaderParams::new_for_one_shard(FIXED_KECCAK_CAPACITY);
     let circuit = EthCircuitImpl::<Fr, _>::new_impl(
@@ -165,16 +177,6 @@ fn main() -> anyhow::Result<()> {
         pubin.extend_from_slice(fr.to_bytes().as_ref());
     }
 
-    fs::write(&args.proof_out, &proof)?;
-    fs::write(&args.pubin_out, &pubin)?;
-    println!(
-        "Wrote proof -> {}\nWrote public inputs ({} bytes = {} Fr) -> {}\n",
-        args.proof_out,
-        pubin.len(),
-        pubin.len() / 32,
-        args.pubin_out
-    );
-
     // In-process verification = the opcode handler's exact check.
     println!("Verifying (opcode handler path: Blake2bRead + VerifierSHPLONK)...");
     let vk = pk.get_vk();
@@ -196,6 +198,49 @@ fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("verify_proof REJECTED the Blake2b proof: {e:?}"))?;
 
     println!("  OK: Blake2b SHPLONK proof VERIFIED against the deposit VK.");
-    println!("\nRESULT: PASS — opcode-consumable (vk_blob, public_inputs, proof) triple is ready.");
+
+    // The keccak table the deposit proof loaded, proven: its commitment is
+    // public input 11.
+    let commit = inst0[PROMISE_COMMIT_INDEX];
+    anyhow::ensure!(
+        keccak_shard::shard_commit(&preimages) == commit,
+        "the keccak shard commitment differs from public input {PROMISE_COMMIT_INDEX}"
+    );
+    println!("Generating the keccak shard proof...");
+    let shard_srs = if k == keccak_shard::KECCAK_SHARD_DEGREE {
+        params
+    } else {
+        load_kzg_params_from_trusted_setup(keccak_shard::KECCAK_SHARD_DEGREE)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+    };
+    let key = keccak_shard::keygen(&shard_srs)?;
+    let keccak_proof = keccak_shard::prove(&shard_srs, &key, preimages, commit)?;
+    anyhow::ensure!(
+        keccak_shard::verify(&shard_srs, key.pk.get_vk(), commit, &keccak_proof),
+        "verify_proof REJECTED the keccak shard proof"
+    );
+    println!(
+        "  OK: keccak shard proof ({} bytes) VERIFIED.",
+        keccak_proof.len()
+    );
+
+    fs::write(&args.proof_out, &proof)?;
+    fs::write(&args.pubin_out, &pubin)?;
+    fs::write(&args.keccak_proof_out, &keccak_proof)?;
+    if let Some(path) = &args.keccak_vk_out {
+        fs::write(path, keccak_shard::vk_blob(&key)?.to_bytes()?)?;
+        println!("Wrote keccak VkBlob -> {path}");
+    }
+    println!(
+        "Wrote proof -> {}\nWrote public inputs ({} bytes = {} Fr) -> {}\nWrote keccak proof -> {}",
+        args.proof_out,
+        pubin.len(),
+        pubin.len() / 32,
+        args.pubin_out,
+        args.keccak_proof_out
+    );
+    println!(
+        "\nRESULT: PASS — the deposit proof, its public inputs and the keccak proof are ready."
+    );
     Ok(())
 }

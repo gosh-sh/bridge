@@ -53,6 +53,14 @@ One source of truth: `DEPOSIT_PUBLIC_INPUT_LAYOUT` (`src/circuit_v2.rs:68`);
 | 10 | `blockHashLow` | Lower 128 bits of the block hash |
 | 11 | `promiseCommit` | Keccak-coprocessor promise commitment |
 
+`promiseCommit` names the table of keccak results the deposit proof takes on trust: the block hash,
+the trie roots, the receipt and transaction leaves all come from it. The deposit proof does not
+show that table is real keccak; a second proof does. `export_blake2b_proof` proves the same table
+with the zkevm-hashes `KeccakComponentShardCircuit` (k = 18, capacity 128, the same Hermez SRS)
+and writes that proof next to the deposit proof. Its one public input is `promiseCommit`, and
+`finalizeDeposit` verifies it against the keccak VkBlob the bridge embeds (`keccak_vk_blob.bin`,
+`CircuitShape::KeccakShard`). A deposit proof without it is refused.
+
 *Earlier revisions of this file documented seven inputs ending at `promiseCommit`; the destination
 and chain-binding inputs were added later.*
 
@@ -145,12 +153,14 @@ event and keeps custody. The proof is consumed on the Acki Nacki side by `USDCBr
 bundled in this repo at `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json`:
 
 ```
-finalizeDeposit(bytes proof, bytes publicInputs)
+finalizeDeposit(bytes proof, bytes publicInputs, bytes keccakProof)
 ```
 
-Two arguments, not three: the verifying key is not passed by the caller. The contract parses the
-deposit fields out of `publicInputs` itself and verifies through `ZKHALO2VERIFYWITHVK` against the VK
-embedded in its own code.
+No verifying key is passed by the caller. The contract parses the deposit fields out of
+`publicInputs` itself, verifies `proof` through `ZKHALO2VERIFYWITHVK` against the deposit VK
+embedded in its own code, and then verifies `keccakProof` against its embedded keccak VK with
+`publicInputs[11]` as the one public input. The opcode needs a node that knows
+`CircuitShape::KeccakShard` (VkBlob shape byte 2).
 
 <!-- UNVERIFIED 2026-08-18: what USDCBridge enforces beyond the proof check — bridge-address
 equality, per-depositId replay protection, the canonical-block-hash gate, and the mint itself — is
@@ -176,7 +186,8 @@ Run with `cargo run --release --example <name>`. Present under `examples/`:
 | `mock_fixture` | Run one saved witness through `MockProver` (~2 min) — the pre-flight after a constraint change, before paying for keygen; `--mutate header-pad` checks a constraint rejects what it exists for |
 | `generate_verifier` | Generate Solidity verifier bytecode — legacy reference; the AN side verifies natively |
 | `generate_aggregation_verifier` | Generate an aggregation verifier — same caveat |
-| `export_blake2b_proof` | Export a Blake2b-transcript proof |
+| `export_blake2b_proof` | Export a Blake2b-transcript deposit proof, its public inputs and the keccak proof (`--keccak-proof-out`) |
+| `export_keccak_shard_set` | Write `keccak_vk_blob.bin` and a `keccak_proof.bin` for every proof of a fixture set |
 
 ## Development
 

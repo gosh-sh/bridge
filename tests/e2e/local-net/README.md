@@ -87,7 +87,7 @@ waited for and the tail of the log.
 | Tests | Step |
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 4 hours |
-| `test_10`–`12` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_10`–`12` | The zerostate bridge is Active at 1.15.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the zerostate's keepers); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
 | `test_40`–`44` | `deposit`: sent, Deposit event — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |

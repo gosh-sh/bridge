@@ -43,11 +43,13 @@
 //!     0     8  magic = b"VKBLOB\x00\x00"
 //!     8     1  version           = 1 (Base, legacy) | 2 (shape-tagged)
 //!     9     1  transcript_kind   = 0 (Blake2b; reserved for Keccak)
-//!    10     1  circuit_shape     = 0 Base | 1 Rlc  (v1: reserved 0)
+//!    10     1  circuit_shape     = 0 Base | 1 Rlc | 2 KeccakShard  (v1: reserved 0)
 //!    11     5  reserved          = 0 × 5
 //!    16     4  config_len  (u32 LE)
 //!    20  cl    config_json (UTF-8 serde_json; `BaseCircuitParams` for Base,
-//!                           axiom-eth `EthCircuitParams` for Rlc)
+//!                           axiom-eth `EthCircuitParams` for Rlc,
+//!                           zkevm-hashes `KeccakComponentShardCircuitParams`
+//!                           for KeccakShard)
 //!   ...     4  vk_len      (u32 LE)
 //!   ...  vl    vk_bytes    (`VerifyingKey::write(SerdeFormat::RawBytes)`)
 //! ```
@@ -138,11 +140,15 @@ pub const VK_BLOB_VERSION_V2: u8 = 2;
 ///   `EthCircuitParams`. Multi-phase (FirstPhase + SecondPhase RLC challenge).
 ///   The **deposit** circuit's shape. Carried as opaque `EthCircuitParams` JSON
 ///   because this crate does not (yet) depend on `axiom-eth`.
+/// - `KeccakShard` — zkevm-hashes `KeccakComponentShardCircuit<Fr>` +
+///   `KeccakComponentShardCircuitParams` JSON. The proof of the keccak table
+///   the deposit circuit loads (see [`crate::keccak_shard`]).
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CircuitShape {
     Base = 0,
     Rlc = 1,
+    KeccakShard = 2,
 }
 
 impl CircuitShape {
@@ -150,8 +156,9 @@ impl CircuitShape {
         match b {
             0 => Ok(Self::Base),
             1 => Ok(Self::Rlc),
+            2 => Ok(Self::KeccakShard),
             other => Err(anyhow!(
-                "unknown circuit_shape byte {other} (defined: 0 = Base, 1 = Rlc)"
+                "unknown circuit_shape byte {other} (defined: 0 = Base, 1 = Rlc, 2 = KeccakShard)"
             )),
         }
     }
@@ -169,6 +176,7 @@ impl CircuitShape {
 pub enum VkConfig {
     Base(BaseCircuitParams),
     Rlc(Vec<u8>),
+    KeccakShard(Vec<u8>),
 }
 
 impl VkConfig {
@@ -177,6 +185,7 @@ impl VkConfig {
         match self {
             VkConfig::Base(_) => CircuitShape::Base,
             VkConfig::Rlc(_) => CircuitShape::Rlc,
+            VkConfig::KeccakShard(_) => CircuitShape::KeccakShard,
         }
     }
 
@@ -185,6 +194,7 @@ impl VkConfig {
         match self {
             VkConfig::Base(p) => Ok(p),
             VkConfig::Rlc(_) => bail!("VkConfig is Rlc, not Base"),
+            VkConfig::KeccakShard(_) => bail!("VkConfig is KeccakShard, not Base"),
         }
     }
 
@@ -195,7 +205,7 @@ impl VkConfig {
                 serde_json::to_vec(p).context("serialising BaseCircuitParams as JSON")
             },
             // Already JSON — carried opaquely.
-            VkConfig::Rlc(json) => Ok(json.clone()),
+            VkConfig::Rlc(json) | VkConfig::KeccakShard(json) => Ok(json.clone()),
         }
     }
 
@@ -208,6 +218,7 @@ impl VkConfig {
                 Ok(VkConfig::Base(p))
             },
             CircuitShape::Rlc => Ok(VkConfig::Rlc(json)),
+            CircuitShape::KeccakShard => Ok(VkConfig::KeccakShard(json)),
         }
     }
 }
@@ -288,6 +299,21 @@ impl VkBlob {
         })
     }
 
+    /// Build a **KeccakShard-shape** `VkBlob` (v2 wire) from the JSON of a
+    /// `KeccakComponentShardCircuitParams` and the shard verifying key.
+    pub fn from_native_keccak_shard(
+        params_json: Vec<u8>,
+        vk: &VerifyingKey<G1Affine>,
+    ) -> Result<Self> {
+        serde_json::from_slice::<serde_json::Value>(&params_json)
+            .context("from_native_keccak_shard: params_json is not valid JSON")?;
+        Ok(Self {
+            config: VkConfig::KeccakShard(params_json),
+            vk_bytes: serialise_vk(vk)?,
+            transcript: TranscriptKind::Blake2b,
+        })
+    }
+
     /// On-wire [`CircuitShape`] for this blob.
     pub fn shape(&self) -> CircuitShape {
         self.config.shape()
@@ -298,7 +324,7 @@ impl VkBlob {
     pub fn version(&self) -> u8 {
         match self.config.shape() {
             CircuitShape::Base => VK_BLOB_VERSION,
-            CircuitShape::Rlc => VK_BLOB_VERSION_V2,
+            CircuitShape::Rlc | CircuitShape::KeccakShard => VK_BLOB_VERSION_V2,
         }
     }
 
@@ -650,10 +676,28 @@ mod unit_tests {
         assert_eq!(back.shape(), CircuitShape::Rlc);
         match &back.config {
             VkConfig::Rlc(json) => assert_eq!(json, &eth_json),
-            VkConfig::Base(_) => panic!("expected Rlc config"),
+            other => panic!("expected Rlc config, got {other:?}"),
         }
         assert_eq!(back.vk_bytes, blob.vk_bytes);
         assert_eq!(back.to_bytes().unwrap(), bytes, "v2 round-trip byte-stable");
+    }
+
+    #[test]
+    fn vk_blob_v2_keccak_shard_round_trips_with_shape_byte() {
+        let json = br#"{"k":18,"capacity":128}"#.to_vec();
+        let blob = sample_blob(VkConfig::KeccakShard(json.clone()));
+        assert_eq!(blob.version(), VK_BLOB_VERSION_V2);
+
+        let bytes = blob.to_bytes().unwrap();
+        assert_eq!(bytes[8], VK_BLOB_VERSION_V2);
+        assert_eq!(bytes[10], 2, "KeccakShard is shape 2");
+
+        let back = VkBlob::read(bytes.as_slice()).unwrap();
+        match &back.config {
+            VkConfig::KeccakShard(j) => assert_eq!(j, &json),
+            other => panic!("expected KeccakShard config, got {other:?}"),
+        }
+        assert_eq!(back.to_bytes().unwrap(), bytes);
     }
 
     #[test]
@@ -678,7 +722,7 @@ mod unit_tests {
         header[0..8].copy_from_slice(VK_BLOB_MAGIC);
         header[8] = VK_BLOB_VERSION_V2;
         header[9] = TranscriptKind::Blake2b as u8;
-        header[10] = 9; // not Base(0) or Rlc(1)
+        header[10] = 9; // not Base(0), Rlc(1) or KeccakShard(2)
         let err = VkBlob::read(header.as_slice()).unwrap_err();
         assert!(
             err.to_string().contains("unknown circuit_shape"),

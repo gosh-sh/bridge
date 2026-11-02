@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.14.0, `DepositVoucher` at 1.4.0,
+`exchange/` — `eccUSDCBridge` at version 1.15.0, `DepositVoucher` at 1.4.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -42,7 +42,11 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
 trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
 verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
-and then requires the proven block hash in the anchor set: the proof places the
+verifies the third argument, `keccakProof`, against the embedded
+`KECCAK_VK_BLOB` with the deposit's public input 11 as its one public input
+(`ERR_INVALID_KECCAK_PROOF` (239) otherwise) — the deposit proof takes its
+keccak results from the table that input names, and this proof shows they are
+real keccak — and then requires the proven block hash in the anchor set: the proof places the
 event in a block, but cannot show that the block is canonical. Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`

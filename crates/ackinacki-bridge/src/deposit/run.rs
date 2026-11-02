@@ -1501,6 +1501,7 @@ async fn walk(
                             &fc,
                             &files.proof,
                             &files.public_inputs,
+                            &files.keccak_proof,
                             ui,
                         )
                         .await?

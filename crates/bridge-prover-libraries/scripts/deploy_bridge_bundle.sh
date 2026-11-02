@@ -27,6 +27,11 @@
 #                              (relative to crates/bridge-prover-libraries)
 #   WITHDRAW_ACC_FR            authoritative AN bridge account field element;
 #                              required and immutable after deployment
+#   PREDECESSOR_BRIDGE         the Sepolia bridge this deploy replaces, already
+#                              paused, or 0x0000000000000000000000000000000000000000
+#                              for the first one; required and immutable — a zero
+#                              in place of a live predecessor pays its withdrawals
+#                              again
 set -euo pipefail
 set +x
 umask 077
@@ -34,6 +39,7 @@ umask 077
 : "${LEVEL:?set LEVEL=1 or LEVEL=2}"
 : "${PRIVATE_KEY:?set PRIVATE_KEY=<sepolia burner>}"
 : "${WITHDRAW_ACC_FR:?set authoritative WITHDRAW_ACC_FR (or an explicit dummy for verifyBlock-only smoke)}"
+: "${PREDECESSOR_BRIDGE:?set PREDECESSOR_BRIDGE to the paused bridge this deploy replaces, or the zero address for the first one}"
 [[ "${CONFIRM_NEW_BRIDGE_DEPLOY:-}" == DEPLOY_NEW_CONTRACTS ]] || {
   echo "Refusing broadcast: set CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS" >&2
   exit 2
@@ -93,6 +99,7 @@ cd "$CONTRACTS_DIR"
 export PRIVATE_KEY
 export WIRE_WITHDRAW_BY_PROOF=true
 export WITHDRAW_ACC_FR
+export PREDECESSOR_BRIDGE
 
 echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \

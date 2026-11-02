@@ -37,9 +37,11 @@ assigns it when the release is tagged.
   on — paid as used (`NullifierAlreadyUsed`). The constructor reverts `InvalidPredecessor` unless
   the address is a bridge on this chain for the same `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`.
   The constructor ABI changes, so tooling that encodes it must be updated. Already deployed
-  bridges are unchanged. `DeployRealBridge` now requires `PREDECESSOR_BRIDGE` on every deploy
-  (the zero address for the first bridge on a chain) and refuses a predecessor that is not paused;
-  the other deploy scripts read it with a zero default. The old bridge does not consult the new
+  bridges are unchanged. Every bridge deploy script — `DeployRealBridge`, `DeployShellnetE2EBridge`
+  (the one for Arbitrum Sepolia), `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge` — and
+  `deploy_bridge_bundle.sh` now require `PREDECESSOR_BRIDGE` (the zero address for the first bridge
+  on a chain) and refuse a predecessor that is not paused. `scripts/production_env.example` no
+  longer fills it in. The old bridge does not consult the new
   one: keep it paused for good. The cutover order is in `docs/aave-yield.md`, "Replacing a bridge
   on the same chain".
 
@@ -48,7 +50,8 @@ assigns it when the release is tagged.
 - `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused bridge only) hands the whole
   `treasuryBalance` to the bridge whose `predecessor()` is this one, so the eccUSDC it backs stays
   backed after a cutover. Pull AAVE principal back first (`TreasuryNotLiquid` otherwise). Emits
-  `TreasuryMigrated`; the old bridge cannot pay anything afterwards.
+  `TreasuryMigrated`. This is not final: unpaused, the old bridge takes deposits again and pays
+  withdrawals from them, so keep it paused.
 - `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
   `treasuryBalance` without a `Deposit` event, so nothing is minted on Acki Nacki. It is how
   `migrateTreasury` delivers, and how the owner covers a predecessor deployed before

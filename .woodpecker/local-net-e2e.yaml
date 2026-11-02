@@ -20,10 +20,11 @@ variables:
   # a tag and up.sh does not pull it.
   - &acki_repo "https://github.com/gosh-sh/acki-nacki.git"
   - &acki_branch "dev"
-  # The build shellnet runs: acki-nacki b31c9d8b pins tvm-sdk 8b108bac, which has the
-  # KECCAK256 instruction ArbitrumBlockVerifier needs; br_dev (c8c9e67e, tvm-sdk v3.0.6.an)
-  # does not. gql-server and block-manager fall back to br_dev when the tag lacks them.
-  - &acki_image_tag "b31c9d8bcda724887afb02f0016a3bb305027792"
+  # acki-nacki 815bbadc (branch bridge-ci, gosh-sh/acki-nacki#2812): dev with tvm-sdk
+  # pinned to tvmlabs/tvm-sdk#300, whose ZKHALO2VERIFYWITHVK verifies the keccak shard
+  # proof finalizeDeposit now requires. It keeps KECCAK256, which ArbitrumBlockVerifier
+  # needs. gql-server and block-manager fall back to br_dev when the tag lacks them.
+  - &acki_image_tag "815bbadcc9e5a8a1fd23bec40e2c11164b4411e9"
   - &acki_aux_fallback_tag "br_dev"
   - &registry "docker.gosh.sh"
   # Contract toolchain for zerostate generation and for the test on the host (the checkout's

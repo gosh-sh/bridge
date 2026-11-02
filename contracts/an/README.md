@@ -381,7 +381,7 @@ unset or the binary reports a different version.
 but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` and
 `ArbitrumBlockVerifier.tvc` need more than the version: their sources call
 `gosh.keccak256`, so `SOLD_0_81` has to be the `sold` 0.81.0 built from
-[gosh-sh/TVM-Solidity-Compiler `feature/keccak256-builtin`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/feature/keccak256-builtin),
+gosh-sh/TVM-Solidity-Compiler at or after [#44 "sold: take the SDK commit that has KECCAK256"](https://github.com/gosh-sh/TVM-Solidity-Compiler/pull/44) (its `feature/keccak256-builtin` branch, merged into `master` on 2026-11-02),
 whose tvm-sdk carries the `KECCAK256` instruction. A stock 0.81.0 emits the
 mnemonic its assembler does not know. The bridge does not import the verifier,
 only `ArbitrumBlockVerifierDeploy.sol`, a contract with the verifier's state

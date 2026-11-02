@@ -33,6 +33,9 @@ assigns it when the release is tagged.
   line paid count as used (`NullifierAlreadyUsed`); a predecessor that is not a bridge for the same
   `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR` reverts `InvalidPredecessor`. Update tooling that encodes
   the constructor; deployed bridges are unchanged.
+- **`AckiNackiBridge.isNullifierUsed(uint256)` also answers for the predecessor line**: it returns
+  true for a nullifier any earlier bridge paid, and reverts when a predecessor reverts. The new view
+  `predecessor()` returns the bridge this one replaces, or zero.
 - Every bridge deploy script (`DeployRealBridge`, `DeployShellnetE2EBridge`,
   `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge`) and `deploy_bridge_bundle.sh` require
   `PREDECESSOR_BRIDGE` — zero for the first bridge on a chain — and refuse a predecessor that is not

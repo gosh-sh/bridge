@@ -387,7 +387,7 @@ enum Cmd {
         arbitrum_rpc_url: String,
         /// `AckiNackiBridge` on the Arbitrum chain, whose `Deposit`s are
         /// anchored.
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         /// First Arbitrum block to scan for deposits (the bridge's deploy
         /// block). When `0`, falls back to `BRIDGE_DEPLOY_BLOCK`.
@@ -487,8 +487,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some((dir, _)) = &log {
         prepare_dir("log", dir).map_err(|e| anyhow::anyhow!(e))?;
     }
-    // Dropped at exit: flushes the file writer.
-    let _log_guard = init_tracing(log.as_ref().map(|(d, p)| (d.as_path(), *p)));
+    init_tracing(log.as_ref().map(|(d, p)| (d.as_path(), *p)))
+        .map_err(|e| anyhow::anyhow!("log file: {e}"))?;
     match args.cmd {
         Cmd::BeaconWatch {
             beacon_url,
@@ -861,6 +861,12 @@ async fn set_committee(
         commitment = %eth_light_client_relayer::le_word_to_uint256_hex(&commitment),
         "setCommitteeCommitment"
     );
+    // The state directory is checked before the transaction: a wrong or
+    // read-only directory must not leave the chain updated and the period
+    // unrecorded.
+    prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let state = state_dir.join(STATE_FILE_NAME);
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter
         .set_committee_commitment(commitment, period)
         .await?
@@ -872,9 +878,6 @@ async fn set_committee(
         },
         other => anyhow::bail!("setCommitteeCommitment: {other:?}"),
     }
-    prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
-    let state = state_dir.join(STATE_FILE_NAME);
-    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     st.last_committee_period = Some(period);
     st.rotate_pending_period = None;
     st.save(&state)?;
@@ -1240,6 +1243,11 @@ async fn submit_rotate(
             confirm_timeout_secs: 120,
             usdc_bridge: None,
         });
+    // The state directory is checked before the transaction (see
+    // `set_committee`).
+    prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let state = state_dir.join(STATE_FILE_NAME);
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter.submit_rotate(&bundle).await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {
             tx_hash,
@@ -1248,9 +1256,6 @@ async fn submit_rotate(
         },
         other => anyhow::bail!("submitRotate: {other:?}"),
     }
-    prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
-    let state = state_dir.join(STATE_FILE_NAME);
-    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     st.last_committee_period = Some(bundle.period);
     st.rotate_pending_period = None;
     st.save(&state)?;
@@ -1588,33 +1593,40 @@ where
 /// Log to stdout and, when `log` is given, to a file per day in that
 /// directory (`<prefix>.<date>`; bridge-audit#132). The guard flushes the
 /// file writer when dropped, so `main` holds it until exit.
-fn init_tracing(
-    log: Option<(&std::path::Path, &str)>,
-) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+/// Daily files kept in the log directory before the oldest is deleted.
+const LOG_KEEP_FILES: usize = 14;
+
+/// stdout always; with a log directory also one file per day there
+/// (`<prefix>.<date>`), written synchronously so nothing is lost when the
+/// process exits through `std::process::exit`.
+fn init_tracing(log: Option<(&std::path::Path, &str)>) -> std::io::Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let stdout = fmt::layer();
     match log {
         Some((dir, prefix)) => {
-            let (writer, guard) =
-                tracing_appender::non_blocking(tracing_appender::rolling::daily(dir, prefix));
-            let file = fmt::layer().with_ansi(false).with_writer(writer);
+            let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix(prefix)
+                .max_log_files(LOG_KEEP_FILES)
+                .build(dir)
+                .map_err(std::io::Error::other)?;
+            let file = fmt::layer().with_ansi(false).with_writer(file_appender);
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)
                 .with(file)
                 .try_init();
-            Some(guard)
         },
         None => {
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)
                 .try_init();
-            None
         },
     }
+    Ok(())
 }
 
 /// Read when `--from-block` is left at zero.
@@ -2091,7 +2103,8 @@ mod tests {
     /// `deposit-relayer` with their flags, environment variables and
     /// defaults; bridge-audit#132 then replaced the state file with the
     /// three directories (`--anchor-state` stays hidden, for the migration
-    /// hint) and built the ABIs in.
+    /// hint), built the ABIs in and gave `--bridge-address` its environment
+    /// variable, so a service can be configured from an env file alone.
     #[test]
     fn the_arbitrum_subcommands_keep_the_deposit_relayer_flags() {
         assert_eq!(
@@ -2099,7 +2112,7 @@ mod tests {
             want(&[
                 ("parent-rpc-url", Some("PARENT_RPC_URL"), &[]),
                 ("arbitrum-rpc-url", Some("ARBITRUM_RPC_URL"), &[]),
-                ("bridge-address", None, &[]),
+                ("bridge-address", Some("BRIDGE_ADDRESS"), &[]),
                 ("from-block", None, &["0"]),
                 ("an-graphql-url", Some("AN_GRAPHQL_URL"), &[]),
                 ("an-keys-path", Some("AN_KEYS_PATH"), &[]),

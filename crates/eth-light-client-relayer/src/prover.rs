@@ -205,15 +205,16 @@ impl SubprocessProofGenerator {
     /// directory. Written even when the prover failed: that is when it is
     /// read.
     fn write_transcript(&self, stem: &str, output: &std::process::Output) {
-        let _ = std::fs::create_dir_all(&self.cfg.log_dir);
-        let _ = std::fs::write(
-            self.cfg.log_dir.join(format!("{stem}-stdout.log")),
-            &output.stdout,
-        );
-        let _ = std::fs::write(
-            self.cfg.log_dir.join(format!("{stem}-stderr.log")),
-            &output.stderr,
-        );
+        let write = |name: String, bytes: &[u8]| {
+            let path = self.cfg.log_dir.join(name);
+            if let Err(e) = std::fs::create_dir_all(&self.cfg.log_dir)
+                .and_then(|()| std::fs::write(&path, bytes))
+            {
+                tracing::warn!(log = %path.display(), error = %e, "prover transcript not written");
+            }
+        };
+        write(format!("{stem}-stdout.log"), &output.stdout);
+        write(format!("{stem}-stderr.log"), &output.stderr);
     }
 
     async fn run_step(&self, update: &FinalityUpdate) -> Result<StepProofBundle, RelayerError> {

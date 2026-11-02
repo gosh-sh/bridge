@@ -84,9 +84,9 @@ struct DirArgs {
 enum Cmd {
     /// Read-only: list confirmed Deposit events from `--start`.
     Watch {
-        #[arg(long)]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         /// Lower bound for the log scan (bridge deploy block). When `0`, falls
         /// back to `BRIDGE_DEPLOY_BLOCK`.
@@ -103,14 +103,14 @@ enum Cmd {
         count: u64,
         /// Optional expected `eth_chainId` (must be a supported deposit chain).
         /// When set, the CLI aborts if the RPC chain does not match.
-        #[arg(long)]
+        #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
     },
     /// Listen for one depositId, prove it, write the operands to `--out-dir`.
     ProveOne {
-        #[arg(long)]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         #[arg(long)]
         deposit_id: u64,
@@ -167,16 +167,16 @@ enum Cmd {
         #[arg(long)]
         out_dir: PathBuf,
         /// Optional expected `eth_chainId` (must be a supported deposit chain).
-        #[arg(long)]
+        #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
     },
     /// Long-running listen→prove→submit loop.
     Daemon {
         #[command(flatten)]
         dirs: DirArgs,
-        #[arg(long)]
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         /// Lower bound for the log scan (bridge deploy block). When `0`, falls
         /// back to `BRIDGE_DEPLOY_BLOCK`.
@@ -270,7 +270,7 @@ enum Cmd {
         allow_insecure_graphql: bool,
         /// Optional expected `eth_chainId`. The RPC's chain is checked against
         /// the deposit allowlist either way.
-        #[arg(long)]
+        #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
         /// Bind address of the Prometheus text exporter (`GET /metrics`), e.g.
         /// `127.0.0.1:9467`. Unset = no exporter. Metric names are listed in
@@ -343,8 +343,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(dir) = &log_dir {
         prepare_dir("log", dir).map_err(|e| anyhow::anyhow!(e))?;
     }
-    // Dropped at exit: flushes the file writer.
-    let _log_guard = init_tracing(log_dir.as_deref());
+    init_tracing(log_dir.as_deref()).map_err(|e| anyhow::anyhow!("log file: {e}"))?;
 
     match args.cmd {
         Cmd::Status {
@@ -1040,31 +1039,38 @@ fn log_err(stage: &'static str) -> impl Fn(anyhow::Error) -> anyhow::Error {
 /// Log to stdout and, when `log_dir` is given, to a file per day in it
 /// (`deposit-relayer.log.<date>`; bridge-audit#132). The guard flushes the
 /// file writer when dropped, so `main` holds it until exit.
-fn init_tracing(log_dir: Option<&Path>) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+/// Daily files kept in the log directory before the oldest is deleted.
+const LOG_KEEP_FILES: usize = 14;
+
+/// stdout always; with a log directory also one file per day there
+/// (`LOG_FILE_PREFIX.<date>`), written synchronously so nothing is lost when
+/// the process exits through `std::process::exit`.
+fn init_tracing(log_dir: Option<&Path>) -> std::io::Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let stdout = fmt::layer();
     match log_dir {
         Some(dir) => {
-            let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
-                dir,
-                LOG_FILE_PREFIX,
-            ));
-            let file = fmt::layer().with_ansi(false).with_writer(writer);
+            let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix(LOG_FILE_PREFIX)
+                .max_log_files(LOG_KEEP_FILES)
+                .build(dir)
+                .map_err(std::io::Error::other)?;
+            let file = fmt::layer().with_ansi(false).with_writer(file_appender);
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)
                 .with(file)
                 .try_init();
-            Some(guard)
         },
         None => {
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)
                 .try_init();
-            None
         },
     }
+    Ok(())
 }

@@ -362,7 +362,11 @@ impl SubprocessProofGenerator {
         let transcript = format!(
             "$ {} {}\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- exit: {} ---\n",
             bin.display(),
-            passthrough.join(" "),
+            passthrough
+                .iter()
+                .map(|a| without_url_secrets(a))
+                .collect::<Vec<_>>()
+                .join(" "),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
             output.status,
@@ -501,6 +505,20 @@ impl ProofGenerator for SubprocessProofGenerator {
         let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof)?;
         bundle.check_binds_to(event)?;
         Ok(bundle)
+    }
+}
+
+/// An argument with any URL cut down to `scheme://host`: RPC URLs carry API
+/// keys and the transcript is a file that gets copied around.
+fn without_url_secrets(arg: &str) -> String {
+    match arg.find("://") {
+        None => arg.to_string(),
+        Some(i) => {
+            let rest = &arg[i + 3..];
+            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let host = rest[..end].rsplit('@').next().unwrap_or("");
+            format!("{}://{host}", &arg[..i])
+        },
     }
 }
 

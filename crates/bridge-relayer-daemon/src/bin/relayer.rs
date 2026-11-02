@@ -64,7 +64,7 @@ use tracing::{error, info, warn};
 struct Args {
     /// Directory for `relayer-state.json`, the cursor of the daemon modes
     /// (bridge-audit#132). `daemon-live` keeps it under `--prover-state-dir`
-    /// instead and ignores this; `sentry-watch` is stateless.
+    /// and refuses a different directory here; `sentry-watch` is stateless.
     #[arg(long, env = "RELAYER_STATE_DIR")]
     state_dir: Option<PathBuf>,
 
@@ -662,8 +662,7 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)
             .map_err(|e| anyhow::anyhow!("log directory {}: {e}", dir.display()))?;
     }
-    // Dropped at exit: flushes the file writer.
-    let _log_guard = init_tracing(log_dir.as_deref());
+    init_tracing(log_dir.as_deref()).map_err(|e| anyhow::anyhow!("log file: {e}"))?;
     let _ = RPC_FAILOVER_URLS.set(args.rpc_failover_urls.clone());
     // The cursor file of the daemon modes other than `daemon-live`.
     let state_file = |dir: &Option<PathBuf>| -> anyhow::Result<PathBuf> {
@@ -678,6 +677,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(dir.join(RELAYER_STATE_FILE_NAME))
     };
 
+    let global_state_dir = args.state_dir.clone();
     match args.cmd {
         Cmd::Status => {
             info!(
@@ -960,7 +960,20 @@ async fn main() -> anyhow::Result<()> {
                 .as_deref()
                 .map(bridge_gql_fetcher::gql_client::parse_endpoint_list)
                 .unwrap_or_default();
-            // One state directory: the cursor sits beside the prover state.
+            // One state directory: the cursor sits beside the prover state. A
+            // global `--state-dir` naming another directory would be silently
+            // ignored; refuse it instead.
+            if let Some(dir) = &global_state_dir {
+                if dir != &prover_state_dir {
+                    anyhow::bail!(
+                        "--state-dir / RELAYER_STATE_DIR ({}) differs from --prover-state-dir \
+                         ({}): daemon-live keeps {RELAYER_STATE_FILE_NAME} in the prover state \
+                         directory; drop --state-dir or point both at one directory",
+                        dir.display(),
+                        prover_state_dir.display()
+                    );
+                }
+            }
             let relayer_state_path = prover_state_dir.join(RELAYER_STATE_FILE_NAME);
             run_daemon_live(
                 relayer_state_path,
@@ -2726,33 +2739,40 @@ fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
 /// Log to stdout and, when `log_dir` is given, to a file per day in it
 /// (`relayer.log.<date>`; bridge-audit#132). The guard flushes the file
 /// writer when dropped, so `main` holds it until exit.
-fn init_tracing(log_dir: Option<&Path>) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+/// Daily files kept in the log directory before the oldest is deleted.
+const LOG_KEEP_FILES: usize = 14;
+
+/// stdout always; with a log directory also one file per day there
+/// (`LOG_FILE_PREFIX.<date>`), written synchronously so nothing is lost when
+/// the process exits through `std::process::exit` (the exit-status paths).
+fn init_tracing(log_dir: Option<&Path>) -> std::io::Result<()> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let stdout = fmt::layer();
     match log_dir {
         Some(dir) => {
-            let (writer, guard) = tracing_appender::non_blocking(tracing_appender::rolling::daily(
-                dir,
-                LOG_FILE_PREFIX,
-            ));
-            let file = fmt::layer().with_ansi(false).with_writer(writer);
+            let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix(LOG_FILE_PREFIX)
+                .max_log_files(LOG_KEEP_FILES)
+                .build(dir)
+                .map_err(std::io::Error::other)?;
+            let file = fmt::layer().with_ansi(false).with_writer(file_appender);
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)
                 .with(file)
                 .try_init();
-            Some(guard)
         },
         None => {
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(stdout)
                 .try_init();
-            None
         },
     }
+    Ok(())
 }
 
 #[cfg(test)]

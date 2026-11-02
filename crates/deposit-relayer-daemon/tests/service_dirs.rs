@@ -94,10 +94,9 @@ async fn a_cycle_writes_only_into_the_three_directories() {
     std::fs::write(canned_dir.join("public_inputs.bin"), &canned.public_inputs).unwrap();
     std::fs::write(canned_dir.join("proof.bin"), &canned.proof).unwrap();
 
-    // `export_blake2b_proof` writes two files; the fake copies the proof to
-    // `--proof-out` and the public inputs through a second fake step is not
-    // how the tool works, so it copies the proof and then the public inputs
-    // are copied by a wrapper around the same script.
+    // The fake `export_blake2b_proof` copies the canned proof to `--proof-out`
+    // and the canned public inputs to `--public-inputs-out`, the two files the
+    // real tool writes.
     let bins_dir = root.join("bins");
     std::fs::create_dir(&bins_dir).unwrap();
     install_tool(
@@ -195,21 +194,23 @@ async fn a_cycle_writes_only_into_the_three_directories() {
     // tool, each holding both streams.
     let logs = entries(&dirs.log);
     assert_eq!(logs.len(), 3, "{logs:?}");
-    for (tool, name) in [
-        "fetch_deposit_data",
-        "export_vk_blob",
-        "export_blake2b_proof",
-    ]
-    .iter()
-    .zip(&logs)
-    {
+    for name in &logs {
         assert!(name.starts_with("deposit-7-"), "{name}");
         let text = std::fs::read_to_string(dirs.log.join(name)).unwrap();
         assert!(
             text.contains("fake stderr") && text.contains("--- exit: "),
             "{name}: {text}"
         );
-        let _ = tool;
+    }
+    for tool in [
+        "fetch_deposit_data",
+        "export_vk_blob",
+        "export_blake2b_proof",
+    ] {
+        assert!(
+            logs.iter().any(|n| n.contains(&format!("-{tool}-"))),
+            "{tool}: {logs:?}"
+        );
     }
     assert!(
         logs.iter().any(|n| n.contains("-export_blake2b_proof-")),

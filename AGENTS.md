@@ -190,7 +190,7 @@ cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin re
 # proof_<N>.json, and withdrawByProof on proof_event_*.json. daemon-withdraw is the payout leg alone;
 # daemon-live proves in-process.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
-    --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
+    --state-dir <state dir/> --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
 # daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();
 # a bridge deployed before that field also needs --anchor-level 1|2 (BRIDGE_ANCHOR_LEVEL).
 # The fixture commands read bound_scenario.json from --fixtures-dir and the R15 calldata from
@@ -218,9 +218,10 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 |---|---|---|
 | `hygiene.yaml` | PRs, pushes to `main` | `gitleaks` over the whole history (`.gitleaks.toml`, `.gitleaksignore`); `lychee` over the Markdown (`lychee.toml`); English-only text (`scripts/check_english_only.py`, `make english-check`; a `non-english-ok` marker exempts a line) |
 | `solidity.yaml` | PRs, pushes to `main` | `forge build`, `forge fmt --check`, `forge test --no-match-contract Fork` |
-| `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json`, the slim ABIs `eth-lc-relayer` ships (`scripts/check_lc_relayer_abis.py`) |
+| `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json`, the ABIs built into `eth-lc-relayer` and the CLI's `USDCBridge.abi.json` copy against the compiled contracts (`scripts/check_lc_relayer_abis.py`) |
 | `verifier_sources.yaml` | PRs, pushes touching `contracts/ethereum/verifiers/` | Every `*AggregatorVerifier.sol` compiles with `solc` 0.8.19 to its `.bin` byte for byte; EIP-170 |
 | `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
+| `images.yaml` | PRs (build only), pushes to `main`, tags `v*`, manual on `main` | The four service images from `docker/Dockerfile` (every Rust workspace compiles), pushed to the registry from `main` and tags; `docker/compose.yaml` checked against the example settings |
 | `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or no earlier release has `kzg_bn254_21.srs`; builds `ackinacki-bridge`, `aggregate-proof` and `deposit-prover`'s tools; derives `kzg_params_18.srs` from the carried `kzg_bn254_21.srs`; checks the packaged deposit prover outside the tree (`scripts/check_deposit_prover_bundle.sh`: Hermez [s]·G2, the bridge's embedded deposit VK, a fixture proof); publishes the four assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
 | `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of acki-nacki's `dev`) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
@@ -228,11 +229,10 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 Each pipeline's header comment has the detail. A step that names a secret which does not exist, or
 is not ticked for the event, makes Woodpecker refuse the whole pipeline before any step runs.
 
-**The only Rust job that runs on a PR or on `main` is `bridge-circuits.yaml`** (added when the
-circuits were vendored — previously they lived in a private repo, so no CI here could reach
-them). Every other Rust crate — including the root workspace, `bridge-relayer-daemon`,
-`bridge-evm-aggregator`, `deposit-prover` and friends — has no PR-triggered pipeline and neither
-do the fork suites or `forge coverage`. Those exist only as GitLab jobs in `.gitlab-ci.yml`, which
+**The Rust jobs that run on a PR or on `main`:** `bridge-circuits.yaml` (the vendored circuits),
+`rust-tests.yaml` (`make test-rust`) and `images.yaml`, which compiles every workspace into the
+service images but runs no tests. The fork suites and `forge coverage` have no PR-triggered
+pipeline. Those exist only as GitLab jobs in `.gitlab-ci.yml`, which
 nothing runs from GitHub, so `make pre-push` is what stands between a branch and a Rust regression
 in the three crates it explicitly runs — the root workspace, `bridge-relayer-daemon` and
 `bridge-evm-aggregator`. Everything else (see the next section) is on the person pushing.

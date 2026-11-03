@@ -1415,6 +1415,7 @@ async fn walk(
                         dapp_hex: to.dapp_hex(),
                         chain_id: rec.params.chain_id,
                         work,
+                        log_dir: p.log_dir.clone(),
                     };
                     // A failure — Ctrl-C reaching the prover too — leaves the
                     // operation where it is: a resume proves again. An

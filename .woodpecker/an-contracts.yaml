@@ -8,9 +8,9 @@
 #     match deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin.
 #   * BridgeZerostateData.getBridgeData must encode the same tuple that
 #     eccUSDCBridge.onCodeUpgrade decodes.
-#   * The trimmed ABIs eth-lc-relayer ships (crates/eth-light-client-relayer/
-#     abi/) must match the compiled contracts and hold every function the
-#     relayer calls.
+#   * The ABIs built into eth-lc-relayer and the CLI's USDCBridge.abi.json
+#     copy must hold every function the relayers call and agree with the
+#     compiled contracts (scripts/check_lc_relayer_abis.py).
 #
 # The zerostate module's own unit tests (contracts/an/zerostate_init.py) also
 # run here.

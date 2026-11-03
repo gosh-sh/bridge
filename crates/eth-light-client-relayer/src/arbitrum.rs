@@ -1132,20 +1132,20 @@ impl TvmAnchorTarget {
     pub async fn connect(
         graphql_url: &str,
         keys: KeyPair,
-        bridge_abi_path: &str,
-        verifier_abi_path: &str,
         bridge_address: ExtendedAddress,
         chain: &ArbitrumChain,
     ) -> Result<Self, RelayerError> {
-        let client = |abi: &str| -> Result<TvmAckiNacki, RelayerError> {
+        // The ABIs are built in (`crate::abi`): the bridge's for the
+        // getters and `isAcceptedBlockHash`, the verifier's for `proveBlock`.
+        let client = |abi: tvm_client::abi::Abi| -> Result<TvmAckiNacki, RelayerError> {
             Ok(TvmAckiNacki::connect(TvmClientConfig {
                 graphql_endpoints: vec![graphql_url.to_string()],
                 keys: keys.clone(),
-                bridge_abi: TvmAckiNacki::load_abi(abi)?,
+                bridge_abi: abi,
             })?)
         };
-        let bridge = client(bridge_abi_path)?;
-        let verifier = client(verifier_abi_path)?;
+        let bridge = client(crate::abi::bridge_abi())?;
+        let verifier = client(crate::abi::arbitrum_verifier_abi())?;
         let got = bridge
             .run_getter(
                 &bridge_address.to_string(),

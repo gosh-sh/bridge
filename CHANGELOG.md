@@ -72,6 +72,9 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
+- `deposit-relayer` needs an EVM RPC that serves `eth_getLogs` and transaction receipts for at
+  least the last 7 days (30 preferred); one that keeps ~10 000 blocks cannot prove a deposit
+  older than that. Check `RPC_URL` before the next restart.
 - Images for every service, built from the sources of one commit by `docker/Dockerfile`:
   `docker.gosh.sh/bridge-relayer`, `bridge-deposit-relayer`, `bridge-eth-lc-relayer` and
   `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and

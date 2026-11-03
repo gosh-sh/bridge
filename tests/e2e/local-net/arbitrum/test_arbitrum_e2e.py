@@ -35,7 +35,7 @@ AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
-RUN_SECS = 4 * 3600         # how long a run may take, for the committee-period check
+RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: 103 min)
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 

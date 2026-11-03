@@ -30,8 +30,8 @@ L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE")
 BRIDGE_TVC = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc"
 BRIDGE_ABI = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
 VOUCHER_TVC = "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc"
-LIGHT_CLIENT_TVC = "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc"
-L2_VERIFIER_TVC = "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc"
+LIGHT_CLIENT_TVC = "contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc"
+L2_VERIFIER_TVC = "contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc"
 ENCODER_TVC = "contracts/an/zerostate/BridgeZerostateData.tvc"
 ENCODER_ABI = "contracts/an/zerostate/BridgeZerostateData.abi.json"
 

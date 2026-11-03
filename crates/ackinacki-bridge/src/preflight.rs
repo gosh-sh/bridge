@@ -2517,7 +2517,7 @@ pub async fn check_bridge_deploy(
     // 2. The withdrawal verifier stack, all three levels. A non-zero address proves
     //    nothing: an EOA answers every call with empty returndata, and a half-wired
     //    adapter answers the first and not the second. This is the same walk
-    //    `deploy/shellnet-l2/scripts/preflight.sh:28` performs.
+    //    `docker/relayer/preflight.sh` performs.
     let adapter = client
         .withdrawal_verifier()
         .await

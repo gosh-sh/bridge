@@ -9,19 +9,19 @@ die() {
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 kit_dir=${1:-$(cd -- "$script_dir/.." && pwd)}
-env_file=${2:-/etc/gosh-bridge-relayer/shellnet-l2.env}
-[[ -f "$kit_dir/compose.yaml" && -r "$env_file" ]] ||
-  die "usage: $0 [KIT_DIR] [RUNTIME_ENV]"
-
+env_file=${2:-}
+[[ -f "$kit_dir/compose.yaml" && -f "$kit_dir/.env" ]] ||
+  die "usage: $0 [COMPOSE_DIR] [DAEMON_LIVE_ENV]  (COMPOSE_DIR holds compose.yaml and .env)"
+# Non-secret Compose settings: the two roots, the metrics address.
+# shellcheck disable=SC1090
+source "$kit_dir/.env"
+: "${BRIDGE_OPT:?BRIDGE_OPT is not set in $kit_dir/.env}"
+: "${BRIDGE_DATA:?BRIDGE_DATA is not set in $kit_dir/.env}"
+env_file=${env_file:-$BRIDGE_OPT/env/daemon-live.env}
+[[ -r "$env_file" ]] || die "cannot read $env_file"
 # shellcheck disable=SC1090
 source "$env_file"
 unset RELAYER_PRIVATE_KEY
-if [[ -f "$kit_dir/.env" ]]; then
-  # Non-secret Compose paths and image settings.
-  # shellcheck disable=SC1090
-  source "$kit_dir/.env"
-fi
-runtime_root=${RELAYER_RUNTIME_ROOT:-/var/lib/gosh-bridge-relayer}
 
 for command_name in cast curl docker jq; do
   command -v "$command_name" >/dev/null || die "$command_name is not installed"
@@ -30,7 +30,7 @@ done
 cd "$kit_dir"
 printf '=== Compose ===\n'
 docker compose ps --all
-container_id=$(docker compose ps -q relayer)
+container_id=$(docker compose ps -q daemon-live)
 if [[ -n "$container_id" ]]; then
   docker inspect "$container_id" --format \
     'container={{.Name}} status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} image={{.Image}} started={{.State.StartedAt}}'
@@ -82,8 +82,8 @@ else
 fi
 
 printf '\n=== Persistent state ===\n'
-relayer_state=$runtime_root/L2_config/relayer-state.json
-prover_state=$runtime_root/L2_config/state/prover_state.json
+relayer_state=$BRIDGE_OPT/daemon-live/state/relayer-state.json
+prover_state=$BRIDGE_OPT/daemon-live/state/prover_state.json
 if [[ -s "$relayer_state" ]]; then
   printf '%s\n' "$relayer_state"
   jq '{
@@ -122,12 +122,12 @@ else
   printf '%s: not created yet\n' "$prover_state"
 fi
 du -sh \
-  "$runtime_root/params/pk_cache" \
-  "$runtime_root/submissions" \
-  "$runtime_root/tmp"
+  "$BRIDGE_DATA/params/relayer/pk_cache" \
+  "$BRIDGE_DATA/daemon-live/logs" \
+  "$BRIDGE_DATA/daemon-live/work"
 
 printf '\n=== GraphQL metrics ===\n'
-metrics_listen=${RELAYER_METRICS_LISTEN:-127.0.0.1:9464}
+metrics_listen=${METRICS_LISTEN_ADDR:-127.0.0.1}:${DAEMON_LIVE_METRICS_PORT:-9464}
 if metrics=$(curl --silent --show-error --max-time 5 "http://$metrics_listen/metrics" 2>&1); then
   grep -E '^relayer_gql_(requests|errors|failovers|full_rounds)_total' <<<"$metrics" ||
     printf 'no relayer_gql_* samples yet\n'
@@ -136,7 +136,7 @@ else
 fi
 
 printf '\n=== Recent significant logs ===\n'
-docker compose logs --no-color --since 6h relayer 2>&1 |
+docker compose logs --no-color --since 6h daemon-live 2>&1 |
   grep -E 'Starting shellnet|startup:|bootstrap seed applied|layers=|aggregate-proof|verified|verifyBlock|transaction|hard aborting|bridge reverted|tick failed|ERROR' |
   sed -E $'s/\033\\[[0-9;]*[mK]//g' |
   tail -80 || true

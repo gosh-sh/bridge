@@ -203,13 +203,13 @@ class InitializeTest(unittest.TestCase):
 
     def test_light_client_code_comes_from_the_placed_artefact(self):
         self.assertIn(
-            "code-of:/placed/contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc",
+            "code-of:/placed/contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc",
             self.run_initialize()[3],
         )
 
     def test_l2_verifier_code_comes_from_the_placed_artefact(self):
         self.assertIn(
-            "code-of:/placed/contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc",
+            "code-of:/placed/contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc",
             self.run_initialize()[4],
         )
 

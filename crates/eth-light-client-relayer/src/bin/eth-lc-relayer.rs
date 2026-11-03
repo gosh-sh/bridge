@@ -40,13 +40,18 @@ use clap::{Parser, Subcommand};
 use eth_light_client_relayer::AnInterfaceSubmitter;
 #[cfg(feature = "live-submit")]
 use eth_light_client_relayer::RelayerState;
-use eth_light_client_relayer::{
-    arbitrum, AnConfig, AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc,
-    HttpBeaconSource, MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig,
-    RelayerMetrics, StateLock, SubprocessProofGenerator, SubprocessProverConfig,
-};
 #[cfg(feature = "live-submit")]
-use eth_light_client_relayer::{RotateProofBundle, StepProofBundle};
+use eth_light_client_relayer::{
+    abi::{bridge_abi, light_client_abi},
+    RotateProofBundle, StepProofBundle,
+};
+use eth_light_client_relayer::{
+    arbitrum, prepare_dir, refuse_unrecognised_state, AnConfig, AnSubmitter, BackoffConfig,
+    BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter, MockProofGenerator,
+    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, ServiceDirs, StateLock,
+    SubprocessProofGenerator, SubprocessProverConfig, ANCHORS_LOG_FILE_PREFIX,
+    ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX, STATE_FILE_NAME,
+};
 use tracing::{error, info, warn};
 #[cfg(feature = "live-submit")]
 use tvm_client::crypto::KeyPair;
@@ -61,17 +66,72 @@ struct Args {
     cmd: Cmd,
 }
 
+/// The three directories of `daemon` (bridge-audit#132).
+#[derive(clap::Args, Debug, Clone)]
+struct DaemonDirs {
+    /// Directory for `eth-lc-relayer-state.json`, its lock and the
+    /// temporary file of its atomic write. Created when missing.
+    #[arg(long, env = "ETH_LC_RELAYER_STATE_DIR")]
+    state_dir: PathBuf,
+    /// Directory for the provers' inputs and outputs: one subdirectory per
+    /// prove, removed when the bundle is read back. Created when missing.
+    #[arg(long, env = "ETH_LC_RELAYER_WORK_DIR")]
+    work_dir: PathBuf,
+    /// Directory for the daemon's own log (one file per day, beside stdout)
+    /// and the transcript of every prover run. Created when missing.
+    #[arg(long, env = "ETH_LC_RELAYER_LOG_DIR")]
+    log_dir: PathBuf,
+}
+
+/// The three directories of `arbitrum-anchors` (bridge-audit#132).
+#[derive(clap::Args, Debug, Clone)]
+struct AnchorsDirs {
+    /// Directory for `arbitrum-anchors-state.json` and its lock: the proofs
+    /// taken at batch time are kept there until their assertion lands, and
+    /// cannot be fetched again. Created when missing.
+    #[arg(long, env = "ARBITRUM_ANCHORS_STATE_DIR")]
+    state_dir: PathBuf,
+    /// Directory for working files. `arbitrum-anchors` starts no prover and
+    /// keeps it empty; taken for the same shape as the other services.
+    #[arg(long, env = "ARBITRUM_ANCHORS_WORK_DIR")]
+    work_dir: PathBuf,
+    /// Directory for the relayer's own log, one file per day, beside
+    /// stdout. Created when missing.
+    #[arg(long, env = "ARBITRUM_ANCHORS_LOG_DIR")]
+    log_dir: PathBuf,
+}
+
+impl DaemonDirs {
+    fn into_service_dirs(self) -> ServiceDirs {
+        ServiceDirs {
+            state: self.state_dir,
+            work: self.work_dir,
+            log: self.log_dir,
+        }
+    }
+}
+
+impl AnchorsDirs {
+    fn into_service_dirs(self) -> ServiceDirs {
+        ServiceDirs {
+            state: self.state_dir,
+            work: self.work_dir,
+            log: self.log_dir,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Fetch and print the latest light-client finality update.
     BeaconWatch {
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: String,
     },
     /// Prove one step from the live beacon (or `--finality-json`) into
     /// `--out-dir`.
     ProveOne {
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: Option<String>,
         #[arg(long)]
         finality_json: Option<PathBuf>,
@@ -88,6 +148,12 @@ enum Cmd {
         srs_path: PathBuf,
         #[arg(long)]
         out_dir: PathBuf,
+        /// Directory for the prover's inputs and outputs (bridge-audit#132).
+        #[arg(long, env = "ETH_LC_RELAYER_WORK_DIR")]
+        work_dir: PathBuf,
+        /// Directory for the prover's transcript.
+        #[arg(long, env = "ETH_LC_RELAYER_LOG_DIR")]
+        log_dir: PathBuf,
         #[arg(long, default_value_t = 7200)]
         timeout_secs: u64,
     },
@@ -99,8 +165,6 @@ enum Cmd {
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: String,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
@@ -118,14 +182,14 @@ enum Cmd {
         /// Override the period (default: attested slot of the bundle / 8192).
         #[arg(long)]
         period: Option<u64>,
-        #[arg(long, default_value = "./eth-lc-relayer-state.json")]
-        state: PathBuf,
+        /// The daemon's state directory: the period is recorded in the
+        /// state file there, so a stopped daemon resumes from it.
+        #[arg(long, env = "ETH_LC_RELAYER_STATE_DIR")]
+        state_dir: PathBuf,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: String,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
@@ -142,8 +206,6 @@ enum Cmd {
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: String,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
@@ -163,14 +225,14 @@ enum Cmd {
     SubmitRotate {
         #[arg(long)]
         bundle_dir: PathBuf,
-        #[arg(long, default_value = "./eth-lc-relayer-state.json")]
-        state: PathBuf,
+        /// The daemon's state directory: the period is recorded in the
+        /// state file there, so a stopped daemon resumes from it.
+        #[arg(long, env = "ETH_LC_RELAYER_STATE_DIR")]
+        state_dir: PathBuf,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: String,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
@@ -178,7 +240,7 @@ enum Cmd {
     },
     /// Walk the execution parent-hash chain of a checkpoint epoch.
     AncestryOne {
-        #[arg(long, env = "BEACON_URL")]
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: String,
         #[arg(long)]
         checkpoint_slot: u64,
@@ -189,7 +251,7 @@ enum Cmd {
     /// `submitAncestry`. `--checkpoint-hash` is the newer anchor,
     /// `--older-anchor-hash` the older one; both must already be proven.
     SubmitAncestry {
-        #[arg(long, env = "ETH_RPC_URL")]
+        #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
         eth_rpc_url: String,
         #[arg(long)]
         checkpoint_hash: String,
@@ -201,8 +263,6 @@ enum Cmd {
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: String,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
@@ -218,23 +278,23 @@ enum Cmd {
         an_graphql_url: String,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: String,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: String,
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
         #[arg(long, env = "AN_USDC_BRIDGE")]
         an_usdc_bridge: String,
-        #[arg(long, env = "AN_USDC_ABI_PATH")]
-        an_usdc_abi_path: String,
     },
     /// Long-running fetch → prove → submit loop.
     Daemon {
-        #[arg(long, env = "BEACON_URL")]
+        #[command(flatten)]
+        dirs: DaemonDirs,
+        /// Removed: the state is a directory now (`--state-dir`). Kept
+        /// hidden so an old unit file fails with the migration hint.
+        #[arg(long, hide = true)]
+        state: Option<PathBuf>,
+        #[arg(long, env = "BEACON_URL", hide_env_values = true)]
         beacon_url: String,
-        #[arg(long, default_value = "./eth-lc-relayer-state.json")]
-        state: PathBuf,
         /// Prebuilt `export_step_vk_blob` example; required unless
         /// `--mock-prove`. Checked to exist and be executable at startup.
         #[arg(long, env = "LIGHT_CLIENT_STEP_PROVER_BIN")]
@@ -265,7 +325,7 @@ enum Cmd {
         no_rotate: bool,
         /// After the first accepted `submitUpdate`, run the owner flip
         /// (`disableOwnerAnchors` + `disableOwnerRotation`). Default **off**.
-        /// Needs `AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`.
+        /// Needs `AN_USDC_BRIDGE`.
         #[arg(long, default_value_t = false, conflicts_with = "no_flip_owner")]
         flip_owner: bool,
         /// No owner flip. This is the default; the flag is kept so existing
@@ -276,7 +336,7 @@ enum Cmd {
         /// the span between the previous checkpoint and the new one and runs
         /// `link_headers` locally. Does **not** call `submitAncestry` unless
         /// `--submit-ancestry` is also set.
-        #[arg(long, env = "ETH_RPC_URL")]
+        #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
         eth_rpc_url: Option<String>,
         /// Send `submitAncestry` after each checkpoint. Default **off**. The
         /// span needs a proven anchor at both ends, so nothing is sent until a
@@ -294,16 +354,12 @@ enum Cmd {
         an_graphql_url: Option<String>,
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: Option<String>,
-        #[arg(long, env = "AN_LC_ABI_PATH")]
-        an_lc_abi_path: Option<String>,
         #[arg(long, env = "AN_LIGHT_CLIENT")]
         an_light_client: Option<String>,
         #[arg(long, env = "AN_SENDER")]
         an_sender: Option<String>,
         #[arg(long, env = "AN_USDC_BRIDGE")]
         an_usdc_bridge: Option<String>,
-        #[arg(long, env = "AN_USDC_ABI_PATH")]
-        an_usdc_abi_path: Option<String>,
         #[arg(long, default_value_t = false)]
         allow_insecure_graphql: bool,
         #[arg(long, default_value_t = 8)]
@@ -332,7 +388,7 @@ enum Cmd {
         arbitrum_rpc_url: String,
         /// `AckiNackiBridge` on the Arbitrum chain, whose `Deposit`s are
         /// anchored.
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         /// First Arbitrum block to scan for deposits (the bridge's deploy
         /// block). When `0`, falls back to `BRIDGE_DEPLOY_BLOCK`.
@@ -345,32 +401,23 @@ enum Cmd {
         /// the call is permissionless).
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        /// `eccUSDCBridge.abi.json` on the AN side.
-        #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
-        an_bridge_abi_path: String,
-        /// `ArbitrumBlockVerifier.abi.json`
-        /// (`contracts/an/0.81.0_compiled/exchange/`).
-        #[arg(long, env = "AN_ARBITRUM_VERIFIER_ABI_PATH")]
-        an_verifier_abi_path: String,
         /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
         #[arg(long, env = "AN_TOKEN_BRIDGE")]
         an_token_bridge: String,
-        /// Where the proofs taken at batch time are kept until their
-        /// assertion lands. They cannot be fetched again later: keep the file
-        /// across restarts.
-        #[arg(
-            long,
-            env = "ARBITRUM_ANCHOR_STATE",
-            default_value = "./arbitrum-anchors-state.json"
-        )]
-        anchor_state: PathBuf,
+        #[command(flatten)]
+        dirs: AnchorsDirs,
+        /// Removed: the state is a directory now (`--state-dir`). Kept
+        /// hidden so an old unit file or `ARBITRUM_ANCHOR_STATE` in the
+        /// environment fails with the migration hint.
+        #[arg(long, env = "ARBITRUM_ANCHOR_STATE", hide = true)]
+        anchor_state: Option<PathBuf>,
         #[arg(long, default_value_t = 12)]
         poll_secs: u64,
         /// Blocks per `eth_getLogs` on the parent chain.
-        #[arg(long, default_value_t = 1_000)]
+        #[arg(long, env = "PARENT_LOG_SPAN", default_value_t = 1_000)]
         parent_log_span: u64,
         /// Blocks per `eth_getLogs` on the Arbitrum chain.
-        #[arg(long, default_value_t = 10_000)]
+        #[arg(long, env = "ARBITRUM_LOG_SPAN", default_value_t = 10_000)]
         arbitrum_log_span: u64,
         /// Allow non-HTTPS GraphQL endpoints (local dev only).
         #[arg(long)]
@@ -400,14 +447,63 @@ enum Cmd {
     },
 }
 
+/// Rust's default for an error out of `main` is `Error: {e:?}` on stderr,
+/// unredacted: a transport error quotes the RPC URL, key included, and
+/// under compose that line lands in the container log on every restart.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-    match Args::parse().cmd {
+async fn main() -> std::process::ExitCode {
+    match real_main().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", redact_urls(&format!("{e:?}")));
+            std::process::ExitCode::FAILURE
+        },
+    }
+}
+
+async fn real_main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    // Before bridge-audit#132 the state was a file path; the lock and the
+    // temporary file were derived from it. Now they live in a directory
+    // with it.
+    match &args.cmd {
+        Cmd::Daemon {
+            state: Some(old), ..
+        } => anyhow::bail!(
+            "--state ({}) is gone: the state is a directory now. Move the file into a directory \
+             as {STATE_FILE_NAME} and pass that directory as --state-dir / \
+             ETH_LC_RELAYER_STATE_DIR; see CHANGELOG.md.",
+            old.display()
+        ),
+        Cmd::ArbitrumAnchors {
+            anchor_state: Some(old),
+            ..
+        } => anyhow::bail!(
+            "--anchor-state / ARBITRUM_ANCHOR_STATE ({}) is gone: the state is a directory now. \
+             Move the file into a directory as {ANCHORS_STATE_FILE_NAME} and pass that directory \
+             as --state-dir / ARBITRUM_ANCHORS_STATE_DIR; see CHANGELOG.md.",
+            old.display()
+        ),
+        _ => {},
+    }
+    let log = match &args.cmd {
+        Cmd::Daemon {
+            dirs, ..
+        } => Some((dirs.log_dir.clone(), LOG_FILE_PREFIX)),
+        Cmd::ArbitrumAnchors {
+            dirs, ..
+        } => Some((dirs.log_dir.clone(), ANCHORS_LOG_FILE_PREFIX)),
+        Cmd::ProveOne {
+            log_dir, ..
+        } => Some((log_dir.clone(), LOG_FILE_PREFIX)),
+        _ => None,
+    };
+    if let Some((dir, _)) = &log {
+        prepare_dir("log", dir).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    init_tracing(log.as_ref().map(|(d, p)| (d.as_path(), *p)))
+        .map_err(|e| anyhow::anyhow!("log file: {e}"))?;
+    match args.cmd {
         Cmd::BeaconWatch {
             beacon_url,
         } => beacon_watch(beacon_url).await,
@@ -418,6 +514,8 @@ async fn main() -> anyhow::Result<()> {
             prover_dir,
             srs_path,
             out_dir,
+            work_dir,
+            log_dir,
             timeout_secs,
         } => {
             prove_one(
@@ -427,6 +525,8 @@ async fn main() -> anyhow::Result<()> {
                 prover_dir,
                 srs_path,
                 out_dir,
+                work_dir,
+                log_dir,
                 timeout_secs,
             )
             .await
@@ -434,20 +534,18 @@ async fn main() -> anyhow::Result<()> {
         Cmd::SetCommittee {
             bundle_dir,
             period,
-            state,
+            state_dir,
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
         } => {
             set_committee(
                 bundle_dir,
                 period,
-                state,
+                state_dir,
                 an_graphql_url,
                 an_keys_path,
-                an_lc_abi_path,
                 an_light_client,
                 an_sender,
             )
@@ -457,7 +555,6 @@ async fn main() -> anyhow::Result<()> {
             bundle_dir,
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
         } => {
@@ -465,7 +562,6 @@ async fn main() -> anyhow::Result<()> {
                 bundle_dir,
                 an_graphql_url,
                 an_keys_path,
-                an_lc_abi_path,
                 an_light_client,
                 an_sender,
             )
@@ -475,7 +571,6 @@ async fn main() -> anyhow::Result<()> {
             slot,
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
         } => {
@@ -483,7 +578,6 @@ async fn main() -> anyhow::Result<()> {
                 slot,
                 an_graphql_url,
                 an_keys_path,
-                an_lc_abi_path,
                 an_light_client,
                 an_sender,
             )
@@ -497,19 +591,17 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::SubmitRotate {
             bundle_dir,
-            state,
+            state_dir,
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
         } => {
             submit_rotate(
                 bundle_dir,
-                state,
+                state_dir,
                 an_graphql_url,
                 an_keys_path,
-                an_lc_abi_path,
                 an_light_client,
                 an_sender,
             )
@@ -527,7 +619,6 @@ async fn main() -> anyhow::Result<()> {
             max_headers,
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
         } => {
@@ -538,7 +629,6 @@ async fn main() -> anyhow::Result<()> {
                 max_headers,
                 an_graphql_url,
                 an_keys_path,
-                an_lc_abi_path,
                 an_light_client,
                 an_sender,
             )
@@ -547,26 +637,23 @@ async fn main() -> anyhow::Result<()> {
         Cmd::FlipOwner {
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
             an_usdc_bridge,
-            an_usdc_abi_path,
         } => {
             flip_owner_cmd(
                 an_graphql_url,
                 an_keys_path,
-                an_lc_abi_path,
                 an_light_client,
                 an_sender,
                 an_usdc_bridge,
-                an_usdc_abi_path,
             )
             .await
         },
         Cmd::Daemon {
+            dirs,
+            state: _,
             beacon_url,
-            state,
             step_prover_bin,
             rotate_prover_bin,
             prover_dir,
@@ -581,11 +668,9 @@ async fn main() -> anyhow::Result<()> {
             owner_hop,
             an_graphql_url,
             an_keys_path,
-            an_lc_abi_path,
             an_light_client,
             an_sender,
             an_usdc_bridge,
-            an_usdc_abi_path,
             allow_insecure_graphql,
             backoff_initial_secs,
             backoff_max_secs,
@@ -600,9 +685,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(v) = an_keys_path {
                 an.keys_path = v;
             }
-            if let Some(v) = an_lc_abi_path {
-                an.light_client_abi_path = v;
-            }
             if let Some(v) = an_light_client {
                 an.light_client = v;
             }
@@ -612,12 +694,9 @@ async fn main() -> anyhow::Result<()> {
             if let Some(v) = an_usdc_bridge {
                 an.usdc_bridge = v;
             }
-            if let Some(v) = an_usdc_abi_path {
-                an.usdc_abi_path = v;
-            }
             run_daemon(
                 beacon_url,
-                state,
+                dirs.into_service_dirs(),
                 step_prover_bin,
                 rotate_prover_bin,
                 prover_dir,
@@ -648,10 +727,9 @@ async fn main() -> anyhow::Result<()> {
             from_block,
             an_graphql_url,
             an_keys_path,
-            an_bridge_abi_path,
-            an_verifier_abi_path,
             an_token_bridge,
-            anchor_state,
+            dirs,
+            anchor_state: _,
             poll_secs,
             parent_log_span,
             arbitrum_log_span,
@@ -663,6 +741,14 @@ async fn main() -> anyhow::Result<()> {
             }
             .validate_live_graphql_endpoint(allow_insecure_graphql)
             .map_err(log_err("arbitrum-anchors"))?;
+            let dirs = dirs.into_service_dirs();
+            dirs.prepare().map_err(log_err("arbitrum-anchors"))?;
+            info!(
+                state_dir = %dirs.state.display(),
+                work_dir = %dirs.work.display(),
+                log_dir = %dirs.log.display(),
+                "service directories",
+            );
             arbitrum_anchors(
                 &parent_rpc_url,
                 &arbitrum_rpc_url,
@@ -671,11 +757,9 @@ async fn main() -> anyhow::Result<()> {
                 AnchorsAn {
                     graphql_url: an_graphql_url,
                     keys_path: an_keys_path,
-                    bridge_abi_path: an_bridge_abi_path,
-                    verifier_abi_path: an_verifier_abi_path,
                     token_bridge: an_token_bridge,
                 },
-                &anchor_state,
+                &dirs.state_file(ANCHORS_STATE_FILE_NAME),
                 Duration::from_secs(poll_secs.max(1)),
                 parent_log_span,
                 arbitrum_log_span,
@@ -742,10 +826,9 @@ async fn beacon_watch(beacon_url: String) -> anyhow::Result<()> {
 async fn set_committee(
     _bundle_dir: PathBuf,
     _period: Option<u64>,
-    _state: PathBuf,
+    _state_dir: PathBuf,
     _an_graphql_url: String,
     _an_keys_path: String,
-    _an_lc_abi_path: String,
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
@@ -757,10 +840,9 @@ async fn set_committee(
 async fn set_committee(
     bundle_dir: PathBuf,
     period: Option<u64>,
-    state: PathBuf,
+    state_dir: PathBuf,
     an_graphql_url: String,
     an_keys_path: String,
-    an_lc_abi_path: String,
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
@@ -773,8 +855,7 @@ async fn set_committee(
     }
     let period = period.unwrap_or(bundle.parsed.attested_slot / SLOTS_PER_SYNC_PERIOD);
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
-    let abi =
-        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url],
         keys,
@@ -794,6 +875,16 @@ async fn set_committee(
         commitment = %eth_light_client_relayer::le_word_to_uint256_hex(&commitment),
         "setCommitteeCommitment"
     );
+    // The state directory is checked before the transaction: a wrong or
+    // read-only directory must not leave the chain updated and the period
+    // unrecorded.
+    prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let state = state_dir.join(STATE_FILE_NAME);
+    // The daemon's lock: a running daemon would overwrite what is recorded
+    // here with its own copy of the state, so it has to be stopped first.
+    refuse_unrecognised_state(&state, STATE_FILE_NAME)?;
+    let _lock = StateLock::acquire(&state)?;
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter
         .set_committee_commitment(commitment, period)
         .await?
@@ -805,7 +896,6 @@ async fn set_committee(
         },
         other => anyhow::bail!("setCommitteeCommitment: {other:?}"),
     }
-    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     st.last_committee_period = Some(period);
     st.rotate_pending_period = None;
     st.save(&state)?;
@@ -880,7 +970,6 @@ async fn set_gloas_fork_slot(
     _slot: u64,
     _an_graphql_url: String,
     _an_keys_path: String,
-    _an_lc_abi_path: String,
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
@@ -892,13 +981,11 @@ async fn set_gloas_fork_slot(
     slot: u64,
     an_graphql_url: String,
     an_keys_path: String,
-    an_lc_abi_path: String,
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
-    let abi =
-        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url],
         keys,
@@ -929,6 +1016,7 @@ async fn set_gloas_fork_slot(
 /// where the step prover will read it: a wrong path is a configuration
 /// error, found now rather than at the first proof. The rotate prover, and
 /// with it `--prover-dir`, is only needed when the daemon may rotate.
+#[allow(clippy::too_many_arguments)]
 fn subprocess_prover_config(
     step_prover_bin: Option<PathBuf>,
     rotate_prover_bin: Option<PathBuf>,
@@ -936,9 +1024,12 @@ fn subprocess_prover_config(
     srs_path: Option<PathBuf>,
     enable_rotate: bool,
     timeout_secs: u64,
+    work_dir: PathBuf,
     log_dir: PathBuf,
 ) -> anyhow::Result<SubprocessProverConfig> {
     use eth_light_client_relayer::prover::require_executable;
+    prepare_dir("work", &work_dir).map_err(|e| anyhow::anyhow!(e))?;
+    prepare_dir("log", &log_dir).map_err(|e| anyhow::anyhow!(e))?;
     let step_prover_bin = step_prover_bin.ok_or_else(|| {
         anyhow::anyhow!(
             "--step-prover-bin (LIGHT_CLIENT_STEP_PROVER_BIN) required unless --mock-prove"
@@ -973,7 +1064,8 @@ fn subprocess_prover_config(
         prover_dir,
         srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
         timeout: Duration::from_secs(timeout_secs),
-        log_dir: Some(log_dir),
+        work_dir,
+        log_dir,
     };
     // Where the step prover will look for the SRS: a relative path, in its
     // working directory. Checked now, not at the first proof.
@@ -987,6 +1079,7 @@ fn subprocess_prover_config(
     Ok(cfg)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prove_one(
     beacon_url: Option<String>,
     finality_json: Option<PathBuf>,
@@ -994,6 +1087,8 @@ async fn prove_one(
     prover_dir: Option<PathBuf>,
     srs_path: PathBuf,
     out_dir: PathBuf,
+    work_dir: PathBuf,
+    log_dir: PathBuf,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let prover_cfg = subprocess_prover_config(
@@ -1003,7 +1098,8 @@ async fn prove_one(
         Some(srs_path),
         false,
         timeout_secs,
-        out_dir.clone(),
+        work_dir,
+        log_dir,
     )?;
     let mut update = if let Some(p) = finality_json {
         eth_light_client_relayer::parse_finality_update(&std::fs::read_to_string(p)?)?
@@ -1087,7 +1183,6 @@ async fn submit_one(
     _bundle_dir: PathBuf,
     _an_graphql_url: String,
     _an_keys_path: String,
-    _an_lc_abi_path: String,
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
@@ -1099,14 +1194,12 @@ async fn submit_one(
     bundle_dir: PathBuf,
     an_graphql_url: String,
     an_keys_path: String,
-    an_lc_abi_path: String,
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
     let bundle = StepProofBundle::from_dir(&bundle_dir)?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
-    let abi =
-        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url],
         keys,
@@ -1134,10 +1227,9 @@ async fn submit_one(
 #[cfg(not(feature = "live-submit"))]
 async fn submit_rotate(
     _bundle_dir: PathBuf,
-    _state: PathBuf,
+    _state_dir: PathBuf,
     _an_graphql_url: String,
     _an_keys_path: String,
-    _an_lc_abi_path: String,
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
@@ -1147,17 +1239,15 @@ async fn submit_rotate(
 #[cfg(feature = "live-submit")]
 async fn submit_rotate(
     bundle_dir: PathBuf,
-    state: PathBuf,
+    state_dir: PathBuf,
     an_graphql_url: String,
     an_keys_path: String,
-    an_lc_abi_path: String,
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
     let bundle = RotateProofBundle::from_dir(&bundle_dir)?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
-    let abi =
-        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url],
         keys,
@@ -1171,6 +1261,14 @@ async fn submit_rotate(
             confirm_timeout_secs: 120,
             usdc_bridge: None,
         });
+    // The state directory is checked before the transaction (see
+    // `set_committee`).
+    prepare_dir("state", &state_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let state = state_dir.join(STATE_FILE_NAME);
+    // The daemon's lock, as in `set_committee`.
+    refuse_unrecognised_state(&state, STATE_FILE_NAME)?;
+    let _lock = StateLock::acquire(&state)?;
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     match submitter.submit_rotate(&bundle).await? {
         eth_light_client_relayer::SubmitOutcome::Accepted {
             tx_hash,
@@ -1179,7 +1277,6 @@ async fn submit_rotate(
         },
         other => anyhow::bail!("submitRotate: {other:?}"),
     }
-    let mut st = RelayerState::load(&state)?.unwrap_or_default();
     st.last_committee_period = Some(bundle.period);
     st.rotate_pending_period = None;
     st.save(&state)?;
@@ -1210,7 +1307,6 @@ async fn submit_ancestry_cmd(
     max_headers: usize,
     _an_graphql_url: String,
     _an_keys_path: String,
-    _an_lc_abi_path: String,
     _an_light_client: String,
     _an_sender: String,
 ) -> anyhow::Result<()> {
@@ -1242,7 +1338,6 @@ async fn submit_ancestry_cmd(
     max_headers: usize,
     an_graphql_url: String,
     an_keys_path: String,
-    an_lc_abi_path: String,
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
@@ -1258,8 +1353,7 @@ async fn submit_ancestry_cmd(
             )
         })?;
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
-    let abi =
-        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
+    let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url],
         keys,
@@ -1289,11 +1383,9 @@ async fn submit_ancestry_cmd(
 async fn flip_owner_cmd(
     _an_graphql_url: String,
     _an_keys_path: String,
-    _an_lc_abi_path: String,
     _an_light_client: String,
     _an_sender: String,
     _an_usdc_bridge: String,
-    _an_usdc_abi_path: String,
 ) -> anyhow::Result<()> {
     Err(live_submit_needs_feature())
 }
@@ -1303,17 +1395,13 @@ async fn flip_owner_cmd(
 async fn flip_owner_cmd(
     an_graphql_url: String,
     an_keys_path: String,
-    an_lc_abi_path: String,
     an_light_client: String,
     an_sender: String,
     an_usdc_bridge: String,
-    an_usdc_abi_path: String,
 ) -> anyhow::Result<()> {
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
-    let lc_abi =
-        TvmAckiNacki::load_abi(&an_lc_abi_path).map_err(|e| anyhow::anyhow!("load LC ABI: {e}"))?;
-    let usdc_abi = TvmAckiNacki::load_abi(&an_usdc_abi_path)
-        .map_err(|e| anyhow::anyhow!("load USDC ABI: {e}"))?;
+    let lc_abi = light_client_abi();
+    let usdc_abi = bridge_abi();
     let tvm_lc = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url.clone()],
         keys: keys.clone(),
@@ -1348,7 +1436,7 @@ async fn flip_owner_cmd(
 #[allow(clippy::too_many_arguments)]
 async fn run_daemon(
     beacon_url: String,
-    state_path: PathBuf,
+    dirs: ServiceDirs,
     step_prover_bin: Option<PathBuf>,
     rotate_prover_bin: Option<PathBuf>,
     prover_dir: Option<PathBuf>,
@@ -1367,6 +1455,14 @@ async fn run_daemon(
     prove_timeout_secs: u64,
 ) -> anyhow::Result<()> {
     backoff.validate().map_err(|e| anyhow::anyhow!(e))?;
+    dirs.prepare().map_err(|e| anyhow::anyhow!(e))?;
+    info!(
+        state_dir = %dirs.state.display(),
+        work_dir = %dirs.work.display(),
+        log_dir = %dirs.log.display(),
+        "service directories",
+    );
+    let state_path = dirs.state_file(STATE_FILE_NAME);
     let prover_cfg = if mock_prove {
         None
     } else {
@@ -1377,9 +1473,11 @@ async fn run_daemon(
             srs_path,
             enable_rotate,
             prove_timeout_secs,
-            prover_log_dir(&state_path),
+            dirs.work.clone(),
+            dirs.log.clone(),
         )?)
     };
+    refuse_unrecognised_state(&state_path, STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(&state_path)?;
     let source = Arc::new(HttpBeaconSource::new(beacon_url)?);
     let mut cfg = RelayerConfig::new(state_path.clone());
@@ -1433,27 +1531,23 @@ async fn run_daemon(
             .map_err(|e| anyhow::anyhow!(e))?;
         if !an.is_live_submit_ready() {
             anyhow::bail!(
-                "live submit needs AN_GRAPHQL_URL, AN_KEYS_PATH, AN_LC_ABI_PATH, AN_LIGHT_CLIENT, \
-                 AN_SENDER (or pass --dry-run)"
+                "live submit needs AN_GRAPHQL_URL, AN_KEYS_PATH, AN_LIGHT_CLIENT, AN_SENDER (or \
+                 pass --dry-run)"
             );
         }
         let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an.keys_path)?)?;
-        let abi = TvmAckiNacki::load_abi(&an.light_client_abi_path)
-            .map_err(|e| anyhow::anyhow!("load ABI: {e}"))?;
         let tvm = TvmAckiNacki::connect(TvmClientConfig {
             graphql_endpoints: vec![an.graphql_url.clone()],
             keys: keys.clone(),
-            bridge_abi: abi,
+            bridge_abi: light_client_abi(),
         })
         .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
         let mut submitter = AnInterfaceSubmitter::new(Arc::new(tvm), an.to_submit_config());
         if an.is_usdc_ready() {
-            let usdc_abi = TvmAckiNacki::load_abi(&an.usdc_abi_path)
-                .map_err(|e| anyhow::anyhow!("load USDC ABI: {e}"))?;
             let tvm_usdc = TvmAckiNacki::connect(TvmClientConfig {
                 graphql_endpoints: vec![an.graphql_url.clone()],
                 keys,
-                bridge_abi: usdc_abi,
+                bridge_abi: bridge_abi(),
             })
             .map_err(|e| anyhow::anyhow!("tvm connect USDC: {e}"))?;
             submitter = submitter.with_usdc(an.usdc_bridge.clone(), Arc::new(tvm_usdc));
@@ -1518,13 +1612,45 @@ where
     }
 }
 
-/// `<state file dir>/prover-logs`: prover transcripts of the daemon's proves.
-fn prover_log_dir(state: &std::path::Path) -> PathBuf {
-    state
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("prover-logs")
+use eth_light_client_relayer::redact::{redact_urls, Redacting};
+
+/// Daily files kept in the log directory before the oldest is deleted.
+const LOG_KEEP_FILES: usize = 14;
+
+/// stdout always; with a log directory also one file per day there
+/// (`<prefix>.<date>`), written synchronously so nothing is lost when the
+/// process exits through `std::process::exit`.
+fn init_tracing(log: Option<(&std::path::Path, &str)>) -> std::io::Result<()> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Both sinks redact URLs: transport errors quote the RPC URL, key included.
+    let stdout = fmt::layer().with_writer(Redacting(std::io::stdout));
+    match log {
+        Some((dir, prefix)) => {
+            let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix(prefix)
+                .max_log_files(LOG_KEEP_FILES)
+                .build(dir)
+                .map_err(std::io::Error::other)?;
+            let file = fmt::layer()
+                .with_ansi(false)
+                .with_writer(Redacting(file_appender));
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .with(file)
+                .try_init();
+        },
+        None => {
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .try_init();
+        },
+    }
+    Ok(())
 }
 
 /// Read when `--from-block` is left at zero.
@@ -1597,13 +1723,12 @@ async fn arbitrum_view(
     })
 }
 
-/// The Acki Nacki side of `arbitrum-anchors`.
+/// The Acki Nacki side of `arbitrum-anchors`. The bridge and verifier ABIs
+/// are built in (`eth_light_client_relayer::abi`).
 #[cfg_attr(not(feature = "live-submit"), allow(dead_code))]
 struct AnchorsAn {
     graphql_url: String,
     keys_path: String,
-    bridge_abi_path: String,
-    verifier_abi_path: String,
     token_bridge: String,
 }
 
@@ -1638,6 +1763,7 @@ async fn arbitrum_anchors(
 ) -> anyhow::Result<()> {
     // One relayer per state file: two would overwrite each other's proofs,
     // which cannot be fetched again.
+    refuse_unrecognised_state(state_path, ANCHORS_STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(state_path)?;
     let view = arbitrum_view(
         parent_rpc_url,
@@ -1656,8 +1782,6 @@ async fn arbitrum_anchors(
     let target = arbitrum::TvmAnchorTarget::connect(
         &an.graphql_url,
         keys,
-        &an.bridge_abi_path,
-        &an.verifier_abi_path,
         acki_nacki_interface::ExtendedAddress::parse(&an.token_bridge)?,
         &chain,
     )
@@ -1856,6 +1980,7 @@ mod tests {
             srs,
             enable_rotate,
             1,
+            dir.join("work-files"),
             dir.join("logs"),
         )
     }
@@ -1917,16 +2042,25 @@ mod tests {
             None,
             false,
             1,
+            dir.path().join("work-files"),
             logs.clone(),
         )
         .unwrap();
         assert_eq!(cfg.srs_path, PathBuf::from("data/kzg_params_19.srs"));
         // ...and not in the binary's own directory, where the prover would
         // look without one.
-        let err =
-            subprocess_prover_config(Some(step.clone()), None, None, None, false, 1, logs.clone())
-                .unwrap_err()
-                .to_string();
+        let err = subprocess_prover_config(
+            Some(step.clone()),
+            None,
+            None,
+            None,
+            false,
+            1,
+            dir.path().join("work-files"),
+            logs.clone(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("--srs-path") && err.contains("bin/data/kzg_params_19.srs"),
             "{err}"
@@ -1934,7 +2068,17 @@ mod tests {
         // An absolute path is taken as is.
         let srs = dir.path().join("hermez-raw-19");
         std::fs::write(&srs, "srs").unwrap();
-        subprocess_prover_config(Some(step), None, None, Some(srs), false, 1, logs).unwrap();
+        subprocess_prover_config(
+            Some(step),
+            None,
+            None,
+            Some(srs),
+            false,
+            1,
+            dir.path().join("work-files"),
+            logs,
+        )
+        .unwrap();
     }
 
     /// The long flags of a subcommand with their environment variables and
@@ -1981,9 +2125,12 @@ mod tests {
     }
 
     /// `arbitrum-anchors` and `arbitrum-vector` came over from
-    /// `deposit-relayer`: a unit file written for it needs only the binary
-    /// changed, so every flag keeps its name, environment variable and
-    /// default.
+    /// `deposit-relayer` with their flags, environment variables and
+    /// defaults; bridge-audit#132 then replaced the state file with the
+    /// three directories (`--anchor-state` stays hidden, for the migration
+    /// hint), built the ABIs in and gave `--bridge-address` and the anchors'
+    /// log spans environment variables, so a service can be configured from
+    /// an env file alone.
     #[test]
     fn the_arbitrum_subcommands_keep_the_deposit_relayer_flags() {
         assert_eq!(
@@ -1991,23 +2138,18 @@ mod tests {
             want(&[
                 ("parent-rpc-url", Some("PARENT_RPC_URL"), &[]),
                 ("arbitrum-rpc-url", Some("ARBITRUM_RPC_URL"), &[]),
-                ("bridge-address", None, &[]),
+                ("bridge-address", Some("BRIDGE_ADDRESS"), &[]),
                 ("from-block", None, &["0"]),
                 ("an-graphql-url", Some("AN_GRAPHQL_URL"), &[]),
                 ("an-keys-path", Some("AN_KEYS_PATH"), &[]),
-                ("an-bridge-abi-path", Some("AN_BRIDGE_ABI_PATH"), &[]),
-                (
-                    "an-verifier-abi-path",
-                    Some("AN_ARBITRUM_VERIFIER_ABI_PATH"),
-                    &[]
-                ),
                 ("an-token-bridge", Some("AN_TOKEN_BRIDGE"), &[]),
-                ("anchor-state", Some("ARBITRUM_ANCHOR_STATE"), &[
-                    "./arbitrum-anchors-state.json"
-                ]),
+                ("state-dir", Some("ARBITRUM_ANCHORS_STATE_DIR"), &[]),
+                ("work-dir", Some("ARBITRUM_ANCHORS_WORK_DIR"), &[]),
+                ("log-dir", Some("ARBITRUM_ANCHORS_LOG_DIR"), &[]),
+                ("anchor-state", Some("ARBITRUM_ANCHOR_STATE"), &[]),
                 ("poll-secs", None, &["12"]),
-                ("parent-log-span", None, &["1000"]),
-                ("arbitrum-log-span", None, &["10000"]),
+                ("parent-log-span", Some("PARENT_LOG_SPAN"), &["1000"]),
+                ("arbitrum-log-span", Some("ARBITRUM_LOG_SPAN"), &["10000"]),
                 ("allow-insecure-graphql", None, &["false"]),
             ])
         );
@@ -2039,8 +2181,6 @@ mod tests {
             AnchorsAn {
                 graphql_url: String::new(),
                 keys_path: String::new(),
-                bridge_abi_path: String::new(),
-                verifier_abi_path: String::new(),
                 token_bridge: String::new(),
             },
             &state,

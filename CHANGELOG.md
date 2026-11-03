@@ -84,6 +84,8 @@ assigns it when the release is tagged.
   `scheme://host`: RPC URLs carry API keys, and transport errors quote them.
 - `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
+- The five `*.patch` files in the repository root and `scripts/check_eth_beacon_lc_sources.sh`
+  are removed: acki-nacki takes the AN contracts through `contracts/an/place.json`. Nothing to do.
 
 ### Fixes
 

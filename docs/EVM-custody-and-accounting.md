@@ -108,6 +108,28 @@ Acki Nacki running; a pause there leaves Ethereum deposits and payouts
 running. Stopping both directions of the bridge in an incident means flipping
 **both** owner switches. There is no single stop switch (QC-AN-J5).
 
+## USDC issuer risk is accepted
+
+*Checked against `AckiNackiBridge.sol` at `3d519742`; the line references in this section are to
+that commit, not to the one in the header.*
+
+The bridge is built for Circle's standard USDC, fixed at construction (`usdc`, `:120`, `:693`).
+Circle can pause the USDC contract or blacklist an address, and the bridge has no defence against
+either. This is accepted as the issuer's risk and is not mitigated in the bridge (audit QC-A1-2).
+What it means:
+
+* While USDC is paused, or for a blacklisted depositor, `deposit` reverts inside `_pullExactUsdc`
+  (`:787`, `:1551`) and nothing is booked.
+* While USDC is paused, or for a blacklisted recipient, `withdrawByProof` reverts inside
+  `_pushExactUsdc` (`:1525`), and the nullifier and `treasuryBalance` (`:1512`) roll back with it.
+  The proof fixes the recipient, so the payout can only be retried once Circle lifts the block, and
+  only while the proof's anchor is still in its window (Case 3e of
+  [`live_withdrawByProof_runbook.md`](../crates/bridge-relayer-daemon/docs/live_withdrawByProof_runbook.md#case-3e--anchor-eviction-deadline----anchor-layer-runway-is-finite)).
+  After that the amount stays in `treasuryBalance` for good.
+* A blacklisted bridge address freezes all custody: the liquid USDC, and the AAVE position too,
+  since `withdrawFromAave` can only send to the bridge itself (`:1632`). The contract has no path
+  around it.
+
 ## AAVE routing never moves the book
 
 `supplyToAave`, `withdrawFromAave` and `emergencyWithdrawAll` move tokens between the bridge and the

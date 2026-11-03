@@ -852,7 +852,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     }
 
     /// @notice Register a source ERC-20 once, then update its deposit limits.
-    ///         The token/id association is immutable; closing deposits leaves withdrawals open.
+    ///         The token/id association is immutable; TVL can only increase.
+    ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
     function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
                             uint128 maxTransfer, uint128 maxTvl, bool depositsEnabled)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
@@ -865,6 +866,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
             require(maxTransfer <= MAX_TRANSFER_AMOUNT && maxTvl <= MAX_BRIDGE_TVL, ERR_TOKEN_CONFIG);
         }
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        require(maxTvl >= config.maxTvl, ERR_TOKEN_CONFIG);
         require(config.evmToken == 0 || config.evmToken == evmToken, ERR_TOKEN_CONFIG);
         uint32 previousId = _bridgeTokenIds[chainId][evmToken];
         require(previousId == 0 || previousId == tokenId, ERR_TOKEN_CONFIG);

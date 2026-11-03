@@ -1400,7 +1400,7 @@ mod tests {
         // sold 0.80.0 build of eccUSDCBridge 1.16.0 with per-token accounting.
         assert_eq!(
             &hash[..8],
-            "19ed19e7",
+            "7c9525de",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

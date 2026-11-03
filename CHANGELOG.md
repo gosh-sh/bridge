@@ -108,7 +108,7 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
-- `eccUSDCBridge` 1.16.0 (code hash `19ed19e7…`) credits the proven ERC-20 to its registered
+- `eccUSDCBridge` 1.16.0 (code hash `7c9525de…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register the same token and ECC id on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
@@ -139,6 +139,9 @@ assigns it when the release is tagged.
   `TokenStillHasLiabilities`, `CannotDelistUsdc` or `CannotListAToken`.
 
 ### Fixes
+
+- AN `setBridgeToken` refuses a lower `maxTvl`, so a pending voucher confirmation keeps the
+  capacity under which it was accepted. Close deposits or lower the EVM TVL cap to throttle intake.
 
 - Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
   False and malformed returns still revert, and exact custody-delta checks remain in force.

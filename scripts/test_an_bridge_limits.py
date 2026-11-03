@@ -245,7 +245,7 @@ class BridgeLimits(unittest.TestCase):
     def test_lowering_or_closing_deposits_does_not_strand_a_prior_payout(self):
         self.register(SECOND_TOKEN, 4, 10**18, 10**19)
         self.confirm_token()
-        self.register(SECOND_TOKEN, 4, 1, 1, enabled=False)
+        self.register(SECOND_TOKEN, 4, 1, 10**19, enabled=False)
         config = self.token_limits()
         self.assertEqual(int(config["outstanding"]), 10**18)
         self.assertEqual(int(config["maxWithdrawal"]), 10**18)
@@ -292,6 +292,15 @@ class BridgeLimits(unittest.TestCase):
         result = self.withdraw(TRANSFER, chain=3)
         self.assertEqual(result["messages"], [])
         self.assertEqual(int(self.limits(chain=3)["outstanding"]), 0)
+
+    def test_tvl_reduction_cannot_invalidate_an_accepted_deposit(self):
+        amount = 10**18
+        self.register(SECOND_TOKEN, 4, amount, amount * 10)
+        self.confirm_token(deposit=100)
+        self.finalize(deposit=101, amount=amount, token=SECOND_TOKEN)
+        self.register(SECOND_TOKEN, 4, amount, amount, expect=241)
+        self.confirm_token(deposit=101)
+        self.assertEqual(int(self.token_limits()["outstanding"]), amount * 2)
 
     def test_usdc_registration_cannot_raise_the_protocol_caps(self):
         self.register(USDC_TOKEN, 3, TRANSFER + 1, TVL, expect=241)

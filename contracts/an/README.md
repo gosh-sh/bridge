@@ -110,7 +110,8 @@ Before enabling an EVM token listing, call
 `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)` as the AN owner.
 Register USDC too, using ECC id `3`; other ids must be at least `4`. Both sides must use the same
 ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
-immutable; subsequent calls can change limits and the deposit switch, retaining outstanding
+immutable; subsequent calls can raise the TVL ceiling, change the deposit transfer limit and
+the deposit switch, retaining outstanding
 inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
 `getTokenDepositConfig(chainId, evmToken)` and `getTokenWithdrawalConfig(chainId, tokenId)` expose
 the configuration and per-chain outstanding amount. Closing or throttling deposits does not
@@ -489,3 +490,7 @@ network.
 
     python3 contracts/an/zerostate/test_zerostate_init.py
     scripts/check_zerostate_data_encoder.py
+
+AN `maxTvl` cannot decrease after registration: a lower ceiling could abort a confirmation
+whose voucher has already been consumed. To restrict new deposits, close the AN deposit switch
+or lower the EVM TVL cap; the latter leaves earlier deposits payable.

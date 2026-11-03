@@ -63,7 +63,7 @@ verify_verifier_lane() {
 
 env_file=${1:-}
 [[ -n "$env_file" && -f "$env_file" ]] ||
-  die "usage: $0 /path/to/shellnet-l2.env"
+  die "usage: $0 /path/to/daemon-live.env"
 
 set -a
 # shellcheck disable=SC1090
@@ -82,19 +82,23 @@ case "$runtime_layout" in
   *) die "unknown RELAYER_RUNTIME_LAYOUT: $runtime_layout" ;;
 esac
 
+# The paths come from the image (container-paths.sh) or, on a host, from the
+# env file. The binary checksums are optional pins: with images built by CI
+# the image digest pins them, and the image checks its own IMAGE-SHA256SUMS.
 required=(
   BRIDGE_REPO_DIR EXPECTED_BRIDGE_COMMIT
-  RELAYER_BINARY EXPECTED_RELAYER_SHA256
-  RELAYER_STATE_PATH RPC_URL BRIDGE_ADDRESS BRIDGE_DEPLOY_BLOCK
+  RELAYER_BINARY
+  RPC_URL BRIDGE_ADDRESS BRIDGE_DEPLOY_BLOCK
   RELAYER_ADDRESS RELAYER_PRIVATE_KEY
   MIN_RELAYER_BALANCE_WEI BRIDGE_GQL_ENDPOINT BRIDGE_PARAMS_DIR
-  BRIDGE_BOOTSTRAP_SEQNO BRIDGE_CONFIG_DIR BRIDGE_STATE_DIR BRIDGE_BK_SET_CONFIG
+  BRIDGE_BOOTSTRAP_SEQNO BRIDGE_STATE_DIR BRIDGE_WORK_DIR BRIDGE_LOG_DIR
+  BRIDGE_BK_SET_CONFIG
   BRIDGE_BK_SET_EXPECTED_SHA256 EXPECTED_BK_SET_COMMITMENT
   EXPECTED_GENESIS_PREV_ANCHOR EXPECTED_WITHDRAW_DAPP_FR
   EXPECTED_WITHDRAW_ACC_FR EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID
   EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID EXPECTED_WITHDRAW_ALT_TOKEN_ID
   EXPECTED_USDC_ADDRESS
-  BRIDGE_AGGREGATE_PROOF_BIN EXPECTED_AGGREGATE_PROOF_SHA256 BRIDGE_VERIFIERS_DIR
+  BRIDGE_AGGREGATE_PROOF_BIN BRIDGE_VERIFIERS_DIR
   BRIDGE_PK_CACHE_DIR BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_ANCHOR_LEVEL
   EXPECTED_EVM_CHAIN_ID
 )
@@ -157,9 +161,13 @@ aggregator_binary=$BRIDGE_AGGREGATE_PROOF_BIN
 "$RELAYER_BINARY" --help >/dev/null || die "relayer cannot execute on this OS"
 actual_relayer_hash=$(sha256sum "$RELAYER_BINARY" | awk '{print $1}')
 actual_aggregator_hash=$(sha256sum "$aggregator_binary" | awk '{print $1}')
-[[ "${actual_relayer_hash,,}" == "${EXPECTED_RELAYER_SHA256,,}" ]] || die "relayer binary checksum mismatch"
-[[ "${actual_aggregator_hash,,}" == "${EXPECTED_AGGREGATE_PROOF_SHA256,,}" ]] || die "aggregate-proof checksum mismatch"
-ok "release binary checksums"
+if [[ -n "${EXPECTED_RELAYER_SHA256:-}" ]]; then
+  [[ "${actual_relayer_hash,,}" == "${EXPECTED_RELAYER_SHA256,,}" ]] || die "relayer binary checksum mismatch"
+fi
+if [[ -n "${EXPECTED_AGGREGATE_PROOF_SHA256:-}" ]]; then
+  [[ "${actual_aggregator_hash,,}" == "${EXPECTED_AGGREGATE_PROOF_SHA256,,}" ]] || die "aggregate-proof checksum mismatch"
+fi
+ok "release binaries relayer=$actual_relayer_hash aggregate-proof=$actual_aggregator_hash"
 
 derived_address=$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")
 [[ "${derived_address,,}" == "${RELAYER_ADDRESS,,}" ]] ||
@@ -187,11 +195,12 @@ for k in 17 19 20 21 22; do
 done
 [[ -d "$BRIDGE_PK_CACHE_DIR" && -w "$BRIDGE_PK_CACHE_DIR" ]] || die "PK cache is not writable"
 [[ -d "$BRIDGE_STATE_DIR" && -w "$BRIDGE_STATE_DIR" ]] || die "prover state directory is not writable"
+[[ -d "$BRIDGE_WORK_DIR" && -w "$BRIDGE_WORK_DIR" ]] || die "work directory is not writable"
+[[ -d "$BRIDGE_LOG_DIR" && -w "$BRIDGE_LOG_DIR" ]] || die "log directory is not writable"
+mkdir -p "$BRIDGE_DUMP_SUBMISSIONS_DIR" 2>/dev/null || true
 [[ -d "$BRIDGE_DUMP_SUBMISSIONS_DIR" && -w "$BRIDGE_DUMP_SUBMISSIONS_DIR" ]] ||
   die "submission dump directory is not writable"
-[[ -d $(dirname -- "$RELAYER_STATE_PATH") && -w $(dirname -- "$RELAYER_STATE_PATH") ]] ||
-  die "relayer state directory is not writable"
-ok "BK set, Hermez SRS K=17/19/20/21/22, and writable state paths"
+ok "BK set, Hermez SRS K=17/19/20/21/22, and writable state, work and log directories"
 
 # Child diagnostics below do not need the signing key. This does not alter the
 # EnvironmentFile inherited later by the daemon process.

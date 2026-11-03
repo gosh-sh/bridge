@@ -346,7 +346,7 @@ establish them:
    ```
 
    Empty diff, or stop here. This is the same comparison
-   `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   `docker/relayer/preflight.sh`
    runs (`verify_verifier_lane`), and the CLI's own
    `check_bridge_deploy` runs it for you on every withdraw — the flag
    does **not** turn that off.

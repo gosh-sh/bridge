@@ -1,5 +1,0 @@
-.env
-deploy.env
-runtime.env
-*.key
-*.secret

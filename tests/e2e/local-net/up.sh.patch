@@ -1,6 +1,21 @@
 --- a/tests/dexdo/up.sh
 +++ b/tests/dexdo/up.sh
-@@ -101,6 +101,15 @@
+@@ -90,8 +90,12 @@
+ #  * nginx caches its upstream (block_manager) IP at config-load; if block_manager
+ #    were (re)created AFTER nginx, its new IP would leave nginx 502-ing the /v2
+ #    gateway. So order is: nodes -> block_manager -> q_server + nginx (last).
+-echo "==> [4/5] up aerospike + nodes first"
+-docker compose -f "$COMPOSE" up -d aerospike node0 node1 node2 node3 node4
++# block_manager comes up in the same call, right behind the nodes it depends on: it
++# indexes blocks only from the moment it attaches, and the nodes start producing at
++# once. Waiting for all five nodes first (below) let the chain run ahead of it, and
++# GraphQL never got the first blocks. Its getent pre-wait covers node DNS.
++echo "==> [4/5] up aerospike, the nodes and block_manager"
++docker compose -f "$COMPOSE" up -d aerospike node0 node1 node2 node3 node4 block_manager
+ 
+ # Wait until every node container is actually running before touching the network
+ # (the /etc/hosts map, block_manager and nginx all need node0..4 registered in
+@@ -101,6 +105,15 @@
    i=0
    until [ "$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null | xargs -r docker inspect -f '{{.State.Running}}' 2>/dev/null)" = "true" ]; do
      i=$((i+1))
@@ -16,10 +31,13 @@
      if [ "$i" -ge 120 ]; then echo "!! node$n not running after 120s" >&2; break; fi
      sleep 1
    done
-@@ -219,6 +228,25 @@
-   sleep 5
- done
- 
+@@ -216,8 +229,27 @@
+     exit 1
+   fi
+   echo "    [probe] ext-message not accepted yet (WRONG_PRODUCER / not settled), $(( deadline - now ))s left"
++  sleep 5
++done
++
 +# The probe above only proves the producer accepts external messages; the node
 +# behind the endpoint (node0) answers account reads from its own state, which a
 +# node that started late may still be syncing. Hand over only once it serves a
@@ -35,10 +53,9 @@
 +    exit 1
 +  fi
 +  echo "    [state] node0 does not serve accounts yet, $(( deadline - now ))s left"
-+  sleep 5
-+done
+   sleep 5
+ done
 +echo "    node0 serves zerostate accounts - network ready for the suite"
-+
+ 
  # Emit the two values the dexdo e2e suite needs. Written to config/ so the caller
  # (dexdo deploy / cargo nextest) can `source` it.
- seed_notes="$(pwd)/config/dex_test_notes.keys.json"

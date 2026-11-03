@@ -22,7 +22,8 @@ bridge = [t["contractAddress"] for t in run["transactions"] if t.get("contractNa
 blocks = [int(r["blockNumber"], 16) for r in run["receipts"]]
 print(f"BRIDGE_ADDRESS={bridge}\nBRIDGE_DEPLOY_BLOCK={min(blocks)}")
 for name, addr in re.findall(r"^\s+([A-Za-z]+): (0x[0-9a-fA-F]{40})$", open(sys.argv[2]).read(), re.M):
-    if name not in ("USDC",):
+    # Logged, not deployed by this run: Circle's USDC and the (here zero) predecessor bridge.
+    if name not in ("USDC", "predecessor"):
         print(f"ADDR_{name.upper()}={addr}")
 PY
 cat "$OUT/evm.env"

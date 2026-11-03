@@ -53,7 +53,7 @@ interface IAcceptedBlockHashSink {
 ///         head: `isProven` / the sink forget that window. Deposits older than
 ///         a year cannot `finalizeDeposit` against this oracle.
 contract EthBeaconLightClient {
-    string constant version = "0.1.1";
+    string constant version = "0.2.0";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -152,37 +152,27 @@ contract EthBeaconLightClient {
         uint64  gloasForkSlot;          // first Gloas slot the proof assumed
     }
 
-    /// @notice The proven public inputs of the **rotate** circuit. The rotate
-    ///         root is a recursive 2-to-1 aggregation over 8 committee shards +
-    ///         a step snark (`eth-light-client-prover`, milestone M6), so its
-    ///         instance column is 17 little-endian 32-byte Fr:
+    /// @notice The proven public inputs of the **rotate** circuit: the committee
+    ///         circuit (`eth-light-client-prover` `committee_table`) wrapped in
+    ///         one aggregation, so its instance column is 17 little-endian
+    ///         32-byte Fr:
     ///           [0..12)  KZG accumulator limbs (lhs/rhs G1, 3×88-bit per coord)
-    ///           [12] current_committee_commitment  — 2-level Poseidon commitment
-    ///               to the committee that SIGNED (must equal the trusted current
-    ///               one); bound in-circuit to the folded step's committee
-    ///           [13] next_committee_commitment     — 2-level Poseidon commitment
-    ///               to the committee proven to sit in the signed state's
+    ///           [12] next_committee_commitment — 2-level Poseidon commitment to
+    ///               the committee whose SSZ root sits in `state_root`'s
     ///               `next_sync_committee` slot; becomes the new trusted one
-    ///           [14] period                        — the sync-committee period the
-    ///               hand-off advances into (monotonic anti-replay)
-    ///           [15] gloas_fork_slot               — picks the `next_sync_committee`
-    ///               index (87 before Gloas, 2946 from it); bound to the folded
-    ///               step's PI #10, must equal `_gloasForkSlot`
-    ///           [16] attested_slot                 — signed header of the rotate
-    ///               proof; `period` must equal `attestedSlot / 8192 + 1`
+    ///           [13] state_root_hi, [14] state_root_lo — the beacon state that
+    ///               slot is proven against, split as the step's PI #8|#9
+    ///           [15] attested_slot — picks the slot's index with
+    ///           [16] gloas_fork_slot — 87 before Gloas, 2946 from it
     ///
-    ///         ⚠ The 12 accumulator limbs are the recursion's KZG accumulator.
-    ///         `ZKHALO2VERIFYWITHVK` verifies the aggregation proof with a plain
-    ///         SHPLONK check but does NOT pair the accumulator against the SRS
-    ///         `[s]·G2`, so acceptance does not (yet) cryptographically enforce
-    ///         the folded shard/step proofs — see `submitRotate`.
+    ///         The proof says nothing about who signed `state_root`: that is the
+    ///         step proof `submitRotate` takes with it.
     uint256 constant ROTATE_ACCUMULATOR_LIMBS = 12;
     struct RotatePI {
-        uint256 currentCommitteeCommitment;
         uint256 nextCommitteeCommitment;
-        uint64  period;
-        uint64  gloasForkSlot;
+        uint256 attestedStateRoot;      // hi << 128 | lo
         uint64  attestedSlot;
+        uint64  gloasForkSlot;
     }
 
     uint256 _ownerPubkey;
@@ -349,62 +339,72 @@ contract EthBeaconLightClient {
     // Committee rotation (rotate ↔ step join — trustless committee chain)
     // ========================================================
 
-    /// @notice Advances the trusted sync committee by verifying a **rotate**
-    ///         proof. This is what makes the committee chain trustless from the
-    ///         weak-subjectivity checkpoint: `submitUpdate` only trusts a
-    ///         committee equal to `_currentCommittee`, and this is the only
-    ///         permissionless way that value moves.
+    /// @notice Advances the trusted sync committee. This is what makes the
+    ///         committee chain trustless from the weak-subjectivity checkpoint:
+    ///         `submitUpdate` only trusts a committee equal to
+    ///         `_currentCommittee`, and this is the only permissionless way
+    ///         that value moves.
     ///
-    ///         The rotate proof (`eth-light-client-prover` recursive rotate, M6)
-    ///         establishes, all bound in-circuit, that (a) the committee whose
-    ///         2-level Poseidon commitment is `current_commit` signed an attested
-    ///         beacon header with a supermajority — this commitment is bound to a
-    ///         folded step proof, not witnessed freely (bls-bind); and (b) the
-    ///         committee whose commitment is `next_commit` occupies that signed
-    ///         state's `next_sync_committee` slot (`htr(SyncCommittee)` + branch @
-    ///         gindex 87, or 2946 from Gloas), anchored to the step's attested `state_root`
-    ///         (bls-state-root). So proving `current_commit` == the current
-    ///         trusted committee is proof `next_commit` is its legitimate
-    ///         successor — no on-chain state_root plumbing needed.
+    ///         Two proofs of one light-client update, verified together:
+    ///           * the step proof (`VK_BLOB`, as `submitUpdate` takes it): the
+    ///             committee in force signed the attested header with a
+    ///             supermajority, and that header's `state_root`;
+    ///           * the rotate proof (`ROTATE_VK_BLOB`): the committee whose
+    ///             commitment is `next_commit` sits in that state's
+    ///             `next_sync_committee` slot (gindex 87, or 2946 from Gloas).
+    ///         The two meet on the attested state root and slot, checked here.
+    ///         The step proof is not taken as a head update.
     ///
-    ///         ⚠ SOUNDNESS — TRUSTLESS ONLY ON A DECIDER-ENABLED NODE. The root
-    ///         is a recursive 2-to-1 aggregation whose validity rests on its
-    ///         12-limb KZG accumulator (PI [0..12)). A stock `ZKHALO2VERIFYWITHVK`
-    ///         runs a plain SHPLONK verify and does NOT pair that accumulator
-    ///         against the SRS `[s]·G2`. The opcode **decider extension**
-    ///         (tvm-sdk#284: VkBlob byte 11 `accumulator_limbs = 12` ⇒ pairs
-    ///         PI[0..12] vs the embedded Hermez `[s]·G2`; reference
-    ///         `eth-light-client-prover/examples/rotate_decider_check.rs`) closes
-    ///         this. The embedded `ROTATE_VK_BLOB` already sets that flag.
-    ///         tvm-sdk#284 co-deploys with this contract, so an accepted rotate
-    ///         enforces the folded shard/step proofs. Call
-    ///         `disableOwnerRotation()` at the deposit flip
+    ///         ⚠ SOUNDNESS — TRUSTLESS ONLY ON A DECIDER-ENABLED NODE. The
+    ///         rotate proof is an aggregation whose validity rests on its
+    ///         12-limb KZG accumulator (PI [0..12)). The opcode pairs it against
+    ///         the embedded Hermez `[s]·G2` because `ROTATE_VK_BLOB` byte 11 is
+    ///         `accumulator_limbs = 12` (tvm-sdk#284); a node without that
+    ///         extension accepts the proof without the committee circuit behind
+    ///         it. Call `disableOwnerRotation()` at the deposit flip
     ///         (`scripts/ursus/flip_deposit_to_light_client.md`).
     ///
-    ///         Permissionless: the proof is the authorization.
-    /// @param proof        — SHPLONK proof bytes, the `proof_cell` operand.
-    /// @param publicInputs — 17 × 32-byte LE Fr: 12 accumulator limbs then
-    ///                       [current_commit, next_commit, period, gloas_fork_slot,
-    ///                       attested_slot].
-    function submitRotate(bytes proof, bytes publicInputs) public {
-        RotatePI pi = _parseRotatePublicInputs(publicInputs);
+    ///         Permissionless: the proofs are the authorization.
+    /// @param stepProof        — step SHPLONK proof bytes of the hand-off update.
+    /// @param stepPublicInputs — its 11 × 32-byte LE Fr, as for `submitUpdate`.
+    /// @param rotateProof      — rotate SHPLONK proof bytes.
+    /// @param rotatePublicInputs — 17 × 32-byte LE Fr: 12 accumulator limbs then
+    ///                       [next_commit, state_root_hi, state_root_lo,
+    ///                       attested_slot, gloas_fork_slot].
+    function submitRotate(
+        bytes stepProof,
+        bytes stepPublicInputs,
+        bytes rotateProof,
+        bytes rotatePublicInputs
+    ) public {
+        StepPI step = _parsePublicInputs(stepPublicInputs);
+        RotatePI pi = _parseRotatePublicInputs(rotatePublicInputs);
+        require(3 * uint256(step.participation) >= 2 * SYNC_COMMITTEE_SIZE, ERR_LOW_PARTICIPATION);
         // Chain to the trusted committee; fail-closed until bootstrapped.
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
-        require(pi.currentCommitteeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
+        require(step.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
         require(_gloasForkSlotSet, ERR_FORK_SLOT_UNSET);
+        require(step.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
         require(pi.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
+        require(
+            pi.attestedSlot == step.attestedSlot && pi.attestedStateRoot == step.attestedStateRoot,
+            ERR_BAD_PUBLIC_INPUTS
+        );
         // The last header of a period is signed in the next one and its
         // state's `next_sync_committee` is still the signer: a genuine
         // hand-off that changes nothing.
         require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
-        require(pi.attestedSlot / SLOTS_PER_PERIOD + 1 == pi.period, ERR_BAD_PUBLIC_INPUTS);
-        // Monotonic period — reject stale / replayed hand-offs. The circuit
-        // binds `period` to the attested slot, so it cannot be inflated.
-        require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
+        // Monotonic period — reject stale / replayed hand-offs.
+        uint64 period = pi.attestedSlot / SLOTS_PER_PERIOD + 1;
+        require(period > _committeePeriod, ERR_STALE_PERIOD);
 
         tvm.accept();
         require(
-            gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof),
+            gosh.zkhalo2VerifyWithVK(VK_BLOB, stepPublicInputs, stepProof),
+            ERR_INVALID_ZKPROOF
+        );
+        require(
+            gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, rotatePublicInputs, rotateProof),
             ERR_INVALID_ZKPROOF
         );
 
@@ -412,10 +412,10 @@ contract EthBeaconLightClient {
 
         uint256 from = _currentCommittee;
         _currentCommittee = pi.nextCommitteeCommitment;
-        _committeePeriod = pi.period;
+        _committeePeriod = period;
 
         address addrExtern = address.makeAddrExtern(CommitteeRotatedEmit, bitCntAddress);
-        emit CommitteeRotated{dest: addrExtern}(pi.period, from, pi.nextCommitteeCommitment);
+        emit CommitteeRotated{dest: addrExtern}(period, from, pi.nextCommitteeCommitment);
     }
 
     // ========================================================
@@ -895,13 +895,13 @@ contract EthBeaconLightClient {
 
     /// @dev Reads the 17 rotate public inputs out of the PROVEN blob. Layout =
     ///      17 × 32-byte LE Fr: 12 KZG accumulator limbs, then
-    ///      [current_committee_commitment, next_committee_commitment, period,
-    ///      gloas_fork_slot, attested_slot].
-    ///      Same little-endian Fr decoding as `_parsePublicInputs`; the two
-    ///      commitments are full-width field elements (Poseidon outputs),
-    ///      `period` and `attested_slot` are small u64s. The 12 accumulator
-    ///      limbs are skipped here (they gate the recursion, not the committee
-    ///      hand-off) — see the soundness note on `submitRotate`.
+    ///      [next_committee_commitment, state_root_hi, state_root_lo,
+    ///      attested_slot, gloas_fork_slot].
+    ///      Same little-endian Fr decoding as `_parsePublicInputs`; the
+    ///      commitment is a full-width field element (Poseidon output), the
+    ///      root halves are 128-bit, the slots u64. The 12 accumulator limbs
+    ///      are skipped here (the opcode's decider reads them) — see the
+    ///      soundness note on `submitRotate`.
     function _parseRotatePublicInputs(bytes publicInputs) private pure returns (RotatePI pi) {
         TvmSlice s = publicInputs.toSlice();
         uint256[] fr;
@@ -914,14 +914,14 @@ contract EthBeaconLightClient {
             fr.push(v);
         }
         uint acc = ROTATE_ACCUMULATOR_LIMBS;
-        require(fr[acc + 2] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
+        require(fr[acc + 1] <= uint256(type(uint128).max), ERR_BAD_PUBLIC_INPUTS);
+        require(fr[acc + 2] <= uint256(type(uint128).max), ERR_BAD_PUBLIC_INPUTS);
         require(fr[acc + 3] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
         require(fr[acc + 4] <= uint256(type(uint64).max), ERR_BAD_PUBLIC_INPUTS);
-        pi.currentCommitteeCommitment = fr[acc];
-        pi.nextCommitteeCommitment    = fr[acc + 1];
-        pi.period                     = uint64(fr[acc + 2]);
-        pi.gloasForkSlot              = uint64(fr[acc + 3]);
-        pi.attestedSlot               = uint64(fr[acc + 4]);
+        pi.nextCommitteeCommitment = fr[acc];
+        pi.attestedStateRoot       = (fr[acc + 1] << 128) | fr[acc + 2];
+        pi.attestedSlot            = uint64(fr[acc + 3]);
+        pi.gloasForkSlot           = uint64(fr[acc + 4]);
     }
 
     // ZK verifying key (VkBlob) for the beacon light-client STEP circuit —
@@ -1148,10 +1148,10 @@ contract EthBeaconLightClient {
         hex"c19d21a7805a9d2e63553cb5c0eb47c91fcbe2683dd430ca0cfbcf4bfd78c01c";
 
     // ZK verifying key (VkBlob) for the beacon light-client ROTATE circuit —
-    // recursive 2-to-1 aggregation root over 8 committee shards + a step snark
-    // (17 public inputs: 12 KZG accumulator limbs + current_commit, next_commit,
-    // period, gloas_fork_slot, attested_slot). Base v1 (Blake2b transcript). Hermez SRS (outer k=21, shard
-    // inners k=20). Source:
+    // one aggregation over the committee circuit on the table SHA-256
+    // (17 public inputs: 12 KZG accumulator limbs + next_commit, state_root_hi,
+    // state_root_lo, attested_slot, gloas_fork_slot). Base v1 (Blake2b
+    // transcript). Hermez SRS (wrap k=21, committee circuit k=18). Source:
     //   acki-nacki-bridge/eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin
     //
     // ⚠ SOUNDNESS: the opcode does a plain SHPLONK verify and does NOT pair the
@@ -1162,65 +1162,43 @@ contract EthBeaconLightClient {
     //
     // To rotate: regenerate the fixture in acki-nacki-bridge on a big-RAM host
     //   (cd eth-light-client-prover &&
-    //      EMIT_VKBLOB=1 cargo run --release --features aggregation --example rotate_tree_n8),
+    //      ROTATE_OUT=fixtures/rotate_vkblob cargo run --release --features aggregation \
+    //        --example rotate_committee),
     // then run acki-nacki-bridge/scripts/embed_rotate_vk_blob.py <this file> and
     // refresh the tvm-sdk opcode fixtures
     //   (acki-nacki-bridge/scripts/sync_rotate_opcode_fixtures_to_tvm_sdk.sh).
     // Do NOT hand-edit the hex.
-    //   sha256 60c0af2af9e231b31325800ef260bad28a66261df7582dfb2e24bb4ce2df58d3
+    //   sha256 6fd3b8b47716220b2e47b75f30b3921751e2e03d7af5a831813279a7bdb6ad86
     bytes constant ROTATE_VK_BLOB =
-        hex"564b424c4f4200000100000c000000007e0000007b226b223a32312c226e756d5f6164766963655f7065725f7068617365223a5b32315d2c226e756d"
+        hex"564b424c4f4200000100000c000000007e0000007b226b223a32312c226e756d5f6164766963655f7065725f7068617365223a5b31305d2c226e756d"
         hex"5f6669786564223a312c226e756d5f6c6f6f6b75705f6164766963655f7065725f7068617365223a5b325d2c226c6f6f6b75705f62697473223a3230"
-        hex"2c226e756d5f696e7374616e63655f636f6c756d6e73223a317d0a0c00000215000000001700000078d954a4152ede302e415658146c54f2100aa5cc"
-        hex"7cf5347a457200b12e38de28d1331f3ae14f45dc9a79f4b9895f681a9c9daba02b61c0fa0bbf0166ae0c020e4b8c9d0177a326d5a901ff4c9605f3ea"
-        hex"3717e57bab01d903b468ce188e44b42c7eeaece01656bb6ed85bb9dd9ed80e810909cd4f762a5ddcf4c9f8a764710614f7729708653603842eb9fe4e"
-        hex"c8326ce8cafea0e257c1be63568b918ae6ec361eb309b606de89e790a567641617daf13305f6a4bef3f779dd796169b08f8d402b8a1bebe283a8b1be"
-        hex"67390514071840329780c648a5e4786a82276dd6d2a4571e6f11c6b2f316934ef3256879596acfb6353e475a6c02542bc1bd1a995a3ef50326b34cb7"
-        hex"fb7847514c0159c52427b2c8b1f6b970b9f64c621cb6dd586c8316124c48151793217acf2524d92294234cef1033480573fa386bd66a9762c5cba824"
-        hex"2953ec8d4118993075d1e6d018eb4248ce8846c907969b74467ca35b631ddc1bfaf77a601065506622233e8b39a91bb705a336290eb113991fcb25e5"
-        hex"9fdad020b289b4858ec16e62b8fbfcbd02f4c0acd841121a8a748dc20745101aab84790fee310d124411f4382567c75671d0c4c65fb3a6493b789372"
-        hex"8733269bf70291271897f4ed9dbff56cd445050ca1aefe35d0e97a52bc766ad543dc216cd6f600242c57bf13f6e8990d7d2feb6122025542272870a9"
-        hex"44a98f31b278708c70b3df06c03fb7bd7649b0084e79841af815f5a6a9f01da9a5bae5bb0a9027aad3466b161358f76cebd12005acec9549d1b0a423"
-        hex"dda279708255549ea0c7895eb6958022ea4b848fa295beb8dfd5b71a417009791e408a3a4e95ca1c15f8435a7c36e50fdffabbd185cbc64d6fdcebd4"
-        hex"1a26533b4ddd228932967f0ea4bf23ad25ef972d73ab0010ba5995d5717db4284c34020dad111939e7d85f54752703600199ae0f82d0044829757219"
-        hex"af2a8a56dc91eea6eb0c9ce1bf2779a560db4640826e8a2c7f9db5c647a292fad6037609dfe3524f826233efb85e28406298229c445b770bdbd97bdd"
-        hex"eccc6748b7243d2eeedbdfccc8ce0b5b43f929debc0db419a7b20b2ef04d982831d8c82c66597802eb96a23cd2667d7c35910116a2cf716ecdaefe23"
-        hex"0be03770e08ec7d140d72188e40c358f43595919f785b0ea184caf2609e468221702d08f79711a15c76a8660d8aff3452664ffc36a1c6fa00909b0a2"
-        hex"fa03c10f1f136a75afc3f35f5fbd3e81ba28703be72669e850ae8b424b66226171e9000fb4d252a6167178335687bc3a6376a7f560250219cb47044a"
-        hex"5382ba7c473eaa2b4674b829c4d35c043d0a24fbf8a92627a094576f360ac121334c8f494bd89012b2481919136eb78a2bad0f091019656e2fe46661"
-        hex"a962ab15e46234478b98c221c9e9d7bb94423b1312dfdcf0ea08206300efe8617be1bdaaabbd4afd5976bc035a45eb90375a2d5250230784e2bb7762"
-        hex"dc7ac054fe2bab0ba9abc1b57b374e165f38d7c8f580642e90fd0abdc4df0c1595b6cd42469ac9d1deccee1c1f32f0080e85cbd9270fdca8670b2846"
-        hex"f6b21b2352bb7b600ae61f4edd20b0794cd658226e435fec0b52ffe91e2a1df82c65bd7cfc159a21c3ca206540ef94369cd9dd1b2d9b97b4346b50c5"
-        hex"70bc64d00a739aff2c4d4a346dce7422624fa5cb0a862f126f68b9349ab3ad128225da4c3ba857cf4b58173498533668b41ae1c33ffc160242f1e206"
-        hex"17ad08040ce8d4667cf5ec68c317539b2b47c27e1cb75903e25ad820b173c3e61615aae3ca1e6d742d96aec24e768aa037f1487c9b41827e4973ab1d"
-        hex"3ed2622703afe87e4b836c70cec34a32624f8c03f10016bddb9f71b8611e36165f76a116cce40758ec13084367631ec4b7771d828ee9a8cfb72a8a8d"
-        hex"0d792c1f07f8b1292dc69444f1f8bd4ee89f886469597c7c0977a4ea27298d0816aca11d942c99456d61450693a42eaf05a0c706c179cf2679362de3"
-        hex"af084e4ada2f4a07c44b330994db73c5df461ed89de289165e07f27c9821e625dba628b3debe191f19946d3809db8d44e07d6ce18ae6c60f22ebe1f8"
-        hex"61801a42487df9f4b4a5de1b6cc75707c01ba9e92d6c585bdf5b5db9e6e18dd771d915fd1d3ee50182155e1746eb0f1767427b8e173548f977bffe95"
-        hex"047e122668ec5640ba995aa7190c650b7e85d4ebe98e8c0930315b2557454d444c7d70e7a9591d13251098e5d61592119343c9bc2d899974bb3c7506"
-        hex"d98d88626b16ea426bbce555cb79712356714e22658ddfc8889ad660a2dad5edbe876371ebd667573bf3acf33044a9b597a2b11e28241d5b45b1f37e"
-        hex"046e1442012e8b5e3fad1f13e89939cb18863373c71f171d2ed959f5d126135d7fbbdfc990dd1afee6321dbc67113997d4c6c066178473202feb6ed1"
-        hex"a90a2e4f2a6235ceef54d716bc06bd96625a733a2aa41e61ae036f1228565328736a2a6ffd25c850f529719797045f51c895b7244d6e7026e0f02e0a"
-        hex"b129b1b6676b775f03203fb456e50563f0cc4c1d0a2ba44c2f2877a3c998b51697eebf461e6206e4034cb4333f39879084caca5871cba4b28085eee0"
-        hex"913b4f06b83af8f98e9de281c37d9a60efdb9117d9f8568b3684d376c571bc2e6e8d550bb4f9599ce5829b06ba75e0adb8f4b3a0b659d20c5bfae1bf"
-        hex"1f6c1fbc40fae62de0355c60bbae1a291774a7f0cad116cd135f9cc8456f738d014f2ed52d13da187795dcc0d8149810464b4d6d39da7092831dd70d"
-        hex"dda9b60b18fab5e70c0fed0dc4b5464ff8920b69758e7480d6b2a71122a0f02a7bb520e7ce00472f5943c71e4526c8deb7e80c0acf28c47f2935adab"
-        hex"99225e98a1818cef4b4bc599058ca008c517bff698c47b1105d66cdb08a40f7835a324e6142156f536eb8773268f3226cd697520b5f88564febefa98"
-        hex"faededf4243c0e6518e500776b7e82049f816024904fb0f5fa1a948e0f78bbc1d9afc3249054993bd107729f97c3b4fae73f0a0bb052e04e333311e1"
-        hex"54012da7b05a0a9f5073d9b4e7f31002c029c124b1fc410f5b91c66c715d1dbb33a5c2f0911d50eedcc14b6c2d8bd786f2546b238b4a480c8d865bd8"
-        hex"719730c4548d26d88b34024836b7b0ff0199ccb77e96f9a12af3cf0374993dad386f7d1454c43d8ad84020123fe51adb17b20e16755999f8335bcb00"
-        hex"06efe595b621406f68fbabc21e9bf5a1d50c264ea052145f35330d43c4383e30660d105d6cf1198c00a099e718792b52c42362e4eca92ae6b25dc6ad"
-        hex"8ab00c10e34c9595b9d991ba21c06bb1430cc22830de63c50d85a372c6e0bab699365f1fd78161c13a8221f416102220a62e56929e970847a6c1b9ff"
-        hex"f3cf22d931a9d30a431dc606b5ac3b2af201824bf04fb2f87a93d30eda75df4c9f25989adf45bf147cddb031ed795792a9e1606d6428c383225fd7d2"
-        hex"c908e7dc74271a1b0ec139248f7505e39a0f2c517bc251535a5542b699dddb8cb56f4f53f34e99a2a48c3a159ac80a31bc6e6573dad1be520171e284"
-        hex"d1c809cc9ec762936339cbea19daa4074bbaf91546801cfb9d4ff84280832eaa56bacf5db41ba054afe3a5f99761570954fc5009cf04f5ae07c773bf"
-        hex"4836bef5e11e00871a9c56e523387128249e17233ecfdd473530cac7e60a480350db97b43487ba4ed9cee412f9deb2b6c5e56a01aa173d952b3f4bc3"
-        hex"a7abffb2c989f681ce38980326daef06c5019b976b179922a3f2c41d23dedf50b3c11b9fcb44aeb8fc7069897ee8705dd626b2b05a666311fb4ef445"
-        hex"ba7f7d5a66b631a97d33ed5ff6889b09bc94e34fe993c015f8e3981e6e2a9165bb547d8c88af03609dacc237d38b1dd39f9d002921c331af82f01b22"
-        hex"c5e77bff73dc39770998f43292b2f39341b1ff47087560eceb21e93a476e960fdf92a72e2c05632ca1fd514c90a42bec24e11393c244004efc70b26a"
-        hex"6cb4171f3028d919e90cb5504ed5c03cd1bb111984343be7c41a7fbd9e998f6bafe0f9116ad7e277dd22e04762ac8321598c88629013cf928e5f83d9"
-        hex"614b8f91722e45265a4b47d418e32ea1cffa40527f351b7d4988de72d35cc2d9d025a37b3106a10e9149cca6f75ac2653365cdd9b23a2974379e41d7"
-        hex"a53fc7a2c7b9b6e422559612407dc6bf399b39c02a84f5154c69c83a595863646ace33b256e2bcf1a3ae641cd1f64e9b9efbf76c24e9dbda1723f08f"
-        hex"63e3d8a3d49836b2874fa6d39bd9f923aa8f52bc5b5f37aef032a65c8741d792e2a05932262a9c9e277dc0cb05be702a7e5eb1722282aa644a0a425d"
-        hex"c7b840d910758c070140461426a966d217c38828b04f464b1a4f54cde2636aff77fe84e93f5f0efa567415f09390d981cb469a0b";
+        hex"2c226e756d5f696e7374616e63655f636f6c756d6e73223a317d8a0600000215000000000c00000078d954a4152ede302e415658146c54f2100aa5cc"
+        hex"7cf5347a457200b12e38de28d1331f3ae14f45dc9a79f4b9895f681a9c9daba02b61c0fa0bbf0166ae0c020eb92a84dbc1c622281c309941823e967f"
+        hex"54e7b345258512cac9cf79dc276af115be4174b5a060b1c5eebf5fac8f977c187c014cf283add9fc34377bfabe9d5a13b9c3e6a94c6be6b4f8b28a1f"
+        hex"91ce55b160b66dd1035543e720574f7b9dd1d119a746ab8b5bf5d093557f129781f1e5f698beda229f61be27a244231c7a31861f22d7f9003d5b423c"
+        hex"933b15880d06dd6132ed70e8dff64a937627a4a07e9fb705489f61b018a2fbdd395a890ddaeb9226b6dd65273e4d736405b6f93e2007a12059166d0a"
+        hex"8a255d1697467fb3c50179957ff5a895568d77b45001b96782ca4112928f7a096a260967a6b87e39c606186097888fc21e1f0f74c3354238fc54951f"
+        hex"eba36c95a678697cda6f9ef8402652f0b85f7550c8ff52239fd6d01481df1c1f033b39ce29cc8bcb36b307334f3daaf82a383e876e886ba5ee14a266"
+        hex"40a87516c6268234604487a215436bde1a3ee096e33e1930025b261e7d84da49142f210cce5026ddf3c810f30f16ed130646fd3aa41712685c49cc21"
+        hex"f448f2030171ee11b7d72551a25735af87b0bac3c55f5490770b3e9e994f6b6d547e6de5bf45bb0bd6ce8d6887b3e1293e2a3b4e75eed407ebeb0bcf"
+        hex"f73d1586ada3897a190eeb22879d3a2f8660423ae46cf76c9642f5b3f70d3388345caed0e3a320c8146013114092cea08348f56bcf2f020b9bb515f2"
+        hex"4283034213d0f7bf516e3f172286ba18cc1f24f4423df440c4916fedd3e7658c939654f61079b672a1403664a34eec083a329115a85fe9f262f8ba29"
+        hex"4599dc6334bdaf342eea7c54f12b0eeace437f014f2c3526c8281de691cbf64340535c0cf73361cac7db3aa8527f00951431791d51f4af698c7ffac6"
+        hex"b6b99e37fd91adbb919fc22a157da86cb6eef5bbd442e018a16f4238fb2b62166d4b71d963b5e3e7c6e299c157c08804830d499b17b2d51f0750af86"
+        hex"4b8ecb7711b26f86903f3421c3d4940d93c2c37f7d78c86a6e3fd51cacbdcad594a58cd129919299c148dea2e06c5e10364aa82b1abc25ae178f4530"
+        hex"7b909505085bcd80c1a8db6885997c929b9b04795f21527c2ad92bb1e50e611740ea7554e53f1d3913d74282d73ff0644f79e9817260b99e20676aa3"
+        hex"5b63ed1c6698262f790ad3b6f0242b8d1d2952778ed43e2c028ec96f491c9e5d454e691fe585c7a25546492faa0a50572c066b7fc109fcee5b8c5986"
+        hex"5ebd54c5ce116311295701662ccb91474917ee35b151bf3b245bbbd396fdb1e4c8529cbde22c2c20f27511bbc3598436676bc68d9fc0f8b8f2ad3478"
+        hex"825484dbb27dd0ca0bf4a8043ae7c299078a237c9912fd188254a1250d991416d6cb665c1be43a6f2f94a00a655ccd708a4da2b74d953a400b490601"
+        hex"9b7458e850ab040092c3c6653953e22ab5cfa3ae189fccb3db179b764ecb4df7741bc0b8fd3e53c68f9086a36f02c91fc194d88d24dfe503a74369bb"
+        hex"b9ee1b67c4e85d36a8a8dc6d9b1b8d2deb537b0db2696b17844cec672c3b6f14a974eb6e9cba219acbe072feff2e5ba5c05b281242412b74e99b0124"
+        hex"6577fbd758841cc0dbf182d4f7d9f16e0f5e6c5c4e89592e970ce83f3918576b8cab35f218e5cef2488f48244dfb40f85e7da8bf8d6d1c00fb792cce"
+        hex"8d0e4a5398a0f5205ff06b6d286c63708968b13072d67fcb282d5527f08b7f064e5a64f54b7c5a139611469db62c3a424880ae050b798ee259134607"
+        hex"00ea3d598871de3eae5fb3b2ea262649a51bd48e96e07be1cb860692545ba02f57afec218a7674827dd1b397c089399763a107586a0c63462cb11511"
+        hex"ff3deb0765af499c8223bb7e49ea8368435cbf71a2180f88888b012ca54a5b48401bc409786eaf9ec21ad2b80d5f38c7522350e29998241cb7ed5992"
+        hex"ef545c090f0dab0d2fb2bd4fcfd544a74ca62bd681324487a4d14b34d7ab6389ac7e2affea3f940ccc49f6023311031767342c94261f2660b7d63040"
+        hex"c42d346906ffbbc231d5602d18fee551303b9d8aa171c81ef3dddae8234c33f2e04c19692a12a0d0843b291c745d5b8497f0551ce5623b0eb89b0e15"
+        hex"6e3cb2974d2ebfe0d637f044b78a7c22b26db415e78054232b74495d3194f30e08df9d79b233ad0926a358936c857a1a3098ff6bc7de971d5943a3d2"
+        hex"43557fa2daf5be6e235b6f016471e73968ed351e0868f98e4a123006008fd9ca0fc06b1fab0d21a77e1da4112405e41e5156a00baab4ddac09d35d21"
+        hex"e8248142054bbdb8605edf574f9bcf7d3b669e2e423d7d19";
 }

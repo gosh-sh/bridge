@@ -10,6 +10,8 @@
 
 pub mod bls_core;
 pub mod committee;
+#[cfg(feature = "aggregation")]
+pub mod committee_table;
 pub mod decode;
 pub mod execution;
 pub mod fork;

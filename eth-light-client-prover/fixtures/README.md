@@ -41,14 +41,17 @@ version=1, transcript=Blake2b, config JSON, `VerifyingKey(RawBytes)`),
   `inst[5]` is the **2-level** Poseidon scheme (`commit_sync_committee_2level`,
   matching rotate's `next_commit`); attested `state_root` at `inst[8|9]`.
   Regenerate: `examples/export_step_vk_blob.rs`.
-- `rotate_vkblob/` — recursive **rotate** root (2-to-1 tree over 8 shards +
-  step), Hermez **k=21**, Blake2b. Public inputs = **17 × Fr** = 12 KZG
-  accumulator limbs + `[current_commit, next_commit, period, gloas_fork_slot, attested_slot]`. `current_commit`
-  is **snark-bound** to the step proof's committee commitment (`inst[0..12]` are
-  the accumulator). The VkBlob header sets `accumulator_limbs = 12` (byte 11).
-  Enforced by `scripts/check_rotate_vkblob_accumulator.sh` (fixture + patch hex +
-  sha256 pin + byte-11-cleared probe). A 0 here is a silent soundness skip.
-  Regenerate: `EMIT_VKBLOB=1 examples/rotate_tree_n8.rs`.
+- `rotate_vkblob/` — **rotate**: the committee circuit (`src/committee_table.rs`,
+  k=18) wrapped in one aggregation, Hermez **k=21**, Blake2b. Public inputs =
+  **17 × Fr** = 12 KZG accumulator limbs + `[next_commit, state_root_hi,
+  state_root_lo, attested_slot, gloas_fork_slot]`. The current committee is not
+  in it: `submitRotate` takes a step proof beside it and requires the same
+  attested slot, state root and Gloas slot in both. The VkBlob header sets
+  `accumulator_limbs = 12` (byte 11). Enforced by
+  `scripts/check_rotate_vkblob_accumulator.sh` (fixture + contract hex + sha256
+  pin + byte-11-cleared probe). A 0 here is a silent soundness skip.
+  Regenerate: `OUTER_SRS=<kzg_bn254_21.srs> ROTATE_OUT=fixtures/rotate_vkblob
+  cargo run --release --features aggregation --example rotate_committee`.
 
   > ⚠ **Opcode-sound only with the decider extension.** The stock
   > `ZKHALO2VERIFYWITHVK` runs a plain SHPLONK `verify_proof` and does **not**

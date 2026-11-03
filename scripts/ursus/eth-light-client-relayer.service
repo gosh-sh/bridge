@@ -12,16 +12,14 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/usr/bin:/bin
 # built with `--features live-submit`. Shadow: add those flags here.
 # No owner flip unless --flip-owner is added; read
 # scripts/ursus/flip_deposit_to_light_client.md before adding it.
-# Rotate is on by default: the three rotate stages run on this host
-# (~50 GB RSS at peak) and need tvm-sdk#284 (v3.1.0.an) on the nodes.
+# Rotate is on by default: its two stages run on this host
+# (~16 GB RSS at peak) and need tvm-sdk#284 (v3.1.0.an) on the nodes.
 # ETH_RPC_URL in the env file adds a local ancestry check; on-chain ancestry
 # needs SUBMIT_ANCESTRY as well (docs/eth-light-client.md §3.4).
 ExecStart=/home/ubuntu/bridge-e2e/bin/eth-lc-relayer daemon \
   --beacon-url ${BEACON_URL} \
   --state /home/ubuntu/bridge-e2e/eth-lc-relayer-state.json \
   --step-prover-bin ${LIGHT_CLIENT_STEP_PROVER_BIN} \
-  --shard-prover-bin ${LIGHT_CLIENT_SHARD_PROVER_BIN} \
-  --step-snark-prover-bin ${LIGHT_CLIENT_STEP_SNARK_PROVER_BIN} \
   --rotate-prover-bin ${LIGHT_CLIENT_ROTATE_PROVER_BIN} \
   --prover-dir ${LIGHT_CLIENT_PROVER_DIR} \
   --srs-path ${STEP_SRS_PATH}

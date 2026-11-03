@@ -15,9 +15,10 @@ checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
 parent chain, which is necessary for a span to carry it, not sufficient.
 Committee rotate: once the contract holds period P and the beacon serves
 `updates?start_period=P`, the daemon proves the rotate P→P+1 in the
-background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
-`--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
-and sends `submitRotate` when the bundle passes its checks against the
+background in two stages: a step proof of the hand-off update
+(`--step-prover-bin`), then the committee proof (`rotate_committee`,
+`--rotate-prover-bin`), and sends both in one `submitRotate` when the
+bundle passes its checks against the
 contract (`docs/eth-light-client.md` §3.3). `--no-rotate` turns it off;
 `--owner-hop` is the fallback at the boundary when no rotate was sent.
 The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).

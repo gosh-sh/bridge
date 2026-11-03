@@ -375,7 +375,7 @@ impl AnSubmitter for MockAnSubmitter {
             });
         }
         inner.period = Some(bundle.period);
-        let next = crate::rotate::ROTATE_NEXT_COMMIT_INDEX * 32;
+        let next = crate::types::ROTATE_NEXT_COMMIT_INDEX * 32;
         if bundle.public_inputs.len() >= next + 32 {
             inner
                 .current_committee
@@ -765,6 +765,15 @@ pub fn build_submit_params(proof: &[u8], public_inputs: &[u8]) -> serde_json::Va
     })
 }
 
+pub fn build_rotate_params(bundle: &RotateProofBundle) -> serde_json::Value {
+    json!({
+        "stepProof": hex::encode(&bundle.step_proof),
+        "stepPublicInputs": hex::encode(&bundle.step_public_inputs),
+        "rotateProof": hex::encode(&bundle.proof),
+        "rotatePublicInputs": hex::encode(&bundle.public_inputs),
+    })
+}
+
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: std::sync::Arc<C>,
     usdc: Option<(String, std::sync::Arc<C>)>,
@@ -851,11 +860,7 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         &self,
         bundle: &RotateProofBundle,
     ) -> Result<SubmitOutcome, RelayerError> {
-        self.call(
-            "submitRotate",
-            build_submit_params(&bundle.proof, &bundle.public_inputs),
-        )
-        .await
+        self.call("submitRotate", build_rotate_params(bundle)).await
     }
 
     async fn submit_ancestry(

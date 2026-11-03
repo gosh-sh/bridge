@@ -47,8 +47,8 @@ different language dialect and a different chain.
 | `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | The binary `--step-prover-bin` names (`LIGHT_CLIENT_STEP_PROVER_BIN`, prebuilt with `cargo build --release --example export_step_vk_blob`), started with the witness passed through environment variables (`generate_step` in `crates/eth-light-client-relayer/src/prover.rs`). |
-| Rotate prover | `eth-light-client-prover/examples/export_shard_snark.rs`, `export_step_snark.rs`, `rotate_tree_n8.rs` | relayer host, child processes of the daemon | Three stages, one binary each: `--shard-prover-bin` (`LIGHT_CLIENT_SHARD_PROVER_BIN`), `--step-snark-prover-bin` (`LIGHT_CLIENT_STEP_SNARK_PROVER_BIN`), `--rotate-prover-bin` (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), all prebuilt with `cargo build --release --features aggregation --example <name>`. The shard stage proves the next committee in 8 shards, the step stage proves the hand-off update signed by the current committee, the tree stage aggregates the nine and writes the bundle `submitRotate` takes (`src/rotate.rs`). |
-| Hermez KZG SRS, k=19 and k=21 | files `kzg_bn254_19.srs` (step), `kzg_bn254_21.srs` (rotate; the release asset of that name, the shard stage cuts its k=20 from it) | relayer host | Same ceremony the opcode is keyed to. Public mirrors have been unreliable; copy from an existing relayer host (`deploy/shellnet-shadow/install-srs.sh` pins the sha256). |
+| Rotate prover | `eth-light-client-prover/examples/export_step_vk_blob.rs`, `rotate_committee.rs` | relayer host, child processes of the daemon | Two stages. The step stage runs the step prover (`--step-prover-bin`) on the hand-off update signed by the current committee. The committee stage runs `--rotate-prover-bin` (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), prebuilt with `cargo build --release --features aggregation --example rotate_committee`: it proves the next committee and its branch to the signed state root at k=18 and wraps that proof in one aggregation at k=21. `submitRotate` takes both proofs (`src/rotate.rs`). |
+| Hermez KZG SRS, k=19 and k=21 | files `kzg_bn254_19.srs` (step), `kzg_bn254_21.srs` (rotate; the release asset of that name, the committee proof cuts its k=18 from it) | relayer host | Same ceremony the opcode is keyed to. Public mirrors have been unreliable; copy from an existing relayer host (`deploy/shellnet-shadow/install-srs.sh` pins the sha256). |
 | Beacon node | external | Ethereum | Must serve the light-client REST endpoints (`finality_update`, `updates`). Public ChainSafe Lodestar and Nimbus endpoints do; publicnode does not serve `updates`. |
 | Execution node | external, optional | Ethereum | Only for epoch ancestry (`submitAncestry`), see §3.4. |
 | Giver | shellnet zerostate giver | Acki Nacki shellnet | Funds the contract on test networks (`deploy/shellnet-shadow/fund-account.sh`). |
@@ -158,7 +158,7 @@ generalized index 169 to 735, the next sync committee from 87 to 2946, and the e
 hash from 812 to 2856, where it is the payload bid's `parent_block_hash` rather than the
 payload's own `block_hash`. The circuits choose the index per header by comparing its slot with
 `gloas_fork_slot`, so one verification key covers both sides of the fork; the rotate proof
-exposes the same slot after `period`. The owner sets it with `setGloasForkSlot` or in the
+exposes the same slot as its last word. The owner sets it with `setGloasForkSlot` or in the
 `updateCode` user cell (`abi.encode(uint64)`); until then `submitUpdate` and `submitRotate` fail
 with exit code 256, and a proof for a different slot fails with 255.
 
@@ -177,7 +177,7 @@ flowchart TD
   A["Fresh contract<br/>committee unset, head 0"] -->|"owner: setCommitteeCommitment(C, P)<br/>from the first proven bundle (eth-lc-relayer set-committee)"| B["Anchored at period P<br/>weak-subjectivity checkpoint"]
   B -->|"submitUpdate every epoch"| B
   B -->|"first finality_update of period P+1"| C{"how is the committee advanced?"}
-  C -->|"production: submitRotate(proof)<br/>rotate circuit + tvm-sdk#284 decider on the nodes"| D["Period P+1, proven"]
+  C -->|"production: submitRotate(step proof, rotate proof)<br/>rotate circuit + tvm-sdk#284 decider on the nodes"| D["Period P+1, proven"]
   C -->|"shadow: daemon --owner-hop<br/>setCommitteeCommitment from the step of P+1"| E["Period P+1, owner-asserted (logged)"]
   C -->|"after disableOwnerRotation, relayer lagged > 1 period:<br/>owner reAnchorCommittee (logged hatch)"| F["Period P+n, re-anchored"]
   D --> G["continue stepping"]
@@ -191,14 +191,24 @@ flowchart TD
   input word 5 of a freshly proven bundle (`eth-lc-relayer set-committee`).
 - **Rotate** (`submitRotate`, `EthBeaconLightClient.sol`) proves that the next committee
   is the one the current committee signed for, so the chain of committees becomes trustless.
+  One transaction carries two proofs. The first is an ordinary step proof of the hand-off
+  update, verified against `VK_BLOB`: its committee (word 5) must be the contract's current
+  one, with a supermajority of signers. The second is the committee proof, verified against
+  `ROTATE_VK_BLOB`: the next committee's 512 keys sit in the signed state root at generalized
+  index 87 (2946 after Gloas), and its commitment is the new committee. The contract requires
+  both proofs to name the same attested slot, state root and Gloas fork slot. The rotate
+  proof's public inputs are 17 words of 32 bytes: 12 accumulator limbs, then
+  `next_committee_commitment`, `attested_state_root` hi and lo (the step's words 8 and 9),
+  `attested_slot` and `gloas_fork_slot`.
   The attested header's period is bound to `attestedSlot / 8192 + 1`; a beacon
   `/updates` best update (start of the old period) is a valid hand-off. The
   replaced committee can still advance the head for the period it served, so
   an early rotate does not freeze the rest of that period. The daemon
   starts the rotate of period P as soon as the contract holds P and the
   beacon serves `/updates?start_period=P`: it fetches that update and the
-  one of P−1 (whose next committee is the current one), and runs the three
-  rotate stages in the background while steps of P keep going. The stages
+  one of P−1 (whose next committee is the current one), and runs the two
+  rotate stages (the step proof, then the committee proof) in the background
+  while steps of P keep going. The stages
   write into `<work-dir>/rotate-<P>/`, so a restart re-runs only the stage
   that had not finished. Before sending, the daemon checks the bundle
   against the contract: a contract already past P drops it, a bundle whose
@@ -441,7 +451,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 |---|---|---|---|
 | `BEACON_URL` | beacon REST base URL | mainnet node with light-client endpoints | Sepolia public Lodestar |
 | `LIGHT_CLIENT_STEP_PROVER_BIN` | prebuilt `export_step_vk_blob` example, checked at startup | required | required |
-| `LIGHT_CLIENT_SHARD_PROVER_BIN`, `LIGHT_CLIENT_STEP_SNARK_PROVER_BIN`, `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` examples (`--features aggregation`), checked at startup | required unless `--no-rotate` | not needed (`--no-rotate`) |
+| `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `rotate_committee` example (`--features aggregation`), checked at startup | required unless `--no-rotate` | not needed (`--no-rotate`) |
 | `LIGHT_CLIENT_PROVER_DIR` | working directory of the rotate stages; holds `kzg_bn254_21.srs` (checked at startup) and `rotate-keys/`, the proving keys the stages write on their first run and reuse while the binaries stay the same | required (rotate) | optional (`--no-rotate`) |
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
@@ -514,7 +524,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 | Quantity | Value |
 |---|---|
 | Step proof, k=19 | about 7 min wall (keygen 4.5, prove 3; the proving key is not cached yet), about 25 GB RSS |
-| Rotate proof | three stages, run one after another: shards 39 min / 41.6 GB RSS, step snark 6 min / 26 GB, tree 42 min / 49.8 GB (Sepolia, period 1403→1404, 3 November 2026). These include the proving keys written on the first run (about 15 min of the total); `rotate-keys/` then holds about 40 GB |
+| Rotate proof | two stages, run one after another: the step proof of the hand-off update (as above), then `rotate_committee`, 5 min 48 s / 15.4 GB RSS on the first run, which writes the proving keys, and 4 min 51 s / 14.4 GB after it (Sepolia, period 1403→1404, 3 November 2026). `rotate-keys/` holds about 4 GB |
 | Submit cadence | one `submitUpdate` per Ethereum epoch (6.4 min); head lags Ethereum finality by about one epoch |
 | Period hop | every 8192 slots, about 27.3 h |
 | Contract gas | about 0.57 shell per accepted update on shellnet; fund ahead of that burn |

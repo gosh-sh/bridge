@@ -154,8 +154,8 @@ services:
     <<: *service
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
     pull_policy: ${BRIDGE_PULL_POLICY:-missing}
-    # Rotates are proven here: the stages peak at ~50 GB RSS (the tree),
-    # so a memory limit, if one is set, has to sit above that.
+    # Rotates are proven here: the stages peak at ~25 GB RSS (the step
+    # proof), so a memory limit, if one is set, has to sit above that.
     command: ["daemon", "--no-flip-owner", "--owner-hop", "--poll-secs", "64", "--prove-timeout-secs", "7200", "--rotate-timeout-secs", "10800"]
     env_file:
       - path: ${BRIDGE_OPT}/env/eth-lc-relayer.env

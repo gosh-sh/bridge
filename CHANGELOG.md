@@ -69,22 +69,37 @@ assigns it when the release is tagged.
   and `EXPECTED_BRIDGE_COMMIT` is the commit of the image. `EXPECTED_RELAYER_SHA256` and
   `EXPECTED_AGGREGATE_PROOF_SHA256` are optional. The layout and the migration are in
   `docker/README.md`.
+- The committee rotate is a different proof (bridge-audit#144), and `EthBeaconLightClient` 1.7.0
+  must be deployed with it (`updateCode` on a live client; state carries over). **`ROTATE_VK_BLOB`
+  is rotated**: sha256 `60c0af2a…` → `6fd3b8b4…` (1824 B,
+  `eth-light-client-prover/fixtures/rotate_vkblob/`). Rotate proofs made for the previous key no
+  longer verify, and the previous contract does not accept the new ones. `submitRotate` takes
+  four arguments now, `(stepProof, stepPublicInputs, rotateProof, rotatePublicInputs)`. The first
+  pair is an ordinary step proof of the hand-off update, checked against `VK_BLOB`; its committee
+  must be the contract's current one, with a supermajority of signers. The second pair is the
+  committee proof. Its 17 public inputs are 12 accumulator limbs, then `next_commit`,
+  `attested_state_root` hi and lo, `attested_slot` and `gloas_fork_slot`. The rotate proof no
+  longer carries the current committee or the period. The contract derives the new period as
+  `attestedSlot / 8192 + 1`. It refuses the pair with exit code 240 (`ERR_BAD_PUBLIC_INPUTS`)
+  when the two proofs disagree on the attested slot or the state root, and with 255 when either
+  names another Gloas slot than `getGloasForkSlot()`. Nodes
+  still need the tvm-sdk#284 decider (`v3.1.0.an`). Upgrade the light client and the
+  relayer together: a relayer from before this change sends the two-argument call, which the new
+  contract does not have.
 - `eth-lc-relayer daemon` proves the committee rotate itself (bridge-audit#145). With rotate on
-  (the default) it needs two more prover binaries beside `--rotate-prover-bin`:
-  `--shard-prover-bin` / `LIGHT_CLIENT_SHARD_PROVER_BIN` (`export_shard_snark`) and
-  `--step-snark-prover-bin` / `LIGHT_CLIENT_STEP_SNARK_PROVER_BIN` (`export_step_snark`), all three
-  built from `eth-light-client-prover` with `--features aggregation`, and `kzg_bn254_21.srs` (the
-  release asset of that name) in `--prover-dir`. Without them it refuses to start and names what
-  is missing; `--no-rotate` starts it without. `scripts/ursus/eth-light-client-relayer.service` and its env example
-  carry the new binaries: update an installed unit before restarting it. In Docker the
-  `bridge-eth-lc-relayer` image ships the binaries; put `kzg_bn254_21.srs` into
+  (the default) it needs `--rotate-prover-bin` / `LIGHT_CLIENT_ROTATE_PROVER_BIN`: the
+  `rotate_committee` example of `eth-light-client-prover`, built with `--features aggregation`. It
+  also needs `kzg_bn254_21.srs` (the release asset of that name) in `--prover-dir`. The step half
+  of the rotate runs on `--step-prover-bin`. Without them the daemon refuses to start and names
+  what is missing; `--no-rotate` starts it without. `scripts/ursus/eth-light-client-relayer.service`
+  and its env example carry the new binary: update an installed unit before restarting it. In
+  Docker the `bridge-eth-lc-relayer` image ships the binary; put `kzg_bn254_21.srs` into
   `$BRIDGE_DATA/params/lc-prover/` (`docker/README.md`, Install). The daemon no longer
-  auto-rotates the one committed fixture period. Verification keys are unchanged.
-- `export_shard_snark`, `export_step_snark` and `rotate_tree_n8` no longer fall back to an SRS
-  under `data/`: `SHARD_SRS_PATH`, `STEP_SRS_PATH` and `OUTER_SRS` are required, and `STEP_SRS`
-  with a step snark. `rotate_tree_n8` fails when `STEP_DIR` is set and holds no
-  `step_proof.bin`, instead of building the tree without the step snark, which is a different
-  circuit than the one the light client pins.
+  auto-rotates the one committed fixture period.
+- `eth-lc-relayer submit-rotate --bundle-dir` takes the daemon's `rotate-<P>/` directory (its `step/`
+  and `committee/`), or one directory holding all four files: `step_proof_blake2b.bin`,
+  `step_public_inputs.bin`, `rotate_proof_blake2b.bin` and `rotate_public_inputs.bin`.
+- `rotate_committee` reads no SRS from `data/`: `OUTER_SRS` is required.
 
 ### New / Improvements
 
@@ -96,19 +111,22 @@ assigns it when the release is tagged.
   `<prover-dir>/rotate-keys/` on the first rotate after an install or a binary upgrade and
   reused after that. Before `submitRotate` the daemon checks the bundle: a bundle for a period the
   contract has left is dropped, and one whose verification key is not the pinned
-  `rotate_vk_blob.bin` or whose current committee is not the contract's is logged and not sent.
-  Each stage is killed after `--rotate-timeout-secs` (default 10800) and on daemon shutdown;
-  transcripts are `rotate-<P>-<stage>-<time>-{stdout,stderr}.log` in `--log-dir`. The prove
-  takes about 1.5 h and 50 GB RAM at its peak, and `rotate-keys/` about 40 GB of disk. The nodes need the tvm-sdk#284 decider (tvm-sdk
-  `v3.1.0.an`).
+  `rotate_vk_blob.bin`, whose step committee is not the contract's, or whose two proofs disagree
+  on the attested slot, state root or Gloas slot, is logged and not sent.
+  There are two stages, `step` and `committee`. Each is killed after `--rotate-timeout-secs`
+  (default 10800) and on daemon shutdown; transcripts are
+  `rotate-<P>-<stage>-<time>-{stdout,stderr}.log` in `--log-dir`. The committee stage takes about
+  6 min and 15.4 GB RAM on the first run, which writes its keys, and about 5 min after that
+  (n14, Sepolia 1403→1404). The step stage costs what a step proof costs, so the step proof's
+  ~25 GB is the peak. `rotate-keys/` holds about 4 GB. The nodes need the tvm-sdk#284 decider
+  (tvm-sdk `v3.1.0.an`).
 - `--owner-hop` works with rotate on: at the first update of a new period without a sent rotate,
   the daemon logs an error naming why (still proving, failed, refused) and falls back to the owner
   hop. It no longer requires `--no-rotate`. `docker/compose.yaml` runs `eth-lc-relayer` that way
   (`--owner-hop --rotate-timeout-secs 10800`, no `--no-rotate`).
-- `export_shard_snark`, `export_step_snark` and `rotate_tree_n8` prove a live hand-off:
-  `ROTATE_UPDATE_PATH` names the beacon update of period P (`/updates?start_period=P`) and, for
-  `export_step_snark`, `COMMITTEE_JSON_PATH` the update of P−1, whose next committee signed it.
-  `ROTATE_KEY_DIR` keeps their proving keys between runs; a key written by another build is
+- `rotate_committee` proves the committee of a live hand-off: `ROTATE_UPDATE_PATH` names the
+  beacon update of period P (`/updates?start_period=P`), `ROTATE_OUT` the output directory.
+  `ROTATE_KEY_DIR` keeps its proving keys between runs; a key written by another build is
   regenerated, not used.
 
 - Images for every service, built from the sources of one commit by `docker/Dockerfile`:

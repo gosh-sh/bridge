@@ -60,8 +60,8 @@ pub use source::{
 };
 pub use state::{RelayerState, StateLock};
 pub use submitter::{
-    build_submit_params, le_word_to_uint256_hex, AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter,
-    MockAnSubmitter, SubmitOutcome,
+    build_rotate_params, build_submit_params, le_word_to_uint256_hex, AnInterfaceSubmitter,
+    AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
 };
 pub use types::{
     gloas_is_scheduled, pack_step_public_inputs, parse_finality_update, BeaconChainParams,

@@ -5,15 +5,16 @@
 //! `next_sync_committee` is committee P+1. Once the beacon node serves such an
 //! update (`/updates?start_period=P`) and the contract still holds committee
 //! P, the daemon proves the hand-off in a task of its own while it goes on
-//! sending step updates: `export_shard_snark` → `export_step_snark` →
-//! `rotate_tree_n8`, each a subprocess writing `<work>/rotate-<P>/<stage>/`.
+//! sending step updates: `export_step_vk_blob` → `rotate_committee`, each a
+//! subprocess writing `<work>/rotate-<P>/<stage>/`. `submitRotate` takes both
+//! proofs: the step proof says committee P signed the update's attested
+//! `state_root`, the rotate proof says which committee sits in that state's
+//! `next_sync_committee`.
 //!
 //! A stage is done when its directory exists. It is written as
 //! `<stage>.partial/` and renamed when the prover exits 0, so a restart runs
 //! again only the stage that was cut short. The inputs go to `inputs/` before
-//! the first stage: all three prove the same update, and the step snark's
-//! attested `state_root` is what anchors the tree's `next_sync_committee`
-//! branch.
+//! the first stage: both stages prove the same update.
 
 use std::{
     fs,
@@ -32,23 +33,19 @@ use tracing::info;
 use crate::{
     error::RelayerError,
     types::{
-        BeaconChainParams, RotateProofBundle, ROTATE_ACCUMULATOR_LIMBS, ROTATE_ATTESTED_SLOT_INDEX,
-        ROTATE_GLOAS_FORK_SLOT_INDEX, ROTATE_INSTANCE_LEN, ROTATE_PERIOD_INDEX,
-        SLOTS_PER_SYNC_PERIOD,
+        word, BeaconChainParams, RotateProofBundle, PUBLIC_INPUT_BYTES, ROTATE_ATTESTED_SLOT_INDEX,
+        ROTATE_GLOAS_FORK_SLOT_INDEX, ROTATE_INSTANCE_LEN, ROTATE_NEXT_COMMIT_INDEX,
+        ROTATE_STATE_ROOT_INDEX, SLOTS_PER_SYNC_PERIOD, STEP_COMMITTEE_INDEX,
+        STEP_GLOAS_FORK_SLOT_INDEX, STEP_STATE_ROOT_INDEX,
     },
 };
 
 /// The `rotate_vk_blob.bin` the light client's `ROTATE_VK_BLOB` is checked
 /// against (`scripts/check_rotate_vkblob_accumulator.sh`, check 4). A rotate
-/// proof whose tree wrote another blob is never sent.
+/// proof whose prover wrote another blob is never sent.
 const ROTATE_VK_BLOB_SHA256: &str = include_str!(
     "../../../eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256"
 );
-
-/// Index of `current_commit` in the rotate public inputs.
-pub const ROTATE_CURRENT_COMMIT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS;
-/// Index of `next_commit` in the rotate public inputs.
-pub const ROTATE_NEXT_COMMIT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 1;
 
 /// sha256 of the pinned `rotate_vk_blob.bin`.
 pub fn pinned_rotate_vk_sha256() -> [u8; 32] {
@@ -67,21 +64,19 @@ pub fn sha256(bytes: &[u8]) -> [u8; 32] {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
-    Shard,
-    StepSnark,
-    Tree,
+    Step,
+    Committee,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 3] = [Stage::Shard, Stage::StepSnark, Stage::Tree];
+    pub const ALL: [Stage; 2] = [Stage::Step, Stage::Committee];
 
     /// The stage's directory under `rotate-<P>/`, and its part of the
     /// transcript names.
     pub fn name(self) -> &'static str {
         match self {
-            Stage::Shard => "shard",
-            Stage::StepSnark => "step",
-            Stage::Tree => "tree",
+            Stage::Step => "step",
+            Stage::Committee => "committee",
         }
     }
 }
@@ -227,14 +222,14 @@ impl RotateDir {
         Ok(())
     }
 
-    /// The proof the tree stage wrote, and the sha256 of its VK blob.
+    /// The proofs both stages wrote, and the sha256 of the rotate VK blob.
     pub fn output(&self) -> Result<RotateOutput, RelayerError> {
-        let tree = self.stage(Stage::Tree);
-        let bundle = RotateProofBundle::from_dir(&tree)?;
-        let blob = fs::read(tree.join("rotate_vk_blob.bin")).map_err(|e| {
+        let committee = self.stage(Stage::Committee);
+        let bundle = RotateProofBundle::from_dirs(&self.stage(Stage::Step), &committee)?;
+        let blob = fs::read(committee.join("rotate_vk_blob.bin")).map_err(|e| {
             RelayerError::ProofGeneration(format!(
                 "read {}/rotate_vk_blob.bin: {e}",
-                tree.display()
+                committee.display()
             ))
         })?;
         Ok(RotateOutput {
@@ -312,17 +307,11 @@ pub struct RotateOutput {
 }
 
 impl RotateOutput {
-    /// `current_commit`, as the 32-byte little-endian word the contract's
-    /// `_currentCommittee` is compared with.
+    /// The step proof's signing committee, as the 32-byte little-endian word
+    /// the contract's `_currentCommittee` is compared with.
     pub fn current_commit(&self) -> [u8; 32] {
-        word(&self.bundle.public_inputs, ROTATE_CURRENT_COMMIT_INDEX)
+        word(&self.bundle.step_public_inputs, STEP_COMMITTEE_INDEX)
     }
-}
-
-fn word(public_inputs: &[u8], index: usize) -> [u8; 32] {
-    let mut w = [0u8; 32];
-    w.copy_from_slice(&public_inputs[index * 32..(index + 1) * 32]);
-    w
 }
 
 /// The contract's side of the checks before `submitRotate`.
@@ -348,8 +337,9 @@ pub enum PreSubmit {
 }
 
 /// Whether `out` goes to `submitRotate`: the contract still holds the period
-/// the proof rotates from, the VK blob is the pinned one, the proof is for
-/// the next period, and it starts from the committee the contract holds.
+/// the proof rotates from, the VK blob is the pinned one, the update is
+/// attested in that period and signed by the committee the contract holds,
+/// and the two proofs are of the same update.
 pub fn check_before_submit(
     out: &RotateOutput,
     vk_pin: &[u8; 32],
@@ -369,16 +359,49 @@ pub fn check_before_submit(
     }
     if out.bundle.period != out.from_period + 1 {
         return PreSubmit::Refuse(format!(
-            "rotate proof period {} != {} (the rotate from {})",
-            out.bundle.period,
-            out.from_period + 1,
-            out.from_period
+            "rotate proof attested at slot {}, not in period {}",
+            out.bundle.attested_slot, out.from_period
         ));
+    }
+    let (step, rotate) = (&out.bundle.step_public_inputs, &out.bundle.public_inputs);
+    if step.len() != PUBLIC_INPUT_BYTES || rotate.len() != ROTATE_INSTANCE_LEN * 32 {
+        return PreSubmit::Refuse("public inputs of the wrong length".into());
+    }
+    let pairs = [
+        (
+            "attested slot",
+            word(step, 0),
+            word(rotate, ROTATE_ATTESTED_SLOT_INDEX),
+        ),
+        (
+            "state_root_hi",
+            word(step, STEP_STATE_ROOT_INDEX),
+            word(rotate, ROTATE_STATE_ROOT_INDEX),
+        ),
+        (
+            "state_root_lo",
+            word(step, STEP_STATE_ROOT_INDEX + 1),
+            word(rotate, ROTATE_STATE_ROOT_INDEX + 1),
+        ),
+        (
+            "gloas_fork_slot",
+            word(step, STEP_GLOAS_FORK_SLOT_INDEX),
+            word(rotate, ROTATE_GLOAS_FORK_SLOT_INDEX),
+        ),
+    ];
+    for (what, s, r) in pairs {
+        if s != r {
+            return PreSubmit::Refuse(format!(
+                "step and rotate proofs differ on {what}: 0x{} != 0x{}",
+                hex::encode(s),
+                hex::encode(r)
+            ));
+        }
     }
     let current = out.current_commit();
     if current != chain.current_committee {
         return PreSubmit::Refuse(format!(
-            "rotate current_commit 0x{} != contract currentCommittee 0x{}",
+            "step committee_commitment 0x{} != contract currentCommittee 0x{}",
             hex::encode(current),
             hex::encode(chain.current_committee)
         ));
@@ -438,17 +461,15 @@ pub async fn run_rotate(
     dir.output()
 }
 
-/// The three prover binaries and where they find their SRS and keys.
+/// The two prover binaries and where they find their SRS and keys.
 #[derive(Clone, Debug)]
 pub struct SubprocessRotateConfig {
-    /// `export_shard_snark` (`--features aggregation`).
-    pub shard_prover_bin: PathBuf,
-    /// `export_step_snark` (`--features aggregation`).
-    pub step_snark_prover_bin: PathBuf,
-    /// `rotate_tree_n8` (`--features aggregation`).
+    /// `export_step_vk_blob`, the daemon's step prover.
+    pub step_prover_bin: PathBuf,
+    /// `rotate_committee` (`--features aggregation`).
     pub rotate_prover_bin: PathBuf,
-    /// `--prover-dir`: the SRS file `kzg_bn254_21.srs` (the shard stage cuts
-    /// its k=20 from it) and the key cache `rotate-keys/`; also the provers'
+    /// `--prover-dir`: the SRS file `kzg_bn254_21.srs` (each stage cuts its
+    /// k from it) and the key cache `rotate-keys/`; also the provers'
     /// working directory.
     pub prover_dir: PathBuf,
     pub log_dir: PathBuf,
@@ -492,27 +513,17 @@ impl SubprocessRotateRunner {
     fn command(&self, stage: Stage, dir: &RotateDir, inputs: &RotateInputs, out: &Path) -> Command {
         let cfg = &self.cfg;
         let mut cmd = match stage {
-            Stage::Shard => {
-                let mut cmd = Command::new(&cfg.shard_prover_bin);
-                cmd.env("SHARD_OUT_DIR", out)
-                    .env("SHARD_SRS_PATH", cfg.srs());
+            Stage::Step => {
+                let mut cmd = Command::new(&cfg.step_prover_bin);
+                cmd.env("FINALITY_UPDATE_PATH", dir.update_path())
+                    .env("COMMITTEE_JSON_PATH", dir.committee_path())
+                    .env("STEP_OUT_DIR", out)
+                    .env("STEP_SRS_PATH", cfg.srs());
                 cmd
             },
-            Stage::StepSnark => {
-                let mut cmd = Command::new(&cfg.step_snark_prover_bin);
-                cmd.env("STEP_OUT_DIR", out)
-                    .env("STEP_SRS_PATH", cfg.srs())
-                    .env("COMMITTEE_JSON_PATH", dir.committee_path());
-                cmd
-            },
-            Stage::Tree => {
+            Stage::Committee => {
                 let mut cmd = Command::new(&cfg.rotate_prover_bin);
-                cmd.env("TREE_OUT", out)
-                    .env("SHARD_DIR", dir.stage(Stage::Shard))
-                    .env("STEP_DIR", dir.stage(Stage::StepSnark))
-                    .env("OUTER_SRS", cfg.srs())
-                    .env("STEP_SRS", cfg.srs())
-                    .env("EMIT_VKBLOB", "1");
+                cmd.env("ROTATE_OUT", out).env("OUTER_SRS", cfg.srs());
                 cmd
             },
         };
@@ -603,9 +614,9 @@ fn unix_now() -> u64 {
 }
 
 /// Stages that write a well-formed rotate in no time: `--mock-prove`, and the
-/// tests. The tree's VK blob is [`MockRotateRunner::VK_BLOB`].
+/// tests. The committee stage's VK blob is [`MockRotateRunner::VK_BLOB`].
 pub struct MockRotateRunner {
-    /// `current_commit` the tree writes.
+    /// The signing committee the step stage writes.
     pub current_commit: [u8; 32],
     pub next_commit: [u8; 32],
     /// Fail this stage once, as a prover killed half way would: the partial
@@ -615,6 +626,10 @@ pub struct MockRotateRunner {
     pub hold: Option<(Stage, std::sync::Arc<tokio::sync::Notify>)>,
     runs: Mutex<Vec<(u64, Stage)>>,
 }
+
+/// Each half of the state root the mock stages agree on: 16 bytes, so the
+/// word fits the 128 bits the contract allows.
+const MOCK_STATE_ROOT_HALF: [u8; 16] = [0x5A; 16];
 
 impl MockRotateRunner {
     pub const VK_BLOB: &'static [u8] = b"mock rotate vk blob";
@@ -670,23 +685,35 @@ impl RotateStageRunner for MockRotateRunner {
                 stage.name()
             )));
         }
-        if stage == Stage::Tree {
-            let attested = attested_slot(&inputs.update_json).map_err(RelayerError::other)?;
-            let mut pi = vec![0u8; ROTATE_INSTANCE_LEN * 32];
-            let mut put = |index: usize, bytes: &[u8]| {
-                pi[index * 32..index * 32 + bytes.len()].copy_from_slice(bytes);
-            };
-            put(ROTATE_CURRENT_COMMIT_INDEX, &self.current_commit);
-            put(ROTATE_NEXT_COMMIT_INDEX, &self.next_commit);
-            put(ROTATE_PERIOD_INDEX, &(dir.period() + 1).to_le_bytes());
-            let gloas = inputs
-                .chain
-                .map_or(crate::types::GLOAS_NOT_SCHEDULED, |c| c.gloas_fork_slot);
-            put(ROTATE_GLOAS_FORK_SLOT_INDEX, &gloas.to_le_bytes());
-            put(ROTATE_ATTESTED_SLOT_INDEX, &attested.to_le_bytes());
-            fs::write(out.join("rotate_public_inputs.bin"), &pi)?;
-            fs::write(out.join("rotate_proof_blake2b.bin"), [0xCD; 64])?;
-            fs::write(out.join("rotate_vk_blob.bin"), Self::VK_BLOB)?;
+        let attested = attested_slot(&inputs.update_json).map_err(RelayerError::other)?;
+        let gloas = inputs
+            .chain
+            .map_or(crate::types::GLOAS_NOT_SCHEDULED, |c| c.gloas_fork_slot);
+        let put = |pi: &mut Vec<u8>, index: usize, bytes: &[u8]| {
+            pi[index * 32..index * 32 + bytes.len()].copy_from_slice(bytes);
+        };
+        match stage {
+            Stage::Step => {
+                let mut pi = vec![0u8; PUBLIC_INPUT_BYTES];
+                put(&mut pi, 0, &attested.to_le_bytes());
+                put(&mut pi, STEP_COMMITTEE_INDEX, &self.current_commit);
+                put(&mut pi, STEP_STATE_ROOT_INDEX, &MOCK_STATE_ROOT_HALF);
+                put(&mut pi, STEP_STATE_ROOT_INDEX + 1, &MOCK_STATE_ROOT_HALF);
+                put(&mut pi, STEP_GLOAS_FORK_SLOT_INDEX, &gloas.to_le_bytes());
+                fs::write(out.join("step_public_inputs.bin"), &pi)?;
+                fs::write(out.join("step_proof_blake2b.bin"), [0xAB; 64])?;
+            },
+            Stage::Committee => {
+                let mut pi = vec![0u8; ROTATE_INSTANCE_LEN * 32];
+                put(&mut pi, ROTATE_NEXT_COMMIT_INDEX, &self.next_commit);
+                put(&mut pi, ROTATE_STATE_ROOT_INDEX, &MOCK_STATE_ROOT_HALF);
+                put(&mut pi, ROTATE_STATE_ROOT_INDEX + 1, &MOCK_STATE_ROOT_HALF);
+                put(&mut pi, ROTATE_ATTESTED_SLOT_INDEX, &attested.to_le_bytes());
+                put(&mut pi, ROTATE_GLOAS_FORK_SLOT_INDEX, &gloas.to_le_bytes());
+                fs::write(out.join("rotate_public_inputs.bin"), &pi)?;
+                fs::write(out.join("rotate_proof_blake2b.bin"), [0xCD; 64])?;
+                fs::write(out.join("rotate_vk_blob.bin"), Self::VK_BLOB)?;
+            },
         }
         Ok(())
     }

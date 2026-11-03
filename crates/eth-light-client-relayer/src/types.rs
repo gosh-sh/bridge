@@ -14,16 +14,22 @@ pub const STEP_INSTANCE_LEN: usize = 11;
 pub const PUBLIC_INPUT_BYTES: usize = STEP_INSTANCE_LEN * 32;
 /// Index of `gloas_fork_slot` in the step public inputs.
 pub const STEP_GLOAS_FORK_SLOT_INDEX: usize = 10;
+/// Index of `committee_commitment` in the step public inputs.
+pub const STEP_COMMITTEE_INDEX: usize = 5;
+/// Index of `attested_state_root_hi` in the step public inputs; `_lo` follows.
+pub const STEP_STATE_ROOT_INDEX: usize = 8;
 /// Rotate PI: 12 accumulator limbs +
-/// current/next/period/gloas_fork_slot/attested_slot.
+/// next_commit/state_root_hi/state_root_lo/attested_slot/gloas_fork_slot.
 pub const ROTATE_ACCUMULATOR_LIMBS: usize = 12;
 pub const ROTATE_INSTANCE_LEN: usize = ROTATE_ACCUMULATOR_LIMBS + 5;
-/// Index of `period` in the rotate public inputs.
-pub const ROTATE_PERIOD_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 2;
-/// Index of `gloas_fork_slot` in the rotate public inputs.
-pub const ROTATE_GLOAS_FORK_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
+/// Index of `next_commit` in the rotate public inputs.
+pub const ROTATE_NEXT_COMMIT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS;
+/// Index of `state_root_hi` in the rotate public inputs; `_lo` follows.
+pub const ROTATE_STATE_ROOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 1;
 /// Index of `attested_slot` in the rotate public inputs.
-pub const ROTATE_ATTESTED_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
+pub const ROTATE_ATTESTED_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 3;
+/// Index of `gloas_fork_slot` in the rotate public inputs.
+pub const ROTATE_GLOAS_FORK_SLOT_INDEX: usize = ROTATE_ACCUMULATOR_LIMBS + 4;
 /// `gloas_fork_slot` of a network that has not scheduled Gloas.
 pub const GLOAS_NOT_SCHEDULED: u64 = u64::MAX;
 
@@ -165,43 +171,79 @@ pub struct StepPublicInputs {
     pub gloas_fork_slot: u64,
 }
 
-/// Opcode operands for `submitRotate`.
+/// Opcode operands for `submitRotate`: the step proof of the hand-off update
+/// and the rotate proof of its `next_sync_committee`.
 #[derive(Clone, Debug)]
 pub struct RotateProofBundle {
+    pub step_public_inputs: Vec<u8>,
+    pub step_proof: Vec<u8>,
     pub public_inputs: Vec<u8>,
     pub proof: Vec<u8>,
+    /// The period the hand-off installs: the attested slot's plus one.
     pub period: u64,
     pub attested_slot: u64,
 }
 
 impl RotateProofBundle {
-    pub fn from_dir(dir: &std::path::Path) -> Result<Self, RelayerError> {
-        let public_inputs = std::fs::read(dir.join("rotate_public_inputs.bin"))
-            .map_err(|e| RelayerError::other(format!("read rotate_public_inputs.bin: {e}")))?;
-        let proof = std::fs::read(dir.join("rotate_proof_blake2b.bin"))
-            .map_err(|e| RelayerError::other(format!("read rotate_proof_blake2b.bin: {e}")))?;
-        let want = ROTATE_INSTANCE_LEN * 32;
-        if public_inputs.len() < want {
+    /// `step_public_inputs.bin` and `step_proof_blake2b.bin` from `step_dir`,
+    /// `rotate_public_inputs.bin` and `rotate_proof_blake2b.bin` from
+    /// `rotate_dir`.
+    pub fn from_dirs(
+        step_dir: &std::path::Path,
+        rotate_dir: &std::path::Path,
+    ) -> Result<Self, RelayerError> {
+        let read = |dir: &std::path::Path, name: &str| {
+            std::fs::read(dir.join(name))
+                .map_err(|e| RelayerError::other(format!("read {}: {e}", dir.join(name).display())))
+        };
+        let step_public_inputs = read(step_dir, "step_public_inputs.bin")?;
+        let step_proof = read(step_dir, "step_proof_blake2b.bin")?;
+        let public_inputs = read(rotate_dir, "rotate_public_inputs.bin")?;
+        let proof = read(rotate_dir, "rotate_proof_blake2b.bin")?;
+        if step_public_inputs.len() != PUBLIC_INPUT_BYTES {
             return Err(RelayerError::other(format!(
-                "rotate PI len {} < {want}",
+                "step PI len {} != {PUBLIC_INPUT_BYTES}",
+                step_public_inputs.len()
+            )));
+        }
+        let want = ROTATE_INSTANCE_LEN * 32;
+        if public_inputs.len() != want {
+            return Err(RelayerError::other(format!(
+                "rotate PI len {} != {want}",
                 public_inputs.len()
             )));
         }
-        let off = ROTATE_PERIOD_INDEX * 32;
-        let period = u64::from_le_bytes(public_inputs[off..off + 8].try_into().unwrap());
-        let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
-        let attested_slot = u64::from_le_bytes(
-            public_inputs[attested_off..attested_off + 8]
-                .try_into()
-                .unwrap(),
-        );
+        let attested_slot = le_u64(&public_inputs, ROTATE_ATTESTED_SLOT_INDEX);
         Ok(Self {
+            step_public_inputs,
+            step_proof,
             public_inputs,
             proof,
-            period,
+            period: attested_slot / SLOTS_PER_SYNC_PERIOD + 1,
             attested_slot,
         })
     }
+
+    /// All four files in one directory.
+    pub fn from_dir(dir: &std::path::Path) -> Result<Self, RelayerError> {
+        Self::from_dirs(dir, dir)
+    }
+}
+
+/// The low 8 bytes of public-input word `index`.
+pub fn le_u64(public_inputs: &[u8], index: usize) -> u64 {
+    u64::from_le_bytes(
+        public_inputs[index * 32..index * 32 + 8]
+            .try_into()
+            .unwrap(),
+    )
+}
+
+/// Public-input word `index`, as the 32 little-endian bytes the contract reads.
+pub fn word(public_inputs: &[u8], index: usize) -> [u8; 32] {
+    public_inputs[index * 32..(index + 1) * 32]
+        .try_into()
+        .unwrap()
 }
 
 pub fn parse_finality_update(json: &str) -> Result<FinalityUpdate, RelayerError> {
@@ -457,27 +499,43 @@ mod tests {
         assert_eq!(b.proof, vec![0xAB; 8]);
     }
 
+    fn write_rotate_bundle(dir: &std::path::Path, rotate_pi: &[u8]) {
+        std::fs::write(dir.join("step_public_inputs.bin"), vec![
+            0u8;
+            PUBLIC_INPUT_BYTES
+        ])
+        .unwrap();
+        std::fs::write(dir.join("step_proof_blake2b.bin"), [0xABu8; 4]).unwrap();
+        std::fs::write(dir.join("rotate_public_inputs.bin"), rotate_pi).unwrap();
+        std::fs::write(dir.join("rotate_proof_blake2b.bin"), [0xCDu8; 4]).unwrap();
+    }
+
     #[test]
-    fn rotate_bundle_from_dir_reads_period_word() {
+    fn rotate_bundle_takes_its_period_from_the_attested_slot() {
         let dir = tempfile::tempdir().unwrap();
         let mut pi = vec![0u8; ROTATE_INSTANCE_LEN * 32];
-        let off = ROTATE_PERIOD_INDEX * 32;
-        pi[off..off + 8].copy_from_slice(&42u64.to_le_bytes());
-        let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
-        pi[attested_off..attested_off + 8].copy_from_slice(&16383u64.to_le_bytes());
-        std::fs::write(dir.path().join("rotate_public_inputs.bin"), &pi).unwrap();
-        std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0xCDu8; 4]).unwrap();
+        let off = ROTATE_ATTESTED_SLOT_INDEX * 32;
+        pi[off..off + 8].copy_from_slice(&16383u64.to_le_bytes());
+        write_rotate_bundle(dir.path(), &pi);
         let b = RotateProofBundle::from_dir(dir.path()).unwrap();
-        assert_eq!(b.period, 42);
+        assert_eq!(b.period, 2);
         assert_eq!(b.attested_slot, 16383);
         assert_eq!(b.proof, vec![0xCD; 4]);
+        assert_eq!(b.step_proof, vec![0xAB; 4]);
     }
 
     #[test]
     fn rotate_bundle_rejects_short_pi() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("rotate_public_inputs.bin"), [0u8; 8]).unwrap();
-        std::fs::write(dir.path().join("rotate_proof_blake2b.bin"), [0u8; 1]).unwrap();
+        write_rotate_bundle(dir.path(), &[0u8; 8]);
+        assert!(RotateProofBundle::from_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn rotate_bundle_needs_the_step_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        write_rotate_bundle(dir.path(), &vec![0u8; ROTATE_INSTANCE_LEN * 32]);
+        std::fs::remove_file(dir.path().join("step_proof_blake2b.bin")).unwrap();
         assert!(RotateProofBundle::from_dir(dir.path()).is_err());
     }
 

@@ -224,7 +224,10 @@ enum Cmd {
         #[arg(long)]
         slot: u64,
     },
-    /// Submit `submitRotate` from a `rotate_tree_n8` EMIT_VKBLOB directory.
+    /// Submit `submitRotate` from a daemon's `rotate-<P>/` directory (its
+    /// `step/` and `committee/` stages), or from one directory holding
+    /// `step_public_inputs.bin`, `step_proof_blake2b.bin`,
+    /// `rotate_public_inputs.bin` and `rotate_proof_blake2b.bin`.
     /// Records the period in `--state` so a stopped daemon resumes; a
     /// running daemon reads `getCommitteeState` on the next tick.
     SubmitRotate {
@@ -302,20 +305,11 @@ enum Cmd {
         beacon_url: String,
         /// Prebuilt `export_step_vk_blob` example; required unless
         /// `--mock-prove`. Checked to exist and be executable at startup.
+        /// Also the rotate's first stage, on the hand-off update.
         #[arg(long, env = "LIGHT_CLIENT_STEP_PROVER_BIN")]
         step_prover_bin: Option<PathBuf>,
-        /// Prebuilt `export_shard_snark` example (`--features aggregation`),
-        /// the rotate's first stage. Required unless `--no-rotate` or
-        /// `--mock-prove`, and ignored with `--no-rotate`.
-        #[arg(long, env = "LIGHT_CLIENT_SHARD_PROVER_BIN")]
-        shard_prover_bin: Option<PathBuf>,
-        /// Prebuilt `export_step_snark` example (`--features aggregation`),
+        /// Prebuilt `rotate_committee` example (`--features aggregation`),
         /// the rotate's second stage. Required unless `--no-rotate` or
-        /// `--mock-prove`, and ignored with `--no-rotate`.
-        #[arg(long, env = "LIGHT_CLIENT_STEP_SNARK_PROVER_BIN")]
-        step_snark_prover_bin: Option<PathBuf>,
-        /// Prebuilt `rotate_tree_n8` example (`--features aggregation`), the
-        /// rotate's last stage. Required unless `--no-rotate` or
         /// `--mock-prove`, and ignored with `--no-rotate`.
         #[arg(long, env = "LIGHT_CLIENT_ROTATE_PROVER_BIN")]
         rotate_prover_bin: Option<PathBuf>,
@@ -678,8 +672,6 @@ async fn real_main() -> anyhow::Result<()> {
             state: _,
             beacon_url,
             step_prover_bin,
-            shard_prover_bin,
-            step_snark_prover_bin,
             rotate_prover_bin,
             prover_dir,
             srs_path,
@@ -723,11 +715,10 @@ async fn real_main() -> anyhow::Result<()> {
             run_daemon(
                 beacon_url,
                 dirs.into_service_dirs(),
-                step_prover_bin,
+                step_prover_bin.clone(),
                 RotateBins {
-                    shard: shard_prover_bin,
-                    step_snark: step_snark_prover_bin,
-                    tree: rotate_prover_bin,
+                    step: step_prover_bin,
+                    committee: rotate_prover_bin,
                 },
                 prover_dir,
                 srs_path,
@@ -1089,12 +1080,11 @@ fn subprocess_prover_config(
 
 /// The rotate stage binaries as given on the command line.
 struct RotateBins {
-    shard: Option<PathBuf>,
-    step_snark: Option<PathBuf>,
-    tree: Option<PathBuf>,
+    step: Option<PathBuf>,
+    committee: Option<PathBuf>,
 }
 
-/// The rotate stages, checked at startup like the step prover: all three
+/// The rotate stages, checked at startup like the step prover: both
 /// binaries, `--prover-dir`, and the SRS files in it. `None` with
 /// `--no-rotate`, where binaries a shared env file names are neither needed
 /// nor checked.
@@ -1116,20 +1106,14 @@ fn rotate_config(
             })?;
             Ok(require_executable(&bin, what)?)
         };
-    let shard_prover_bin = need(
-        bins.shard,
-        "--shard-prover-bin",
-        "LIGHT_CLIENT_SHARD_PROVER_BIN",
-        "shard prover",
-    )?;
-    let step_snark_prover_bin = need(
-        bins.step_snark,
-        "--step-snark-prover-bin",
-        "LIGHT_CLIENT_STEP_SNARK_PROVER_BIN",
-        "step snark prover",
+    let step_prover_bin = need(
+        bins.step,
+        "--step-prover-bin",
+        "LIGHT_CLIENT_STEP_PROVER_BIN",
+        "step prover",
     )?;
     let rotate_prover_bin = need(
-        bins.tree,
+        bins.committee,
         "--rotate-prover-bin",
         "LIGHT_CLIENT_ROTATE_PROVER_BIN",
         "rotate prover",
@@ -1148,8 +1132,7 @@ fn rotate_config(
         prover_dir.display()
     );
     let cfg = SubprocessRotateConfig {
-        shard_prover_bin,
-        step_snark_prover_bin,
+        step_prover_bin,
         rotate_prover_bin,
         prover_dir,
         log_dir,
@@ -1341,7 +1324,11 @@ async fn submit_rotate(
     an_light_client: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
-    let bundle = RotateProofBundle::from_dir(&bundle_dir)?;
+    let bundle = if bundle_dir.join("committee").is_dir() {
+        RotateProofBundle::from_dirs(&bundle_dir.join("step"), &bundle_dir.join("committee"))?
+    } else {
+        RotateProofBundle::from_dir(&bundle_dir)?
+    };
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
     let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
@@ -2109,14 +2096,13 @@ mod tests {
 
     fn bins(dir: &Path) -> RotateBins {
         RotateBins {
-            shard: Some(executable(dir, "shard")),
-            step_snark: Some(executable(dir, "step-snark")),
-            tree: Some(executable(dir, "tree")),
+            step: Some(executable(dir, "step")),
+            committee: Some(executable(dir, "committee")),
         }
     }
 
     #[test]
-    fn rotate_needs_its_three_binaries_a_prover_dir_and_the_srs() {
+    fn rotate_needs_its_two_binaries_a_prover_dir_and_the_srs() {
         let dir = tempfile::tempdir().unwrap();
         let params = dir.path().join("params");
         std::fs::create_dir_all(&params).unwrap();
@@ -2125,15 +2111,13 @@ mod tests {
             rotate_config(true, bins, prover_dir, 1, logs.clone())
         };
         for (missing, flag) in [
-            ("shard", "--shard-prover-bin"),
-            ("step-snark", "--step-snark-prover-bin"),
-            ("tree", "--rotate-prover-bin"),
+            ("step", "--step-prover-bin"),
+            ("committee", "--rotate-prover-bin"),
         ] {
             let mut b = bins(dir.path());
             match missing {
-                "shard" => b.shard = None,
-                "step-snark" => b.step_snark = None,
-                _ => b.tree = None,
+                "step" => b.step = None,
+                _ => b.committee = None,
             }
             let err = cfg(b, Some(&params)).unwrap_err().to_string();
             assert!(err.contains(flag), "{err}");
@@ -2151,9 +2135,8 @@ mod tests {
         // `--no-rotate`: binaries a shared env file names are neither needed
         // nor checked.
         let none = RotateBins {
-            shard: Some(dir.path().join("not-built")),
-            step_snark: None,
-            tree: None,
+            step: None,
+            committee: Some(dir.path().join("not-built")),
         };
         assert!(rotate_config(false, none, None, 1, logs.clone())
             .unwrap()

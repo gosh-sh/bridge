@@ -33,8 +33,10 @@
 		{
 			"name": "submitRotate",
 			"inputs": [
-				{"name":"proof","type":"bytes"},
-				{"name":"publicInputs","type":"bytes"}
+				{"name":"stepProof","type":"bytes"},
+				{"name":"stepPublicInputs","type":"bytes"},
+				{"name":"rotateProof","type":"bytes"},
+				{"name":"rotatePublicInputs","type":"bytes"}
 			],
 			"outputs": [
 			]

@@ -297,7 +297,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 from_period,
                 to_period,
                 "committee period advanced; rotate prove is off — owner setCommitteeCommitment or \
-                 prove rotate_tree_n8 on n14"
+                 prove rotate_committee on n14"
             );
             return Ok(TickOutcome::RotateRequired {
                 from_period,
@@ -1662,7 +1662,7 @@ mod tests {
         use crate::rotate::Stage;
         let p = SLOTS_PER_SYNC_PERIOD;
         let dir = tempdir().unwrap();
-        let (runner, release) = held_runner(Stage::Tree);
+        let (runner, release) = held_runner(Stage::Committee);
         let mut rig = rotate_rig(
             vec![
                 update(p + 70, p + 64),
@@ -1715,9 +1715,8 @@ mod tests {
             "an accepted rotate leaves no directory"
         );
         assert_eq!(rig.runner.runs(), vec![
-            (1, Stage::Shard),
-            (1, Stage::StepSnark),
-            (1, Stage::Tree)
+            (1, Stage::Step),
+            (1, Stage::Committee)
         ]);
         // Period 1 still has updates to come; the committee period does not
         // drop back with them, and no second rotate starts.
@@ -1738,17 +1737,16 @@ mod tests {
         let dir = tempdir().unwrap();
         let updates = vec![update(p + 70, p + 64), update(p + 102, p + 96)];
         let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
-        *runner.fail_once.lock().unwrap() = Some(Stage::Tree);
+        *runner.fail_once.lock().unwrap() = Some(Stage::Committee);
         let mut rig = rotate_rig(updates.clone(), false, runner, dir.path());
         rig.relayer.tick().await.unwrap();
         rig.relayer.tick().await.unwrap();
         rig.relayer.wait_for_rotate().await;
         let rotate_dir = rig.work.join("rotate-1");
-        assert!(rotate_dir.join("shard").is_dir());
         assert!(rotate_dir.join("step").is_dir());
-        assert!(!rotate_dir.join("tree").exists());
+        assert!(!rotate_dir.join("committee").exists());
         assert!(
-            rotate_dir.join("tree.partial/started").exists(),
+            rotate_dir.join("committee.partial/started").exists(),
             "the cut stage left its partial"
         );
         let state = rig.state.clone();
@@ -1761,7 +1759,7 @@ mod tests {
         rig.relayer.tick().await.unwrap();
         assert_eq!(rig.relayer.rotate_running(), Some(1));
         rig.relayer.wait_for_rotate().await;
-        assert_eq!(rig.runner.runs(), vec![(1, Stage::Tree)]);
+        assert_eq!(rig.runner.runs(), vec![(1, Stage::Committee)]);
         assert!(matches!(
             rig.relayer.tick().await.unwrap(),
             TickOutcome::Rotated {
@@ -1779,7 +1777,7 @@ mod tests {
         use crate::rotate::Stage;
         let p = SLOTS_PER_SYNC_PERIOD;
         let dir = tempdir().unwrap();
-        let (runner, _never) = held_runner(Stage::StepSnark);
+        let (runner, _never) = held_runner(Stage::Step);
         let mut rig = rotate_rig(
             vec![
                 update(p + 70, p + 64),
@@ -1817,7 +1815,7 @@ mod tests {
         use crate::rotate::Stage;
         let p = SLOTS_PER_SYNC_PERIOD;
         let dir = tempdir().unwrap();
-        let (runner, release) = held_runner(Stage::Tree);
+        let (runner, release) = held_runner(Stage::Committee);
         let mut rig = rotate_rig(
             vec![
                 update(p + 70, p + 64),
@@ -1859,7 +1857,7 @@ mod tests {
         use crate::rotate::Stage;
         let p = SLOTS_PER_SYNC_PERIOD;
         let dir = tempdir().unwrap();
-        let (runner, release) = held_runner(Stage::Tree);
+        let (runner, release) = held_runner(Stage::Committee);
         let mut rig = rotate_rig(
             vec![
                 update(p + 70, p + 64),
@@ -1913,7 +1911,11 @@ mod tests {
             r.tick().await.unwrap();
             assert_eq!(rig.submitter.rotate_submits(), 0, "{wrong}");
             assert_eq!(r.rotate_running(), None, "{wrong}");
-            assert_eq!(rig.runner.runs().len(), 3, "{wrong}: proven once");
+            assert_eq!(
+                rig.runner.runs().len(),
+                crate::rotate::Stage::ALL.len(),
+                "{wrong}: proven once"
+            );
             assert_eq!(r.state().last_committee_period, Some(1), "{wrong}");
             let status = r.rotate_status(1);
             let named = if wrong == "vk" {
@@ -2052,7 +2054,7 @@ mod tests {
         // The contract's own refusal: not proven again by this process.
         r.tick().await.unwrap();
         assert_eq!(r.rotate_running(), None);
-        assert_eq!(rig.runner.runs().len(), 3);
+        assert_eq!(rig.runner.runs().len(), crate::rotate::Stage::ALL.len());
     }
 
     /// A daemon that stops — SIGTERM ends `run_until_shutdown` and drops the
@@ -2066,8 +2068,8 @@ mod tests {
         let params = dir.path().join("params");
         std::fs::create_dir_all(&params).unwrap();
         let pid_file = dir.path().join("pid");
-        let bin = dir.path().join("shard.sh");
-        let script = dir.path().join("shard.src");
+        let bin = dir.path().join("step.sh");
+        let script = dir.path().join("step.src");
         std::fs::write(
             &script,
             format!(
@@ -2088,8 +2090,7 @@ mod tests {
             .unwrap()
             .success());
         let runner = SubprocessRotateRunner::new(SubprocessRotateConfig {
-            shard_prover_bin: bin.clone(),
-            step_snark_prover_bin: bin.clone(),
+            step_prover_bin: bin.clone(),
             rotate_prover_bin: bin,
             prover_dir: params,
             log_dir: dir.path().join("logs"),
@@ -2145,7 +2146,7 @@ mod tests {
             "the inputs stay for the restart"
         );
         assert!(
-            !rotate_dir.join("shard").exists(),
+            !rotate_dir.join("step").exists(),
             "a killed stage is not done"
         );
     }

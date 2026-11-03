@@ -15,7 +15,7 @@ knows a host path, an address or a key.
 |---|---|---|---|
 | `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `seed_prover_bk_set`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight`, `fold-bk-set` |
 | `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer`, `fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`, `downsize_srs`, `circuit_params.json` | `deposit-relayer daemon` |
-| `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
+| `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `rotate_committee` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
 | `bridge-cli` | `bridge-cli` | `ackinacki-bridge` with the deposit tools, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
 | (files) | `tools` | every binary above as plain files | `docker build --target tools --output type=local,dest=out .` |
 
@@ -72,7 +72,7 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
   params/relayer/                    # SRS k=17..22, inner keys, SHA256SUMS (finalize-params.sh); pk_cache/ rw
   params/deposit-prover/             # kzg_params_18.srs; the proving key the first proof writes
   params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_21.srs; step-key/ from `compose run lc-keygen`;
-                                     #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
+                                     #   rotate-keys/ written by the daemon at its first rotate (~4 GB)
 ```
 
 Each daemon logs to stdout and to one file per day in its `logs/` directory, keeping the newest

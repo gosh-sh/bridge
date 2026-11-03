@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
-# Copy the ETH light-client recursive `rotate` ZKHALO2VERIFYWITHVK *consumer*
-# fixtures from eth-light-client-prover into tvm-sdk. Three-operand ABI only:
-#   vk_cell            ← rotate_vk_blob.bin   (VkBlob v1 Base, Blake2b, 17 PI)
+# Copy the ETH light-client `rotate` ZKHALO2VERIFYWITHVK *consumer* fixtures
+# from eth-light-client-prover into tvm-sdk. Three-operand ABI only:
+#   vk_cell            ← rotate_vk_blob.bin   (VkBlob v1 Base, Blake2b, 17 PI,
+#                          byte 11 accumulator_limbs = 12)
 #   public_inputs_cell ← rotate_public_inputs.bin (17 × 32 B LE Fr:
-#                          12 KZG accumulator limbs + [current, next, period, gloas_fork_slot, attested_slot])
+#                          12 KZG accumulator limbs + [next_commit, state_root_hi,
+#                          state_root_lo, attested_slot, gloas_fork_slot])
 #   proof_cell         ← rotate_proof.bin     (Blake2b SHPLONK, Hermez k=21)
 #
-# The root proof is a 2-to-1 recursion tree over 8 committee shards + a step
-# snark (`examples/rotate_tree_n8.rs`). Producer SRS / config stay in
-# eth-light-client-prover only.
+# The proof wraps the committee circuit (`src/committee_table.rs`, k=18) in one
+# aggregation (`examples/rotate_committee.rs`). Its validity rests on the
+# accumulator: the opcode pairs instances[0..12] against the embedded [s]·G2
+# because of byte 11 (tvm-sdk#284).
 #
-# ⚠ NOT YET OPCODE-SOUND: the opcode runs a plain SHPLONK verify and does NOT
-# pair instances[0..12] (the accumulator) against the embedded [s]·G2. Acceptance
-# is necessary but not sufficient until the partner opcode decider extension
-# lands (see eth-light-client-prover/examples/rotate_decider_check.rs).
-#
-# Regenerate the source triple first with:
-#   cd eth-light-client-prover && \
-#     EMIT_VKBLOB=1 cargo run --release --features aggregation --example rotate_tree_n8
+# Regenerate the source files first with:
+#   cd eth-light-client-prover && ROTATE_OUT=fixtures/rotate_vkblob \
+#     OUTER_SRS=../params/kzg_bn254_21.srs ROTATE_UPDATE_PATH=<update.json> \
+#     cargo run --release --features aggregation --example rotate_committee
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,7 +24,7 @@ SRC="${ROOT}/eth-light-client-prover/fixtures/rotate_vkblob"
 DST="${ROOT}/../tvm-sdk/tvm_vm/halo2_test_data/rotate_light_client"
 
 if [[ ! -d "$SRC" ]]; then
-  echo "error: missing $SRC (run eth-light-client-prover rotate_tree_n8 with EMIT_VKBLOB=1 first)" >&2
+  echo "error: missing $SRC (run eth-light-client-prover rotate_committee first)" >&2
   exit 1
 fi
 if [[ ! -d "$(dirname "$DST")" ]]; then

@@ -49,6 +49,9 @@ snark-verifier-sdk = { git = "https://github.com/gosh-sh/snark-verifier", rev = 
   "halo2-axiom",
 ], optional = true }
 
+# The table SHA-256 of the rotate's committee circuit (`committee_table`).
+zkevm-hashes = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1", default-features = false, features = ["halo2-axiom"], optional = true }
+
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -63,7 +66,7 @@ rand = "0.8"
 [features]
 # M6 recursive rotate: RotateAggregationCircuit (snark-verify N committee-shard
 # proofs + in-circuit committee re-merkleization/commitment/branch glue).
-aggregation = ["dep:snark-verifier", "dep:snark-verifier-sdk"]
+aggregation = ["dep:snark-verifier", "dep:snark-verifier-sdk", "dep:zkevm-hashes"]
 
 # The N=1 recursive-rotate glue bring-up (needs the `aggregation` feature).
 [[example]]
@@ -80,6 +83,10 @@ required-features = ["aggregation"]
 
 [[example]]
 name = "rotate_tree_n8"
+required-features = ["aggregation"]
+
+[[example]]
+name = "rotate_committee"
 required-features = ["aggregation"]
 
 [[example]]

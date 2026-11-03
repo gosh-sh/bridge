@@ -277,31 +277,33 @@ impl LightClient {
         Ok(())
     }
 
-    /// `submitRotate`: a proven hand-off. The committee leaving office is kept
-    /// as the previous one and may still advance the head for the period it
+    /// `submitRotate`: a proven hand-off, the step proof of an update signed
+    /// by `signer` and the rotate proof of its `next_sync_committee`, which
+    /// agree on the attested slot. The committee leaving office is kept as
+    /// the previous one and may still advance the head for the period it
     /// served. There is no end-of-period window: a `/updates` best update is
     /// a valid hand-off.
     pub fn rotate(
         &mut self,
+        signer: [u8; 32],
         next: [u8; 32],
-        period: u64,
         attested_slot: u64,
     ) -> Result<(), LcError> {
         if self.committee == [0; 32] {
             return Err(LcError::CommitteeUnset);
+        }
+        if signer != self.committee {
+            return Err(LcError::WrongCommittee);
         }
         // A hand-off that changes nothing exists for every period boundary and
         // would only evict the previous committee.
         if next == self.committee {
             return Err(LcError::SelfRotation);
         }
-        if attested_slot / SLOTS_PER_PERIOD + 1 != period {
-            return Err(LcError::BadPublicInputs);
-        }
         self.prev_committee = self.committee;
         self.prev_committee_head_slot = self.finalized_slot;
         self.committee = next;
-        self.period = period;
+        self.period = attested_slot / SLOTS_PER_PERIOD + 1;
         Ok(())
     }
 
@@ -568,7 +570,7 @@ mod tests {
 
         // A checkpoint in the old period was never proven, and the committee
         // rotates before it is.
-        c.rotate(new_committee, 2, updates_best_attested(2))
+        c.rotate(old_committee, new_committee, updates_best_attested(2))
             .unwrap();
         assert_eq!(c.committee, new_committee);
 
@@ -597,7 +599,7 @@ mod tests {
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], old)
             .unwrap();
 
-        c.rotate([0xC1; 32], 2, updates_best_attested(2)).unwrap();
+        c.rotate(old, [0xC1; 32], updates_best_attested(2)).unwrap();
         assert_eq!(c.period, 2);
         assert_eq!(c.committee, [0xC1; 32]);
 
@@ -613,15 +615,17 @@ mod tests {
     }
 
     #[test]
-    fn an_attested_slot_that_does_not_match_the_period_is_refused() {
+    fn a_hand_off_not_signed_by_the_committee_in_force_is_refused() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(
-            c.rotate([0xC1; 32], 2, 100).unwrap_err(),
-            LcError::BadPublicInputs
+            c.rotate([0xB0; 32], [0xC1; 32], updates_best_attested(2))
+                .unwrap_err(),
+            LcError::WrongCommittee
         );
-        assert_eq!(LcError::BadPublicInputs.code(), 240);
+        assert_eq!(c.committee, [0xC0; 32]);
+        assert_eq!(LcError::WrongCommittee.code(), 242);
     }
 
     /// Reachable for every period boundary: the last header of a period is
@@ -633,11 +637,12 @@ mod tests {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update_at(SLOTS_PER_PERIOD, SLOTS_PER_PERIOD, [0xAA; 32], [0xC0; 32])
             .unwrap();
-        c.rotate([0xC1; 32], 2, updates_best_attested(2)).unwrap();
+        c.rotate([0xC0; 32], [0xC1; 32], updates_best_attested(2))
+            .unwrap();
         assert_eq!(c.prev_committee, [0xC0; 32]);
 
         assert_eq!(
-            c.rotate([0xC1; 32], 3, updates_best_attested(3))
+            c.rotate([0xC1; 32], [0xC1; 32], updates_best_attested(3))
                 .unwrap_err(),
             LcError::SelfRotation,
             "a hand-off onto the committee already in force must be refused"
@@ -664,7 +669,7 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2, updates_best_attested(2))
+        c.rotate(old_committee, new_committee, updates_best_attested(2))
             .unwrap();
 
         // Attested in period 3 after a rotate into period 2: outside the
@@ -698,7 +703,7 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 2, updates_best_attested(2))
+        c.rotate(old_committee, new_committee, updates_best_attested(2))
             .unwrap();
         c.submit_update_at(
             2 * SLOTS_PER_PERIOD,
@@ -731,7 +736,7 @@ mod tests {
             old_committee,
         )
         .unwrap();
-        c.rotate(new_committee, 4, updates_best_attested(4))
+        c.rotate(old_committee, new_committee, updates_best_attested(4))
             .unwrap();
 
         assert_eq!(
@@ -770,7 +775,8 @@ mod tests {
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
         c.submit_update(64, [0xAA; 32], old_committee).unwrap();
-        c.rotate(new_committee, 2, SLOTS_PER_PERIOD + 64).unwrap();
+        c.rotate(old_committee, new_committee, SLOTS_PER_PERIOD + 64)
+            .unwrap();
 
         c.submit_update_at(96, SLOTS_PER_PERIOD + 80, [0xCC; 32], old_committee)
             .expect("old committee still serves period 1");
@@ -937,7 +943,8 @@ mod tests {
     fn upgrade_clears_the_previous_committee_window() {
         let mut c = LightClient::bootstrap([0xC0; 32], 1);
         c.submit_update(64, [0xAA; 32], [0xC0; 32]).unwrap();
-        c.rotate([0xC1; 32], 2, updates_best_attested(2)).unwrap();
+        c.rotate([0xC0; 32], [0xC1; 32], updates_best_attested(2))
+            .unwrap();
         assert_ne!(c.prev_committee, [0; 32], "the rotation armed the window");
         assert_ne!(c.prev_committee_head_slot, 0);
 

@@ -43,8 +43,8 @@ tvm-sdk#284 co-deploys with this contract (every node on the opcode decider).
    proven and the span sent (`docs/eth-light-client.md` §3.4).
 8. Period boundary: the daemon proves the rotate of the contract's period
    in the background as soon as the beacon serves its `/updates` hand-off
-   (about 1.5 h on n14 with the first keygen, see `docs/eth-light-client.md` §5) and sends
-   `submitRotate`; `getCommitteeState` then reports the next period. Its
+   (a step proof plus about 6 min for the committee proof on n14, see
+   `docs/eth-light-client.md` §5) and sends both proofs in one `submitRotate`; `getCommitteeState` then reports the next period. Its
    transcripts are `logs/rotate-<period>-<stage>-*.log`. A bundle proved
    elsewhere still goes through `eth-lc-relayer submit-rotate --state-dir`.
 9. Owner flip, only on purpose and not in production: `eth-lc-relayer

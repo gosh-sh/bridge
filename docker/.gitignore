@@ -1,0 +1,7 @@
+# Filled-in settings and keys never enter the repository; only *.example do.
+.env
+env/*.env
+deploy.env
+runtime.env
+*.key
+*.secret

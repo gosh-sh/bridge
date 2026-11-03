@@ -4,7 +4,7 @@ How to deploy, run and recover `relayer daemon-live`, the AN→ETH relayer that
 proves Acki Nacki shellnet state and posts it to an `AckiNackiBridge` on
 Sepolia. Withdrawals (`withdrawByProof`, Circuit 4) are covered by the
 withdraw runbook. For a long-running server use the
-[Docker Compose kit](../deploy/shellnet-l2/README.md); the commands below are
+[Docker Compose kit](../../../docker/README.md); the commands below are
 the direct-CLI equivalent, for development and recovery.
 
 Run every command from `crates/bridge-prover-libraries/` in **bash**: the env
@@ -305,10 +305,12 @@ export BRIDGE_STATE_DIR="$BRIDGE_CONFIG_DIR/state" \
        BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions
 # run the environment check from §2, then make sure nothing from an
 # earlier bridge is left behind (the deploy script already archived state/*.json):
-[ -e "$BRIDGE_CONFIG_DIR/relayer-state.json" ] && \
-  mv "$BRIDGE_CONFIG_DIR/relayer-state.json" "$BRIDGE_CONFIG_DIR/relayer-state.pre_$(date +%s).json"
-mkdir -p "$BRIDGE_STATE_DIR" logs submissions
-nohup ./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+[ -e "$BRIDGE_STATE_DIR/relayer-state.json" ] && \
+  mv "$BRIDGE_STATE_DIR/relayer-state.json" "$BRIDGE_STATE_DIR/relayer-state.pre_$(date +%s).json"
+mkdir -p "$BRIDGE_STATE_DIR" work logs submissions
+# the cursor (relayer-state.json) lives in $BRIDGE_STATE_DIR beside the prover state;
+# --work-dir holds the proof scratch files, --log-dir the daily log and prover transcripts
+nohup ./target/release/relayer daemon-live --work-dir ./work --log-dir ./logs \
   > "logs/live_cold_L2_config_$(date -u +%Y%m%dT%H%M%SZ).log" 2>&1 &
 ```
 
@@ -395,7 +397,7 @@ jq '{seen: .last_observed_on_chain.last_seen_block_seq_no,
      bkN: .last_observed_on_chain.last_bk_set_update_seq_no,
      attempts_since_progress, polls_since_progress,
      bk_update_attempts_since_progress}' \
-  "$BRIDGE_CONFIG_DIR/relayer-state.json"
+  "$BRIDGE_STATE_DIR/relayer-state.json"
 pgrep -fl 'relayer .*daemon-live'
 ```
 
@@ -453,8 +455,8 @@ jq '.last_attempt_seqno = .last_processed_seqno
   | .attempts_since_progress = 0
   | .polls_since_progress = 0
   | .bk_update_attempts_since_progress = 0' \
-  "$BRIDGE_CONFIG_DIR/relayer-state.json" > /tmp/relayer-state.json \
-  && mv /tmp/relayer-state.json "$BRIDGE_CONFIG_DIR/relayer-state.json"
+  "$BRIDGE_STATE_DIR/relayer-state.json" > /tmp/relayer-state.json \
+  && mv /tmp/relayer-state.json "$BRIDGE_STATE_DIR/relayer-state.json"
 ```
 
 If `not confirmed` warnings keep recurring, point `RPC_URL` at an
@@ -548,8 +550,8 @@ crates/bridge-prover-libraries/
 ├── bk_set.shellnet.live.json    BK set at the current bridge's seed; BRIDGE_BK_SET_CONFIG
 ├── L2_config/
 │   ├── env                      written by the deploy script
-│   ├── relayer-state.json       relayer cursors, attempt counters, last on-chain snapshot
-│   └── state/
+│   └── state/                   BRIDGE_STATE_DIR: the one state directory
+│       ├── relayer-state.json   relayer cursors, attempt counters, last on-chain snapshot
 │       ├── prover_state.json    prover snapshot — the resume point
 │       └── prover_bk_set.json   prover's current BK set, rotated on every applied rotation
 ├── submissions/                 verifyBlock calldata dumps (BRIDGE_DUMP_SUBMISSIONS_DIR)
@@ -574,7 +576,7 @@ previous one, since the evening of 2026-10-08). Step by step, with rollback:
 
 ### Server deployment and handoff
 
-The [Compose kit](../deploy/shellnet-l2/README.md) wraps the same steps:
+The [Compose kit](../../../docker/README.md) wraps the same steps:
 read-only preflight on every start, `restart: unless-stopped`, and the kit's
 `scripts/status.sh` for a snapshot. Never run two daemons on the
 same bridge, key or state. Record for every deployment: the bridge address

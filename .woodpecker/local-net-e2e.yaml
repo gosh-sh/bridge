@@ -222,8 +222,24 @@ steps:
         -e dexdo_bm_image="$BM_IMG"
         -e dex_test_notes_cnt=0
 
-  run-test:
+  # The tests start only once the network's GraphQL serves blocks 1 and 100, each within
+  # five minutes: the chain moves, and GraphQL has it from its start
+  # (tests/e2e/local-net/network-blocks-on-host.sh).
+  network-blocks:
     depends_on: [net-up]
+    image: *ansible_image
+    environment:
+      KNOWN_HOSTS: *known_hosts
+      E2E_HOST: { from_secret: LOCAL_NET_HOST }
+      E2E_CI_USER: { from_secret: LOCAL_NET_CI_USER }
+      SSH_OPTS: *ssh_opts
+    commands:
+      - mkdir -p ~/.ssh && cp -a $CI_WORKSPACE/.ssh/. ~/.ssh/ && cp $CI_WORKSPACE/$KNOWN_HOSTS ~/.ssh/known_hosts && chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_ed25519
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s -- assert bridge-$CI_PIPELINE_NUMBER" < $CI_WORKSPACE/tests/e2e/local-net/host-lease.sh
+      - ssh $SSH_OPTS "$E2E_CI_USER@$E2E_HOST" "bash -s" < $CI_WORKSPACE/tests/e2e/local-net/network-blocks-on-host.sh
+
+  run-test:
+    depends_on: [network-blocks]
     image: *ansible_image
     environment:
       KNOWN_HOSTS: *known_hosts

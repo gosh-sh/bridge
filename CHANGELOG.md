@@ -61,8 +61,8 @@ assigns it when the release is tagged.
   `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
   the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
   names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
-  bridge the message names — the idempotency key does not include the bridge, so the run
-  resumes without a second burn. Deposits still work against 1.14.0.
+  bridge the message names and `--allow-retry` — the idempotency key does not include the
+  bridge, so the run resumes without a second burn; without the flag it stops with exit 3. Deposits still work against 1.14.0.
 - **`relayer daemon-withdraw` and `relayer daemon-bridge`** park a `proof_event_*.json` whose
   `dstBridge` is another bridge without sending it, and treat `WrongDstBridge` as permanent;
   `relayer submit-withdraw` and `relayer withdraw-e2e` refuse such a proof. `bridge-verifier-daemon`

@@ -11,7 +11,7 @@ is, which command collects what, and the two ways to get it wrong. The contract-
 
 | | What it means | Read it with |
 |---|---|---|
-| **Owed to users** | A book number. Up on deposit, down on a proven payout; also up on `fundTreasury` and to zero on `migrateTreasury` when a bridge is replaced (below). | `treasuryBalance()` (`:98`) |
+| **Owed to users** | A book number. Up on deposit, down on a proven payout; also up on `fundTreasury` and to zero on `migrateTreasury` when a bridge is replaced (below). | `treasuryBalance()` (`:108`) |
 | **Liquid** | USDC on the contract, spendable now. | `usdc.balanceOf(bridge)` |
 | **In AAVE** | `suppliedPrincipal()` is what we put in; `aUsdcBalance()` is what it is worth now. | both (`:123`, `:1387`) |
 
@@ -200,7 +200,7 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    its `relayer daemon-withdraw` (or `daemon-bridge`) and its `deposit-relayer` running, until it
    has emitted `WithdrawalByProofExecuted` for every burn made before step 2. Every one of them is
    paid there or nowhere. A user whose `ackinacki-bridge withdraw` stopped after the burn resumes it
-   with `--bridge-address <old>`; the resume does not repeat the check that refuses a new burn. A
+   with `--bridge-address <old> --allow-retry`; the resume does not repeat the check that refuses a new burn. A
    bridge deployed before `dstBridge` existed, such as the 421614 bridge
    `0x3FB082a905a895151224F6d93bD074E816338638`, verifies only proofs of the previous Circuit 4:
    prove those burns with the `ackinacki-bridge` release that bridge was deployed for. This step

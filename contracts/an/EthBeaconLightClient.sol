@@ -7,8 +7,8 @@ import "./EthKeccak.sol";
 /// @notice Sink for the canonicality anchor the light client proves. The
 ///         `USDCBridge` implements this so a proven finalized execution block
 ///         hash lands in the same `_acceptedBlockHash` set that
-///         `finalizeDeposit` already consults — replacing the owner / M-of-N
-///         attester writer with a trustless one. Address 0 disables the push
+///         `finalizeDeposit` already consults — a trustless writer next to the
+///         owner's `setAcceptedBlockHash`. Address 0 disables the push
 ///         (the light client still records the anchor locally).
 interface IAcceptedBlockHashSink {
     function acceptBlockHashFromLightClient(uint256 chainId, uint256 blockHash) external;

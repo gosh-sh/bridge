@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.15.0, `DepositVoucher` at 1.4.0,
+`exchange/` — `eccUSDCBridge` at version 1.16.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -103,6 +103,27 @@ folders and `contracts/scripts/bridge_*.py`, never
 `contracts/scripts/bridge_contracts.py`, which is acki-nacki's own module and
 the one that does the placing. A change here reaches a network only after that
 pin is moved.
+
+### Registering bridged currencies
+
+Before enabling an EVM token listing, call
+`setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)` as the AN owner.
+Register USDC too, using ECC id `3`; other ids must be at least `4`. Both sides must use the same
+ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
+immutable; subsequent calls can change limits and the deposit switch, retaining outstanding
+inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
+`getTokenDepositConfig(chainId, evmToken)` and `getTokenWithdrawalConfig(chainId, tokenId)` expose
+the configuration and per-chain outstanding amount. Closing or throttling deposits does not
+lower the withdrawal allowance. `finalizeDeposit` reads the proven token, and DepositVoucher
+1.5.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
+burns the attached currency and decrements only that currency's destination-chain inventory.
+The existing `finalizeDeposit`, `confirmDeposit` and `initiateWithdrawal` signatures are preserved.
+
+For an upgrade from 1.15.0, build `userCell` with
+`BridgeZerostateData.getTokenUpgradeData(newVoucherCode)` and pass it to the old `updateCode`.
+Register every token lane afterward and restore trusted bridge and anchor configuration before
+opening deposits. Newer `updateCode` calls preserve the token registry and outstanding balances.
+Voucher-code rotation still requires the historical deposit cutoff described below.
 
 ## Arbitrum blocks
 

@@ -25,7 +25,7 @@ The CLI, relayers and web form take their addresses from configuration.
 | deployment block | `323405848` |
 | USDC | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` |
 
-This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.15.0
+This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.16.0
 for deposits. The deployment addresses below describe the existing shellnet pair.
 
 ### Acki Nacki (shellnet)

@@ -34,34 +34,16 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The oldest bridge this build accepts: 1.15.0, the first one with the
-/// token-aware deposit key. Its voucher code is not changed by `updateCode`
-/// (bridge-audit#107: an upgrade that changes it brings a block cutoff), so a
-/// deposit is not minted twice.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 15, 0));
+/// The first bridge with the proven-token registry and token-aware voucher.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 16, 0));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 15, 0);
-/// The first supported bridge with this build's deposit key and mandatory
-/// per-chain limit getters. The key rotated in 1.15.0 with the token public
-/// input, so a 1.14.0 deployment still holds the twelve-input key and cannot
-/// verify what this build proves. Refuse it before the token leaves L1.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 15, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
+/// The mandatory protocol floor includes the token-aware callback, even in
+/// development builds. The thirteen-input deposit key itself dates to 1.15.0.
+pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
-
-/// The first Acki Nacki bridge that credits the token the proof carries.
-///
-/// Until a deployment reports this version or newer, `finalizeDeposit` mints
-/// `USDC_ECC_ID` for every proof it accepts, whatever the deposited ERC-20
-/// was (`contracts/an/exchange/eccUSDCBridge.sol:1093`), and enforces its
-/// USDC-denominated `MAX_TRANSFER_AMOUNT` against the raw base units. So a
-/// deposit of any token other than the EVM bridge's own `usdc()` is either
-/// refused on this side after the money has left L1, or credited as bridged
-/// USDC. The CLI refuses it before the wallet is asked; the EVM side can
-/// already list a second token, and the owner lists it with deposits closed
-/// until this version is deployed.
-pub const AN_TOKEN_REGISTRY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
 
 /// Refuses a bridge older than this build's mandatory deposit interfaces.
 pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
@@ -102,6 +84,63 @@ pub async fn read_volume_limits(
         max_transfer: field("maxTransfer")?,
         max_tvl: field("maxTvl")?,
         outstanding: field("outstanding")?,
+    })
+}
+
+/// The AN listing must identify the same currency as the EVM listing before
+/// the wallet can lock funds on L1. Missing or malformed getter data refuses.
+pub async fn read_token_deposit_limits(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    chain_id: u64,
+    token: Address,
+    expected_token_id: u32,
+) -> CliResult<crate::deposit::evm::VolumeLimits> {
+    let out = an
+        .run_getter(
+            bridge,
+            BRIDGE_ABI,
+            "getTokenDepositConfig",
+            json!({"chainId": chain_id.to_string(),
+               "evmToken": U256::from_be_slice(token.as_slice()).to_string()}),
+        )
+        .await
+        .map_err(|e| refuse(format!("getTokenDepositConfig failed: {e:#}")))?;
+    token_deposit_limits(&out, expected_token_id)
+}
+
+fn token_deposit_limits(
+    out: &serde_json::Value,
+    expected_token_id: u32,
+) -> CliResult<crate::deposit::evm::VolumeLimits> {
+    let invalid = |name: &str| refuse(format!("getTokenDepositConfig: invalid {name}: {out}"));
+    let boolean = |name: &str| out[name].as_bool().ok_or_else(|| invalid(name));
+    let number = |name: &str| -> CliResult<U256> {
+        let n = out[name]
+            .as_u64()
+            .map(u128::from)
+            .or_else(|| out[name].as_str().and_then(|v| v.parse::<u128>().ok()));
+        n.map(U256::from).ok_or_else(|| invalid(name))
+    };
+    if !boolean("listed")? {
+        return Err(refuse(
+            "the proven token is not registered on the AN bridge".to_owned(),
+        ));
+    }
+    if number("tokenId")? != U256::from(expected_token_id) {
+        return Err(refuse(
+            "the EVM and AN bridges assign different currency ids to this token".to_owned(),
+        ));
+    }
+    if !boolean("depositsEnabled")? {
+        return Err(refuse(
+            "deposits for this token are closed on the AN bridge".to_owned(),
+        ));
+    }
+    Ok(crate::deposit::evm::VolumeLimits {
+        max_transfer: number("maxTransfer")?,
+        max_tvl: number("maxTvl")?,
+        outstanding: number("outstanding")?,
     })
 }
 
@@ -552,9 +591,9 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
         ]);
-        // A 1.15.0 bridge answers getL2Verifier; this chain is not a rollup,
+        // A 1.16.0 bridge answers getL2Verifier; this chain is not a rollup,
         // so it names none. Without the answer the read falls into
         // `transient`, which retries for ever.
         an.getter(BRIDGE, "getL2Verifier", vec![
@@ -607,18 +646,18 @@ mod tests {
             json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.15.0"), "{error}");
+        assert!(error.to_string().contains("1.16.0"), "{error}");
         assert!(error.to_string().contains("per-chain limit"), "{error}");
     }
 
-    /// A bridge whose version says 1.15.0 but whose code has no
+    /// A bridge whose version says 1.16.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -664,7 +703,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -785,7 +824,7 @@ mod tests {
     ///
     /// The floor moves with the deposit key, not with every release: 1.14.0
     /// added the Arbitrum block verifier and kept 1.13.0's key, so the floor
-    /// stayed at 1.13.0 while both held the same key. 1.15.0 rotates it —
+    /// stayed at 1.13.0 while both held the same key. 1.16.0 rotates it —
     /// the circuit proves the deposited token — so the floor moves with it.
     /// The key's VkBlob sha256, which the contract source records next to
     /// the embedded key, is pinned here with the floor: a rotated key fails
@@ -878,7 +917,7 @@ mod tests {
     async fn a_bridge_with_verifiers_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -898,7 +937,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),
@@ -964,6 +1003,46 @@ mod tests {
             let e = go(&an, [0; 32]).await.unwrap_err();
             assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
             assert!(e.to_string().contains(needle), "{needle}: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod token_listing_tests {
+    use super::*;
+
+    fn listing() -> serde_json::Value {
+        json!({"listed": true, "tokenId": "4", "depositsEnabled": true,
+               "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000",
+               "outstanding": "5000000000000000000"})
+    }
+
+    #[test]
+    fn token_listing_keeps_eighteen_decimal_base_units() {
+        let limits = token_deposit_limits(&listing(), 4).unwrap();
+        assert_eq!(limits.max_transfer, U256::from(10u128.pow(18)));
+        assert_eq!(limits.outstanding, U256::from(5 * 10u128.pow(18)));
+    }
+
+    #[test]
+    fn token_listing_fails_closed_on_missing_mismatched_or_closed_currency() {
+        assert!(token_deposit_limits(&listing(), 3).is_err());
+        for field in [
+            "listed",
+            "tokenId",
+            "depositsEnabled",
+            "maxTransfer",
+            "maxTvl",
+            "outstanding",
+        ] {
+            let mut out = listing();
+            out.as_object_mut().unwrap().remove(field);
+            assert!(token_deposit_limits(&out, 4).is_err(), "missing {field}");
+        }
+        for field in ["listed", "depositsEnabled"] {
+            let mut out = listing();
+            out[field] = json!(false);
+            assert!(token_deposit_limits(&out, 4).is_err(), "false {field}");
         }
     }
 }

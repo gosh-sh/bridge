@@ -1,6 +1,8 @@
 pragma gosh-solidity >=0.80;
 pragma AbiHeader expire;
 
+import "../exchange/modifiers/modifiers.sol";
+
 /// @title BridgeZerostateData
 /// @notice Builds the data cell a premined eccUSDCBridge is upgraded with.
 ///         The tuple below is the one `eccUSDCBridge.onCodeUpgrade` decodes; the
@@ -8,7 +10,7 @@ pragma AbiHeader expire;
 ///         fails if they drift apart.
 /// @dev Never deployed: it is executed in tvm-debugger at an arbitrary address,
 ///      which is why it carries no constructor and its code hash does not matter.
-contract BridgeZerostateData {
+contract BridgeZerostateData is eccUSDCBridgeModifiers {
     function getBridgeData(
         uint256 pubkey, address usdcWallet,
         uint128 totalMinted, uint64 mintNonce, uint64 mintAccumulatorNonce,
@@ -33,5 +35,12 @@ contract BridgeZerostateData {
         return abi.encode(pubkey, usdcWallet, totalMinted, mintNonce, mintAccumulatorNonce,
                           totalMintedBridgeByToken, totalBurnedBridgeByToken, depositVoucherCode,
                           userCell, outstandingByChain, messages);
+    }
+    /// @notice Upgrade payload for a pre-registry bridge: install the new
+    ///         voucher code with an empty token registry, then register each lane.
+    function getTokenUpgradeData(TvmCell voucherCode) public pure returns (TvmCell) {
+        mapping(uint256 => mapping(uint32 => BridgeTokenConfig)) bridgeTokens;
+        mapping(uint256 => mapping(uint256 => uint32)) bridgeTokenIds;
+        return abi.encode(voucherCode, bridgeTokens, bridgeTokenIds);
     }
 }

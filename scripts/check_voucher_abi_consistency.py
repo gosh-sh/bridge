@@ -119,13 +119,17 @@ def main() -> int:
             raise SystemExit(f"{path}: not found (pass --source)")
 
     src_ctor = source_signature(voucher_src, "constructor")
-    src_confirm = source_signature(bridge_src, "function confirmDeposit")
+    callback_match = re.search(r"\.(confirm\w*Deposit)\s*\{", strip_comments(voucher_src.read_text()))
+    if not callback_match:
+        raise SystemExit(f"{voucher_src}: no deposit confirmation call found")
+    callback = callback_match.group(1)
+    src_confirm = source_signature(bridge_src, "function " + callback)
     deploy_arity = source_deploy_arity(bridge_src)
 
     problems: list[str] = []
     print(f"source {args.source}")
     print(f"  DepositVoucher.constructor  {render(src_ctor)}")
-    print(f"  eccUSDCBridge.confirmDeposit   {render(src_confirm)}")
+    print(f"  eccUSDCBridge.{callback}   {render(src_confirm)}")
     print(f"  new DepositVoucher(...)     {deploy_arity} args")
 
     compare(
@@ -150,11 +154,11 @@ def main() -> int:
                 )
 
         abi_ctor = abi_signature(voucher_abi, "constructor")
-        abi_confirm = abi_signature(bridge_abi, "confirmDeposit")
+        abi_confirm = abi_signature(bridge_abi, callback)
         print(f"compiled {bridge_abi}")
         print(f"         {voucher_abi}")
         print(f"  DepositVoucher.constructor  {render(abi_ctor)}")
-        print(f"  eccUSDCBridge.confirmDeposit   {render(abi_confirm)}")
+        print(f"  eccUSDCBridge.{callback}   {render(abi_confirm)}")
 
         # The pairwise check is what would have caught 2026-07-02 on its own.
         compare(

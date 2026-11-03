@@ -15,6 +15,7 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 ### New / Improvements
+
 ### Fixes
 -->
 
@@ -26,7 +27,7 @@ assigns it when the release is tagged.
   the token as its sixth field. Redeploy the EVM bridge and update clients and indexers together.
 - The deposit circuit has 13 public inputs (`token` at slot 11, `promiseCommit` at 12) and a new
   VK (SHA-256 `f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9`).
-  Deploy `eccUSDCBridge` 1.15.0 and the matching prover/CLI together. Old-event receipts cannot
+  Deploy `eccUSDCBridge` 1.16.0 and the matching prover/CLI together. Old-event receipts cannot
   be re-proven with this key: finalize pending deposits on the old pair before switching.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
@@ -41,8 +42,12 @@ assigns it when the release is tagged.
   are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
   folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
 
-- `ackinacki-bridge` requires AN bridge 1.15.0 (`MIN_BRIDGE_VERSION`) for the token-bearing
-  deposit key. Withdrawal preflight also requires EVM `usdcTokenId()` and
+- After the upgrade to `eccUSDCBridge` 1.16.0, and on a fresh zerostate, the AN token registry
+  is empty: every deposit, USDC included, is refused with 240 until `setBridgeToken` registers
+  USDC as ECC `3` for each source chain. Pause the AN bridge and let pending vouchers confirm
+  before `updateCode`; register, then unpause.
+- `ackinacki-bridge` requires AN bridge 1.16.0 (`MIN_BRIDGE_VERSION`) for the token registry
+  and token-aware voucher callback. Withdrawal preflight also requires EVM `usdcTokenId()` and
   `maxWithdrawalAmount(uint32)` getters. Upgrade the paired contracts and CLI together.
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted.
@@ -51,12 +56,27 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
+- `eccUSDCBridge` 1.16.0 (code hash `19ed19e7…`) credits the proven ERC-20 to its registered
+  ECC currency and tracks outstanding inventory independently for each source chain and currency.
+  Before opening deposits on EVM, register the same token and ECC id on AN with
+  `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
+  token base units. AN refuses unregistered tokens and the CLI refuses mismatched currency ids.
+  `DepositVoucher` 1.5.0 carries the token to `confirmTokenDeposit`; the existing
+  `finalizeDeposit`, `initiateWithdrawal` and `confirmDeposit` signatures are preserved.
+  Upgrading from 1.15.0 requires the structured `userCell` returned by
+  `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)`, followed by token registration
+  and restoration of the trusted bridge and anchor configuration. Subsequent upgrades preserve
+  token configuration and outstanding inventory automatically.
+- `ackinacki-bridge withdraw --token-id` selects the registered ECC currency (default `3`,
+  USDC). Amount precision comes from the destination token registry; no rounding is performed.
+  Withdrawal records and locks include the currency, while existing USDC keys are preserved.
+  The JSON burn summary includes `token_id` and uses that token's decimal precision.
+
 - The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
   `delistToken`, `tokenInfo`, `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and
   `maxWithdrawalAmount`. Liabilities and limits use each token's base units; AAVE stays USDC-only.
-- New non-USDC listings start with deposits closed. The AN bridge still mints ECC id `3` only;
-  the CLI refuses other tokens until AN supports them. Open a listing only with a matching AN
-  deployment; withdrawals require both a listed id and outstanding liabilities.
+- New non-USDC listings start with deposits closed. Register the same token and ECC id on AN
+  before opening the EVM listing; withdrawals require a listed id and outstanding liabilities.
 - `--token` (`DEPOSIT_TOKEN`) defaults to the EVM bridge's `usdc()`. Amounts use the listing's
   decimals, checked against the ERC-20. Deposits retain exact-balance and uint64 width checks.
 

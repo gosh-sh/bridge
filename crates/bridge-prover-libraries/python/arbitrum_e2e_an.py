@@ -155,10 +155,18 @@ def main():
                       f"VERIFIER_L2={uint(cfg.get('l2ChainId'))}", f"VERIFIER_L1={uint(cfg.get('l1ChainId'))}",
                       f"VERIFIER_ROLLUP={uint(cfg.get('rollup')):#042x}"]
         elif cmd == "trust" and len(args) == 1:
+            usdc_token = int("75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", 16)
+            owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": str(usdc_token),
+                                          "tokenId": 3, "maxTransfer": "50000000", "maxTvl": "10000000000",
+                                          "depositsEnabled": True})
+            listed = until(lambda: truth(getter("getTokenDepositConfig", {
+                "chainId": str(ARB_SEPOLIA), "evmToken": str(usdc_token)}).get("listed")))
+            if not listed:
+                raise RuntimeError("AN USDC lane did not become registered")
             owner_call("setTrustedL1Bridge", {"chainId": str(ARB_SEPOLIA), "l1Bridge": args[0], "allowed": True})
             trusted = until(lambda: truth(getter("isTrustedL1Bridge",
                                                  {"chainId": str(ARB_SEPOLIA), "l1Bridge": args[0]}).get("value0")))
-            answer = [f"TRUSTED={str(bool(trusted)).lower()}"]
+            answer = [f"TRUSTED={str(bool(trusted)).lower()}", "TOKEN_REGISTERED=true"]
         elif cmd == "msig" and not args:
             gql = be.GqlClient(GRAPHQL_URL)
             keys = os.path.join(WORK_DIR, "msig_arbitrum_e2e.keys.json")

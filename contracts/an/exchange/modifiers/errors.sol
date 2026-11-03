@@ -31,4 +31,7 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_MESSAGE_IS_EXIST = 400;
     uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
     uint16 constant ERR_MESSAGE_EXPIRED = 402;
+    uint16 constant ERR_TOKEN_UNREGISTERED = 240;
+    uint16 constant ERR_TOKEN_CONFIG = 241;
+    uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 242;
 }

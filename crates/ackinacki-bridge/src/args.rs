@@ -106,6 +106,11 @@ pub enum Command {
 /// parsers below are where a refusal gets its wording, and they
 /// can only refuse what they were handed verbatim.
 pub struct WithdrawArgs {
+    /// ECC currency id registered for this token on AN and the destination
+    /// bridge.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(3..))]
+    pub token_id: u32,
+
     /// Source multisig address in `dapp_id::account_id` form (both 64 hex,
     /// no `0x`, no workchain prefix). Must be an active, deployed
     /// single-custodian multisig.
@@ -133,8 +138,8 @@ pub struct WithdrawArgs {
     #[arg(long, value_name = "u64")]
     pub to_chain: Option<u64>,
 
-    /// USDC amount as a decimal string. At most 6 fractional digits. Any
-    /// finer precision is refused (not rounded).
+    /// Decimal token amount; precision comes from the destination registry
+    /// for a non-USDC currency. Excess precision is refused without rounding.
     #[arg(long, value_name = "USDC")]
     pub amount: String,
 
@@ -318,9 +323,17 @@ pub struct UsdcAmount(pub u128);
 impl UsdcAmount {
     /// Human-readable decimal string with exactly 6 fractional digits.
     pub fn display(&self) -> String {
-        let whole = self.0 / 1_000_000;
-        let frac = self.0 % 1_000_000;
-        format!("{whole}.{frac:06}")
+        self.display_with_decimals(6)
+    }
+
+    /// Format the raw base units with exactly the registered decimal precision.
+    pub fn display_with_decimals(&self, decimals: u8) -> String {
+        if decimals == 0 {
+            return self.0.to_string();
+        }
+        let mut digits = format!("{:0>width$}", self.0, width = usize::from(decimals) + 1);
+        digits.insert(digits.len() - usize::from(decimals), '.');
+        digits
     }
 }
 
@@ -432,6 +445,44 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         address,
         chain_id,
     })
+}
+
+/// Convert a token-denominated amount without rounding or a six-decimal
+/// intermediate. The bridge's ECC mint/burn interface is limited to u64.
+pub fn parse_token_amount(raw: &str, decimals: u8) -> CliResult<UsdcAmount> {
+    let invalid = |expected: String| CliError::ArgInvalid {
+        flag: "amount",
+        expected,
+        got: redact(raw),
+    };
+    let (whole, fraction) = raw.split_once('.').unwrap_or((raw, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || (raw.contains('.') && fraction.is_empty())
+    {
+        return Err(invalid(
+            "positive decimal token amount, without exponent notation".into(),
+        ));
+    }
+    if fraction.len() > usize::from(decimals) {
+        return Err(invalid(format!(
+            "at most {decimals} fractional digits for this token"
+        )));
+    }
+    let mut units = String::with_capacity(whole.len() + usize::from(decimals));
+    units.push_str(whole);
+    units.push_str(fraction);
+    units.extend(std::iter::repeat_n(
+        '0',
+        usize::from(decimals) - fraction.len(),
+    ));
+    let units = units
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| invalid("positive token amount fitting in u64 base units".into()))?;
+    Ok(UsdcAmount(u128::from(units)))
 }
 
 /// Parse `--amount` as decimal USDC, reject > 6 fractional digits (no
@@ -1171,5 +1222,50 @@ mod tests {
                 "mode {mode:04o} must be refused with the exact remedy, got: {msg}",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod token_amount_tests {
+    use super::*;
+
+    #[test]
+    fn token_amount_preserves_base_units_at_each_precision() {
+        assert_eq!(
+            parse_token_amount("1.000000000000000001", 18).unwrap().0,
+            1_000_000_000_000_000_001
+        );
+        assert_eq!(parse_token_amount("0.000000000000000001", 18).unwrap().0, 1);
+        assert_eq!(parse_token_amount("1.25", 6).unwrap().0, 1_250_000);
+        assert_eq!(parse_token_amount("42", 0).unwrap().0, 42);
+        assert_eq!(
+            parse_token_amount("18446744073709551615", 0).unwrap().0,
+            u128::from(u64::MAX)
+        );
+        assert_eq!(
+            parse_token_amount("1.000001", 6).unwrap(),
+            parse_amount("1.000001").unwrap()
+        );
+    }
+
+    #[test]
+    fn token_amount_refuses_rounding_signs_zero_and_overflow() {
+        for raw in [
+            "0",
+            "0.000000",
+            "-1",
+            "+1",
+            "1e2",
+            "1.",
+            ".1",
+            " 1",
+            "1.1.1",
+            "18446744073709551616",
+        ] {
+            assert!(parse_token_amount(raw, 6).is_err(), "{raw}");
+        }
+        assert!(parse_token_amount("0.0000001", 6).is_err());
+        assert!(parse_token_amount("1.1", 0).is_err());
+        assert!(parse_token_amount("18.446744073709551616", 18).is_err());
     }
 }

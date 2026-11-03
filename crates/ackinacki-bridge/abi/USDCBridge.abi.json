@@ -45,6 +45,18 @@
 			]
 		},
 		{
+			"name": "mintAndSendTokenBridged",
+			"inputs": [
+				{"name":"recipient","type":"address"},
+				{"name":"value","type":"uint128"},
+				{"name":"nonce","type":"uint64"},
+				{"name":"chainId","type":"uint256"},
+				{"name":"tokenId","type":"uint32"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "mintAndSendAccumulator",
 			"inputs": [
 				{"name":"buyer","type":"address"},
@@ -151,6 +163,51 @@
 				{"name":"paused","type":"bool"}
 			],
 			"outputs": [
+			]
+		},
+		{
+			"name": "setBridgeToken",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"evmToken","type":"uint256"},
+				{"name":"tokenId","type":"uint32"},
+				{"name":"maxTransfer","type":"uint128"},
+				{"name":"maxTvl","type":"uint128"},
+				{"name":"depositsEnabled","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getTokenDepositConfig",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"evmToken","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"listed","type":"bool"},
+				{"name":"tokenId","type":"uint32"},
+				{"name":"maxTransfer","type":"uint128"},
+				{"name":"maxTvl","type":"uint128"},
+				{"name":"outstanding","type":"uint128"},
+				{"name":"depositsEnabled","type":"bool"},
+				{"name":"maxWithdrawal","type":"uint128"}
+			]
+		},
+		{
+			"name": "getTokenWithdrawalConfig",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"tokenId","type":"uint32"}
+			],
+			"outputs": [
+				{"name":"listed","type":"bool"},
+				{"name":"evmToken","type":"uint256"},
+				{"name":"maxTransfer","type":"uint128"},
+				{"name":"maxTvl","type":"uint128"},
+				{"name":"outstanding","type":"uint128"},
+				{"name":"depositsEnabled","type":"bool"},
+				{"name":"maxWithdrawal","type":"uint128"}
 			]
 		},
 		{
@@ -280,6 +337,20 @@
 				{"name":"chainId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
 				{"name":"anAccount","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "confirmTokenDeposit",
+			"inputs": [
+				{"name":"depositId","type":"uint256"},
+				{"name":"contractAddr","type":"uint256"},
+				{"name":"dappId","type":"uint256"},
+				{"name":"chainId","type":"uint256"},
+				{"name":"amount","type":"uint128"},
+				{"name":"anAccount","type":"uint256"},
+				{"name":"evmToken","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -453,6 +524,8 @@
 		{"init":false,"name":"_totalMintedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_outstandingByChain","type":"map(uint256,uint128)"},
+		{"components":[{"name":"evmToken","type":"uint256"},{"name":"maxTransfer","type":"uint128"},{"name":"maxTvl","type":"uint128"},{"name":"maxWithdrawal","type":"uint128"},{"name":"outstanding","type":"uint128"},{"name":"depositsEnabled","type":"bool"}],"init":false,"name":"_bridgeTokens","type":"map(uint256,map(uint32,tuple))"},
+		{"init":false,"name":"_bridgeTokenIds","type":"map(uint256,map(uint256,uint32))"},
 		{"init":false,"name":"_depositVoucherCode","type":"cell"},
 		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},
 		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},

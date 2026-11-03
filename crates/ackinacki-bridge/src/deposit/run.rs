@@ -461,6 +461,7 @@ pub async fn run_fresh(
         checked.params.clone(),
         hex::encode(checked.an.voucher_code_hash),
     );
+    rec.token_id = checked.token_id;
     let op = rec.op_id.clone();
     let Some(op_lock) = OpLock::try_take(&p.state_dir, &op)? else {
         return Err(CliError::Preflight {
@@ -803,6 +804,7 @@ fn credit_identity(rec: &OpRecord, dep: &DepositInfo, to: &AnTarget) -> Identity
         contract: U256::from_be_slice(rec.params.bridge.as_slice()),
         chain_id: rec.params.chain_id,
         amount: u128::from(rec.params.amount_units),
+        token_id: rec.token_id,
         account: to.account_id,
     }
 }

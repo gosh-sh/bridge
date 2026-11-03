@@ -83,7 +83,7 @@ def test_10_local_network_bridge_active(an):
     """The zerostate bridge is up at the version this commit ships."""
     got = an("bridge")
     assert got.get("BRIDGE_ACTIVE") == "true", f"eccUSDCBridge is not Active: {got}"
-    assert got.get("BRIDGE_VERSION") == "1.15.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.15.0"
+    assert got.get("BRIDGE_VERSION") == "1.16.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.16.0"
 
 
 def test_11_build_on_prover_host(ph, sha):
@@ -157,6 +157,7 @@ def test_22_l2_verifier_deployed(an, ctx):
 def test_23_trust_set(an, arb, ctx):
     """Acki Nacki trusts the new bridge for 421614, and the bridge holds the genesis anchor."""
     got = an("trust", ctx["bridge"])
+    assert got.get("TOKEN_REGISTERED") == "true", "AN USDC token lane is not registered"
     assert got.get("TRUSTED") == "true", f"isTrustedL1Bridge({ARB_CHAIN}, bridge) is false after setTrustedL1Bridge"
     g = ctx["genesis"]
     assert arb.call(ctx["bridge"], "storedBkSetCommitment()") == int(g["GENESIS_BK_SET_COMMITMENT"], 16)

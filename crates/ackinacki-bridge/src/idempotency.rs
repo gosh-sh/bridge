@@ -86,6 +86,11 @@ pub enum Status {
     Failed,
 }
 
+/// Currency used by records written before token selection was available.
+fn usdc_currency_id() -> u32 {
+    3
+}
+
 /// What [`reserve`] does with a record it found, as three cases that
 /// cover every [`Status`].
 ///
@@ -191,6 +196,8 @@ fn terminal_refusal(record: &Record, remedy: &str) -> CliError {
 /// is what keeps that true.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default = "usdc_currency_id")]
+    pub token_id: u32,
     pub key: String,
     pub status: Status,
     pub from_extended: String,
@@ -244,6 +251,26 @@ pub fn key(from: &FromAddress, to: &ToAddress, amount: &UsdcAmount) -> String {
     hex::encode(h.finalize())
 }
 
+/// Currency is part of a withdrawal identity. Preserve every existing USDC
+/// key so an upgrade cannot bypass its recorded burn or in-flight lock.
+pub fn key_for_token(
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    token_id: u32,
+) -> String {
+    let legacy = key(from, to, amount);
+    if token_id == 3 {
+        return legacy;
+    }
+    let mut h = Sha256::new();
+    h.update(b"bridge-withdrawal-currency|");
+    h.update(token_id.to_be_bytes());
+    h.update(b"|");
+    h.update(legacy.as_bytes());
+    hex::encode(h.finalize())
+}
+
 /// Try to reserve the record. Behavior:
 /// - No prior record → fresh `Status::Reserved` written and returned.
 /// - Prior `Status::Failed` with `an_tx_hash` present → resume: return the
@@ -291,9 +318,22 @@ pub fn reserve(
     amount: &UsdcAmount,
     allow_retry: bool,
 ) -> CliResult<(Record, Reservation)> {
+    reserve_for_token(state_dir, from, to, amount, 3, allow_retry)
+}
+
+/// Atomically reserve the selected currency without touching another currency
+/// record.
+pub fn reserve_for_token(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    token_id: u32,
+    allow_retry: bool,
+) -> CliResult<(Record, Reservation)> {
     ensure_state_dir(state_dir)?;
 
-    let key = key(from, to, amount);
+    let key = key_for_token(from, to, amount, token_id);
     let path = record_path(state_dir, &key);
 
     // First-writer-wins, publishing the name and the contents together.
@@ -318,7 +358,8 @@ pub fn reserve(
     // rewrites this file on every stage transition — and deletes itself on
     // every error path, so a failure here can no longer leave a partial
     // record behind at all.
-    let record = fresh_reserved_record(&key, from, to, amount);
+    let mut record = fresh_reserved_record(&key, from, to, amount);
+    record.token_id = token_id;
     // Whether the record reached its name. Everything after the
     // `hard_link` can still fail, and the two sides of that need different
     // sentences: before it, nothing exists and nothing was left behind;
@@ -416,6 +457,7 @@ pub fn reserve(
         ),
         source: None,
     })?;
+    check_record_currency(&prior, token_id)?;
     what_a_found_record_earns(&prior, allow_retry)?;
     Ok((prior, Reservation::Found))
 }
@@ -650,7 +692,33 @@ pub fn peek(
     to: &ToAddress,
     amount: &UsdcAmount,
 ) -> CliResult<Option<Record>> {
-    let path = record_path(state_dir, &key(from, to, amount));
+    peek_for_token(state_dir, from, to, amount, 3)
+}
+
+/// Refuse a record whose stored currency disagrees with the requested identity.
+fn check_record_currency(record: &Record, token_id: u32) -> CliResult<()> {
+    if record.token_id != token_id {
+        return Err(CliError::BurnOutcomeUnknown {
+            reason: format!(
+                "withdrawal record {} names ECC[{}], expected ECC[{token_id}]; no message was \
+                 sent by this run. Reconcile the record before retrying",
+                record.key, record.token_id
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+/// Read the selected currency record without creating or changing one.
+pub fn peek_for_token(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    token_id: u32,
+) -> CliResult<Option<Record>> {
+    let path = record_path(state_dir, &key_for_token(from, to, amount, token_id));
     // `metadata`, not `exists()`. `Path::exists()` answers a `bool` and
     // folds EVERY `stat` failure into `false`: a state directory this
     // process cannot traverse — mode 0600, a different owner, a
@@ -664,7 +732,11 @@ pub fn peek(
     // run could not find out, which is not the same answer and must not
     // be reported as one.
     match std::fs::metadata(&path) {
-        Ok(_) => read_record(&path).map(Some),
+        Ok(_) => {
+            let record = read_record(&path)?;
+            check_record_currency(&record, token_id)?;
+            Ok(Some(record))
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(CliError::Preflight {
             reason: format!(
@@ -1747,6 +1819,7 @@ fn fresh_reserved_record(
     amount: &UsdcAmount,
 ) -> Record {
     Record {
+        token_id: 3,
         key: key.to_string(),
         status: Status::Reserved,
         from_extended: from.extended(),
@@ -3314,6 +3387,53 @@ mod tests {
             address: Address::from_str("0x841709B6842233d8474aeA1d773e8d0F7c7c0B9f").unwrap(),
             chain_id: 11_155_111,
         }
+    }
+
+    #[test]
+    fn currency_keys_preserve_usdc_records_and_separate_other_tokens() {
+        let from = sample_from();
+        let to = sample_to();
+        let amount = UsdcAmount(1_000_000);
+        let old = key(&from, &to, &amount);
+        assert_eq!(key_for_token(&from, &to, &amount, 3), old);
+        let second = key_for_token(&from, &to, &amount, 4);
+        assert_ne!(second, old);
+        assert_ne!(second, key_for_token(&from, &to, &amount, 5));
+        assert_eq!(second, key_for_token(&from, &to, &amount, 4));
+        assert_ne!(second, key_for_token(&from, &to, &UsdcAmount(2_000_000), 4));
+    }
+
+    #[test]
+    fn reserving_another_currency_does_not_resume_the_usdc_record() {
+        let dir = TempDir::new().unwrap();
+        let from = sample_from();
+        let to = sample_to();
+        let amount = UsdcAmount(500_000);
+        let (usdc, how) = reserve(dir.path(), &from, &to, &amount, false).unwrap();
+        assert_eq!(how, Reservation::Created);
+        assert!(peek_for_token(dir.path(), &from, &to, &amount, 4)
+            .unwrap()
+            .is_none());
+        let (other, how) = reserve_for_token(dir.path(), &from, &to, &amount, 4, false).unwrap();
+        assert_eq!(how, Reservation::Created);
+        assert_ne!(usdc.key, other.key);
+        assert_eq!(
+            peek(dir.path(), &from, &to, &amount).unwrap().unwrap().key,
+            usdc.key
+        );
+        assert_eq!(
+            peek_for_token(dir.path(), &from, &to, &amount, 4)
+                .unwrap()
+                .unwrap()
+                .key,
+            other.key
+        );
+        assert_eq!(
+            reserve_for_token(dir.path(), &from, &to, &amount, 4, false)
+                .unwrap()
+                .1,
+            Reservation::Found
+        );
     }
 
     #[test]

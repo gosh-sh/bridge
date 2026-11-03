@@ -556,6 +556,7 @@ mod tests {
             contract: alloy_primitives::U256::from(0xcdfdu64),
             chain_id: 1,
             amount: 1,
+            token_id: 3,
             account: [0xa3; 32],
         }
     }

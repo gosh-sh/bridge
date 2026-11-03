@@ -62,6 +62,8 @@ const MULTISIG_ABI_JSON: &str = include_str!("../abi/UpdateCustodianMultisigWall
 /// balance for the record-keeping.
 #[derive(Debug, Clone)]
 pub struct PreflightReport {
+    pub token_id: u32,
+    pub evm_token: Option<Address>,
     pub from: FromAddress,
     pub to: ToAddress,
     pub amount: UsdcAmount,
@@ -151,6 +153,30 @@ pub async fn run(
     gql_endpoint: &str,
     usdc_bridge_account_id_hex: &str,
     balance_check: BalanceCheck,
+) -> CliResult<PreflightReport> {
+    run_for_token(
+        from,
+        from_keys,
+        to,
+        amount,
+        gql_endpoint,
+        usdc_bridge_account_id_hex,
+        balance_check,
+        BRIDGED_USDC_TOKEN_ID,
+    )
+    .await
+}
+
+/// Validate the source account and AN inventory for the selected ECC currency.
+pub async fn run_for_token(
+    from: &FromAddress,
+    from_keys: &Path,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    gql_endpoint: &str,
+    usdc_bridge_account_id_hex: &str,
+    balance_check: BalanceCheck,
+    token_id: u32,
 ) -> CliResult<PreflightReport> {
     // 1. File perms. Nothing ran this before us; see the list above.
     args::check_key_file_perms(from_keys)?;
@@ -272,9 +298,37 @@ pub async fn run(
     //     and stage 4 waits for an event that never comes. Asked only while
     //     the burn is still to be sent: once it is on the wire the pause can
     //     no longer stop it, and a resume should not gain a way to fail.
+    let mut token_config = None;
     if matches!(balance_check, BalanceCheck::Require) {
         let bridge_boc =
             fetch_account_boc(&context, &usdc_bridge_dapp_id, usdc_bridge_account_id_hex).await?;
+        let version = call_bridge_getter(
+            &context,
+            &usdc_bridge_legacy,
+            &bridge_boc,
+            "getVersion",
+            json!({}),
+        )
+        .await?;
+        let version = version["value0"]
+            .as_str()
+            .and_then(crate::deposit::an_preflight::BridgeVersion::parse)
+            .ok_or_else(|| CliError::Preflight {
+                reason: "AN bridge returned an invalid version".into(),
+                source: None,
+            })?;
+        if token_id != BRIDGED_USDC_TOKEN_ID
+            || version >= crate::deposit::an_preflight::BridgeVersion(1, 16, 0)
+        {
+            token_config = call_get_token_withdrawal_limits(
+                &context,
+                &usdc_bridge_legacy,
+                &bridge_boc,
+                to.chain_id,
+                token_id,
+            )
+            .await?;
+        }
         if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -287,7 +341,8 @@ pub async fn run(
             });
         }
         let (minted, burned) =
-            call_get_total_bridged(&context, &usdc_bridge_legacy, &bridge_boc).await?;
+            call_get_total_bridged_for_token(&context, &usdc_bridge_legacy, &bridge_boc, token_id)
+                .await?;
         // Match initiateWithdrawal's refund when burned already exceeds minted
         // or this amount would take it there. The first arm avoids
         // subtracting when burned > minted.
@@ -304,9 +359,14 @@ pub async fn run(
                 source: None,
             });
         }
-        let (max_transfer, _, outstanding) =
-            call_get_deposit_limits(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id)
-                .await?;
+        let (max_transfer, outstanding) = if let Some((cap, outstanding, _)) = token_config {
+            (cap, outstanding)
+        } else {
+            let (cap, _, outstanding) =
+                call_get_deposit_limits(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id)
+                    .await?;
+            (cap, outstanding)
+        };
         if amount.0 > max_transfer || amount.0 > outstanding {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -325,7 +385,7 @@ pub async fn run(
     // The balance is ALWAYS fetched and always reported — it is in the
     // `PreflightReport` and in the log line, and an operator reconciling a
     // resumed run wants to see it. Only the refusal is conditional.
-    let ecc3_balance = extract_ecc_balance(&account, 3)?;
+    let ecc3_balance = extract_ecc_balance(&account, token_id)?;
     match balance_check {
         BalanceCheck::Require if ecc3_balance < amount.0 => {
             return Err(CliError::Preflight {
@@ -353,6 +413,8 @@ pub async fn run(
     }
 
     Ok(PreflightReport {
+        evm_token: token_config.map(|(_, _, token)| token),
+        token_id,
         from: from.clone(),
         to: *to,
         amount: *amount,
@@ -580,7 +642,7 @@ const BRIDGED_USDC_TOKEN_ID: u32 = 3;
 
 /// Execute an ABI getter against the fetched bridge account, without a network
 /// call.
-async fn call_bridge_getter(
+pub(crate) async fn call_bridge_getter(
     ctx: &Arc<ClientContext>,
     bridge_legacy: &str,
     bridge_boc: &str,
@@ -644,12 +706,22 @@ async fn call_get_total_bridged(
     bridge_legacy: &str,
     bridge_boc: &str,
 ) -> CliResult<(u128, u128)> {
+    call_get_total_bridged_for_token(ctx, bridge_legacy, bridge_boc, BRIDGED_USDC_TOKEN_ID).await
+}
+
+/// Read bridged mint and burn totals for the selected ECC currency.
+async fn call_get_total_bridged_for_token(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+    token_id: u32,
+) -> CliResult<(u128, u128)> {
     let output = call_bridge_getter(
         ctx,
         bridge_legacy,
         bridge_boc,
         "getTotalBridged",
-        json!({ "tokenId": BRIDGED_USDC_TOKEN_ID }),
+        json!({ "tokenId": token_id }),
     )
     .await?;
     let minted = json_u128(&output["minted"]).ok_or_else(|| CliError::Preflight {
@@ -695,6 +767,53 @@ async fn call_get_deposit_limits(
         field("maxTvl")?,
         field("outstanding")?,
     ))
+}
+
+/// Read the immutable token address, payout ceiling and destination-chain
+/// inventory.
+async fn call_get_token_withdrawal_limits(
+    ctx: &Arc<ClientContext>,
+    bridge: &str,
+    boc: &str,
+    chain_id: u64,
+    token_id: u32,
+) -> CliResult<Option<(u128, u128, Address)>> {
+    let out = call_bridge_getter(
+        ctx,
+        bridge,
+        boc,
+        "getTokenWithdrawalConfig",
+        json!({"chainId": chain_id.to_string(), "tokenId": token_id}),
+    )
+    .await?;
+    if token_id == BRIDGED_USDC_TOKEN_ID && out["listed"].as_bool() == Some(false) {
+        return Ok(None);
+    }
+    if out["listed"].as_bool() != Some(true) {
+        return Err(CliError::Preflight {
+            reason: format!("ECC[{token_id}] is not registered for AN chain {chain_id}"),
+            source: None,
+        });
+    }
+    let field = |name: &str| {
+        json_u128(&out[name]).ok_or_else(|| CliError::Preflight {
+            reason: format!("getTokenWithdrawalConfig: invalid {name}: {out}"),
+            source: None,
+        })
+    };
+    let token = out["evmToken"]
+        .as_str()
+        .and_then(|s| s.parse::<U256>().ok())
+        .filter(|n| !n.is_zero() && n.bit_len() <= 160)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!("getTokenWithdrawalConfig: invalid evmToken: {out}"),
+            source: None,
+        })?;
+    Ok(Some((
+        field("maxWithdrawal")?,
+        field("outstanding")?,
+        Address::from_slice(&token.to_be_bytes::<32>()[12..]),
+    )))
 }
 
 /// Parse a JSON number or decimal string as `u128` (`getTotalBridged` answers
@@ -2333,6 +2452,30 @@ pub fn parse_eth_signer(raw: &str) -> CliResult<PrivateKeySigner> {
         })
 }
 
+/// Read immutable token precision and payout limits before parsing a non-USDC
+/// amount.
+pub async fn withdrawal_asset(
+    rpc_url: &str,
+    bridge: Address,
+    chain_id: u64,
+    token_id: u32,
+) -> CliResult<bridge_relayer_daemon::bridge::TokenPayoutInfo> {
+    check_destination_chain(rpc_url, chain_id).await?;
+    let url = rpc_url.parse().map_err(|e| CliError::Preflight {
+        reason: format!("invalid RPC URL: {e}"),
+        source: None,
+    })?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    require_code(&provider, bridge, "--bridge-address").await?;
+    EthBridgeClient::new(bridge, provider)
+        .token_payout_info(token_id)
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!("cannot read token {token_id} from destination bridge: {e}"),
+            source: None,
+        })
+}
+
 /// Preflight the destination chain: the RPC answers, and the chain it
 /// reports is the chain the operator named in `--to-chain`.
 ///
@@ -2500,6 +2643,29 @@ pub async fn check_bridge_deploy(
     verifiers_dir: Option<&Path>,
     expected_identity: (U256, U256),
     amount: &UsdcAmount,
+) -> CliResult<()> {
+    check_bridge_deploy_for_token(
+        rpc_url,
+        bridge,
+        verifiers_dir,
+        expected_identity,
+        amount,
+        3,
+        None,
+    )
+    .await
+}
+
+/// Check the verifier stack, identity and selected token payout lane before
+/// burning.
+pub async fn check_bridge_deploy_for_token(
+    rpc_url: &str,
+    bridge: Address,
+    verifiers_dir: Option<&Path>,
+    expected_identity: (U256, U256),
+    amount: &UsdcAmount,
+    token_id: u32,
+    expected_token: Option<Address>,
 ) -> CliResult<()> {
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
@@ -2684,17 +2850,60 @@ pub async fn check_bridge_deploy(
         });
     }
 
-    // Payout limits remain valid when the owner throttles new deposits.
-    let max_transfer = client
-        .usdc_payout_cap()
-        .await
-        .map_err(|e| CliError::Preflight {
-            reason: format!(
-                "--bridge-address {bridge}: cannot read the USDC payout cap \
-                 (usdcTokenId()/maxWithdrawalAmount()): {e}"
-            ),
-            source: Some(anyhow::Error::new(e)),
-        })?;
+    let (max_transfer, treasury) = if token_id == 3 {
+        if let Some(expected_token) = expected_token {
+            let info =
+                client
+                    .token_payout_info(token_id)
+                    .await
+                    .map_err(|e| CliError::Preflight {
+                        reason: format!("cannot read registered USDC token: {e}"),
+                        source: None,
+                    })?;
+            if info.token != expected_token {
+                return Err(CliError::Preflight {
+                    reason: "EVM and AN assign ECC[3] to different tokens".into(),
+                    source: None,
+                });
+            }
+        }
+        (
+            client
+                .usdc_payout_cap()
+                .await
+                .map_err(|e| CliError::Preflight {
+                    reason: format!(
+                        "--bridge-address {bridge}: cannot read the USDC payout cap \
+                         (usdcTokenId()/maxWithdrawalAmount()): {e}"
+                    ),
+                    source: None,
+                })?,
+            client
+                .treasury_balance()
+                .await
+                .map_err(|e| CliError::Preflight {
+                    reason: format!("--bridge-address {bridge}: treasuryBalance() failed: {e}"),
+                    source: None,
+                })?,
+        )
+    } else {
+        let info = client
+            .token_payout_info(token_id)
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!("cannot read payout registry for ECC[{token_id}]: {e}"),
+                source: None,
+            })?;
+        if let Some(expected_token) = expected_token {
+            if info.token != expected_token {
+                return Err(CliError::Preflight {
+                    reason: format!("EVM and AN assign ECC[{token_id}] to different tokens"),
+                    source: None,
+                });
+            }
+        }
+        (info.max_withdrawal, info.liabilities)
+    };
     if U256::from(amount.0) > max_transfer {
         return Err(CliError::Preflight {
             reason: format!(
@@ -2705,15 +2914,6 @@ pub async fn check_bridge_deploy(
         });
     }
 
-    // 5. Treasury preflight. See the note above: this refuses early, it does not
-    //    promise.
-    let treasury = client
-        .treasury_balance()
-        .await
-        .map_err(|e| CliError::Preflight {
-            reason: format!("--bridge-address {bridge}: treasuryBalance() failed: {e}"),
-            source: Some(anyhow::Error::new(e)),
-        })?;
     let needed = U256::from(amount.0);
     if treasury < needed {
         return Err(CliError::Preflight {
@@ -5063,6 +5263,45 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_token_is_matched_to_the_an_registry_only_before_the_burn() {
+        let listing = format!(
+            "0x{}{:064x}{:064x}{:064x}{:064x}{:064x}",
+            &word_addr(5)[2..],
+            18u64,
+            1u64,
+            1_000_000u64,
+            u64::from(u32::MAX),
+            1_000_000u64,
+        );
+        for (expected, refused) in [
+            (Some(Address::repeat_byte(6)), true),
+            (Some(Address::repeat_byte(5)), false),
+            (None, false),
+        ] {
+            let url = mock_rpc_code_for(
+                &full_walk_code(),
+                full_walk(&[(SEL_TOKEN_INFO, listing.clone())]),
+            )
+            .await;
+            let result = check_bridge_deploy_for_token(
+                &url,
+                Address::repeat_byte(1),
+                None,
+                (U256::ZERO, U256::ZERO),
+                &UsdcAmount(1_000_000),
+                4,
+                expected,
+            )
+            .await;
+            match result {
+                Err(e) if refused => assert!(e.to_string().contains("different tokens"), "{e}"),
+                Ok(()) if !refused => {},
+                other => panic!("expected token {expected:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn wrong_usdc_currency_id_is_refused_before_the_burn() {
         let url = mock_rpc_code_for(
             &full_walk_code(),
@@ -5207,6 +5446,8 @@ pub(crate) mod tests {
         let dapp_id = [0u8; 32];
         let account_id = [0x1au8; 32];
         PreflightReport {
+            evm_token: None,
+            token_id: 3,
             from: sample_from(),
             to: sample_to(),
             amount: UsdcAmount(1_000_000),

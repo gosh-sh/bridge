@@ -11,7 +11,8 @@
 				{"name":"dappId","type":"uint256"},
 				{"name":"chainId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"anAccount","type":"uint256"}
+				{"name":"anAccount","type":"uint256"},
+				{"name":"evmToken","type":"uint256"}
 			],
 			"outputs": [
 			]

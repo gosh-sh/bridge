@@ -1825,7 +1825,11 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
+        ]);
+        an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
+            serde_json::json!({"listed": true, "tokenId": "3", "depositsEnabled": true,
+                "maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
         ]);
         an.getter(W_BRIDGE_ACC, "getDepositLimits", vec![
             serde_json::json!({"maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
@@ -1957,7 +1961,7 @@ impl World {
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.15.0", "value1": "eccUSDCBridge" }),
+            serde_json::json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),

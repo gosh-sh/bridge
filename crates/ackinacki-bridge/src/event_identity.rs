@@ -34,6 +34,26 @@ pub(crate) fn check_captured_event(
     an_tx: &str,
     record: Option<&Path>,
 ) -> CliResult<()> {
+    check_captured_event_for_token(
+        event_boc_b64,
+        from,
+        to,
+        amount,
+        crate::burn::USDC_ECC_ID,
+        an_tx,
+        record,
+    )
+}
+
+pub(crate) fn check_captured_event_for_token(
+    event_boc_b64: &str,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    token_id: u32,
+    an_tx: &str,
+    record: Option<&Path>,
+) -> CliResult<()> {
     let event = bridge_event_witness::decode_event_boc_base64(event_boc_b64).map_err(|e| {
         CliError::ProofFailed {
             reason: format!(
@@ -79,11 +99,10 @@ pub(crate) fn check_captured_event(
             to.chain_id,
         ));
     }
-    if event.token_id != crate::burn::USDC_ECC_ID {
+    if event.token_id != token_id {
         differ.push(format!(
-            "token: the event's ECC[{}], this withdrawal's ECC[{}] (USDC)",
-            event.token_id,
-            crate::burn::USDC_ECC_ID
+            "token: the event's ECC[{}], this withdrawal's ECC[{}]",
+            event.token_id, token_id
         ));
     }
     let ours = hex::decode(&from.account_id_hex).ok();
@@ -256,6 +275,32 @@ mod tests {
     }
 
     #[test]
+    fn a_usdc_event_cannot_resume_a_selected_second_currency() {
+        check_captured_event_for_token(
+            EVENT_1_000000,
+            &from(),
+            &to(),
+            &amount("1.000000"),
+            3,
+            AN_TX,
+            None,
+        )
+        .unwrap();
+        let error = check_captured_event_for_token(
+            EVENT_1_000000,
+            &from(),
+            &to(),
+            &amount("1.000000"),
+            4,
+            AN_TX,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code().as_i32(), 10);
+        assert!(error.to_string().contains("ECC[4]"), "{error}");
+    }
+
+    #[test]
     fn a_token_other_than_usdc_is_refused() {
         let msg = refusal(EVENT_TOKEN_2, &from(), &to(), "1.000000");
         assert!(msg.contains("token"), "{msg}");
@@ -292,7 +337,7 @@ mod tests {
             include_str!("orchestrator.rs"),
         );
         let check = src
-            .find("event_identity::check_captured_event(")
+            .find("event_identity::check_captured_event_for_token(")
             .expect("the check is wired");
         let captured = src.find("Status::Captured").expect("the capture write");
         assert!(

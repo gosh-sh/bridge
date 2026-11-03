@@ -84,6 +84,7 @@ pub struct WithdrawSuccess {
 #[derive(Debug, Clone, serde::Serialize)]
 /// What stage 3 did, as the JSON envelope reports it.
 pub struct BurnSummary {
+    pub token_id: u32,
     pub an_tx: String,
     pub bounce: bool,
     pub amount: String,
@@ -215,7 +216,26 @@ pub async fn run(
     // ---- Arg validation (parses raw strings into typed forms) ----
     let from = args::parse_from(&args.from)?;
     let to = args::parse_to(&args.to, args.to_chain)?;
-    let amount = args::parse_amount(&args.amount)?;
+    let asset = if args.token_id == 3 {
+        None
+    } else {
+        Some(
+            preflight::withdrawal_asset(
+                &args.rpc_url,
+                args.bridge_address,
+                to.chain_id,
+                args.token_id,
+            )
+            .await
+            .map_err(|e| refusal_before_currency_identity(e, args.token_id))?,
+        )
+    };
+    let decimals = asset.map(|info| info.decimals).unwrap_or(6);
+    let amount = if let Some(asset) = asset {
+        args::parse_token_amount(&args.amount, asset.decimals)?
+    } else {
+        args::parse_amount(&args.amount)?
+    };
 
     // Read the prior record BEFORE preflight. Read-only: `peek` never
     // creates anything, so this cannot poison a run that is about to be
@@ -295,7 +315,7 @@ pub async fn run(
     // to be refused; and a dry run's whole job is to say what a real run
     // would do, which it cannot do without looking.
     let prior = match &where_to_look {
-        Some(dir) => match idempotency::peek(dir, &from, &to, &amount)
+        Some(dir) => match idempotency::peek_for_token(dir, &from, &to, &amount, args.token_id)
             .map_err(refusal_reading_a_record_that_exists)?
         {
             Some(record) => WhatStageOneFound::ARecord(record),
@@ -420,7 +440,7 @@ pub async fn run(
 
     // ---- 1. Preflight ----
     info!("stage 1/6: preflight");
-    let preflight = preflight::run(
+    let preflight = preflight::run_for_token(
         &from,
         &args.from_keys,
         &to,
@@ -428,6 +448,7 @@ pub async fn run(
         &args.gql_endpoint,
         &args.usdc_bridge_account,
         preflight::BalanceCheck::from_burn_sent(burn_already_sent),
+        args.token_id,
     )
     .await
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
@@ -459,7 +480,7 @@ pub async fn run(
         &preflight.bridge_dapp_id,
         &preflight.bridge_account_id,
     );
-    crate::preflight::check_bridge_deploy(
+    crate::preflight::check_bridge_deploy_for_token(
         &args.rpc_url,
         args.bridge_address,
         // Read from `args`, NOT from `plumbing`: `plumbing` is `None` for
@@ -470,6 +491,8 @@ pub async fn run(
         args.verifiers_dir.as_deref(),
         expected_identity,
         &amount,
+        args.token_id,
+        preflight.evm_token,
     )
     .await
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
@@ -623,12 +646,13 @@ pub async fn run(
 
             // Point of no return starts on the next line.
             info!("stage 2/6: idempotency reserve");
-            let (r, decision, held) = reserve_and_take_the_lock(
+            let (r, decision, held) = reserve_and_take_the_lock_for_token(
                 &state_dir,
                 &from,
                 &to,
                 &amount,
                 args.allow_retry,
+                args.token_id,
                 &mut _withdrawal_lock,
             )?;
             // `held` is the seam's OWN hold, handed back rather than
@@ -686,7 +710,7 @@ pub async fn run(
                     // temporary cannot.
                     let permit = idempotency::BurnPermit::issue(
                         &state_dir,
-                        &idempotency::key(&from, &to, &amount),
+                        &idempotency::key_for_token(&from, &to, &amount, args.token_id),
                         &held,
                     )?;
                     info!(
@@ -775,9 +799,10 @@ pub async fn run(
         info!("dry-run: skipping burn / capture / prove / submit");
         return Ok(WithdrawSuccess {
             burn: BurnSummary {
+                token_id: args.token_id,
                 an_tx: "<dry-run>".into(),
                 bounce: true,
-                amount: amount.display(),
+                amount: amount.display_with_decimals(decimals),
             },
             capture: CaptureSummary {
                 withdrawal_msg_id: "<dry-run>".into(),
@@ -893,11 +918,12 @@ pub async fn run(
     // The event has to be THIS withdrawal's before anything is proved from
     // it, and before the record says it was captured: on a resume the hash
     // came off the record, and the record can be wrong. See `event_identity`.
-    crate::event_identity::check_captured_event(
+    crate::event_identity::check_captured_event_for_token(
         &captured.event_boc_b64,
         &from,
         &to,
         &amount,
+        args.token_id,
         &an_tx_hash,
         record
             .as_ref()
@@ -1343,9 +1369,10 @@ pub async fn run(
 
     Ok(WithdrawSuccess {
         burn: BurnSummary {
+            token_id: args.token_id,
             an_tx: an_tx_hash,
             bounce,
-            amount: amount.display(),
+            amount: amount.display_with_decimals(decimals),
         },
         capture: CaptureSummary {
             withdrawal_msg_id: e2e.captured.message_id,
@@ -1383,6 +1410,19 @@ impl ResumeNote {
              at stage 4/6 (capture), then waits for coverage and proves again.",
             record.display()
         ))
+    }
+}
+
+/// A registry lookup failed before its precision could identify any prior
+/// record.
+fn refusal_before_currency_identity(error: CliError, token_id: u32) -> CliError {
+    CliError::BurnOutcomeUnknown {
+        reason: format!(
+            "cannot establish precision for ECC[{token_id}]: {error}. No message was sent by this \
+             run; prior records could not yet be identified. Restore the RPC/registry before \
+             retrying"
+        ),
+        source: None,
     }
 }
 
@@ -1538,7 +1578,21 @@ fn reserve_and_take_the_lock<'a>(
     allow_retry: bool,
     slot: &'a mut idempotency::LockSlot,
 ) -> CliResult<(idempotency::Record, BurnDecision, idempotency::LockHold<'a>)> {
-    let (record, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)?;
+    reserve_and_take_the_lock_for_token(state_dir, from, to, amount, allow_retry, 3, slot)
+}
+
+/// Reserve the selected currency and keep its lock borrowed for the whole run.
+fn reserve_and_take_the_lock_for_token<'a>(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+    token_id: u32,
+    slot: &'a mut idempotency::LockSlot,
+) -> CliResult<(idempotency::Record, BurnDecision, idempotency::LockHold<'a>)> {
+    let (record, decision, lock) =
+        reserve_and_decide_for_token(state_dir, from, to, amount, allow_retry, token_id)?;
     Ok((record, decision, slot.install(lock)))
 }
 
@@ -1619,8 +1673,9 @@ fn resume_recorded_burn<'a>(
     // contended one, and `reserve` itself. Each of them says "nothing was
     // sent" about a run whose entry condition is a burn already on the
     // wire.
-    let (r, decision, lock) = reserve_and_decide(state_dir, from, to, amount, allow_retry)
-        .map_err(|e| resumed_refusal(e, observed))?;
+    let (r, decision, lock) =
+        reserve_and_decide_for_token(state_dir, from, to, amount, allow_retry, observed.token_id)
+            .map_err(|e| resumed_refusal(e, observed))?;
     let held = slot.install(lock);
     // Held for the rest of THIS function too, not only by the caller
     // once it returns. Everything below — the restoring write, the
@@ -1701,8 +1756,15 @@ fn resume_recorded_burn<'a>(
             // which is correct at its other call site and false at this
             // one. See `resumed_refusal` for what that costs and what is
             // remapped.
-            let (reserved, _) = idempotency::reserve(state_dir, from, to, amount, allow_retry)
-                .map_err(|e| resumed_refusal(e, observed))?;
+            let (reserved, _) = idempotency::reserve_for_token(
+                state_dir,
+                from,
+                to,
+                amount,
+                observed.token_id,
+                allow_retry,
+            )
+            .map_err(|e| resumed_refusal(e, observed))?;
             let Some(an_tx) = reserved.an_tx_hash.clone() else {
                 // Unreachable by construction — the record just written
                 // came from `peek`, so `read_record` has already accepted
@@ -2135,6 +2197,18 @@ fn reserve_and_decide(
     amount: &UsdcAmount,
     allow_retry: bool,
 ) -> CliResult<(idempotency::Record, BurnDecision, idempotency::AcquiredLock)> {
+    reserve_and_decide_for_token(state_dir, from, to, amount, allow_retry, 3)
+}
+
+/// Acquire the selected currency lock before atomically reserving its identity.
+fn reserve_and_decide_for_token(
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+    token_id: u32,
+) -> CliResult<(idempotency::Record, BurnDecision, idempotency::AcquiredLock)> {
     // The lock comes FIRST — before the reservation, long before the send.
     //
     // A lock TAKEN between the reserve and `burn::send` would be a new way
@@ -2149,7 +2223,7 @@ fn reserve_and_decide(
     // right now, or did a run die and leave this behind?" The kernel drops
     // it when the holder exits, so that answer is a fact rather than a
     // guess about wall-clock age.
-    let key = idempotency::key(from, to, amount);
+    let key = idempotency::key_for_token(from, to, amount, token_id);
 
     // Before the lock, and propagated. Preparing the state directory and
     // taking the lock are different questions, and letting the first
@@ -2158,7 +2232,15 @@ fn reserve_and_decide(
     idempotency::ensure_state_dir(state_dir)?;
 
     let attempt = idempotency::WithdrawalLock::try_acquire(state_dir, &key)?;
-    reserve_and_decide_holding(attempt, state_dir, from, to, amount, allow_retry)
+    reserve_and_decide_holding_for_token(
+        attempt,
+        state_dir,
+        from,
+        to,
+        amount,
+        allow_retry,
+        token_id,
+    )
 }
 
 /// The half of [`reserve_and_decide`] that runs once the lock attempt has
@@ -2178,7 +2260,20 @@ fn reserve_and_decide_holding(
     amount: &UsdcAmount,
     allow_retry: bool,
 ) -> CliResult<(idempotency::Record, BurnDecision, idempotency::AcquiredLock)> {
-    let key = idempotency::key(from, to, amount);
+    reserve_and_decide_holding_for_token(attempt, state_dir, from, to, amount, allow_retry, 3)
+}
+
+/// Apply the lock verdict and reserve the matching currency record.
+fn reserve_and_decide_holding_for_token(
+    attempt: idempotency::LockAttempt,
+    state_dir: &Path,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    allow_retry: bool,
+    token_id: u32,
+) -> CliResult<(idempotency::Record, BurnDecision, idempotency::AcquiredLock)> {
+    let key = idempotency::key_for_token(from, to, amount, token_id);
 
     // Asked BEFORE the attempt is taken apart, and asked of the attempt
     // rather than restated here.
@@ -2207,7 +2302,7 @@ fn reserve_and_decide_holding(
             // live process is holding, which is the one moment a burn is
             // most likely to be in flight. The record is unreadable
             // rather than absent, which is exit 10's third population.
-            let prior = idempotency::peek(state_dir, from, to, amount)
+            let prior = idempotency::peek_for_token(state_dir, from, to, amount, token_id)
                 .map_err(refusal_reading_a_record_that_exists)?;
             return Err(idempotency::a_reservation_that_cannot_speak_for_itself(
                 prior
@@ -2246,7 +2341,8 @@ fn reserve_and_decide_holding(
         },
     };
 
-    let (r, how) = idempotency::reserve(state_dir, from, to, amount, allow_retry)?;
+    let (r, how) =
+        idempotency::reserve_for_token(state_dir, from, to, amount, token_id, allow_retry)?;
     info!(key = %r.key, ?how, "reserved");
     // The record AND which side of the atomic publish it came from — NOT
     // the `peek` taken back in stage 1. See [`decide_burn`]: those two
@@ -2442,17 +2538,27 @@ fn confirm_before_burn(
     // A redirect is NOT that case: `2>file` writes fine, and the prompt
     // is in the file. Only a write that actually fails gets refused.
     let prompt = format!(
-        "\nAbout to withdraw USDC:\n\x20 from      : {from}\n\x20 to        : 0x{to_hex} on \
-         {chain_name} (chain {chain_id})\n\x20 amount    : {amount_display} USDC\n\x20 bridge    \
-         : {bridge}\n\x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\nThis will:\n\x20 1. \
-         broadcast a multisig sendTransaction burning {amount_display} USDC on Acki Nacki\n\x20 \
-         2. wait for the covering anchor bundle to land on Sepolia\n\x20 3. produce a Circuit-4 \
-         SHPLONK proof\n\x20 4. submit withdrawByProof (spends ETH gas)\n\nThe AN burn is \
-         irreversible once broadcast. Pass --yes to skip this prompt.\nProceed? [y/N]: ",
+        "\nAbout to withdraw {currency}:\n\x20 from      : {from}\n\x20 to        : 0x{to_hex} on \
+         {chain_name} (chain {chain_id})\n\x20 amount    : {amount_display} {currency}\n\x20 \
+         bridge    : {bridge}\n\x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\nThis \
+         will:\n\x20 1. broadcast a multisig sendTransaction burning {amount_display} {currency} \
+         on Acki Nacki\n\x20 2. wait for the covering anchor bundle to land on Sepolia\n\x20 3. \
+         produce a Circuit-4 SHPLONK proof\n\x20 4. submit withdrawByProof (spends ETH \
+         gas)\n\nThe AN burn is irreversible once broadcast. Pass --yes to skip this \
+         prompt.\nProceed? [y/N]: ",
         from = from.extended(),
         to_hex = hex::encode(to.address.as_slice()),
         chain_id = to.chain_id,
-        amount_display = amount.display(),
+        amount_display = if args.token_id == 3 {
+            amount.display()
+        } else {
+            args.amount.clone()
+        },
+        currency = if args.token_id == 3 {
+            "USDC".to_owned()
+        } else {
+            format!("ECC[{}]", args.token_id)
+        },
         bridge = args.bridge_address,
     );
 
@@ -2511,6 +2617,7 @@ mod tests {
     /// A reserved record, with `an_tx_hash` as the only variable.
     fn reserved(an_tx_hash: Option<&str>) -> idempotency::Record {
         idempotency::Record {
+            token_id: 3,
             key: "k".into(),
             status: Status::Reserved,
             from_extended: "ab::cd".into(),
@@ -2967,6 +3074,21 @@ mod tests {
     }
 
     #[test]
+    fn a_token_precision_failure_does_not_claim_the_withdrawal_is_untouched() {
+        let error = refusal_before_currency_identity(
+            CliError::Preflight {
+                reason: "RPC unavailable".into(),
+                source: None,
+            },
+            4,
+        );
+        assert_eq!(error.exit_code().as_i32(), 10);
+        assert!(error
+            .to_string()
+            .contains("prior records could not yet be identified"));
+    }
+
+    #[test]
     fn everything_that_can_refuse_runs_before_the_reservation() {
         // The order inside `run`'s burn branch IS the fix, and nothing but
         // the order enforces it. The prompt comes first (a human can still
@@ -3009,7 +3131,7 @@ mod tests {
         // hands its slot over and the reservation happens inside, where a
         // test can assert which slot the lock went into. `run` itself no
         // longer names `reserve_and_decide`.
-        let reserve = at(concat!("reserve_and_take", "_the_lock("));
+        let reserve = at(concat!("reserve_and_take", "_the_lock_for_token("));
         let send = at(concat!("burn::s", "end("));
 
         assert!(
@@ -3429,6 +3551,92 @@ mod tests {
     /// choice, both halves of preflight against two fake chains, the
     /// burn/resume choice, the settled hold, and the early return — and
     /// it is the harness everything after it is built on.
+    #[tokio::test]
+    async fn a_second_currency_dry_run_preserves_its_existing_unknown_burn() {
+        let mut world = crate::test_chain::fake_world_for_token(
+            2_000_000_000_000_000_000,
+            "1.000000000000000001",
+            crate::test_chain::WorldKnobs::default(),
+            4,
+            18,
+        )
+        .await;
+        let path = world.leave_a_hash_less_reservation();
+        let before = std::fs::read(&path).unwrap();
+        let error = world.run(true).await.unwrap_err();
+        assert_eq!(error.exit_code().as_i32(), 3);
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_second_currency_resume_restores_its_own_record_after_deletion() {
+        let _relocking = crate::test_forks::relocking();
+        let dir = tempfile::TempDir::new().unwrap();
+        let amount = UsdcAmount(1_000_000);
+        let (mut observed, _) =
+            idempotency::reserve_for_token(dir.path(), &seam_from(), &seam_to(), &amount, 4, false)
+                .unwrap();
+        observed.status = Status::Burned;
+        observed.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
+        idempotency::update(
+            dir.path(),
+            &observed,
+            &idempotency::LockSlot::empty().hold(),
+        )
+        .unwrap();
+        std::fs::remove_file(idempotency::record_path(dir.path(), &observed.key)).unwrap();
+        let mut slot = idempotency::LockSlot::empty();
+        let (restored, hash, _held) = resume_recorded_burn(
+            dir.path(),
+            &seam_from(),
+            &seam_to(),
+            &amount,
+            true,
+            &observed,
+            &mut slot,
+        )
+        .unwrap();
+        assert_eq!(restored.token_id, 4);
+        assert_eq!(restored.key, observed.key);
+        assert_eq!(Some(hash), observed.an_tx_hash);
+        assert_eq!(
+            idempotency::peek_for_token(dir.path(), &seam_from(), &seam_to(), &amount, 4)
+                .unwrap()
+                .unwrap()
+                .token_id,
+            4
+        );
+        assert!(
+            idempotency::peek(dir.path(), &seam_from(), &seam_to(), &amount)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registered_second_currency_runs_the_cli_preflight_at_its_own_precision() {
+        let mut world = crate::test_chain::fake_world_for_token(
+            2_000_000_000_000_000_000,
+            "1.000000000000000001",
+            crate::test_chain::WorldKnobs::default(),
+            4,
+            18,
+        )
+        .await;
+        let result = world
+            .run(true)
+            .await
+            .expect("registered ECC4 must pass both preflights");
+        assert_eq!(result.burn.token_id, 4);
+        assert_eq!(result.burn.amount, "1.000000000000000001");
+        assert_eq!(result.burn.an_tx, "<dry-run>");
+        assert!(matches!(result.submit.status, SubmitStatus::DryRunOk));
+        assert_eq!(
+            std::fs::read_dir(world.state_dir.path()).unwrap().count(),
+            0
+        );
+    }
+
     #[tokio::test]
     async fn a_dry_run_executes_the_pipeline_down_to_its_early_return() {
         let mut world = crate::test_chain::fake_world(5_000_000, "1.000000").await;
@@ -3859,7 +4067,7 @@ mod tests {
             );
         }
         for wrapped in [
-            "check_captured_event(",
+            "check_captured_event_for_token(",
             "recheck_proving_key(",
             "recheck_aggregate_proof(",
             "prove_lock::take(",
@@ -4326,7 +4534,7 @@ mod tests {
         // reads exactly like one that has been checked, and both were
         // covering real defects: the first has been moved below the peek
         // and re-badged, the second answers exit 10 itself now.
-        const EXEMPT: [(&str, &str); 9] = [
+        const EXEMPT: [(&str, &str); 10] = [
             (
                 concat!("args::", "parse_"),
                 "argument text, and there is no identity yet: a record is named by a hash over \
@@ -4334,6 +4542,11 @@ mod tests {
                  withdrawal that could have one. True of these three and of nothing else in `run` \
                  — `parse_anchor_layer` sat here on the same words one line further down, where \
                  all three had just been parsed",
+            ),
+            (
+                "refusal_before_currency_identity(",
+                "always returns exit 10: without token precision this run cannot identify a prior \
+                 record; the runtime test covers that distinction",
             ),
             (
                 "default_state_dir(",

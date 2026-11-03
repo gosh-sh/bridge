@@ -3,6 +3,15 @@ pragma gosh-solidity >=0.80;
 import "./errors.sol";
 
 abstract contract eccUSDCBridgeModifiers is eccUSDCBridgeErrors {
+    struct BridgeTokenConfig {
+        uint256 evmToken;
+        uint128 maxTransfer;
+        uint128 maxTvl;
+        uint128 maxWithdrawal;
+        uint128 outstanding;
+        bool depositsEnabled;
+    }
+
     uint64 constant MIN_BALANCE = 100 vmshell;
 
     uint32 constant USDC_ECC_ID = 3;

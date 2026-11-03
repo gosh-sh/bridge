@@ -90,6 +90,7 @@ pub struct Deps {
 /// run it.
 #[derive(Debug, Clone)]
 pub struct Checked {
+    pub token_id: u32,
     /// The EVM side: the bridge's token, the sender's balance if known,
     /// the head the checks ran at.
     pub evm: EvmPreflight,
@@ -240,33 +241,24 @@ pub async fn check(
         false,
     )
     .await?;
-    // The Acki Nacki side mints bridged USDC for every proof it accepts and
-    // measures it against USDC-denominated limits, so until a deployment
-    // carries the token registry only the EVM bridge's own token can be
-    // credited. Refusing here keeps the deposit from leaving L1 for a credit
-    // that would be wrong or rejected.
-    if token != bridge_usdc && an.version < an_preflight::AN_TOKEN_REGISTRY_BRIDGE_VERSION {
-        return Err(refuse(format!(
-            "the Acki Nacki bridge is version {}, which credits every accepted deposit as bridged \
-             USDC whatever token the proof carries; {} and newer credit the proven token. \
-             Depositing {token} would be minted as USDC or refused after the money has left L1. \
-             Deposit {bridge_usdc}, or wait for the Acki Nacki bridge to be upgraded",
-            an.version,
-            an_preflight::AN_TOKEN_REGISTRY_BRIDGE_VERSION
-        )));
-    }
-    let limits =
-        an_preflight::read_volume_limits(d.an.as_ref(), bridge_acc, net.chain_id()).await?;
+    let limits = an_preflight::read_token_deposit_limits(
+        d.an.as_ref(),
+        bridge_acc,
+        net.chain_id(),
+        token,
+        listing.token_id,
+    )
+    .await?;
     let requested = U256::from(amount);
     if requested > limits.max_transfer {
         return Err(refuse(format!(
-            "deposit exceeds AN MAX_TRANSFER_AMOUNT ({} micro-USDC)",
+            "deposit exceeds the AN token maxTransfer ({} base units)",
             limits.max_transfer
         )));
     }
     if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
         return Err(refuse(format!(
-            "AN chain {} would exceed MAX_BRIDGE_TVL; wait for withdrawals and retry",
+            "AN chain {} would exceed the AN token maxTvl; wait for withdrawals and retry",
             net.chain_id()
         )));
     }
@@ -296,6 +288,7 @@ pub async fn check(
         ));
     }
     Ok(Checked {
+        token_id: listing.token_id,
         evm,
         an,
         plan,
@@ -1273,11 +1266,9 @@ mod tests {
         assert!(e.to_string().contains("MAX_DEPOSIT_AMOUNT"), "{e}");
     }
 
-    /// A second listed ERC-20 is refused before the wallet is asked, while
-    /// the Acki Nacki bridge still credits every accepted proof as bridged
-    /// USDC. The money must not leave L1 for a credit that would be wrong.
+    /// The two chains must agree on the currency before any funds leave L1.
     #[tokio::test]
-    async fn a_second_token_is_refused_until_the_an_bridge_credits_it() {
+    async fn a_second_token_is_refused_when_an_assigns_a_different_currency() {
         use alloy::sol_types::{SolCall, SolValue};
 
         use crate::deposit::evm::IErc20;
@@ -1311,13 +1302,53 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
-        assert!(e.to_string().contains("bridged USDC"), "{e}");
-        assert!(
-            e.to_string()
-                .contains(&an_preflight::AN_TOKEN_REGISTRY_BRIDGE_VERSION.to_string()),
-            "{e}"
-        );
+        assert!(e.to_string().contains("different currency ids"), "{e}");
         assert_eq!(store.list().unwrap().len(), 0);
+        assert_eq!(*world.an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_registered_second_token_preserves_its_currency_and_base_units() {
+        use alloy::sol_types::{SolCall, SolValue};
+
+        use crate::deposit::evm::IErc20;
+        const DAI: Address = alloy_primitives::address!("68194a729c2450ad26072b3d33adacbcef39d574");
+        const ONE: u128 = 1_000_000_000_000_000_000;
+        let world = World::healthy();
+        world
+            .evm
+            .set_token_listing(W_BRIDGE, DAI, 7, 18, true, ONE * 50, ONE * 10_000, 0);
+        world.evm.set_call(
+            DAI,
+            IErc20::decimalsCall::SELECTOR,
+            U256::from(18u8).abi_encode().into(),
+        );
+        world.evm.set_call(
+            DAI,
+            IErc20::balanceOfCall::SELECTOR,
+            U256::from(ONE * 2).abi_encode().into(),
+        );
+        world.evm.set_call(
+            DAI,
+            IErc20::allowanceCall::SELECTOR,
+            U256::ZERO.abi_encode().into(),
+        );
+        world.an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
+            serde_json::json!({"listed": true, "tokenId": "7", "depositsEnabled": true,
+                "maxTransfer": ONE.to_string(), "maxTvl": (ONE * 10).to_string(),
+                "outstanding": "0"}),
+        ]);
+        let mut p = world.params(RunMode::DryRun);
+        p.token = Some(DAI);
+        p.amount = Some(UsdcAmount(1_000_000));
+        let store = Store::open(&p.state_dir).unwrap();
+        let checked = check(&p, &world.deps(), &store, Some(sepolia_sender()))
+            .await
+            .unwrap();
+        assert_eq!(checked.params.token, DAI);
+        assert_eq!(checked.params.amount_units, ONE as u64);
+        assert_eq!(checked.evm.decimals, 18);
+        assert!(store.list().unwrap().is_empty());
         assert_eq!(*world.an.sent.lock().unwrap(), 0);
     }
 

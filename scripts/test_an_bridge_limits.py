@@ -25,6 +25,9 @@ BRIDGE = "0:" + "1a" * 32
 SENDER = "0:" + "ab" * 32
 TRANSFER = 50_000_000
 TVL = 10_000_000_000
+USDC_TOKEN = 68
+SECOND_TOKEN = 85
+THIRD_TOKEN = 102
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
 
 
@@ -55,6 +58,14 @@ class BridgeLimits(unittest.TestCase):
         source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         hooks = """
+    function testLegacyUpgrade() public {
+        tvm.accept();
+        TvmCell userCell;
+        TvmCell data = abi.encode(_ownerPubkey, _usdcWallet, _totalMinted, _mintNonce,
+            _mintAccumulatorNonce, _totalMintedBridgeByToken, _totalBurnedBridgeByToken,
+            _depositVoucherCode, userCell, _outstandingByChain, _messages);
+        onCodeUpgrade(data);
+    }
     uint16 _testLastRefusal;
     function testLastRefusal() public view returns (uint16 reason) {
         reason = _testLastRefusal;
@@ -95,9 +106,14 @@ class BridgeLimits(unittest.TestCase):
                     for n in ("public", "secret")}
         cls.key_file = cls.root / "keys.json"
         cls.key_file.write_text(json.dumps(cls.keys))
+        voucher_dir = cls.root / "voucher"
+        voucher_dir.mkdir()
+        command([os.environ.get("SOLD_0_81", "/usr/bin/sold"), "--tvm-version", "gosh",
+                 "--base-path", str(REPO / "contracts/an"),
+                 str(REPO / "contracts/an/exchange/DepositVoucher.sol"), "-o", str(voucher_dir)])
+        cls.voucher_abi = voucher_dir / "DepositVoucher.abi.json"
         cls.voucher_code = json.loads(command([
-            DEBUGGER, "state-decode", "-s",
-            str(REPO / "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc")
+            DEBUGGER, "state-decode", "-s", str(voucher_dir / "DepositVoucher.tvc")
         ]))["code"]
 
     @classmethod
@@ -110,6 +126,8 @@ class BridgeLimits(unittest.TestCase):
         self.call("constructor", {"pubkey": "0x" + self.keys["public"],
                                   "usdcWallet": "0:" + "00" * 32})
         self.seed(TVL - TRANSFER)
+        for chain in (1, 2):
+            self.register(USDC_TOKEN, 3, TRANSFER, TVL, chain=chain)
 
     def call(self, function, args=None, *, source=None, signed=False, expect=0,
              ecc=None, shell=1_000_000_000, header=None):
@@ -121,7 +139,7 @@ class BridgeLimits(unittest.TestCase):
         if signed:
             extra += ["--sign", str(self.key_file)]
         if ecc is not None:
-            extra += ["--message-ecc", json.dumps({"3": str(ecc)})]
+            extra += ["--message-ecc", json.dumps(ecc if isinstance(ecc, dict) else {"3": str(ecc)})]
         result = json.loads(command([
             DEBUGGER, "run", "-i", str(self.tvc), "-a", str(self.abi), "--address", BRIDGE,
             "--json", "--decode-out-messages", "-m", function, "-p", json.dumps(args or {})
@@ -137,8 +155,8 @@ class BridgeLimits(unittest.TestCase):
     def limits(self, chain=1):
         return self.call("getDepositLimits", {"chainId": str(chain)})["response"]
 
-    def finalize(self, deposit=0, amount=TRANSFER, chain=1, expect=0, header=None):
-        pi = [deposit, 1, amount, 42, chain, 0, 0, 0, 43, 0, 123, 0]
+    def finalize(self, deposit=0, amount=TRANSFER, chain=1, expect=0, header=None, token=USDC_TOKEN):
+        pi = [deposit, 1, amount, 42, chain, 0, 0, 0, 43, 0, 123, token, 0]
         return self.call("finalizeDeposit", {"proof": "", "publicInputs": b"".join(
             n.to_bytes(32, "little") for n in pi).hex()}, expect=expect, header=header)
 
@@ -164,6 +182,120 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(int(decoded["value"]["other"]["3"]), amount)
         self.assertEqual(int(decoded["value"]["value"]), min(shell, 100_000_000))
         self.assertEqual(decoded["bounce"], "false")
+
+    def register(self, token, token_id, max_transfer, max_tvl, *, chain=1, enabled=True, expect=0):
+        return self.call("setBridgeToken", {
+            "chainId": str(chain), "evmToken": str(token), "tokenId": token_id,
+            "maxTransfer": str(max_transfer), "maxTvl": str(max_tvl),
+            "depositsEnabled": enabled}, signed=True, expect=expect)
+
+    def token_limits(self, token_id=4, chain=1):
+        return self.call("getTokenWithdrawalConfig", {
+            "chainId": str(chain), "tokenId": token_id})["response"]
+
+    def confirm_token(self, token=SECOND_TOKEN, amount=10**18, deposit=100, chain=1, expect=0):
+        voucher = self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})["response"]["voucher"]
+        return self.call("confirmTokenDeposit", {
+            "depositId": str(deposit), "contractAddr": "42", "dappId": "0", "chainId": str(chain),
+            "amount": str(amount), "anAccount": "43", "evmToken": str(token)},
+            source=voucher, expect=expect)
+
+    def withdraw_token(self, amount, token_id=4, chain=1):
+        return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
+                         source=SENDER, ecc={str(token_id): str(amount)})
+
+    def test_unregistered_proven_token_cannot_mint_usdc(self):
+        before = self.call("getTotalBridged", {"tokenId": 3})["response"]
+        self.call("testRejectProof")
+        self.finalize(token=SECOND_TOKEN, expect=240)
+        self.confirm_token(expect=240)
+        self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"], before)
+
+    def test_second_token_has_independent_mint_burn_and_chain_accounting(self):
+        self.register(SECOND_TOKEN, 4, 10**18, 10**19)
+        before_usdc = self.limits()["outstanding"]
+        self.finalize(deposit=100, token=SECOND_TOKEN, amount=10**18)
+        result = self.confirm_token()
+        self.assertTrue(result["vm_success"])
+        self.assertEqual(int(self.token_limits()["outstanding"]), 10**18)
+        self.assertEqual(self.limits()["outstanding"], before_usdc)
+        self.assertEqual(int(self.call("getTotalBridged", {"tokenId": 4})["response"]["minted"]), 10**18)
+        self.withdraw_token(10**18)
+        self.assertEqual(int(self.token_limits()["outstanding"]), 0)
+        self.assertEqual(self.limits()["outstanding"], before_usdc)
+        self.assertEqual(int(self.call("getTotalBridged", {"tokenId": 4})["response"]["burned"]), 10**18)
+
+    def test_third_token_needs_only_registration(self):
+        self.register(SECOND_TOKEN, 4, 10**18, 10**19)
+        self.register(THIRD_TOKEN, 5, 123, 1230)
+        self.finalize(deposit=101, token=THIRD_TOKEN, amount=123)
+        self.confirm_token(token=THIRD_TOKEN, amount=123, deposit=101)
+        self.assertEqual(int(self.token_limits(5)["outstanding"]), 123)
+        self.assertEqual(int(self.token_limits(4)["outstanding"]), 0)
+        self.withdraw_token(123, token_id=5)
+        self.assertEqual(int(self.token_limits(5)["outstanding"]), 0)
+
+    def test_token_identity_cannot_be_reassigned(self):
+        self.register(SECOND_TOKEN, 4, 100, 1000)
+        self.register(THIRD_TOKEN, 4, 100, 1000, expect=241)
+        self.register(SECOND_TOKEN, 5, 100, 1000, expect=241)
+        self.assertEqual(int(self.token_limits(4)["evmToken"], 0), SECOND_TOKEN)
+        self.assertFalse(self.token_limits(5)["listed"])
+
+    def test_lowering_or_closing_deposits_does_not_strand_a_prior_payout(self):
+        self.register(SECOND_TOKEN, 4, 10**18, 10**19)
+        self.confirm_token()
+        self.register(SECOND_TOKEN, 4, 1, 1, enabled=False)
+        config = self.token_limits()
+        self.assertEqual(int(config["outstanding"]), 10**18)
+        self.assertEqual(int(config["maxWithdrawal"]), 10**18)
+        self.finalize(token=SECOND_TOKEN, amount=1, expect=242)
+        self.withdraw_token(10**18)
+        self.assertEqual(int(self.token_limits()["outstanding"]), 0)
+
+    def test_second_token_cannot_spend_another_chain_inventory(self):
+        for chain in (1, 2): self.register(SECOND_TOKEN, 4, 10**18, 10**19, chain=chain)
+        self.confirm_token(chain=1)
+        result = self.withdraw_token(10**18, chain=2)
+        self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 236)
+        self.assertEqual(int(self.token_limits(chain=1)["outstanding"]), 10**18)
+        self.assertEqual(int(self.token_limits(chain=2)["outstanding"]), 0)
+        self.withdraw_token(10**18, chain=1)
+        self.assertEqual(int(self.token_limits(chain=1)["outstanding"]), 0)
+
+    def test_registry_survives_upgrade_with_per_token_principal(self):
+        self.register(SECOND_TOKEN, 4, 10**18, 10**19)
+        self.confirm_token()
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        config = self.token_limits()
+        self.assertTrue(config["listed"])
+        self.assertEqual(int(config["evmToken"], 0), SECOND_TOKEN)
+        self.assertEqual(int(config["outstanding"]), 10**18)
+        self.withdraw_token(10**18)
+        self.assertEqual(int(self.token_limits()["outstanding"]), 0)
+
+    def test_legacy_upgrade_prefix_keeps_usdc_balances_and_rejects_unknown_assets(self):
+        before = self.limits()["outstanding"]
+        self.register(SECOND_TOKEN, 4, 100, 1000)
+        self.call("testLegacyUpgrade")
+        self.assertEqual(self.limits()["outstanding"], before)
+        self.assertFalse(self.token_limits()["listed"])
+        self.withdraw(TRANSFER)
+        self.assertEqual(int(self.limits()["outstanding"]), int(before) - TRANSFER)
+
+    def test_registering_legacy_usdc_with_a_lower_deposit_cap_preserves_payouts(self):
+        self.call("setOutstandingByChain", {"chainId": "3", "amount": str(TRANSFER)}, signed=True)
+        self.register(USDC_TOKEN, 3, 10_000_000, TVL, chain=3)
+        config = self.token_limits(token_id=3, chain=3)
+        self.assertEqual(int(config["maxTransfer"]), 10_000_000)
+        self.assertEqual(int(config["maxWithdrawal"]), TRANSFER)
+        result = self.withdraw(TRANSFER, chain=3)
+        self.assertEqual(result["messages"], [])
+        self.assertEqual(int(self.limits(chain=3)["outstanding"]), 0)
+
+    def test_usdc_registration_cannot_raise_the_protocol_caps(self):
+        self.register(USDC_TOKEN, 3, TRANSFER + 1, TVL, expect=241)
+        self.register(USDC_TOKEN, 3, TRANSFER, TVL + 1, expect=241)
 
     def test_issue_98_values(self):
         limits = self.limits()
@@ -273,14 +405,41 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
         self.assertEqual(int(self.limits(2)["outstanding"]), 2 * TRANSFER)
 
+    def test_production_voucher_forwards_the_second_token_and_round_trips_its_currency(self):
+        amount = 10**18
+        self.register(SECOND_TOKEN, 4, amount, amount * 10)
+        usdc_before = self.limits()["outstanding"]
+        deploy = self.finalize(token=SECOND_TOKEN, amount=amount)["messages"][0]
+        voucher = self.root / "second-token-voucher.tvc"
+        voucher.write_bytes(base64.b64decode(deploy["state_init"]))
+        params = {"depositId": "0", "contractAddr": "42", "dappId": "0", "chainId": "1",
+                  "amount": str(amount), "anAccount": "43", "evmToken": str(SECOND_TOKEN)}
+        result = json.loads(command([
+            DEBUGGER, "run", "-i", str(voucher), "-a", str(self.voucher_abi), "--json",
+            "--address", deploy["destination"], "--internal", "--message-source", BRIDGE,
+            "--message-value", "2000000000", "-m", "constructor", "-p", json.dumps(params)]))
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(len(result["messages"]), 1)
+        callback = json.loads(command(["tvm-cli", "-j", "decode", "msg",
+                                       result["messages"][0]["boc"], "--abi", str(self.abi)]))
+        body = callback["BodyCall"]["confirmTokenDeposit"]
+        self.assertEqual(int(body["evmToken"], 0), SECOND_TOKEN)
+        self.assertEqual(callback["Header"]["destination"], BRIDGE)
+        self.call("confirmTokenDeposit", body, source=callback["Header"]["source"])
+        self.assertEqual(int(self.token_limits()["outstanding"]), amount)
+        self.assertEqual(self.limits()["outstanding"], usdc_before)
+        self.withdraw_token(amount)
+        self.assertEqual(int(self.token_limits()["outstanding"]), 0)
+        self.assertEqual(self.limits()["outstanding"], usdc_before)
+
     def test_voucher_constructor_replay_cannot_send_a_second_confirmation(self):
         deploy = self.finalize()["messages"][0]
         self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER)
         voucher = self.root / "voucher-case.tvc"
         voucher.write_bytes(base64.b64decode(deploy["state_init"]))
-        abi = REPO / "contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json"
+        abi = self.voucher_abi
         params = {"depositId": "0", "contractAddr": "42", "dappId": "0", "chainId": "1",
-                  "amount": str(TRANSFER), "anAccount": "43"}
+                  "amount": str(TRANSFER), "anAccount": "43", "evmToken": str(USDC_TOKEN)}
         call = [DEBUGGER, "run", "-i", str(voucher), "-a", str(abi), "--json",
                 "--address", deploy["destination"], "--internal", "--message-source", BRIDGE,
                 "--message-value", "2000000000", "-m", "constructor", "-p", json.dumps(params)]

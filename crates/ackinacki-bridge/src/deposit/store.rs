@@ -128,6 +128,8 @@ pub struct OpRecord {
     /// `getDepositVoucherCodeHash()` at preflight; the voucher address is
     /// computed with it.
     pub voucher_code_hash: String,
+    #[serde(default = "legacy_currency_id")]
+    pub token_id: u32,
     pub from: Option<Address>,
     pub stage: OpStage,
     pub request: Option<RequestInfo>,
@@ -145,6 +147,10 @@ pub struct OpRecord {
     pub anchor_writer: Option<String>,
 }
 
+fn legacy_currency_id() -> u32 {
+    3
+}
+
 impl OpRecord {
     pub fn new(op_id: String, params: OpParams, voucher_code_hash: String) -> Self {
         let now = crate::idempotency::rfc3339_now();
@@ -155,6 +161,7 @@ impl OpRecord {
             updated_at: now,
             params,
             voucher_code_hash,
+            token_id: 3,
             from: None,
             stage: OpStage::Reserved,
             request: None,

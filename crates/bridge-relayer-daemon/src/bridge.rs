@@ -1004,6 +1004,14 @@ mod sol_bindings {
 
 use sol_bindings::AckiNackiBridge;
 
+#[derive(Debug, Clone, Copy)]
+pub struct TokenPayoutInfo {
+    pub token: Address,
+    pub decimals: u8,
+    pub max_withdrawal: U256,
+    pub liabilities: U256,
+}
+
 /// Production bridge client — wraps `sol!`-generated bindings.
 ///
 /// Generic over any alloy [`Provider`] (a wallet-filled provider in
@@ -1643,6 +1651,32 @@ where
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    pub async fn token_payout_info(&self, token_id: u32) -> Result<TokenPayoutInfo, RelayerError> {
+        let info = self
+            .contract
+            .tokenInfo(token_id)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        if info.token == Address::ZERO {
+            return Err(RelayerError::other(format!(
+                "token id {token_id} is not registered"
+            )));
+        }
+        let max_withdrawal = self
+            .contract
+            .maxWithdrawalAmount(token_id)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok(TokenPayoutInfo {
+            token: info.token,
+            decimals: info.decimals,
+            max_withdrawal,
+            liabilities: info.liabilities,
+        })
     }
 
     /// `IBridgeWithdrawalVerifier public immutable bridgeWithdrawalVerifier`

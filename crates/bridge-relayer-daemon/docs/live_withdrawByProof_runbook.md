@@ -843,11 +843,12 @@ Sepolia revert. The log prints the selector.
 ```bash
 # Re-run the exact eth_call with --trace for a decoded reason.
 # withdrawByProof takes a bytes proof plus a WithdrawalPublicInputs
-# struct of 11 uint256s, encoded as a tuple literal on the CLI.
+# struct of 12 uint256s (the last is dstBridge), encoded as a tuple literal
+# on the CLI. Selector 0xc7d38069.
 cast call $BRIDGE \
-  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
   <calldata_hex_from_log> \
-  '(<11 comma-separated pi values from log>)' \
+  '(<12 comma-separated pi values from log>)' \
   --rpc-url $RPC --trace
 ```
 

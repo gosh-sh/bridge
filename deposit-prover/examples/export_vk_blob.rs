@@ -191,6 +191,9 @@ fn main() -> anyhow::Result<()> {
         halo2_tvm_bundle::VkConfig::Base(_) => {
             anyhow::bail!("read back a Base config; expected Rlc")
         },
+        halo2_tvm_bundle::VkConfig::KeccakShard(_) => {
+            anyhow::bail!("read back a KeccakShard config; expected Rlc")
+        },
     };
     let parsed_params: EthCircuitParams = serde_json::from_slice(&carried_json)
         .map_err(|e| anyhow::anyhow!("parse carried EthCircuitParams: {e}"))?;

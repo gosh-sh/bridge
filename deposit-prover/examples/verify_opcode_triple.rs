@@ -86,6 +86,9 @@ fn main() -> anyhow::Result<()> {
     let eth_json = match &blob.config {
         VkConfig::Rlc(j) => j.clone(),
         VkConfig::Base(_) => anyhow::bail!("vk_blob carries a Base config; expected Rlc"),
+        VkConfig::KeccakShard(_) => {
+            anyhow::bail!("vk_blob carries a KeccakShard config; expected Rlc")
+        },
     };
     let eth_params: EthCircuitParams = serde_json::from_slice(&eth_json)?;
     let mut vk_slice = blob.vk_bytes.as_slice();

@@ -272,6 +272,15 @@ PREDECESSOR_BRIDGE=<the bridge whose treasury this one takes over, or 0x00000000
   ./scripts/deploy_bridge_bundle.sh
 ```
 
+Then bind the new bridge on Acki Nacki: the owner of `eccUSDCBridge` calls
+`setTrustedL1Bridge(<chain id>, <new bridge>, true)` and
+`setEvmBridge(<chain id>, <new bridge>)`. Every burn names the bridge
+`getEvmBridge(<chain id>)` returns at that moment, and only that bridge pays it
+(`WrongDstBridge` otherwise). Until the binding is set, `ackinacki-bridge withdraw
+--bridge-address <new bridge>` stops before the burn. If another bridge already
+serves the chain, follow `docs/aave-yield.md`, "Replacing a bridge on the same
+chain", instead.
+
 **Post-deploy sanity — verify W²-alignment:**
 
 ```bash

@@ -178,34 +178,36 @@ bound to the new one, whether either is paused or not. Burns made before the swi
 old bridge, and only by it.
 
 The old bridge's user principal (`treasuryBalance`) has to follow the eccUSDC it backs once the old
-bridge has paid what it owes. So the order is:
+bridge has paid what it owes, and the new bridge cannot pay anyone until it has that principal. So
+withdrawals to the chain close for the time the old bridge needs to pay the burns already made, and
+reopen on the new bridge once the principal is there. Deposits stay open throughout. The order is:
 
-1. **Deploy the new bridge.** `PREDECESSOR_BRIDGE` (optional, zero by default) names the old
-   bridge only so that the old bridge's `migrateTreasury` will accept the new one in step 5; the
-   constructor reverts `InvalidPredecessor` unless that address has code on this chain and was
+1. **Deploy the new bridge and trust it.** `PREDECESSOR_BRIDGE` (optional, zero by default) names
+   the old bridge only so that the old bridge's `migrateTreasury` will accept the new one in step 4;
+   the constructor reverts `InvalidPredecessor` unless that address has code on this chain and was
    deployed for the same `WITHDRAW_DAPP_FR` and `WITHDRAW_ACC_FR`. It plays no part in replay
-   protection, and the old bridge need not be paused. The constructor leaves the new bridge
-   unpaused; its owner calls `pause()` in the next transaction and keeps it paused until step 5.
-   A deposit made in between is not lost: Acki Nacki finalizes it once it trusts the new bridge.
-2. **Switch Acki Nacki to it**: `setTrustedL1Bridge(<chainId>, <new>, true)` and
-   `setEvmBridge(<chainId>, <new>)` on `eccUSDCBridge`. From that message on, every burn to that
-   chain is bound to the new bridge. Point `ackinacki-bridge withdraw --bridge-address` and the
-   withdrawal relayer at the new bridge, and start a `deposit-relayer daemon` for it with
-   `--bridge-address <new>` and its own `--state` file.
-3. **Let the old bridge pay what it owes.** Keep it unpaused, keep its `verifyBlock` relayer and
-   its `relayer daemon-withdraw` (or `daemon-bridge`) running, and keep its `deposit-relayer`
-   running: each watches one bridge. Every burn from before step 2 is paid there or nowhere. A
+   protection. Leave the new bridge unpaused: a paused bridge reverts `verifyBlock`, so it would
+   anchor nothing. Start its `verifyBlock` relayer, its withdrawal relayer and a
+   `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
+   `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccUSDCBridge`, so that deposits into the new
+   bridge are finalized. Deposits into the old bridge still are too.
+2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccUSDCBridge`. From that
+   message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
+   (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
+   because `getEvmBridge` is unset. The burns made before this message are bound to the old bridge,
+   and the set is now closed.
+3. **Let the old bridge pay what it owes.** Keep it unpaused and keep its `verifyBlock` relayer,
+   its `relayer daemon-withdraw` (or `daemon-bridge`) and its `deposit-relayer` running, until it
+   has emitted `WithdrawalByProofExecuted` for every burn made before step 2. Every one of them is
+   paid there or nowhere. A user whose `ackinacki-bridge withdraw` stopped after the burn resumes it
+   with `--bridge-address <old>`; the resume does not repeat the check that refuses a new burn. A
    bridge deployed before `dstBridge` existed, such as the 421614 bridge
    `0x3FB082a905a895151224F6d93bD074E816338638`, verifies only proofs of the previous Circuit 4:
-   prove those burns with the `ackinacki-bridge` release that bridge was deployed for.
-4. **Retire the old bridge**: once every burn bound to it is paid, `pause()` it and pull its AAVE
-   position back (`withdrawFromAave` or `emergencyWithdrawAll`) so its whole `treasuryBalance` is
-   liquid USDC. Stop its `deposit-relayer`, and stop trusting it on Acki Nacki
-   (`setTrustedL1Bridge(<chainId>, <old>, false)`), only after every deposit it took has been
-   finalized — every deposit id below its `depositCounter`, which the pause froze.
-   `eccUSDCBridge` refuses a deposit from an untrusted bridge (`ERR_UNSUPPORTED_SRC_CHAIN`), and
-   step 5 moves that deposit's USDC to the new bridge, so a deposit refused here has no way back.
-5. **Move the principal**, then `unpause()` the new bridge.
+   prove those burns with the `ackinacki-bridge` release that bridge was deployed for. This step
+   takes as long as anchoring and proving the last of those burns, and withdrawals to the chain stay
+   closed for all of it.
+4. **Retire the old bridge and move the principal.** `pause()` it and pull its AAVE position back
+   (`withdrawFromAave` or `emergencyWithdrawAll`) so its whole `treasuryBalance` is liquid USDC.
    - An old bridge that has `migrateTreasury(address)`: its owner calls
      `migrateTreasury(<new bridge>)`. It needs the old bridge paused, its `treasuryBalance`
      liquid (`TreasuryNotLiquid` otherwise), and a target with code whose `predecessor()` is
@@ -220,6 +222,13 @@ bridge has paid what it owes. So the order is:
      there.
 
    `fundTreasury` credits `treasuryBalance` without a `Deposit` event, so nothing is minted on
-   Acki Nacki. Only the owner and `predecessor` may call it, and it works while the bridge is
-   paused. A withdrawal to the new bridge that arrives before step 5 reverts
-   `WithdrawTreasuryShortfall` (or `BridgePaused`), which the relayers retry; the burn is not lost.
+   Acki Nacki. Only the owner and `predecessor` may call it. A deposit the old bridge took before
+   its pause is in the `treasuryBalance` that moves, and Acki Nacki still finalizes it: the old
+   bridge stays trusted until step 6.
+5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccUSDCBridge`.
+   Point `ackinacki-bridge withdraw --bridge-address` at the new bridge.
+6. **Stop trusting the old bridge** (`setTrustedL1Bridge(<chainId>, <old>, false)`) and stop its
+   relayers, only after every deposit it took has been finalized: every deposit id below its
+   `depositCounter`, which the pause froze. `eccUSDCBridge` refuses a deposit from an untrusted
+   bridge (`ERR_UNSUPPORTED_SRC_CHAIN`), and step 4 moved that deposit's USDC to the new bridge, so
+   a deposit refused here has no way back.

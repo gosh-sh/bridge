@@ -94,7 +94,7 @@ pub const NUM_VK_BINDING_INSTANCES: usize = 1;
 ///     permutation columns). The exact count is the inner circuit's
 ///     preprocessed-column count × 2 (x, y) × non-native-field limbs, plus the
 ///     `transcript_initial_state` element that snark-verifier appends — always
-///     present on this path, not optional. Circuit 4 has 11 inner PIs and is
+///     present on this path, not optional. Circuit 4 has 12 inner PIs and is
 ///     built on the K=20 SRS. The preprocessed-column count is that circuit's,
 ///     not a fixed "~19 at K=19". Circuit 1A/1B preimages are both larger than
 ///     a hundred elements.
@@ -206,8 +206,8 @@ mod tests {
     /// num_prev + NUM_VK_BINDING_INSTANCES` scalars in column 0.
     #[test]
     fn digest_lands_after_accumulator_and_previous_instances() {
-        // Circuit 4: 11 inner PIs (see BridgeWithdrawalAggregatorVerifier).
-        assert_eq!(vk_digest_index(11), 23);
+        // Circuit 4: 12 inner PIs (see BridgeWithdrawalAggregatorVerifier).
+        assert_eq!(vk_digest_index(12), 24);
         // Circuit 2: 14 inner PIs.
         assert_eq!(vk_digest_index(14), 26);
         // Boundary: no inner PIs re-exposed.

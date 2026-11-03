@@ -188,9 +188,10 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         );
         other.withdrawByProof(cd, pub);
 
-        // The Yul verifier reverts without data when the pairing fails.
+        // The pairing fails: `ShplonkHalo2Verifier` turns the Yul revert into
+        // `false` (staticcall) and the bridge reverts `WithdrawalProofRejected`.
         _setWord(cd, ACC + 11, otherPub.dstBridge);
-        vm.expectRevert();
+        vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
         other.withdrawByProof(cd, otherPub);
 
         assertFalse(other.isNullifierUsed(pub.nullifier));

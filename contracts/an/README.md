@@ -278,9 +278,10 @@ refused with 239 and burns nothing.
 
 `setEvmBridge` decides where every later burn to that chain is paid; a burn
 already made stays bound to the bridge it named. When an EVM bridge is replaced,
-call it together with `setTrustedL1Bridge` for the new bridge and keep the old
-bridge paying until the burns bound to it are paid — the order is in
-`docs/aave-yield.md`, "Replacing a bridge on the same chain".
+`setEvmBridge(dstChainId, 0)` closes withdrawals to that chain while the old
+bridge pays the burns bound to it, and `setEvmBridge` with the new bridge reopens
+them once the principal has moved — the order is in `docs/aave-yield.md`,
+"Replacing a bridge on the same chain".
 
 Like `_trustedL1Bridge`, the binding is not carried through `updateCode`: after
 an upgrade every withdrawal is refused with 239 until the owner calls

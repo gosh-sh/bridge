@@ -173,4 +173,8 @@ cat <<EOF
     set -a && source "\$BRIDGE_CONFIG_DIR/env" && set +a
     export BRIDGE_STATE_DIR=\$BRIDGE_CONFIG_DIR/state
     mkdir -p work logs && ./target/release/relayer daemon-live --work-dir ./work --log-dir ./logs
+
+    On Acki Nacki the eccUSDCBridge owner calls setTrustedL1Bridge(<chain id>, $BRIDGE_ADDRESS, true)
+    and setEvmBridge(<chain id>, $BRIDGE_ADDRESS); until then no burn names this bridge. If another
+    bridge serves the chain, follow docs/aave-yield.md, "Replacing a bridge on the same chain".
 EOF

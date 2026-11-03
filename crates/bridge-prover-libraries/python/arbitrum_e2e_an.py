@@ -160,7 +160,9 @@ def main():
             trusted = until(lambda: truth(getter("isTrustedL1Bridge",
                                                  {"chainId": str(ARB_SEPOLIA), "l1Bridge": args[0]}).get("value0")))
             owner_call("setEvmBridge", {"dstChainId": str(ARB_SEPOLIA), "evmBridge": args[0]})
-            bound = until(lambda: uint(getter("getEvmBridge", {"dstChainId": str(ARB_SEPOLIA)}).get("value0")))
+            want = int(args[0], 16)
+            bound = until(lambda: (lambda b: b if b == want else None)(
+                uint(getter("getEvmBridge", {"dstChainId": str(ARB_SEPOLIA)}).get("value0"))))
             answer = [f"TRUSTED={str(bool(trusted)).lower()}", f"EVM_BRIDGE={bound or 0:#042x}"]
         elif cmd == "msig" and not args:
             gql = be.GqlClient(GRAPHQL_URL)

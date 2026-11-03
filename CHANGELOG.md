@@ -29,8 +29,10 @@ assigns it when the release is tagged.
   first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
   made before the switch below are paid by the bridge they named. Upgrade in this order:
   `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
-  then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. The cutover from an
-  existing bridge is in `docs/aave-yield.md`, "Replacing a bridge on the same chain".
+  then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. Replacing an
+  existing bridge closes withdrawals to its chain (`setEvmBridge(<chainId>, 0)`) until the old
+  bridge has paid the burns bound to it and its principal has moved; deposits stay open. The
+  order is in `docs/aave-yield.md`, "Replacing a bridge on the same chain".
 - **Circuit 4 verification key rotated.** Withdrawal proofs built for the previous key do not
   verify against the new `BridgeWithdrawalAggregatorVerifier`, and new proofs do not verify
   against the old one. `BridgeWithdrawalAggregatorVerifier.{bin,sol}` and its

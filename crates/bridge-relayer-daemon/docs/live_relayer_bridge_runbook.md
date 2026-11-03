@@ -257,6 +257,13 @@ BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   may pay it, the one `eccUSDCBridge.getEvmBridge(11155111)` returned when it
   was burnt. The cutover is in `docs/aave-yield.md`, "Replacing a bridge on
   the same chain".
+- Once the bridge is deployed, the owner of `eccUSDCBridge` on Acki Nacki
+  calls `setTrustedL1Bridge(11155111, <new bridge>, true)` and
+  `setEvmBridge(11155111, <new bridge>)`. Until `getEvmBridge(11155111)`
+  returns the new address, `ackinacki-bridge withdraw --bridge-address <new
+  bridge>` stops before the burn, and the relayer has nothing to pay: every
+  burn names the bridge `getEvmBridge` returned at the time. When a bridge
+  already serves 11155111, follow the cutover above instead.
 
 - `BRIDGE_SEED_SEQNO` pins the seed to S; without it the script picks the
   newest boundary at deploy time, which can be later than the S the set was

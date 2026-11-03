@@ -9,7 +9,13 @@ load genesis.env; load evm.env
 export RELAYER_PRIVATE_KEY; RELAYER_PRIVATE_KEY=$(derive_key "$(tr -d '[:space:]' </run/input)" relayer)
 export RPC_URL=$ARB_RPC RPC_FAILOVER_URLS= BRIDGE_GQL_ENDPOINT=$GQL BRIDGE_BK_SET_CONFIG=$OUT/bk_set.json
 export BRIDGE_BOOTSTRAP_SEQNO=$GENESIS_SEED_SEQNO BRIDGE_ANCHOR_LEVEL=2
-export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache BRIDGE_STATE_DIR=$WORK/relayer-state
-export BRIDGE_AGGREGATE_PROOF_BIN=/bin-ci/aggregate-proof BRIDGE_VERIFIERS_DIR=/src/contracts/ethereum/verifiers
-mkdir -p "$BRIDGE_STATE_DIR"
-exec relayer --state "$WORK/relayer-state.json" daemon-live
+export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache
+# The three directories (bridge-audit#132): relayer-state.json sits in the state directory
+# with the prover state; the work directory holds the proof in flight; the log directory
+# the daemon's own log beside this one.
+export BRIDGE_STATE_DIR=$WORK/relayer-state BRIDGE_WORK_DIR=$WORK/relayer-work BRIDGE_LOG_DIR=/logs/relayer
+# The image's aggregate-proof when running from it, /bin-ci's otherwise.
+export BRIDGE_AGGREGATE_PROOF_BIN; BRIDGE_AGGREGATE_PROOF_BIN=$(command -v aggregate-proof)
+export BRIDGE_VERIFIERS_DIR=/src/contracts/ethereum/verifiers
+mkdir -p "$BRIDGE_STATE_DIR" "$BRIDGE_WORK_DIR" "$BRIDGE_LOG_DIR"
+exec relayer daemon-live

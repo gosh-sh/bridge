@@ -89,6 +89,9 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
+  no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
+  verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.
 - `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe
   holds: both streams are read to the end, and its transcript is written like the step
   prover's.

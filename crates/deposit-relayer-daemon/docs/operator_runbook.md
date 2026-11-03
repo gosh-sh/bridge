@@ -206,7 +206,7 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 |---|---|---|---|
 | 220 `ERR_INVALID_ZKPROOF` | `finalizeDeposit` | the bridge's `VK_BLOB` is not this prover's VkBlob | deploy the matching pair (bridge VK and prover) |
 | 222 `ERR_UNSUPPORTED_SRC_CHAIN` | `finalizeDeposit` | `(chainId, source contract)` not allowlisted | owner: `setTrustedL1Bridge(chainId, l1Bridge, true)` |
-| 224 `ERR_UNKNOWN_BLOCK` | `finalizeDeposit` | the deposit's block hash is not an accepted anchor | confirm with `scripts/deposit_anchor_params.py --verify`, then admit it (`setAcceptedBlockHash` while owner anchors are on, otherwise the light client) |
+| 224 `ERR_UNKNOWN_BLOCK` | `finalizeDeposit` | the deposit's block hash is not an accepted anchor | confirm with `scripts/deposit_anchor_params.py --verify`, then the chain's anchor writer admits it: `setAcceptedBlockHash` while owner anchors are on for that chain, the light client for Ethereum, the Arbitrum block verifier (`eth-lc-relayer arbitrum-anchors`) for Arbitrum |
 | 204 / 230 | `finalizeDeposit` | zero amount / zero recipient was proven | genuinely bad deposit; leave it parked |
 | 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | proven amount exceeds 50 USDC | contact the operator; old oversized transfers must settle before activating the new pair |
 | 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full | retried without counting a failed attempt; wait for withdrawals |

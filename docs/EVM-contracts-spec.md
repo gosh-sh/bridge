@@ -910,7 +910,7 @@ Read off the code, without a formal audit claim.
    *Deploy mode.* The 12-hour L1 figure and the ×16 step are those of an L1 deploy
    (`bundleStride = W·P`, `:234`): the relayer submits `verifyBlock` at every W·P boundary, and
    only the W²-aligned blocks among them carry an L2 hash. On an L2 deploy (`bundleStride = W²`;
-   the shellnet kit's `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   the shellnet kit's `docker/relayer/preflight.sh`
    accepts no other `BRIDGE_ANCHOR_LEVEL`) every submitted block is W²-aligned and carries at
    least the L1 and L2 hashes, so `_appendLayerHashes` (`:1170-1181`) advances the L1 and L2
    windows together, one slot per bundle. The L1 window then lasts as long as L2 (≈ 8 days) — it

@@ -56,14 +56,69 @@ assigns it when the release is tagged.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
-  flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+  flags and environment variables carry over; the `ARBITRUM_ANCHOR_STATE` file gives way to the
+  state directory of the next entry.
 - `EthBeaconLightClient` and `ArbitrumBlockVerifier` are built with the `sold` 0.81.1 release and
   move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
-  are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
-  folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
+  are unchanged, and the relayers build them in from the new folder. Rebuild with
+  `make SOLD_0_81_1=<sold 0.81.1>`.
+- Every long-running service takes three directories and writes nowhere else
+  (bridge-audit#132): `--state-dir`, `--work-dir`, `--log-dir`, each with an environment
+  variable (`DEPOSIT_RELAYER_*_DIR`, `ETH_LC_RELAYER_*_DIR`, `ARBITRUM_ANCHORS_*_DIR`,
+  `BRIDGE_WORK_DIR` and `BRIDGE_LOG_DIR` beside `BRIDGE_STATE_DIR` for `relayer daemon-live`).
+  The state is a directory now: `deposit-relayer daemon --state` / `DEPOSIT_RELAYER_STATE`,
+  `eth-lc-relayer daemon --state`, `eth-lc-relayer arbitrum-anchors --anchor-state` /
+  `ARBITRUM_ANCHOR_STATE` and `relayer --state` / `RELAYER_STATE_PATH` are gone. An old
+  command line stops: without the directory flags clap names the missing ones, and an old
+  `--state` flag or `*_STATE` variable beside them fails with the migration hint. Move each
+  state file into
+  its service's state directory (`deposit-relayer-state.json`, `eth-lc-relayer-state.json`,
+  `arbitrum-anchors-state.json`, `relayer-state.json` next to `prover_state.json`); the
+  daemons name the files; `deposit-relayer`, `eth-lc-relayer daemon` and `arbitrum-anchors`
+  refuse to start when they find other JSON files in their state directory but not their own
+  (`relayer daemon-live` re-reads the bridge's on-chain state at start, so its cursor file is
+  rebuilt). `deposit-relayer status` and `prove-one`, `eth-lc-relayer prove-one`,
+  `set-committee`, `submit-rotate` and the other `relayer` daemon modes take the directory flags
+  too; `set-committee` and `submit-rotate` take the daemon's state lock, so the daemon is
+  stopped while they run. The provers' files go under the work directory instead of the system
+  temp directory, their transcripts and each daemon's own log (a file per day, the newest 14
+  kept, beside stdout) into the log directory.
+- The contract ABIs are built into the binaries: `AN_BRIDGE_ABI_PATH`,
+  `AN_ARBITRUM_VERIFIER_ABI_PATH`, `AN_LC_ABI_PATH`, `AN_USDC_ABI_PATH` and their flags are
+  removed from `deposit-relayer` and `eth-lc-relayer`; `crates/eth-light-client-relayer/abi/`
+  is gone. Remove the variables from the unit files.
+- The Docker Compose kit moved from `crates/bridge-relayer-daemon/deploy/shellnet-l2` to
+  `docker/` and covers every service (bridge-audit#135): `docker/compose.yaml` runs
+  `daemon-live`, `deposit-relayer`, `eth-lc-relayer` and `arbitrum-anchors` from the images
+  `docker/Dockerfile` builds, with the one-shot commands `preflight`, `lc-keygen`,
+  `fold-bk-set` and `cli` under `--profile ops`. The old `compose.yaml`, `compose.env.example`
+  and `Dockerfile` are deleted; the scripts are `docker/relayer/`, the runtime env template is
+  `docker/env/daemon-live.env.example`, the compose service `relayer` is `daemon-live`. The
+  BK set file is no longer baked into the image: it is mounted from `$BRIDGE_OPT/keys/bk_set.json`,
+  and `EXPECTED_BRIDGE_COMMIT` is the commit of the image. `EXPECTED_RELAYER_SHA256` and
+  `EXPECTED_AGGREGATE_PROOF_SHA256` are optional. The layout and the migration are in
+  `docker/README.md`.
+
+### New / Improvements
+
+- Images for every service, built from the sources of one commit by `docker/Dockerfile`:
+  `docker.gosh.sh/bridge-relayer`, `bridge-deposit-relayer`, `bridge-eth-lc-relayer` and
+  `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and
+  on a version tag, tagged `sha-<12>`, `latest` and the release). `--target tools` gives
+  every binary as plain files.
+- `deposit-relayer` reads `RPC_URL`, `BRIDGE_ADDRESS` and `EXPECT_CHAIN_ID` from the
+  environment, `eth-lc-relayer arbitrum-anchors` reads `BRIDGE_ADDRESS`, `PARENT_LOG_SPAN` and
+  `ARBITRUM_LOG_SPAN`: a service is configured from an env file alone.
+- `deposit-relayer` and `eth-lc-relayer` cut every URL in their logs and prover transcripts to
+  `scheme://host`: RPC URLs carry API keys, and transport errors quote them.
+- `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
+  stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
 
 ### Fixes
 
+- `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe
+  holds: both streams are read to the end, and its transcript is written like the step
+  prover's.
 - Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
   `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
   `install.sh` needs a tag cut after this change.

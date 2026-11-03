@@ -31,6 +31,8 @@ thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `daemon-live`'s own log goes to `--log-dir` as well as stdout (bridge-audit#132).
+tracing-appender = "0.2"
 hex = "0.4"
 # `Service` for the failover transport in `eth_rpc` (alloy does not re-export it).
 tower = "0.5"

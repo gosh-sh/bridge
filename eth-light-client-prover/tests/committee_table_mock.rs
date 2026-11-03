@@ -1,15 +1,18 @@
 //! MockProver checks of the rotate's committee circuit on the table SHA-256.
 #![cfg(feature = "aggregation")]
 
-use eth_light_client_prover::committee_table::{
-    native_committee_commitment, native_instances, CommitteeCircuit, CommitteeWitness,
-    COMMITTEE_TABLE_K, NUM_MESSAGES,
+use eth_light_client_prover::{
+    committee::SYNC_COMMITTEE_SIZE,
+    committee_table::{
+        native_committee_commitment, native_instances, CommitteeCircuit, CommitteeWitness,
+        COMMITTEE_TABLE_K, NUM_MESSAGES,
+    },
+    mainnet::rotate_update_from_env,
 };
-use eth_light_client_prover::committee::SYNC_COMMITTEE_SIZE;
-use eth_light_client_prover::mainnet::rotate_update_from_env;
-use halo2_base::halo2_proofs::dev::MockProver;
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::halo2curves::ff::Field;
+use halo2_base::halo2_proofs::{
+    dev::MockProver,
+    halo2curves::{bn256::Fr, ff::Field},
+};
 
 const GLOAS_FORK_SLOT: u64 = 11_296_768;
 
@@ -29,12 +32,20 @@ fn accepts(w: CommitteeWitness) {
 
 #[test]
 fn an_electra_hand_off_is_accepted() {
-    accepts(CommitteeWitness::synthetic(1, GLOAS_FORK_SLOT - 1, GLOAS_FORK_SLOT));
+    accepts(CommitteeWitness::synthetic(
+        1,
+        GLOAS_FORK_SLOT - 1,
+        GLOAS_FORK_SLOT,
+    ));
 }
 
 #[test]
 fn a_gloas_hand_off_is_accepted() {
-    accepts(CommitteeWitness::synthetic(2, GLOAS_FORK_SLOT, GLOAS_FORK_SLOT));
+    accepts(CommitteeWitness::synthetic(
+        2,
+        GLOAS_FORK_SLOT,
+        GLOAS_FORK_SLOT,
+    ));
 }
 
 #[test]
@@ -55,9 +66,17 @@ fn the_table_hashing_other_messages_is_refused() {
     let inst = native_instances(&w);
     // A pubkey leaf, an inner node of the committee tree, the container node
     // and the last branch level.
-    for m in [7, SYNC_COMMITTEE_SIZE + 3, 2 * SYNC_COMMITTEE_SIZE, NUM_MESSAGES - 1] {
+    for m in [
+        7,
+        SYNC_COMMITTEE_SIZE + 3,
+        2 * SYNC_COMMITTEE_SIZE,
+        NUM_MESSAGES - 1,
+    ] {
         let circuit = CommitteeCircuit::mock(w.clone()).with_sha_inputs(|msgs| msgs[m][5] ^= 1);
-        assert!(run(&circuit, inst.clone()).is_err(), "message {m} is not bound");
+        assert!(
+            run(&circuit, inst.clone()).is_err(),
+            "message {m} is not bound"
+        );
     }
 }
 
@@ -82,10 +101,19 @@ fn the_commitment_is_the_one_step_recomputes() {
 #[test]
 #[ignore]
 fn a_live_hand_off_is_accepted() {
-    let (path, update) = rotate_update_from_env().unwrap().expect("ROTATE_UPDATE_PATH is set");
-    let gloas: u64 = std::env::var("BEACON_GLOAS_FORK_SLOT").unwrap().parse().unwrap();
+    let (path, update) = rotate_update_from_env()
+        .unwrap()
+        .expect("ROTATE_UPDATE_PATH is set");
+    let gloas: u64 = std::env::var("BEACON_GLOAS_FORK_SLOT")
+        .unwrap()
+        .parse()
+        .unwrap();
     let w = CommitteeWitness::from_update(&update, gloas).unwrap();
     let inst = native_instances(&w);
-    println!("{}: next_commit 0x{}", path.display(), hex::encode(inst[0].to_bytes().iter().rev().copied().collect::<Vec<_>>()));
+    println!(
+        "{}: next_commit 0x{}",
+        path.display(),
+        hex::encode(inst[0].to_bytes().iter().rev().copied().collect::<Vec<_>>())
+    );
     accepts(w);
 }

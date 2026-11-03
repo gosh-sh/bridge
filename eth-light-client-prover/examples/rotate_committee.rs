@@ -29,37 +29,51 @@
 //! `BEACON_GLOAS_FORK_SLOT`, `ROTATE_KEY_DIR` (keeps both proving keys between
 //! runs), `ROTATE_OUT` (default `out/rotate_committee`).
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
-
-use eth_light_client_prover::committee_table::{
-    native_instances, CommitteeCircuit, CommitteeCircuitParams, CommitteeWitness,
-    COMMITTEE_INSTANCE_LEN, COMMITTEE_TABLE_K,
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
 };
-use eth_light_client_prover::key_cache::KeyCache;
-use eth_light_client_prover::live_witness::ChainParams;
-use eth_light_client_prover::mainnet::{rotate_update_from_env, SLOTS_PER_SYNC_PERIOD};
 
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::{BaseCircuitParams, CircuitBuilderStage};
-use halo2_base::halo2_proofs::halo2curves::bn256::{pairing, Bn256, Fq, Fr, G1Affine};
-use halo2_base::halo2_proofs::halo2curves::ff::Field;
-use halo2_base::halo2_proofs::halo2curves::CurveAffine;
-use halo2_base::halo2_proofs::plonk::{verify_proof, VerifyingKey};
-use halo2_base::halo2_proofs::poly::commitment::{Params, ParamsProver};
-use halo2_base::halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
-use halo2_base::halo2_proofs::poly::kzg::multiopen::VerifierSHPLONK;
-use halo2_base::halo2_proofs::poly::kzg::strategy::SingleStrategy;
-use halo2_base::halo2_proofs::transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer};
-use halo2_base::halo2_proofs::SerdeFormat;
-use halo2_base::utils::testing::gen_proof_with_instances;
-
-use snark_verifier_sdk::halo2::aggregation::{
-    AggregationCircuit, AggregationConfigParams, VerifierUniversality,
+use eth_light_client_prover::{
+    committee_table::{
+        native_instances, CommitteeCircuit, CommitteeCircuitParams, CommitteeWitness,
+        COMMITTEE_INSTANCE_LEN, COMMITTEE_TABLE_K,
+    },
+    key_cache::KeyCache,
+    live_witness::ChainParams,
+    mainnet::{rotate_update_from_env, SLOTS_PER_SYNC_PERIOD},
 };
-use snark_verifier_sdk::halo2::gen_snark_shplonk;
-use snark_verifier_sdk::{gen_pk, CircuitExt, SHPLONK};
+use halo2_base::{
+    gates::circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, CircuitBuilderStage},
+    halo2_proofs::{
+        halo2curves::{
+            bn256::{pairing, Bn256, Fq, Fr, G1Affine},
+            ff::Field,
+            CurveAffine,
+        },
+        plonk::{verify_proof, VerifyingKey},
+        poly::{
+            commitment::{Params, ParamsProver},
+            kzg::{
+                commitment::{KZGCommitmentScheme, ParamsKZG},
+                multiopen::VerifierSHPLONK,
+                strategy::SingleStrategy,
+            },
+        },
+        transcript::{Blake2bRead, Challenge255, TranscriptReadBuffer},
+        SerdeFormat,
+    },
+    utils::testing::gen_proof_with_instances,
+};
+use snark_verifier_sdk::{
+    gen_pk,
+    halo2::{
+        aggregation::{AggregationCircuit, AggregationConfigParams, VerifierUniversality},
+        gen_snark_shplonk,
+    },
+    CircuitExt, SHPLONK,
+};
 
 /// Frozen `VkBlob` magic (see `deposit-prover/src/halo2_tvm_bundle.rs`).
 const VK_BLOB_MAGIC: &[u8; 8] = b"VKBLOB\x00\x00";
@@ -86,7 +100,8 @@ fn write_chunk(out: &mut Vec<u8>, bytes: &[u8]) {
 /// Base v1 VkBlob, as `rotate_tree_n8.rs` writes it.
 fn encode_base_v1_vkblob(config: &BaseCircuitParams, vk: &VerifyingKey<G1Affine>) -> Vec<u8> {
     let mut vk_bytes = Vec::new();
-    vk.write(&mut vk_bytes, SerdeFormat::RawBytes).expect("VerifyingKey::write(RawBytes)");
+    vk.write(&mut vk_bytes, SerdeFormat::RawBytes)
+        .expect("VerifyingKey::write(RawBytes)");
     let mut out = Vec::new();
     out.extend_from_slice(VK_BLOB_MAGIC);
     out.push(1); // version = 1 (Base)
@@ -94,15 +109,25 @@ fn encode_base_v1_vkblob(config: &BaseCircuitParams, vk: &VerifyingKey<G1Affine>
     out.push(0); // shape = Base
     out.push(ACCUMULATOR_LIMBS as u8);
     out.extend_from_slice(&[0u8; 4]);
-    write_chunk(&mut out, &serde_json::to_vec(config).expect("serialise BaseCircuitParams"));
+    write_chunk(
+        &mut out,
+        &serde_json::to_vec(config).expect("serialise BaseCircuitParams"),
+    );
     write_chunk(&mut out, &vk_bytes);
     out
 }
 
-/// The VkBlob back into its config and verifying key, the way the opcode reads it.
+/// The VkBlob back into its config and verifying key, the way the opcode reads
+/// it.
 fn read_base_v1_vkblob(bytes: &[u8]) -> anyhow::Result<VerifyingKey<G1Affine>> {
-    anyhow::ensure!(bytes.len() >= 16 && &bytes[0..8] == VK_BLOB_MAGIC, "VkBlob header");
-    anyhow::ensure!(bytes[8..12] == [1, 0, 0, ACCUMULATOR_LIMBS as u8], "VkBlob version bytes");
+    anyhow::ensure!(
+        bytes.len() >= 16 && &bytes[0..8] == VK_BLOB_MAGIC,
+        "VkBlob header"
+    );
+    anyhow::ensure!(
+        bytes[8..12] == [1, 0, 0, ACCUMULATOR_LIMBS as u8],
+        "VkBlob version bytes"
+    );
     let chunk = |off: usize| -> (&[u8], usize) {
         let len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
         (&bytes[off + 4..off + 4 + len], off + 4 + len)
@@ -130,7 +155,10 @@ fn coord_from_limbs(limbs: &[Fr]) -> Option<Fq> {
 /// The decider the opcode runs: `e(lhs, g2) == e(rhs, s_g2)`.
 fn decide(acc: &[Fr], params: &ParamsKZG<Bn256>) -> bool {
     let point = |l: &[Fr]| -> Option<G1Affine> {
-        Option::from(G1Affine::from_xy(coord_from_limbs(&l[0..3])?, coord_from_limbs(&l[3..6])?))
+        Option::from(G1Affine::from_xy(
+            coord_from_limbs(&l[0..3])?,
+            coord_from_limbs(&l[3..6])?,
+        ))
     };
     match (point(&acc[0..6]), point(&acc[6..12])) {
         (Some(lhs), Some(rhs)) => pairing(&lhs, &params.g2()) == pairing(&rhs, &params.s_g2()),
@@ -152,7 +180,10 @@ fn main() -> anyhow::Result<()> {
         std::env::var("OUTER_SRS")
             .map_err(|_| anyhow::anyhow!("OUTER_SRS is not set (Hermez kzg_bn254_21.srs)"))?,
     );
-    let wrap_k: u32 = std::env::var("WRAP_K").ok().and_then(|s| s.parse().ok()).unwrap_or(21);
+    let wrap_k: u32 = std::env::var("WRAP_K")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(21);
     let out = PathBuf::from(
         std::env::var("ROTATE_OUT").unwrap_or_else(|_| "out/rotate_committee".to_string()),
     );
@@ -162,11 +193,11 @@ fn main() -> anyhow::Result<()> {
         Some((path, update)) => {
             println!("committee of {}", path.display());
             CommitteeWitness::from_update(&update, gloas_fork_slot)?
-        }
+        },
         None => {
             println!("synthetic committee");
             CommitteeWitness::synthetic(1, 9_412 * SLOTS_PER_SYNC_PERIOD, gloas_fork_slot)
-        }
+        },
     };
     let expected = native_instances(&witness);
     println!(
@@ -180,14 +211,19 @@ fn main() -> anyhow::Result<()> {
     // ---- committee circuit ------------------------------------------------
     let params_c = load_srs(&srs, COMMITTEE_TABLE_K as u32)?;
     let stored = match &keys {
-        Some(keys) => keys.load::<CommitteeCircuit, CommitteeCircuitParams>("committee", |p| p.clone())?,
+        Some(keys) => {
+            keys.load::<CommitteeCircuit, CommitteeCircuitParams>("committee", |p| p.clone())?
+        },
         None => None,
     };
     let (c_params, c_bp, c_pk) = match stored {
         Some(key) => {
-            println!("committee: proving key from {}", keys.as_ref().unwrap().dir().display());
+            println!(
+                "committee: proving key from {}",
+                keys.as_ref().unwrap().dir().display()
+            );
             (key.params, key.break_points, key.pk)
-        }
+        },
         None => {
             let mut kg = CommitteeCircuit::keygen(witness.clone());
             let p = kg.calculate_params();
@@ -200,7 +236,7 @@ fn main() -> anyhow::Result<()> {
                 keys.store("committee", &p, &bp, &pk)?;
             }
             (p, bp, pk)
-        }
+        },
     };
     let mut c_vk = Vec::new();
     c_pk.get_vk().write(&mut c_vk, SerdeFormat::RawBytes)?;
@@ -217,24 +253,32 @@ fn main() -> anyhow::Result<()> {
         committee.proof().len(),
         sha256_hex(&c_vk)
     );
-    anyhow::ensure!(committee.instances == vec![expected.clone()], "committee instances");
+    anyhow::ensure!(
+        committee.instances == vec![expected.clone()],
+        "committee instances"
+    );
     drop(c_pk);
     drop(params_c);
 
     // ---- wrap ---------------------------------------------------------------
     let params_w = load_srs(&srs, wrap_k)?;
-    let wrap_keys = keys.as_ref().map(|k| k.with_tag(&format!("committee-vk-{}", sha256_hex(&c_vk))));
+    let wrap_keys = keys
+        .as_ref()
+        .map(|k| k.with_tag(&format!("committee-vk-{}", sha256_hex(&c_vk))));
     let stored = match &wrap_keys {
         Some(keys) => {
             keys.load::<AggregationCircuit, AggregationConfigParams>("committee-wrap", |c| *c)?
-        }
+        },
         None => None,
     };
     let (w_params, w_bp, w_pk) = match stored {
         Some(key) => {
-            println!("wrap: proving key from {}", wrap_keys.as_ref().unwrap().dir().display());
+            println!(
+                "wrap: proving key from {}",
+                wrap_keys.as_ref().unwrap().dir().display()
+            );
             (key.params, key.break_points, key.pk)
-        }
+        },
         None => {
             let cfg = AggregationConfigParams {
                 degree: wrap_k,
@@ -259,7 +303,7 @@ fn main() -> anyhow::Result<()> {
                 keys.store("committee-wrap", &p, &bp, &pk)?;
             }
             (p, bp, pk)
-        }
+        },
     };
     let mut wrap = AggregationCircuit::new::<SHPLONK>(
         CircuitBuilderStage::Prover,
@@ -272,13 +316,18 @@ fn main() -> anyhow::Result<()> {
     wrap.expose_previous_instances(false);
     let inst = wrap.instances().remove(0);
     anyhow::ensure!(
-        inst.len() == ACCUMULATOR_LIMBS + COMMITTEE_INSTANCE_LEN && inst[ACCUMULATOR_LIMBS..] == expected[..],
+        inst.len() == ACCUMULATOR_LIMBS + COMMITTEE_INSTANCE_LEN
+            && inst[ACCUMULATOR_LIMBS..] == expected[..],
         "wrap instances: {} of them, not 12 accumulator limbs + the committee's",
         inst.len()
     );
     let t = Instant::now();
     let proof = gen_proof_with_instances(&params_w, &w_pk, wrap, &[&inst]);
-    println!("wrap: prove {:.1}s, {} B", t.elapsed().as_secs_f64(), proof.len());
+    println!(
+        "wrap: prove {:.1}s, {} B",
+        t.elapsed().as_secs_f64(),
+        proof.len()
+    );
 
     // ---- what the opcode does with it ----------------------------------------
     let base_params: BaseCircuitParams = w_params.into();
@@ -292,19 +341,36 @@ fn main() -> anyhow::Result<()> {
         Challenge255<G1Affine>,
         Blake2bRead<&[u8], G1Affine, Challenge255<G1Affine>>,
         SingleStrategy<'_, Bn256>,
-    >(params_w.verifier_params(), &vk, SingleStrategy::new(&params_w), &[refs], &mut transcript)
+    >(
+        params_w.verifier_params(),
+        &vk,
+        SingleStrategy::new(&params_w),
+        &[refs],
+        &mut transcript,
+    )
     .map_err(|e| anyhow::anyhow!("the read-back VkBlob rejects the proof: {e:?}"))?;
-    anyhow::ensure!(decide(&inst[..ACCUMULATOR_LIMBS], &params_w), "the decider rejects the accumulator");
+    anyhow::ensure!(
+        decide(&inst[..ACCUMULATOR_LIMBS], &params_w),
+        "the decider rejects the accumulator"
+    );
     let mut tampered = inst[..ACCUMULATOR_LIMBS].to_vec();
     tampered[0] += Fr::ONE;
-    anyhow::ensure!(!decide(&tampered, &params_w), "the decider accepts a tampered accumulator");
-    println!("VkBlob reads back, the proof verifies, the decider accepts it and refuses a tampered one");
+    anyhow::ensure!(
+        !decide(&tampered, &params_w),
+        "the decider accepts a tampered accumulator"
+    );
+    println!(
+        "VkBlob reads back, the proof verifies, the decider accepts it and refuses a tampered one"
+    );
 
     let inst_bytes: Vec<u8> = inst.iter().flat_map(|f| f.to_bytes()).collect();
     fs::write(out.join("rotate_vk_blob.bin"), &vk_blob)?;
     fs::write(out.join("rotate_public_inputs.bin"), &inst_bytes)?;
     fs::write(out.join("rotate_proof_blake2b.bin"), &proof)?;
-    fs::write(out.join("rotate_base_circuit_params.json"), serde_json::to_vec_pretty(&base_params)?)?;
+    fs::write(
+        out.join("rotate_base_circuit_params.json"),
+        serde_json::to_vec_pretty(&base_params)?,
+    )?;
     println!(
         "wrote {}: VkBlob {} B (sha256 {}), {} instances, proof {} B",
         out.display(),

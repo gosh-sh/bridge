@@ -9,7 +9,8 @@
 //!    before Gloas, 2946 from it, picked by the attested slot against the Gloas
 //!    fork slot);
 //! 3. the committee's 2-level Poseidon commitment over the same pubkey bytes,
-//!    the value `step` recomputes ([`crate::rotate::commit_sync_committee_2level`]).
+//!    the value `step` recomputes
+//!    ([`crate::rotate::commit_sync_committee_2level`]).
 //!
 //! Public instances, [`COMMITTEE_INSTANCE_LEN`] BN254 scalars:
 //!
@@ -35,29 +36,35 @@
 
 use std::cell::RefCell;
 
-use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::{BaseCircuitParams, BaseConfig};
-use halo2_base::gates::flex_gate::MultiPhaseThreadBreakPoints;
-use halo2_base::gates::{GateInstructions, RangeChip, RangeInstructions};
-use halo2_base::halo2_proofs::circuit::{Layouter, SimpleFloorPlanner};
-use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
-use halo2_base::halo2_proofs::plonk::{Circuit, ConstraintSystem, Error};
-use halo2_base::halo2_proofs::halo2curves::ff::Field;
-use halo2_base::{AssignedValue, Context, QuantumCell};
+use halo2_base::{
+    gates::{
+        circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, BaseConfig},
+        flex_gate::MultiPhaseThreadBreakPoints,
+        GateInstructions, RangeChip, RangeInstructions,
+    },
+    halo2_proofs::{
+        circuit::{Layouter, SimpleFloorPlanner},
+        halo2curves::{bn256::Fr, ff::Field},
+        plonk::{Circuit, ConstraintSystem, Error},
+    },
+    AssignedValue, Context, QuantumCell,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zkevm_hashes::sha256::vanilla::columns::Sha256CircuitConfig;
-use zkevm_hashes::sha256::vanilla::param::SHA256_NUM_ROWS;
-use zkevm_hashes::sha256::vanilla::witness::AssignedSha256Block;
-
-use crate::committee::{COMMITTEE_SHARDS, PUBKEYS_PER_SHARD, SYNC_COMMITTEE_SIZE};
-use crate::fork::{
-    assert_is_gloas, is_gloas, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA, NEXT_SYNC_COMMITTEE_GINDEX_GLOAS,
-    SYNC_COMMITTEE_BRANCH_LEN,
+use zkevm_hashes::sha256::vanilla::{
+    columns::Sha256CircuitConfig, param::SHA256_NUM_ROWS, witness::AssignedSha256Block,
 };
-use crate::mainnet::RotateFixture;
-use crate::rotate::{combine_committee_commitment, commit_committee_shard, new_committee_hasher};
-use crate::ssz::merkle_depth;
+
+use crate::{
+    committee::{COMMITTEE_SHARDS, PUBKEYS_PER_SHARD, SYNC_COMMITTEE_SIZE},
+    fork::{
+        assert_is_gloas, is_gloas, NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
+        NEXT_SYNC_COMMITTEE_GINDEX_GLOAS, SYNC_COMMITTEE_BRANCH_LEN,
+    },
+    mainnet::RotateFixture,
+    rotate::{combine_committee_commitment, commit_committee_shard, new_committee_hasher},
+    ssz::merkle_depth,
+};
 
 /// Rows of the committee circuit.
 pub const COMMITTEE_TABLE_K: usize = 18;
@@ -115,9 +122,13 @@ impl CommitteeWitness {
             x as u8
         };
         let mut w = Self {
-            pubkeys: (0..SYNC_COMMITTEE_SIZE).map(|_| std::array::from_fn(|_| byte())).collect(),
+            pubkeys: (0..SYNC_COMMITTEE_SIZE)
+                .map(|_| std::array::from_fn(|_| byte()))
+                .collect(),
             aggregate: std::array::from_fn(|_| byte()),
-            branch: (0..SYNC_COMMITTEE_BRANCH_LEN).map(|_| std::array::from_fn(|_| byte())).collect(),
+            branch: (0..SYNC_COMMITTEE_BRANCH_LEN)
+                .map(|_| std::array::from_fn(|_| byte()))
+                .collect(),
             state_root: [0; 32],
             attested_slot,
             gloas_fork_slot,
@@ -219,8 +230,11 @@ fn pair_message(left: &[u8; 32], right: &[u8; 32]) -> [u8; 64] {
 /// is as long as the deeper index; the shallower one leaves the node as it is
 /// above its depth.
 fn branch_level(i: usize, gloas: bool) -> (bool, bool) {
-    let gindex =
-        if gloas { NEXT_SYNC_COMMITTEE_GINDEX_GLOAS } else { NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA };
+    let gindex = if gloas {
+        NEXT_SYNC_COMMITTEE_GINDEX_GLOAS
+    } else {
+        NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA
+    };
     let active = i < merkle_depth(gindex);
     (active && (gindex >> i) & 1 == 1, active)
 }
@@ -303,7 +317,13 @@ impl CommitteeCircuit {
             builder.set_break_points(bp);
         }
         let instances = native_instances(&witness);
-        Self { witness, params, builder: RefCell::new(builder), instances, sha_inputs: None }
+        Self {
+            witness,
+            params,
+            builder: RefCell::new(builder),
+            instances,
+            sha_inputs: None,
+        }
     }
 
     /// Sizes the base part's columns by laying it out once over placeholder
@@ -324,9 +344,14 @@ impl CommitteeCircuit {
                 .collect::<Vec<_>>()
         };
         self.constrain(&blocks);
-        let base = self.builder.borrow_mut().calculate_params(Some(NUM_UNUSABLE_ROWS));
+        let base = self
+            .builder
+            .borrow_mut()
+            .calculate_params(Some(NUM_UNUSABLE_ROWS));
         self.builder.borrow_mut().clear();
-        self.params = CommitteeCircuitParams { base };
+        self.params = CommitteeCircuitParams {
+            base,
+        };
         self.params.clone()
     }
 
@@ -380,17 +405,28 @@ impl CommitteeCircuit {
         let range = RangeChip::new(LOOKUP_BITS, b.lookup_manager().clone());
         let gate = range.gate();
         let ctx = b.main(0);
-        let mut hashed = Hashed { blocks, msgs: &msgs, next: 0 };
+        let mut hashed = Hashed {
+            blocks,
+            msgs: &msgs,
+            next: 0,
+        };
 
         let zero = ctx.load_zero();
-        let pubkeys: Vec<Vec<AssignedValue<Fr>>> =
-            w.pubkeys.iter().map(|pk| load_checked_bytes(ctx, &range, pk)).collect();
+        let pubkeys: Vec<Vec<AssignedValue<Fr>>> = w
+            .pubkeys
+            .iter()
+            .map(|pk| load_checked_bytes(ctx, &range, pk))
+            .collect();
         let aggregate = load_checked_bytes(ctx, &range, &w.aggregate);
 
         let mut level: Vec<Vec<AssignedValue<Fr>>> = pubkeys
             .iter()
             .map(|pk| {
-                let m: Vec<_> = pk.iter().copied().chain(std::iter::repeat(zero).take(16)).collect();
+                let m: Vec<_> = pk
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat(zero).take(16))
+                    .collect();
                 hashed.hash(ctx, &range, &m)
             })
             .collect();
@@ -403,8 +439,11 @@ impl CommitteeCircuit {
                 })
                 .collect();
         }
-        let agg_msg: Vec<_> =
-            aggregate.iter().copied().chain(std::iter::repeat(zero).take(16)).collect();
+        let agg_msg: Vec<_> = aggregate
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(zero).take(16))
+            .collect();
         let agg_root = hashed.hash(ctx, &range, &agg_msg);
         let container: Vec<_> = level[0].iter().chain(&agg_root).copied().collect();
         let mut node = hashed.hash(ctx, &range, &container);
@@ -427,7 +466,9 @@ impl CommitteeCircuit {
                 m.push(gate.select(ctx, node[j], sibling[j], sibling_left));
             }
             let digest = hashed.hash(ctx, &range, &m);
-            node = (0..32).map(|j| gate.select(ctx, digest[j], node[j], active)).collect();
+            node = (0..32)
+                .map(|j| gate.select(ctx, digest[j], node[j], active))
+                .collect();
         }
         assert_eq!(hashed.next, NUM_MESSAGES);
 
@@ -447,7 +488,13 @@ impl CommitteeCircuit {
         debug_assert_eq!(digests.len(), COMMITTEE_SHARDS);
         let next_commit = combine_committee_commitment(&hasher, ctx, gate, &digests, &aggregate);
 
-        let out = vec![next_commit, state_root_hi, state_root_lo, attested_slot, gloas_fork_slot];
+        let out = vec![
+            next_commit,
+            state_root_hi,
+            state_root_lo,
+            attested_slot,
+            gloas_fork_slot,
+        ];
         debug_assert_eq!(
             out.iter().map(|c| *c.value()).collect::<Vec<_>>(),
             self.instances,
@@ -517,7 +564,11 @@ fn le_int(
     bytes: &[AssignedValue<Fr>],
 ) -> AssignedValue<Fr> {
     let weights = (0..bytes.len()).map(|i| QuantumCell::Constant(Fr::from(256).pow([i as u64])));
-    gate.inner_product(ctx, bytes.iter().copied().map(QuantumCell::Existing), weights)
+    gate.inner_product(
+        ctx,
+        bytes.iter().copied().map(QuantumCell::Existing),
+        weights,
+    )
 }
 
 /// `Σ b_i · 256^(n-1-i)`.
@@ -549,7 +600,9 @@ fn select_const(
 /// The instances the circuit exposes for `w`, computed natively.
 pub fn native_instances(w: &CommitteeWitness) -> Vec<Fr> {
     let le = |b: &[u8]| {
-        b.iter().rev().fold(Fr::ZERO, |acc, &x| acc * Fr::from(256) + Fr::from(x as u64))
+        b.iter()
+            .rev()
+            .fold(Fr::ZERO, |acc, &x| acc * Fr::from(256) + Fr::from(x as u64))
     };
     vec![
         native_committee_commitment(&w.pubkeys, &w.aggregate),
@@ -592,25 +645,41 @@ impl Circuit<Fr> for CommitteeCircuit {
         unimplemented!()
     }
 
-    fn configure_with_params(meta: &mut ConstraintSystem<Fr>, params: Self::Params) -> Self::Config {
+    fn configure_with_params(
+        meta: &mut ConstraintSystem<Fr>,
+        params: Self::Params,
+    ) -> Self::Config {
         let sha256 = Sha256CircuitConfig::new(meta);
         // Last: it reads the unusable rows of everything configured before it.
         let base = BaseCircuitBuilder::configure_with_params(meta, params.base);
-        CommitteeCircuitConfig { base, sha256 }
+        CommitteeCircuitConfig {
+            base,
+            sha256,
+        }
     }
 
     fn configure(_: &mut ConstraintSystem<Fr>) -> Self::Config {
         unreachable!("configured with params")
     }
 
-    fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<Fr>) -> Result<(), Error> {
-        let msgs = self.sha_inputs.clone().unwrap_or_else(|| self.witness.messages().0);
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fr>,
+    ) -> Result<(), Error> {
+        let msgs = self
+            .sha_inputs
+            .clone()
+            .unwrap_or_else(|| self.witness.messages().0);
         let inputs: Vec<Vec<u8>> = msgs.iter().map(|m| m.to_vec()).collect();
         let mut assigned = Vec::new();
         layouter.assign_region(
             || "sha256",
             |mut region| {
-                assigned = config.sha256.multi_sha256(&mut region, inputs.clone(), Some(NUM_BLOCKS));
+                assigned =
+                    config
+                        .sha256
+                        .multi_sha256(&mut region, inputs.clone(), Some(NUM_BLOCKS));
                 Ok(())
             },
         )?;

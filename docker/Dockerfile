@@ -110,9 +110,11 @@ RUN --mount=type=cache,id=cargo-home,target=/cargo \
     --mount=type=cache,id=target-lc-prover,target=/src/eth-light-client-prover/target \
     cd eth-light-client-prover \
     && cargo build --release --locked --example export_step_vk_blob \
-    && cargo build --release --locked --features aggregation --example rotate_tree_n8 \
+    && cargo build --release --locked --features aggregation \
+         --example export_shard_snark --example export_step_snark --example rotate_tree_n8 \
     && install -D -m 0755 -t /out \
-         target/release/examples/export_step_vk_blob target/release/examples/rotate_tree_n8
+         target/release/examples/export_step_vk_blob target/release/examples/export_shard_snark \
+         target/release/examples/export_step_snark target/release/examples/rotate_tree_n8
 
 # cast and forge: the relayer's preflight reads the chain with cast, the CLI
 # image carries both for the operator. Pinned release, sha256-checked.
@@ -217,16 +219,19 @@ ENTRYPOINT ["/opt/bridge/bin/deposit-relayer"]
 CMD ["daemon"]
 
 # eth-lc-relayer: the beacon light-client daemon and the Arbitrum block
-# relayer (arbitrum-anchors) are two commands of this binary; the step and
-# rotate provers it starts are beside it. SRS and the step key live in
-# /data/params.
+# relayer (arbitrum-anchors) are two commands of this binary; the step
+# prover and the three rotate stages it starts are beside it. SRS, the step
+# key and the rotate keys (rotate-keys/) live in /data/params.
 FROM runtime-base AS bridge-eth-lc-relayer
 LABEL org.opencontainers.image.title="GOSH bridge: Ethereum light-client and Arbitrum block relayer"
 COPY --from=build-lc-relayer /out/eth-lc-relayer /opt/bridge/bin/
-COPY --from=build-lc-prover /out/export_step_vk_blob /out/rotate_tree_n8 /opt/bridge/bin/
+COPY --from=build-lc-prover /out/export_step_vk_blob /out/export_shard_snark \
+     /out/export_step_snark /out/rotate_tree_n8 /opt/bridge/bin/
 RUN chmod 0555 /opt/bridge/bin/* \
     && cd /opt/bridge && sha256sum bin/* >IMAGE-SHA256SUMS && chmod 0444 IMAGE-SHA256SUMS
 ENV LIGHT_CLIENT_STEP_PROVER_BIN=/opt/bridge/bin/export_step_vk_blob \
+    LIGHT_CLIENT_SHARD_PROVER_BIN=/opt/bridge/bin/export_shard_snark \
+    LIGHT_CLIENT_STEP_SNARK_PROVER_BIN=/opt/bridge/bin/export_step_snark \
     LIGHT_CLIENT_ROTATE_PROVER_BIN=/opt/bridge/bin/rotate_tree_n8 \
     LIGHT_CLIENT_PROVER_DIR=/data/params \
     STEP_SRS_PATH=/data/params/kzg_bn254_19.srs \

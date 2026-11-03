@@ -31,15 +31,21 @@
 //!   cargo run --release --features aggregation --example rotate_tree_n8 2>&1 | tail -60
 //! ```
 //!
-//! Env: `SHARD_DIR` (default `out/shard_snark`), `OUTER_SRS`
-//! (default `../params/kzg_bn254_{k}.srs`), `TREE_K` (default 21).
+//! Env: `SHARD_DIR` (default `out/shard_snark`), `OUTER_SRS` (required, Hermez
+//! k=21; the shard snarks are read against the same file cut to their k),
+//! `TREE_K` (default 21), `STEP_DIR` (the step snark to fold; when set it must
+//! hold one) with `STEP_SRS` (required with a step snark, Hermez k=21),
+//! `ROTATE_UPDATE_PATH` (the live update whose committee and branch are glued;
+//! without it the committed mainnet fixture, else a synthetic committee),
+//! `ROTATE_KEY_DIR` (keeps the L1, L2 and root proving keys between runs).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use eth_light_client_prover::committee::{native_committee_subtree_root, COMMITTEE_SHARDS};
-use eth_light_client_prover::mainnet::{committee_source, SLOTS_PER_SYNC_PERIOD};
+use eth_light_client_prover::key_cache::KeyCache;
+use eth_light_client_prover::mainnet::{committee_source_from_env, SLOTS_PER_SYNC_PERIOD};
 use eth_light_client_prover::live_witness::ChainParams;
 use eth_light_client_prover::rotate::SHARD_INSTANCE_LEN;
 use eth_light_client_prover::step::STEP_INSTANCE_LEN;
@@ -178,7 +184,9 @@ struct AggNodePk {
 }
 
 /// One stock intermediate aggregation node (L1 / L2). Returns a `Snark` whose
-/// protocol carries `accumulator_indices = 0..12`, so a parent folds it.
+/// protocol carries `accumulator_indices = 0..12`, so a parent folds it. The
+/// level's key comes from `stored` (`ROTATE_KEY_DIR`) when it holds one, and
+/// goes there after a keygen.
 fn agg_node(
     name: &str,
     params: &ParamsKZG<Bn256>,
@@ -186,8 +194,19 @@ fn agg_node(
     inners: Vec<Snark>,
     has_prev_accumulator: bool,
     cache: &mut Option<AggNodePk>,
-) -> Snark {
+    stored: Option<(&KeyCache, &str)>,
+) -> anyhow::Result<Snark> {
     println!("── {name}: aggregate {} snark(s), has_prev={has_prev_accumulator}", inners.len());
+    if cache.is_none() {
+        if let Some((keys, key_name)) = stored {
+            if let Some(key) =
+                keys.load::<AggregationCircuit, AggregationConfigParams>(key_name, |c| *c)?
+            {
+                println!("   proving key {key_name} from {}", keys.dir().display());
+                *cache = Some(AggNodePk { calc: key.params, pk: key.pk, bp: key.break_points });
+            }
+        }
+    }
     if cache.is_none() {
         let cfg = AggregationConfigParams { degree: k, lookup_bits: (k - 1) as usize, ..Default::default() };
         let mut kg = AggregationCircuit::new::<SHPLONK>(
@@ -205,6 +224,10 @@ fn agg_node(
         println!("   gen_pk {:.1}s (cached for this level)", t.elapsed().as_secs_f64());
         let bp = kg.break_points();
         drop(kg);
+        if let Some((keys, key_name)) = stored {
+            keys.store(key_name, &calc, &bp, &pk)?;
+            println!("   stored proving key {key_name} in {}", keys.dir().display());
+        }
         *cache = Some(AggNodePk { calc, pk, bp });
     } else {
         println!("   reuse cached pk");
@@ -223,7 +246,12 @@ fn agg_node(
     let snark = gen_snark_shplonk(params, &cached.pk, pv, None::<&Path>);
     let ninst: usize = snark.instances.iter().map(|c| c.len()).sum();
     println!("   {name} done {:.1}s → {} B, {ninst} inst\n", t.elapsed().as_secs_f64(), snark.proof().len());
-    snark
+    Ok(snark)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -247,8 +275,11 @@ fn main() -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("read shard VK: {e}"))?;
 
-    let inner_srs = shard_dir.join(format!("kzg_bn254_{inner_k}.srs"));
-    let params_inner = load_srs(&inner_srs, inner_k)?;
+    let outer_srs = PathBuf::from(
+        std::env::var("OUTER_SRS")
+            .map_err(|_| anyhow::anyhow!("OUTER_SRS is not set (Hermez kzg_bn254_21.srs)"))?,
+    );
+    let params_inner = load_srs(&outer_srs, inner_k)?;
     let protocol = compile(
         &params_inner,
         &vk,
@@ -272,7 +303,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ---- Committee glue witness (real mainnet fixture, else synthetic) ------
-    let source = committee_source();
+    let source = committee_source_from_env()?;
     anyhow::ensure!(source.shards.len() == COMMITTEE_SHARDS, "committee source != 8 shards");
     let subtree_roots: Vec<[u8; 32]> =
         source.shards.iter().map(|s| native_committee_subtree_root(s)).collect();
@@ -310,17 +341,24 @@ fn main() -> anyhow::Result<()> {
         witness.period()
     );
 
-    let outer_srs = std::env::var("OUTER_SRS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("../params/kzg_bn254_{k}.srs")));
     let params = load_srs(&outer_srs, k)?;
     println!();
 
     // ---- Optional step snark → BIND current_commit (bls-bind, R2 opt-1) -----
     // When present, its verified `committee_commitment` (step PI[5]) replaces the
     // witnessed placeholder as the rotate `current_commit`.
-    let step_dir =
-        PathBuf::from(std::env::var("STEP_DIR").unwrap_or_else(|_| "out/step_snark".to_string()));
+    let step_dir_env = std::env::var_os("STEP_DIR").filter(|d| !d.is_empty());
+    let step_dir = step_dir_env
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("out/step_snark"));
+    anyhow::ensure!(
+        step_dir_env.is_none() || step_dir.join("step_proof.bin").exists(),
+        "STEP_DIR={} holds no step_proof.bin: a tree without the step snark is another circuit \
+         than the one the light client pins",
+        step_dir.display()
+    );
+    let mut step_vk_sha = None;
     let step_snark: Option<Snark> = if step_dir.join("step_proof.bin").exists() {
         let step_cfg: BaseCircuitParams =
             serde_json::from_slice(&fs::read(step_dir.join("step_config.json"))?)?;
@@ -333,9 +371,10 @@ fn main() -> anyhow::Result<()> {
             step_cfg.clone(),
         )
         .map_err(|e| anyhow::anyhow!("read step VK: {e}"))?;
-        let step_srs_path = std::env::var("STEP_SRS")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(format!("../params/kzg_bn254_{step_k}.srs")));
+        step_vk_sha = Some(sha256_hex(&step_vk_bytes));
+        let step_srs_path = PathBuf::from(std::env::var("STEP_SRS").map_err(|_| {
+            anyhow::anyhow!("STEP_SRS is not set (Hermez kzg_bn254_{step_k}.srs, the step snark's)")
+        })?);
         let params_step = load_srs(&step_srs_path, step_k)?;
         let step_proof = fs::read(step_dir.join("step_proof.bin"))?;
         let step_inst = read_instances(&step_dir.join("step_instances.bin"))?;
@@ -365,6 +404,17 @@ fn main() -> anyhow::Result<()> {
     };
     let bound_current = step_snark.is_some();
 
+    // Each level's key also depends on the snarks it folds: tie it to them.
+    let keys = KeyCache::from_env()?;
+    let shard_tag = format!("shard-vk-{}", sha256_hex(&vk_bytes));
+    let l1_keys = keys.as_ref().map(|c| c.with_tag(&shard_tag));
+    let root_keys = keys.as_ref().map(|c| {
+        c.with_tag(&format!(
+            "{shard_tag}+step-vk-{}",
+            step_vk_sha.as_deref().unwrap_or("none")
+        ))
+    });
+
     // ---- L1 (×4): aggregate distinct shard pairs {0,1}{2,3}{4,5}{6,7} -------
     let mut l1: Vec<Snark> = Vec::with_capacity(4);
     let mut l1_pk: Option<AggNodePk> = None;
@@ -376,7 +426,8 @@ fn main() -> anyhow::Result<()> {
             vec![leaves[2 * p].clone(), leaves[2 * p + 1].clone()],
             false,
             &mut l1_pk,
-        );
+            l1_keys.as_ref().map(|c| (c, "tree-l1")),
+        )?;
         anyhow::ensure!(
             node.instances.iter().map(|c| c.len()).sum::<usize>() == 18,
             "L1[{p}] != 18 inst"
@@ -395,7 +446,8 @@ fn main() -> anyhow::Result<()> {
             vec![l1[2 * p].clone(), l1[2 * p + 1].clone()],
             true,
             &mut l2_pk,
-        );
+            l1_keys.as_ref().map(|c| (c, "tree-l2")),
+        )?;
         anyhow::ensure!(
             node.instances.iter().map(|c| c.len()).sum::<usize>() == 24,
             "L2[{p}] != 24 inst"
@@ -407,23 +459,47 @@ fn main() -> anyhow::Result<()> {
     let emit_vkblob = std::env::var("EMIT_VKBLOB").map(|v| v == "1" || v == "true").unwrap_or(false);
     println!("── ROOT: RotateAggregationCircuit over 2×L2 (8 distinct shards) + committee glue");
     let root_inners = vec![l2[0].clone(), l2[1].clone()];
-    let cfg = AggregationConfigParams { degree: k, lookup_bits: (k - 1) as usize, ..Default::default() };
-    let mut kg = RotateAggregationCircuit::new(
-        CircuitBuilderStage::Keygen,
-        cfg,
-        &params,
-        root_inners.clone(),
-        VerifierUniversality::None,
-        &witness,
-        step_snark.clone(),
-    );
-    let calc = kg.calculate_params(Some(10));
-    println!("   calculated: {calc:?}");
-    let t = Instant::now();
-    let pk = gen_pk(&params, &kg, None);
-    println!("   gen_pk {:.1}s", t.elapsed().as_secs_f64());
-    let bp = kg.break_points();
-    drop(kg);
+    let stored_root = match &root_keys {
+        Some(keys) => keys.load::<RotateAggregationCircuit, AggregationConfigParams>(
+            "tree-root",
+            |c| (*c).into(),
+        )?,
+        None => None,
+    };
+    let (calc, pk, bp) = match stored_root {
+        Some(key) => {
+            println!("   proving key tree-root from {}", root_keys.as_ref().unwrap().dir().display());
+            (key.params, key.pk, key.break_points)
+        }
+        None => {
+            let cfg = AggregationConfigParams {
+                degree: k,
+                lookup_bits: (k - 1) as usize,
+                ..Default::default()
+            };
+            let mut kg = RotateAggregationCircuit::new(
+                CircuitBuilderStage::Keygen,
+                cfg,
+                &params,
+                root_inners.clone(),
+                VerifierUniversality::None,
+                &witness,
+                step_snark.clone(),
+            );
+            let calc = kg.calculate_params(Some(10));
+            println!("   calculated: {calc:?}");
+            let t = Instant::now();
+            let pk = gen_pk(&params, &kg, None);
+            println!("   gen_pk {:.1}s", t.elapsed().as_secs_f64());
+            let bp = kg.break_points();
+            drop(kg);
+            if let Some(keys) = &root_keys {
+                keys.store("tree-root", &calc, &bp, &pk)?;
+                println!("   stored proving key tree-root in {}", keys.dir().display());
+            }
+            (calc, pk, bp)
+        }
+    };
 
     // Keep copies for the optional Blake2b (opcode) re-prove.
     let bp_emit = if emit_vkblob { Some(bp.clone()) } else { None };

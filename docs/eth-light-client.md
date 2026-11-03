@@ -43,12 +43,12 @@ different language dialect and a different chain.
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
 | `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client lets the replaced committee advance the head for the period it served, so an early `/updates` hand-off does not freeze it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is no longer a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale, so `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch` edit files the placing overwrites and no longer apply to anything. `scripts/check_eth_beacon_lc_sources.sh` does not look at the placed sources at all: it reads the two patch files and `contracts/an/EthKeccak.sol`, and asserts the patches touch only `contracts/exchange/` paths. Nothing checks the files `place.json` places. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
-| `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the decider of tvm-sdk PR #284, which is not on every network yet. |
+| `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the KZG accumulation decider of tvm-sdk PR #284, released in tvm-sdk tag `v3.1.0.an` (the tag `acki-nacki` `dev` pins). A node built against an older tvm-sdk accepts a rotate proof without checking the inner proofs it aggregates. |
 | `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | The binary `--step-prover-bin` names (`LIGHT_CLIENT_STEP_PROVER_BIN`, prebuilt with `cargo build --release --example export_step_vk_blob`), started with the witness passed through environment variables (`generate_step` in `crates/eth-light-client-relayer/src/prover.rs`). |
-| Rotate prover | `eth-light-client-prover/examples/rotate_tree_n8.rs` | relayer host | The binary `--rotate-prover-bin` names (`LIGHT_CLIENT_ROTATE_PROVER_BIN`, prebuilt with `cargo build --release --features aggregation --example rotate_tree_n8`); `EMIT_VKBLOB=1`, recursive aggregation over 8 shards (`generate_rotate` in `src/prover.rs`). |
-| Hermez KZG SRS, k=19 | file `kzg_bn254_19.srs` | relayer host | Same ceremony the opcode is keyed to. Public mirrors have been unreliable; copy from an existing relayer host (`deploy/shellnet-shadow/install-srs.sh` pins the sha256). |
+| Rotate prover | `eth-light-client-prover/examples/export_shard_snark.rs`, `export_step_snark.rs`, `rotate_tree_n8.rs` | relayer host, child processes of the daemon | Three stages, one binary each: `--shard-prover-bin` (`LIGHT_CLIENT_SHARD_PROVER_BIN`), `--step-snark-prover-bin` (`LIGHT_CLIENT_STEP_SNARK_PROVER_BIN`), `--rotate-prover-bin` (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), all prebuilt with `cargo build --release --features aggregation --example <name>`. The shard stage proves the next committee in 8 shards, the step stage proves the hand-off update signed by the current committee, the tree stage aggregates the nine and writes the bundle `submitRotate` takes (`src/rotate.rs`). |
+| Hermez KZG SRS, k=19 and k=21 | files `kzg_bn254_19.srs` (step), `kzg_bn254_21.srs` (rotate; the release asset of that name, the shard stage cuts its k=20 from it) | relayer host | Same ceremony the opcode is keyed to. Public mirrors have been unreliable; copy from an existing relayer host (`deploy/shellnet-shadow/install-srs.sh` pins the sha256). |
 | Beacon node | external | Ethereum | Must serve the light-client REST endpoints (`finality_update`, `updates`). Public ChainSafe Lodestar and Nimbus endpoints do; publicnode does not serve `updates`. |
 | Execution node | external, optional | Ethereum | Only for epoch ancestry (`submitAncestry`), see §3.4. |
 | Giver | shellnet zerostate giver | Acki Nacki shellnet | Funds the contract on test networks (`deploy/shellnet-shadow/fund-account.sh`). |
@@ -195,14 +195,24 @@ flowchart TD
   `/updates` best update (start of the old period) is a valid hand-off. The
   replaced committee can still advance the head for the period it served, so
   an early rotate does not freeze the rest of that period. The daemon
-  auto-rotates only the committed fixture period; a live period jump
-  returns `RotateRequired` — prove `rotate_tree_n8` on n14 against the
-  `/updates` best update and `submit-rotate`. It needs the rotate
-  decider from tvm-sdk PR #284 in the node VM; on a network without it
-  `submitRotate` is unsound and must stay off (`--no-rotate`).
-- **Owner hop** (`--owner-hop`, `src/relayer.rs:215`) is the shadow substitute: prove a step of
-  the new period, write its commitment with the owner key, submit the same bundle. It is refused
-  once `disableOwnerRotation` has been called.
+  starts the rotate of period P as soon as the contract holds P and the
+  beacon serves `/updates?start_period=P`: it fetches that update and the
+  one of P−1 (whose next committee is the current one), and runs the three
+  rotate stages in the background while steps of P keep going. The stages
+  write into `<work-dir>/rotate-<P>/`, so a restart re-runs only the stage
+  that had not finished. Before sending, the daemon checks the bundle
+  against the contract: a contract already past P drops it, a bundle whose
+  verification key is not the pinned one
+  (`eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256`)
+  or whose current committee is not the contract's is refused and logged,
+  not sent. It needs the decider of tvm-sdk PR #284 in the node VM; on a
+  network without it `submitRotate` proves less than it claims (§2), and
+  `--no-rotate` keeps it off.
+- **Owner hop** (`--owner-hop`) is the fallback: when the first update of P+1 arrives and no
+  rotate of P has been sent, the daemon logs an error naming why (still proving, failed,
+  refused, `--no-rotate`), proves a step of P+1, writes its commitment with the owner key and
+  submits the same bundle. It is refused once `disableOwnerRotation` has been called. Without
+  `--owner-hop` the daemon returns `RotateRequired` on every tick until the rotate lands.
 - **Re-anchor** (`reAnchorCommittee`, `EthBeaconLightClient.sol:496`) is the emergency hatch
   after the flip: armed only when owner rotation is disabled, period cannot go backwards, never
   writes execution hashes, counted in `getCommitteeState().reAnchorsApplied`.
@@ -419,8 +429,8 @@ production unit in `scripts/ursus/` uses the same pieces under a different prefi
 | `config/eth-lc-relayer.env` | endpoints, addresses, paths (see §4.4) | 0600, no secrets besides paths |
 | `config/*.keys.json` | owner key of the light client (and, in production, of `USDCBridge`); giver key on test networks | 0600, never committed, never pasted anywhere |
 | `state/eth-lc-relayer-state.json` | last finalized slot, committee period, `owner_flip_done`, `genesis_validators_root` pin (`src/state.rs:16`); its lock and the temporary file of its atomic write beside it. `state/` is `--state-dir` (bridge-audit#132) | operational; losing it is safe (the contract is the truth, the file is re-derived) |
-| `work/` (`--work-dir`) | one directory per prove while it runs, gone with the bundle; never the system temp directory | recomputable |
-| `logs/` (`--log-dir`) | the daemon's own log, a file per day beside stdout, and the provers' transcripts `step-<slot>-<time>-{stdout,stderr}.log`, `rotate-<period>-<time>-*.log` | operational |
+| `work/` (`--work-dir`) | one directory per step prove while it runs, gone with the bundle; `rotate-<period>/` per rotate, with its inputs and the output of each finished stage, kept until the contract has moved past that period; never the system temp directory | recomputable |
+| `logs/` (`--log-dir`) | the daemon's own log, a file per day beside stdout, and the provers' transcripts `step-<slot>-<time>-{stdout,stderr}.log`, `rotate-<period>-<stage>-<time>-{stdout,stderr}.log` | operational |
 
 ### 4.4 Configuration
 
@@ -431,8 +441,8 @@ All settings are environment variables read by the `daemon` subcommand (each has
 |---|---|---|---|
 | `BEACON_URL` | beacon REST base URL | mainnet node with light-client endpoints | Sepolia public Lodestar |
 | `LIGHT_CLIENT_STEP_PROVER_BIN` | prebuilt `export_step_vk_blob` example, checked at startup | required | required |
-| `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `rotate_tree_n8` example (`--features aggregation`) | required unless `--no-rotate` | not needed (`--no-rotate`) |
-| `LIGHT_CLIENT_PROVER_DIR` | working directory of the provers; `rotate_tree_n8` reads its shard snarks and outer SRS there, the daemon its fixture period | required (rotate) | optional (`--no-rotate`) |
+| `LIGHT_CLIENT_SHARD_PROVER_BIN`, `LIGHT_CLIENT_STEP_SNARK_PROVER_BIN`, `LIGHT_CLIENT_ROTATE_PROVER_BIN` | prebuilt `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` examples (`--features aggregation`), checked at startup | required unless `--no-rotate` | not needed (`--no-rotate`) |
+| `LIGHT_CLIENT_PROVER_DIR` | working directory of the rotate stages; holds `kzg_bn254_21.srs` (checked at startup) and `rotate-keys/`, the proving keys the stages write on their first run and reuse while the binaries stay the same | required (rotate) | optional (`--no-rotate`) |
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |
@@ -441,7 +451,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `ETH_LC_RELAYER_STATE_DIR`, `ETH_LC_RELAYER_WORK_DIR`, `ETH_LC_RELAYER_LOG_DIR` | the three directories (`--state-dir`, `--work-dir`, `--log-dir`), see §4.3 | required | required |
 | `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
 | `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain for the span between consecutive checkpoints | unset | unset |
-| daemon flags | | none (rotate on, flip off; `--flip-owner` only once §3.5 no longer applies) | `--no-rotate --no-flip-owner --owner-hop` |
+| daemon flags | | `--owner-hop` while a missed rotate should fall back to the owner key; `--rotate-timeout-secs` (default 10800) per stage; `--flip-owner` only once §3.5 no longer applies | `--no-rotate --no-flip-owner --owner-hop` |
 
 ### 4.5 Procedure
 
@@ -504,7 +514,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 | Quantity | Value |
 |---|---|
 | Step proof, k=19 | about 7 min wall (keygen 4.5, prove 3; the proving key is not cached yet), about 25 GB RSS |
-| Rotate proof | about 30 min, about 40 GB |
+| Rotate proof | three stages, run one after another: shards 39 min / 41.6 GB RSS, step snark 6 min / 26 GB, tree 42 min / 49.8 GB (Sepolia, period 1403→1404, 3 November 2026). These include the proving keys written on the first run (about 15 min of the total); `rotate-keys/` then holds about 40 GB |
 | Submit cadence | one `submitUpdate` per Ethereum epoch (6.4 min); head lags Ethereum finality by about one epoch |
 | Period hop | every 8192 slots, about 27.3 h |
 | Contract gas | about 0.57 shell per accepted update on shellnet; fund ahead of that burn |

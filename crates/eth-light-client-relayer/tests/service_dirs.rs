@@ -95,7 +95,6 @@ async fn a_step_cycle_writes_only_into_the_three_directories() {
 
     let prover = SubprocessProofGenerator::new(SubprocessProverConfig {
         step_prover_bin: step,
-        rotate_prover_bin: None,
         prover_dir: Some(prover_dir.clone()),
         srs_path: "srs.bin".into(),
         timeout: std::time::Duration::from_secs(30),

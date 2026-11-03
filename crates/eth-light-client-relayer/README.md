@@ -13,16 +13,20 @@ checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
 parent chain, which is necessary for a span to carry it, not sufficient.
-Committee rotate: the daemon only auto-`submitRotate`s the committed
-fixture period. A live period jump returns `RotateRequired` — prove
-`rotate_tree_n8` on the prover host and run `eth-lc-relayer submit-rotate --state-dir`.
-`--no-rotate` opts out of even that. tvm-sdk#284 co-deploys with this
-contract.
+Committee rotate: once the contract holds period P and the beacon serves
+`updates?start_period=P`, the daemon proves the rotate P→P+1 in the
+background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
+`--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
+and sends `submitRotate` when the bundle passes its checks against the
+contract (`docs/eth-light-client.md` §3.3). `--no-rotate` turns it off;
+`--owner-hop` is the fallback at the boundary when no rotate was sent.
+The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).
 
 Every long-running command writes only into the three directories it is
 given (bridge-audit#132): `--state-dir` (the state file, its lock and the
-temporary file of its atomic write), `--work-dir` (one subdirectory per prove,
-gone once the bundle is read back) and `--log-dir` (the command's own log, a
+temporary file of its atomic write), `--work-dir` (one subdirectory per step
+prove, gone once the bundle is read back, and `rotate-<P>/` per rotate, kept
+until the contract has moved past P) and `--log-dir` (the command's own log, a
 file per day beside stdout, and every prover's transcript). `daemon` reads
 them from `ETH_LC_RELAYER_{STATE,WORK,LOG}_DIR`, `arbitrum-anchors` from
 `ARBITRUM_ANCHORS_{STATE,WORK,LOG}_DIR`. Nothing goes to the system temp
@@ -102,10 +106,12 @@ eth-lc-relayer arbitrum-anchors --parent-rpc-url … --arbitrum-rpc-url … \
 eth-lc-relayer arbitrum-vector --parent-rpc-url … --arbitrum-rpc-url … --out ./vector.json
 ```
 
-`--no-rotate` opts out of even the fixture auto-rotate. A live period
-is never proved in-process: prove on the prover host and `submit-rotate --state-dir`
-(tvm-sdk#284; the rotate tree is ~40 GB). The next daemon tick reads
-`getCommitteeState` and continues.
+`--no-rotate` turns the background rotate off; `submit-rotate --state-dir`
+still sends a bundle proved elsewhere, and the next daemon tick reads
+`getCommitteeState` and continues. The rotate stages need
+`kzg_bn254_21.srs` in `--prover-dir`, keep their
+proving keys in `<prover-dir>/rotate-keys/`, and each stage is killed after
+`--rotate-timeout-secs` (default 10800).
 `--flip-owner` opts in to the owner flip after the first accepted update. It is
 **off** by default: after it, L1 deposits outside checkpoint blocks have no
 anchor writer; L2s keep the owner path

@@ -46,10 +46,11 @@ use eth_light_client_relayer::{
     RotateProofBundle, StepProofBundle,
 };
 use eth_light_client_relayer::{
-    arbitrum, prepare_dir, refuse_unrecognised_state, AnConfig, AnSubmitter, BackoffConfig,
-    BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter, MockProofGenerator,
-    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, ServiceDirs, StateLock,
-    SubprocessProofGenerator, SubprocessProverConfig, ANCHORS_LOG_FILE_PREFIX,
+    arbitrum, prepare_dir, refuse_unrecognised_state, rotate::pinned_rotate_vk_sha256, AnConfig,
+    AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter,
+    MockProofGenerator, MockRotateRunner, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
+    RotateStageRunner, ServiceDirs, StateLock, SubprocessProofGenerator, SubprocessProverConfig,
+    SubprocessRotateConfig, SubprocessRotateRunner, ANCHORS_LOG_FILE_PREFIX,
     ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 use tracing::{error, info, warn};
@@ -74,11 +75,15 @@ struct DaemonDirs {
     #[arg(long, env = "ETH_LC_RELAYER_STATE_DIR")]
     state_dir: PathBuf,
     /// Directory for the provers' inputs and outputs: one subdirectory per
-    /// prove, removed when the bundle is read back. Created when missing.
+    /// step prove, removed when the bundle is read back, and `rotate-<P>/`
+    /// per rotate, kept across restarts until the contract has the rotate.
+    /// Created when missing.
     #[arg(long, env = "ETH_LC_RELAYER_WORK_DIR")]
     work_dir: PathBuf,
     /// Directory for the daemon's own log (one file per day, beside stdout)
-    /// and the transcript of every prover run. Created when missing.
+    /// and the transcript of every prover run
+    /// (`rotate-<P>-<stage>-<ts>-{stdout,stderr}.log` for the rotate).
+    /// Created when missing.
     #[arg(long, env = "ETH_LC_RELAYER_LOG_DIR")]
     log_dir: PathBuf,
 }
@@ -299,17 +304,26 @@ enum Cmd {
         /// `--mock-prove`. Checked to exist and be executable at startup.
         #[arg(long, env = "LIGHT_CLIENT_STEP_PROVER_BIN")]
         step_prover_bin: Option<PathBuf>,
-        /// Prebuilt `rotate_tree_n8` example (`--features aggregation`);
-        /// required unless `--no-rotate` or `--mock-prove`, and ignored with
-        /// `--no-rotate`.
+        /// Prebuilt `export_shard_snark` example (`--features aggregation`),
+        /// the rotate's first stage. Required unless `--no-rotate` or
+        /// `--mock-prove`, and ignored with `--no-rotate`.
+        #[arg(long, env = "LIGHT_CLIENT_SHARD_PROVER_BIN")]
+        shard_prover_bin: Option<PathBuf>,
+        /// Prebuilt `export_step_snark` example (`--features aggregation`),
+        /// the rotate's second stage. Required unless `--no-rotate` or
+        /// `--mock-prove`, and ignored with `--no-rotate`.
+        #[arg(long, env = "LIGHT_CLIENT_STEP_SNARK_PROVER_BIN")]
+        step_snark_prover_bin: Option<PathBuf>,
+        /// Prebuilt `rotate_tree_n8` example (`--features aggregation`), the
+        /// rotate's last stage. Required unless `--no-rotate` or
+        /// `--mock-prove`, and ignored with `--no-rotate`.
         #[arg(long, env = "LIGHT_CLIENT_ROTATE_PROVER_BIN")]
         rotate_prover_bin: Option<PathBuf>,
         /// Working directory for the provers. Required when the daemon may
-        /// rotate: `rotate_tree_n8` reads its shard snarks (`out/shard_snark`)
-        /// and the outer SRS (`../params/`) there, and the period check reads
-        /// `fixtures/mainnet/` there. Otherwise optional: a relative
-        /// `--srs-path` resolves against it, and the SRS is checked to be
-        /// there at startup. Defaults to the binary's own directory.
+        /// rotate: the rotate stages read `kzg_bn254_21.srs` there and keep
+        /// their proving keys in `rotate-keys/`. Otherwise optional: a relative
+        /// `--srs-path` resolves against it, and the SRS is checked to
+        /// be there at startup. Defaults to the binary's own directory.
         #[arg(long, env = "LIGHT_CLIENT_PROVER_DIR")]
         prover_dir: Option<PathBuf>,
         #[arg(long, env = "STEP_SRS_PATH")]
@@ -319,8 +333,10 @@ enum Cmd {
         /// Do not send to AN (in-memory submitter).
         #[arg(long, default_value_t = false)]
         dry_run: bool,
-        /// Skip `submitRotate` on a period jump. Rotate is **on** by default
-        /// (tvm-sdk#284 co-deploys with this contract).
+        /// Do not prove or send rotates. Rotate is **on** by default: the
+        /// hand-off from the committee the contract holds is proven in the
+        /// background during that committee's period, in
+        /// `<work-dir>/rotate-<P>/`, and sent with `submitRotate`.
         #[arg(long, default_value_t = false)]
         no_rotate: bool,
         /// After the first accepted `submitUpdate`, run the owner flip
@@ -344,11 +360,13 @@ enum Cmd {
         /// than a span. Needs `--eth-rpc-url`.
         #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
         submit_ancestry: bool,
-        /// With `--no-rotate`: on a period jump, prove a step of the new
-        /// period and advance the committee with the owner key
+        /// On a period jump the contract has no rotate for, prove a step of
+        /// the new period and advance the committee with the owner key
         /// (`setCommitteeCommitment`) instead of waiting for a rotate proof.
-        /// Shadow only; refused by the contract after `disableOwnerRotation`.
-        #[arg(long, default_value_t = false, requires = "no_rotate")]
+        /// With rotate on this is the fallback, logged as an ERROR with the
+        /// reason the rotate did not make it. Refused by the contract after
+        /// `disableOwnerRotation`.
+        #[arg(long, default_value_t = false)]
         owner_hop: bool,
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: Option<String>,
@@ -370,8 +388,13 @@ enum Cmd {
         backoff_multiplier: u32,
         #[arg(long, default_value_t = 64)]
         poll_secs: u64,
+        /// Step prover timeout.
         #[arg(long, default_value_t = 7200)]
         prove_timeout_secs: u64,
+        /// Timeout of each rotate stage. A stage that runs out is killed;
+        /// the next tick starts it again, after the stages already done.
+        #[arg(long, default_value_t = 10800)]
+        rotate_timeout_secs: u64,
     },
     /// Anchor the Arbitrum blocks that hold deposits: follow the parent
     /// chain's batches and assertions and call `proveBlock` on the chain's
@@ -655,6 +678,8 @@ async fn real_main() -> anyhow::Result<()> {
             state: _,
             beacon_url,
             step_prover_bin,
+            shard_prover_bin,
+            step_snark_prover_bin,
             rotate_prover_bin,
             prover_dir,
             srs_path,
@@ -677,6 +702,7 @@ async fn real_main() -> anyhow::Result<()> {
             backoff_multiplier,
             poll_secs,
             prove_timeout_secs,
+            rotate_timeout_secs,
         } => {
             let mut an = AnConfig::default();
             if let Some(v) = an_graphql_url {
@@ -698,7 +724,11 @@ async fn real_main() -> anyhow::Result<()> {
                 beacon_url,
                 dirs.into_service_dirs(),
                 step_prover_bin,
-                rotate_prover_bin,
+                RotateBins {
+                    shard: shard_prover_bin,
+                    step_snark: step_snark_prover_bin,
+                    tree: rotate_prover_bin,
+                },
                 prover_dir,
                 srs_path,
                 mock_prove,
@@ -717,6 +747,7 @@ async fn real_main() -> anyhow::Result<()> {
                 },
                 poll_secs,
                 prove_timeout_secs,
+                rotate_timeout_secs,
             )
             .await
         },
@@ -1011,18 +1042,14 @@ async fn set_gloas_fork_slot(
     Ok(())
 }
 
-/// The subprocess prover for `daemon` and `prove-one`, every binary checked
-/// to exist and be executable before anything else starts, and the SRS to be
-/// where the step prover will read it: a wrong path is a configuration
-/// error, found now rather than at the first proof. The rotate prover, and
-/// with it `--prover-dir`, is only needed when the daemon may rotate.
-#[allow(clippy::too_many_arguments)]
+/// The step prover for `daemon` and `prove-one`, checked to exist and be
+/// executable before anything else starts, and the SRS to be where it will
+/// read it: a wrong path is a configuration error, found now rather than at
+/// the first proof.
 fn subprocess_prover_config(
     step_prover_bin: Option<PathBuf>,
-    rotate_prover_bin: Option<PathBuf>,
     prover_dir: Option<PathBuf>,
     srs_path: Option<PathBuf>,
-    enable_rotate: bool,
     timeout_secs: u64,
     work_dir: PathBuf,
     log_dir: PathBuf,
@@ -1035,32 +1062,13 @@ fn subprocess_prover_config(
             "--step-prover-bin (LIGHT_CLIENT_STEP_PROVER_BIN) required unless --mock-prove"
         )
     })?;
-    // With `--no-rotate` nothing rotates: a rotate binary named in a shared
-    // env file is neither needed nor checked.
-    let rotate_prover_bin = match (rotate_prover_bin, enable_rotate) {
-        (_, false) => None,
-        (Some(bin), true) => Some(require_executable(&bin, "rotate prover")?),
-        (None, true) => anyhow::bail!(
-            "--rotate-prover-bin (LIGHT_CLIENT_ROTATE_PROVER_BIN) required unless --no-rotate or \
-             --mock-prove"
-        ),
-    };
     let prover_dir = match prover_dir {
         Some(dir) if dir.is_dir() => Some(dir),
         Some(dir) => anyhow::bail!("--prover-dir {} is not a directory", dir.display()),
-        // `rotate_tree_n8` reads its shard snarks (`out/shard_snark`) and the
-        // outer SRS (`../params/`) in its working directory, and the period
-        // check before it reads `fixtures/mainnet/` there: without the
-        // directory the first period jump fails, not the start.
-        None if rotate_prover_bin.is_some() => anyhow::bail!(
-            "--prover-dir (LIGHT_CLIENT_PROVER_DIR) required unless --no-rotate: rotate_tree_n8 \
-             reads its shard snarks and outer SRS there, and the period check its fixture"
-        ),
         None => None,
     };
     let cfg = SubprocessProverConfig {
         step_prover_bin: require_executable(&step_prover_bin, "step prover")?,
-        rotate_prover_bin,
         prover_dir,
         srs_path: srs_path.unwrap_or_else(|| PathBuf::from("data/kzg_params_19.srs")),
         timeout: Duration::from_secs(timeout_secs),
@@ -1079,6 +1087,96 @@ fn subprocess_prover_config(
     Ok(cfg)
 }
 
+/// The rotate stage binaries as given on the command line.
+struct RotateBins {
+    shard: Option<PathBuf>,
+    step_snark: Option<PathBuf>,
+    tree: Option<PathBuf>,
+}
+
+/// The rotate stages, checked at startup like the step prover: all three
+/// binaries, `--prover-dir`, and the SRS files in it. `None` with
+/// `--no-rotate`, where binaries a shared env file names are neither needed
+/// nor checked.
+fn rotate_config(
+    enable_rotate: bool,
+    bins: RotateBins,
+    prover_dir: Option<&std::path::Path>,
+    timeout_secs: u64,
+    log_dir: PathBuf,
+) -> anyhow::Result<Option<SubprocessRotateConfig>> {
+    use eth_light_client_relayer::prover::require_executable;
+    if !enable_rotate {
+        return Ok(None);
+    }
+    let need =
+        |bin: Option<PathBuf>, flag: &str, env: &str, what: &str| -> anyhow::Result<PathBuf> {
+            let bin = bin.ok_or_else(|| {
+                anyhow::anyhow!("{flag} ({env}) required unless --no-rotate or --mock-prove")
+            })?;
+            Ok(require_executable(&bin, what)?)
+        };
+    let shard_prover_bin = need(
+        bins.shard,
+        "--shard-prover-bin",
+        "LIGHT_CLIENT_SHARD_PROVER_BIN",
+        "shard prover",
+    )?;
+    let step_snark_prover_bin = need(
+        bins.step_snark,
+        "--step-snark-prover-bin",
+        "LIGHT_CLIENT_STEP_SNARK_PROVER_BIN",
+        "step snark prover",
+    )?;
+    let rotate_prover_bin = need(
+        bins.tree,
+        "--rotate-prover-bin",
+        "LIGHT_CLIENT_ROTATE_PROVER_BIN",
+        "rotate prover",
+    )?;
+    let prover_dir = prover_dir
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--prover-dir (LIGHT_CLIENT_PROVER_DIR) required unless --no-rotate: the rotate \
+                 stages read kzg_bn254_21.srs there and keep rotate-keys/"
+            )
+        })?;
+    anyhow::ensure!(
+        prover_dir.is_dir(),
+        "--prover-dir {} is not a directory",
+        prover_dir.display()
+    );
+    let cfg = SubprocessRotateConfig {
+        shard_prover_bin,
+        step_snark_prover_bin,
+        rotate_prover_bin,
+        prover_dir,
+        log_dir,
+        timeout: Duration::from_secs(timeout_secs),
+    };
+    cfg.check()?;
+    Ok(Some(cfg))
+}
+
+/// The rotate wired into the relayer: the subprocess stages with the pinned
+/// VK, or with `--mock-prove` the mock stages.
+fn wire_rotate<S, P, A>(
+    relayer: Relayer<S, P, A>,
+    rotate: &Option<(Arc<dyn RotateStageRunner>, [u8; 32])>,
+    work_dir: &std::path::Path,
+) -> Relayer<S, P, A>
+where
+    S: BeaconSource,
+    P: ProofGenerator,
+    A: AnSubmitter,
+{
+    match rotate {
+        Some((runner, pin)) => relayer.with_rotate(runner.clone(), work_dir.to_path_buf(), *pin),
+        None => relayer,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prove_one(
     beacon_url: Option<String>,
@@ -1093,10 +1191,8 @@ async fn prove_one(
 ) -> anyhow::Result<()> {
     let prover_cfg = subprocess_prover_config(
         Some(step_prover_bin),
-        None,
         prover_dir,
         Some(srs_path),
-        false,
         timeout_secs,
         work_dir,
         log_dir,
@@ -1438,7 +1534,7 @@ async fn run_daemon(
     beacon_url: String,
     dirs: ServiceDirs,
     step_prover_bin: Option<PathBuf>,
-    rotate_prover_bin: Option<PathBuf>,
+    rotate_bins: RotateBins,
     prover_dir: Option<PathBuf>,
     srs_path: Option<PathBuf>,
     mock_prove: bool,
@@ -1453,6 +1549,7 @@ async fn run_daemon(
     backoff: BackoffConfig,
     poll_secs: u64,
     prove_timeout_secs: u64,
+    rotate_timeout_secs: u64,
 ) -> anyhow::Result<()> {
     backoff.validate().map_err(|e| anyhow::anyhow!(e))?;
     dirs.prepare().map_err(|e| anyhow::anyhow!(e))?;
@@ -1463,20 +1560,39 @@ async fn run_daemon(
         "service directories",
     );
     let state_path = dirs.state_file(STATE_FILE_NAME);
-    let prover_cfg = if mock_prove {
-        None
+    let (prover_cfg, rotate) = if mock_prove {
+        let rotate: Option<(Arc<dyn RotateStageRunner>, [u8; 32])> = enable_rotate.then(|| {
+            (
+                Arc::new(MockRotateRunner::new([0xC0; 32])) as Arc<dyn RotateStageRunner>,
+                MockRotateRunner::vk_pin(),
+            )
+        });
+        (None, rotate)
     } else {
-        Some(subprocess_prover_config(
+        let rotate = rotate_config(
+            enable_rotate,
+            rotate_bins,
+            prover_dir.as_deref(),
+            rotate_timeout_secs,
+            dirs.log.clone(),
+        )?
+        .map(|cfg| {
+            (
+                Arc::new(SubprocessRotateRunner::new(cfg)) as Arc<dyn RotateStageRunner>,
+                pinned_rotate_vk_sha256(),
+            )
+        });
+        let step = subprocess_prover_config(
             step_prover_bin,
-            rotate_prover_bin,
             prover_dir,
             srs_path,
-            enable_rotate,
             prove_timeout_secs,
             dirs.work.clone(),
             dirs.log.clone(),
-        )?)
+        )?;
+        (Some(step), rotate)
     };
+    let work_dir = dirs.work.clone();
     refuse_unrecognised_state(&state_path, STATE_FILE_NAME)?;
     let _lock = StateLock::acquire(&state_path)?;
     let source = Arc::new(HttpBeaconSource::new(beacon_url)?);
@@ -1498,7 +1614,11 @@ async fn run_daemon(
                 Arc::new(MockAnSubmitter::accepting()),
             )?;
             return run(
-                attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+                attach_execution(
+                    wire_rotate(relayer, &rotate, &work_dir),
+                    eth_rpc_url,
+                    submit_ancestry,
+                )?,
                 backoff,
             )
             .await;
@@ -1511,7 +1631,11 @@ async fn run_daemon(
             Arc::new(MockAnSubmitter::accepting()),
         )?;
         return run(
-            attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+            attach_execution(
+                wire_rotate(relayer, &rotate, &work_dir),
+                eth_rpc_url,
+                submit_ancestry,
+            )?,
             backoff,
         )
         .await;
@@ -1519,7 +1643,16 @@ async fn run_daemon(
 
     #[cfg(not(feature = "live-submit"))]
     {
-        let _ = (an, allow_insecure, prover_cfg, cfg, source, eth_rpc_url);
+        let _ = (
+            an,
+            allow_insecure,
+            prover_cfg,
+            cfg,
+            source,
+            eth_rpc_url,
+            rotate,
+            work_dir,
+        );
         Err(live_submit_needs_feature())
     }
 
@@ -1558,7 +1691,11 @@ async fn run_daemon(
             let relayer =
                 Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter)?;
             return run(
-                attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+                attach_execution(
+                    wire_rotate(relayer, &rotate, &work_dir),
+                    eth_rpc_url,
+                    submit_ancestry,
+                )?,
                 backoff,
             )
             .await;
@@ -1566,7 +1703,11 @@ async fn run_daemon(
         let gen = SubprocessProofGenerator::new(prover_cfg.clone().expect("checked above"));
         let relayer = Relayer::new(cfg, source, Arc::new(gen), submitter)?;
         run(
-            attach_execution(relayer, eth_rpc_url, submit_ancestry)?,
+            attach_execution(
+                wire_rotate(relayer, &rotate, &work_dir),
+                eth_rpc_url,
+                submit_ancestry,
+            )?,
             backoff,
         )
         .await
@@ -1966,62 +2107,89 @@ mod tests {
         path
     }
 
-    fn config(
-        dir: &Path,
-        rotate: Option<PathBuf>,
-        prover_dir: Option<PathBuf>,
-        srs: Option<PathBuf>,
-        enable_rotate: bool,
-    ) -> anyhow::Result<SubprocessProverConfig> {
-        subprocess_prover_config(
-            Some(executable(dir, "step")),
-            rotate,
-            prover_dir,
-            srs,
-            enable_rotate,
-            1,
-            dir.join("work-files"),
-            dir.join("logs"),
-        )
+    fn bins(dir: &Path) -> RotateBins {
+        RotateBins {
+            shard: Some(executable(dir, "shard")),
+            step_snark: Some(executable(dir, "step-snark")),
+            tree: Some(executable(dir, "tree")),
+        }
     }
 
     #[test]
-    fn rotate_needs_a_prover_dir_and_no_rotate_ignores_the_rotate_binary() {
+    fn rotate_needs_its_three_binaries_a_prover_dir_and_the_srs() {
         let dir = tempfile::tempdir().unwrap();
-        let srs = dir.path().join("srs.bin");
-        std::fs::write(&srs, "srs").unwrap();
-        let rotate = executable(dir.path(), "rotate");
-        let err = config(
-            dir.path(),
-            Some(rotate.clone()),
-            None,
-            Some(srs.clone()),
-            true,
-        )
-        .unwrap_err()
-        .to_string();
+        let params = dir.path().join("params");
+        std::fs::create_dir_all(&params).unwrap();
+        let logs = dir.path().join("logs");
+        let cfg = |bins, prover_dir: Option<&Path>| {
+            rotate_config(true, bins, prover_dir, 1, logs.clone())
+        };
+        for (missing, flag) in [
+            ("shard", "--shard-prover-bin"),
+            ("step-snark", "--step-snark-prover-bin"),
+            ("tree", "--rotate-prover-bin"),
+        ] {
+            let mut b = bins(dir.path());
+            match missing {
+                "shard" => b.shard = None,
+                "step-snark" => b.step_snark = None,
+                _ => b.tree = None,
+            }
+            let err = cfg(b, Some(&params)).unwrap_err().to_string();
+            assert!(err.contains(flag), "{err}");
+        }
+        let err = cfg(bins(dir.path()), None).unwrap_err().to_string();
         assert!(err.contains("--prover-dir"), "{err}");
-        let cfg = config(
-            dir.path(),
-            Some(rotate.clone()),
-            Some(dir.path().to_path_buf()),
-            Some(srs.clone()),
-            true,
-        )
+        let err = cfg(bins(dir.path()), Some(&params))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kzg_bn254_21.srs"), "{err}");
+        std::fs::write(params.join("kzg_bn254_21.srs"), "srs").unwrap();
+        let rotate = cfg(bins(dir.path()), Some(&params)).unwrap().unwrap();
+        assert_eq!(rotate.key_dir(), params.join("rotate-keys"));
+        assert_eq!(rotate.timeout, Duration::from_secs(1));
+        // `--no-rotate`: binaries a shared env file names are neither needed
+        // nor checked.
+        let none = RotateBins {
+            shard: Some(dir.path().join("not-built")),
+            step_snark: None,
+            tree: None,
+        };
+        assert!(rotate_config(false, none, None, 1, logs.clone())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn owner_hop_no_longer_needs_no_rotate() {
+        use clap::Parser;
+        let args = Args::try_parse_from([
+            "eth-lc-relayer",
+            "daemon",
+            "--state-dir",
+            "/s",
+            "--work-dir",
+            "/w",
+            "--log-dir",
+            "/l",
+            "--beacon-url",
+            "http://beacon",
+            "--owner-hop",
+        ])
         .unwrap();
-        assert_eq!(cfg.rotate_prover_bin, Some(rotate.canonicalize().unwrap()));
-        // `--no-rotate`: the binary a shared env file names is neither
-        // needed nor checked, and the provers run where they are.
-        let cfg = config(
-            dir.path(),
-            Some(dir.path().join("not-built")),
-            None,
-            Some(srs),
-            false,
-        )
-        .unwrap();
-        assert_eq!(cfg.rotate_prover_bin, None);
-        assert_eq!(cfg.prover_dir, None);
+        match args.cmd {
+            Cmd::Daemon {
+                owner_hop,
+                no_rotate,
+                rotate_timeout_secs,
+                ..
+            } => {
+                assert!(owner_hop);
+                assert!(!no_rotate);
+                assert_eq!(rotate_timeout_secs, 10800);
+            },
+            _ => panic!("not daemon"),
+        }
     }
 
     #[test]
@@ -2037,10 +2205,8 @@ mod tests {
         // The default, relative path: found under `--prover-dir`...
         let cfg = subprocess_prover_config(
             Some(step.clone()),
-            None,
             Some(work.clone()),
             None,
-            false,
             1,
             dir.path().join("work-files"),
             logs.clone(),
@@ -2053,8 +2219,6 @@ mod tests {
             Some(step.clone()),
             None,
             None,
-            None,
-            false,
             1,
             dir.path().join("work-files"),
             logs.clone(),
@@ -2071,9 +2235,7 @@ mod tests {
         subprocess_prover_config(
             Some(step),
             None,
-            None,
             Some(srs),
-            false,
             1,
             dir.path().join("work-files"),
             logs,

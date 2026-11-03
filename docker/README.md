@@ -15,7 +15,7 @@ knows a host path, an address or a key.
 |---|---|---|---|
 | `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `seed_prover_bk_set`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight`, `fold-bk-set` |
 | `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer`, `fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`, `downsize_srs`, `circuit_params.json` | `deposit-relayer daemon` |
-| `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
+| `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
 | `bridge-cli` | `bridge-cli` | `ackinacki-bridge` with the deposit tools, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
 | (files) | `tools` | every binary above as plain files | `docker build --target tools --output type=local,dest=out .` |
 
@@ -71,7 +71,8 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
   cli/work/  cli/logs/
   params/relayer/                    # SRS k=17..22, inner keys, SHA256SUMS (finalize-params.sh); pk_cache/ rw
   params/deposit-prover/             # kzg_params_18.srs; the proving key the first proof writes
-  params/lc-prover/                  # kzg_bn254_19.srs; step-key/ from `compose run lc-keygen`
+  params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_21.srs; step-key/ from `compose run lc-keygen`;
+                                     #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
 ```
 
 Each daemon logs to stdout and to one file per day in its `logs/` directory, keeping the newest
@@ -101,7 +102,7 @@ sourced by its entrypoint; the other services get theirs as container environmen
 firewall. `/metrics` is served by `daemon-live` (9464) and `deposit-relayer` (9467); the
 compose healthchecks read them.
 
-Flags without an environment variable (`eth-lc-relayer daemon --no-rotate --owner-hop …`)
+Flags without an environment variable (`eth-lc-relayer daemon --owner-hop --rotate-timeout-secs …`)
 are the service's `command:` in the compose file; override it in a `compose.override.yaml`
 next to it.
 
@@ -114,7 +115,12 @@ next to it.
    Deposit prover: `kzg_params_18.srs` into `params/deposit-prover/` (cut from the k=21 SRS
    with `downsize_srs`, in the `bridge-cli` image). Light client: `kzg_bn254_19.srs` into
    `params/lc-prover/`, then the step key once per image:
-   `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB).
+   `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB). The rotate needs the
+   Hermez `kzg_bn254_21.srs` there too: the release asset of that name, checked against the
+   release's `SHA256SUMS`.
+
+   The rotate keys are not an install step: the daemon writes them to `rotate-keys/` during
+   its first rotate after an image upgrade, and writes them again when the image changes.
 3. Fill `.env` and the four env files from the templates; the keys and `bk_set.json` into
    `keys/`.
 4. `docker compose --profile ops run --rm preflight`: the withdraw relayer's checks, no

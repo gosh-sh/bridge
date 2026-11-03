@@ -1085,7 +1085,7 @@ mod tests {
         // `dstBridge` in `WithdrawalInitiated`).
         assert_eq!(
             &hash[..8],
-            "5cada5db",
+            "24adf1c6",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

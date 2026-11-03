@@ -24,6 +24,47 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **A withdrawal proof names the one EVM bridge that may pay it** (bridge-audit#140). A second
+  `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
+  first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
+  made before the switch below are paid by the bridge they named. Upgrade in this order:
+  `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
+  then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. The cutover from an
+  existing bridge is in `docs/aave-yield.md`, "Replacing a bridge on the same chain".
+- **Circuit 4 verification key rotated.** Withdrawal proofs built for the previous key do not
+  verify against the new `BridgeWithdrawalAggregatorVerifier`, and new proofs do not verify
+  against the old one. `BridgeWithdrawalAggregatorVerifier.{bin,sol}` and its
+  `_calldata.bin` are regenerated; the `vkDigest` pinned in `ShplonkDeployLib`
+  (`WITHDRAWAL_VK_DIGEST`) and the Yul code hash (`WITHDRAWAL_YUL_CODEHASH`) change with them.
+  The verifier is immutable in `AckiNackiBridge`, so a bridge needs a new deployment. Circuit 4
+  has twelve public inputs, the twelfth being `dstBridge`; `proof_event_*.json` carries twelve
+  `public_instances_hex`, the aggregated calldata is 3 712 bytes with the inner-VK digest at
+  word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
+  revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
+  before the upgrade are proven with the release their bridge was deployed for.
+- **`eccUSDCBridge` 1.15.0** (code hash `24adf1c630247edd5e397cecb5f0c5290a9081cfef4d137224cd1a80b76a9d07`):
+  `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
+  `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
+  evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
+  EVM bridge set is refused with reason 239 (`ERR_NO_EVM_BRIDGE`) and burns nothing. The binding
+  is not carried through `updateCode`: call `setEvmBridge` for every chain right after the
+  upgrade, before withdrawals reopen. The zerostate binds `BRIDGE_ZS_L1_BRIDGE` for
+  `BRIDGE_ZS_L1_CHAIN_ID`.
+- **`AckiNackiBridge.withdrawByProof`**: `WithdrawalPublicInputs` gains `dstBridge` as its last
+  field, so the selector is `0xc7d38069` (was `0xa9753d18`) and
+  `IBridgeWithdrawalVerifier.verifyWithdrawal` is `0xbcd3e6c9`. A proof whose `dstBridge` is not
+  the bridge's own address reverts `WrongDstBridge(uint256)`. Tooling that encodes the call by
+  hand needs the twelve-field tuple.
+- **`ackinacki-bridge withdraw`** needs `eccUSDCBridge` 1.15.0. Before burning it requires
+  `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
+  the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
+  names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
+  bridge the message names — the idempotency key does not include the bridge, so the run
+  resumes without a second burn. Deposits still work against 1.14.0.
+- **`relayer daemon-withdraw` and `relayer daemon-bridge`** park a `proof_event_*.json` whose
+  `dstBridge` is another bridge without sending it, and treat `WrongDstBridge` as permanent;
+  `relayer submit-withdraw` and `relayer withdraw-e2e` refuse such a proof. `bridge-verifier-daemon`
+  accepts twelve public instances and refuses eleven.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
@@ -32,23 +73,14 @@ assigns it when the release is tagged.
   move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
   are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
   folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
-- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains two last fields** —
-  `predecessor`, the bridge this one replaces on the same chain or zero for the first, and
-  `legacyPredecessors`, every other earlier bridge for the same identity that `predecessor` does
-  not answer for (bridges deployed before this release answer only for themselves). Nullifiers
-  any of them paid count as used (`NullifierAlreadyUsed`); an entry that is not a bridge for the
-  same `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR` reverts `InvalidPredecessor`. Update tooling that
-  encodes the constructor; deployed bridges are unchanged.
-- **`AckiNackiBridge.isNullifierUsed(uint256)` also answers for earlier bridges**: it returns true
-  for a nullifier `predecessor`, its own line or a `legacyPredecessors` entry paid, and reverts when
-  one of them reverts. New views: `predecessor()` and `legacyPredecessors()`.
-- Every bridge deploy script (`DeployRealBridge`, `DeployShellnetE2EBridge`,
-  `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge`) and `deploy_bridge_bundle.sh` require
-  `PREDECESSOR_BRIDGE` — zero for the first bridge on a chain — and refuse a predecessor that is not
-  paused. When `PREDECESSOR_BRIDGE` is a bridge from before this release they also require
-  `LEGACY_PREDECESSOR_BRIDGES`: comma-separated, paused, every earlier bridge for the same
-  `WITHDRAW_ACC_FR`, empty if there is none. Keep a replaced bridge paused for good; the cutover is in `docs/aave-yield.md`,
-  "Replacing a bridge on the same chain".
+- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains a last field, `predecessor`** —
+  the bridge on the same chain whose treasury this one may take over with `migrateTreasury` /
+  `fundTreasury`, or zero. A non-zero one must have code on this chain and the same
+  `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`, else the deploy reverts `InvalidPredecessor`; it need not
+  be paused. New view: `predecessor()`. Update tooling that encodes the constructor; deployed
+  bridges are unchanged. The bridge deploy scripts read it from `PREDECESSOR_BRIDGE` (optional,
+  zero by default); `deploy_bridge_bundle.sh` requires `PREDECESSOR_BRIDGE` to be set, to the zero
+  address if there is none.
 
 ### New / Improvements
 

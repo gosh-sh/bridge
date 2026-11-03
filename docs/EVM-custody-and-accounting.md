@@ -15,16 +15,16 @@ proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 
 ## The book number is not a balance
 
-`treasuryBalance` (`:98`) is **book value**: the sum of user principal the bridge owes. It is not a
+`treasuryBalance` (`:108`) is **book value**: the sum of user principal the bridge owes. It is not a
 token balance and is never reconciled against one.
 
 It moves in four places in the whole contract (lines as of gosh-sh/bridge-audit#140):
 
-* `+= credited` in `deposit` (`:881`)
-* `-= pub.amount` in `withdrawByProof` (`:1607`)
-* `+= amount` in `fundTreasury` (`:1850`), owner or `predecessor` only, for USDC it pulls from the
+* `+= credited` in `deposit` (`:856`)
+* `-= pub.amount` in `withdrawByProof` (`:1587`)
+* `+= amount` in `fundTreasury` (`:1807`), owner or `predecessor` only, for USDC it pulls from the
   caller, with no `Deposit` event
-* `= 0` in `migrateTreasury` (`:1879`), owner only on a paused bridge, which hands the whole book
+* `= 0` in `migrateTreasury` (`:1836`), owner only on a paused bridge, which hands the whole book
   to a successor (CUST-2)
 
 Nothing else writes it — in particular not the AAVE routing functions, which move tokens between

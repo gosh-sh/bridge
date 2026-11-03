@@ -61,7 +61,7 @@ test-only.
 **That future has since arrived.** Circuit 4 landed: the inner event snark is produced by
 `export-c4-poseidon-snark` in `bridge-snark-utils`, aggregated by this crate's
 `export-inner-aggregator`, and the result is committed as
-`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 314 B, inner `K=20`), which
+`contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin` (21 475 B, inner `K=20`), which
 `AckiNackiBridge.withdrawByProof` calls through its adapter. The same pipeline produces the 1A, 1B
 and Circuit-2 verifiers. So the milestone text below (M4 → M7) is a historical record of a plan that
 has since been executed, not a description of pending work.

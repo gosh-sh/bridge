@@ -245,21 +245,18 @@ set -a; source L2_config/env; set +a          # your key (.env) and endpoints
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=2 \
 PRIVATE_KEY="$RELAYER_PRIVATE_KEY" \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
-PREDECESSOR_BRIDGE=<the paused Sepolia bridge this one replaces, or the zero address> \
+PREDECESSOR_BRIDGE=<the Sepolia bridge whose treasury this one takes over, or the zero address> \
 BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   ./scripts/deploy_bridge_bundle.sh 2>&1 | tee "logs/deploy_L2_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
-- `PREDECESSOR_BRIDGE` has no default. Name the Sepolia bridge for the same
-  `WITHDRAW_ACC_FR` that this deploy replaces, after pausing it: the new bridge
-  refuses the withdrawals it paid. Use the zero address only for the first
-  bridge for that identity; a zero in place of a live one pays its
-  withdrawals again. If that bridge predates the `predecessor` field it
-  answers only for itself: also set `LEGACY_PREDECESSOR_BRIDGES` to every
-  earlier Sepolia bridge for the same `WITHDRAW_ACC_FR`, comma-separated and
-  each paused, or to an empty string if there is none; the deploy refuses to
-  run without it. The cutover is in `docs/aave-yield.md`, "Replacing a
-  bridge on the same chain".
+- `PREDECESSOR_BRIDGE` has no default in this script. Name the Sepolia bridge
+  for the same `WITHDRAW_ACC_FR` whose treasury this one should take over with
+  `migrateTreasury`, or the zero address. It need not be paused and does not
+  protect against replay: each withdrawal proof names the one EVM bridge that
+  may pay it, the one `eccUSDCBridge.getEvmBridge(11155111)` returned when it
+  was burnt. The cutover is in `docs/aave-yield.md`, "Replacing a bridge on
+  the same chain".
 
 - `BRIDGE_SEED_SEQNO` pins the seed to S; without it the script picks the
   newest boundary at deploy time, which can be later than the S the set was

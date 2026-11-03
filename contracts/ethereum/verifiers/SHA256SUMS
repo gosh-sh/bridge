@@ -7,9 +7,12 @@
 # hashes change vs. the 2026-09-22 pins. Adapter contracts add a
 # `bytes32 immutable vkDigest` and reject any proof whose exposed digest
 # doesn't match.
+# BridgeWithdrawalAggregatorVerifier regenerated 2026-11-02: Circuit 4
+# gained a twelfth public input (dstBridge), so it expects 12 + 12 + 1
+# scalars and its VK digest moves to calldata word 24.
 # CREATE extcodehash pins live in ShplonkDeployLib *_YUL_CODEHASH.
-bfa8c4f4f7ebfc300e12d062cc1e0958a06422ebaa2942ff970e6d577a02392f  BridgeWithdrawalAggregatorVerifier.bin
-2270bfa73b6d89f118a74e49b7e1893b08d83321b93e620ac020d781bdad9860  BridgeWithdrawalAggregatorVerifier_calldata.bin
+50f9e7386aef9f171bd00d913c59a9e9e0b7f6bcea301c289e7636340329950f  BridgeWithdrawalAggregatorVerifier.bin
+20d9b7b49d237b1a0b2c0a75a69046522f1b135281d9c7f85589ed16f9ef1d27  BridgeWithdrawalAggregatorVerifier_calldata.bin
 092e3d4c508862f95a0391dabbd5daf610d07ac286468a81c9392c12975f5070  FallbackAggregatorVerifier.bin
 a938045a8d66a7212156a783af86d82eaccc802134163fbbe5bcb6a479e5a19c  FallbackAggregatorVerifier_calldata.bin
 f86c9dffbc466a9646dbf6e22dcc521e933769e45de0035b560b4bc0fa99aaa9  LayerHashesAggregatorVerifier.bin

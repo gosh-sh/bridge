@@ -1,8 +1,8 @@
 //! Test / synthetic-witness helpers for `bridge-event-prove-circuit`.
 //!
 //! Most helpers consume **real BOCs** captured from a local Acki Nacki node
-//! by `acki-nacki/tests/exchange/generate_withdrawals.py` and shipped as
-//! `bridge-event-prove-circuit/withdrawals.txt`. There is no synthetic
+//! by `crates/bridge-prover-libraries/python/capture_withdrawal_fixtures.py`
+//! and shipped as `bridge-event-prove-circuit/withdrawals.txt`. There is no synthetic
 //! event-BOC builder — fixtures must originate from the live contract — but
 //! the surrounding two-level Merkle witnesses and dense chain are built
 //! synthetically by [`build_two_level_tree`] / [`build_dense_chain`].

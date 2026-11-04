@@ -1,6 +1,25 @@
 --- a/tests/dexdo/up.sh
 +++ b/tests/dexdo/up.sh
-@@ -101,12 +101,40 @@
+@@ -90,8 +90,17 @@
+ #  * nginx caches its upstream (block_manager) IP at config-load; if block_manager
+ #    were (re)created AFTER nginx, its new IP would leave nginx 502-ing the /v2
+ #    gateway. So order is: nodes -> block_manager -> q_server + nginx (last).
+-echo "==> [4/5] up aerospike + nodes first"
++# block_manager has to be on the network before its first block, the way acki-nacki's
++# ansible tests deploy it (deploy-bm.yml, then deploy-bk.yml): it indexes blocks only
++# from the moment it connects to a node's block stream and never fetches older ones.
++# node1..4 sleep GLOBAL_SYNC_DELAY before they start, so node0 comes up alone, with no
++# quorum to make blocks, and block_manager connects to it in [4b2/5]; the chain starts
++# once the others wake. Their sleeping containers keep the names node1..4 resolvable
++# for node0's gossip seeds and block_manager's config.
++export GLOBAL_SYNC_DELAY=${GLOBAL_SYNC_DELAY:-45}
++echo "==> [4/5] up aerospike + nodes first (node1..4 start after ${GLOBAL_SYNC_DELAY}s)"
+ docker compose -f "$COMPOSE" up -d aerospike node0 node1 node2 node3 node4
++nodes_up=$(date +%s)
+ 
+ # Wait until every node container is actually running before touching the network
+ # (the /etc/hosts map, block_manager and nginx all need node0..4 registered in
+@@ -101,11 +110,49 @@
    i=0
    until [ "$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null | xargs -r docker inspect -f '{{.State.Running}}' 2>/dev/null)" = "true" ]; do
      i=$((i+1))
@@ -19,29 +38,38 @@
      sleep 1
    done
    echo "    node$n running"
- done
- 
-+# block_manager indexes blocks only from the moment it attaches to a node's block
-+# stream (UDP 12000 on node0..2), and a connect that fails puts that node on a 10 s
-+# cooldown, hard-coded in block-manager. Started before the nodes listen, its first
-+# connects fail, and the blocks the network makes during the cooldown never reach
-+# GraphQL. So start it only once all three stream endpoints are bound.
-+echo "==> [4b2/5] wait until node0..2 listen on the block stream (udp 12000)"
-+for n in 0 1 2; do
-+  cid=$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null)
-+  i=0
-+  until docker exec "$cid" bash -c 'for f in /proc/net/udp /proc/net/udp6; do while read -r _ l _; do [[ $l == *:2EE0 ]] && exit 0; done < "$f"; done; exit 1' 2>/dev/null; do
-+    i=$((i+1))
-+    if [ "$i" -ge 120 ]; then echo "!! node$n does not listen on udp 12000 after 60s" >&2; break; fi
-+    sleep 0.5
-+  done
-+  [ "$i" -ge 120 ] || echo "    node$n listens on udp 12000 ($(date -u +%T))"
 +done
 +
++# A connect that fails puts that node on a 10 s cooldown, hard-coded in block-manager,
++# so block_manager starts once node0 listens on its block stream (udp 12000), and the
++# step waits until it is connected there, all before node1..4 wake.
++echo "==> [4b2/5] block_manager onto node0's block stream before node1..4 start"
++cid=$(docker compose -f "$COMPOSE" ps -q node0 2>/dev/null)
++i=0
++until docker exec "$cid" bash -c 'for f in /proc/net/udp /proc/net/udp6; do while read -r _ l _; do [[ $l == *:2EE0 ]] && exit 0; done < "$f"; done; exit 1' 2>/dev/null; do
++  i=$((i+1))
++  if [ "$i" -ge 120 ]; then echo "!! node0 does not listen on udp 12000 after 60s" >&2; break; fi
++  sleep 0.5
++done
++[ "$i" -ge 120 ] || echo "    node0 listens on udp 12000 ($(date -u +%T))"
++node0_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$cid" 2>/dev/null)
++bm_since=$(date -u +%Y-%m-%dT%H:%M:%S)
++docker compose -f "$COMPOSE" up -d block_manager
++i=0
++until awk -v t="$bm_since" -v p="peer=\"$node0_ip:12000\"" \
++    'substr($1, 1, 19) >= t && /Connection established/ && index($0, p) { f = 1; exit } END { exit !f }' \
++    logs/bm0/bm.log 2>/dev/null; do
++  i=$((i+1))
++  if [ "$i" -ge 60 ]; then echo "!! block_manager not connected to node0's block stream after 30s" >&2; break; fi
++  sleep 0.5
+ done
++left=$(( nodes_up + GLOBAL_SYNC_DELAY - $(date +%s) ))
++[ "$i" -ge 60 ] || echo "    block_manager connected to node0 ($(date -u +%T)), node1..4 start in ${left}s"
++[ "$left" -gt 0 ] || echo "!! node1..4 started before block_manager connected: raise GLOBAL_SYNC_DELAY" >&2
+ 
  # block_manager now attaches to a settled network -> clean DNS sandbox, no wedge.
  echo "==> [4c/5] up block_manager on the settled network, then q_server + nginx"
- docker compose -f "$COMPOSE" up -d block_manager
-@@ -219,6 +247,25 @@
+@@ -219,6 +266,25 @@
    sleep 5
  done
  

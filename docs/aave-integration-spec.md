@@ -105,6 +105,9 @@ because the band keeps principal in the pool, so the owner has to pull it back b
 | OWN-6 | Ubiquitous | `yieldRecipient` shall default to the owner and follow a new owner when it was still the default (`:799`, `:1895-1900`). |
 | OWN-7 | State-driven | While the bridge is paused, `deposit` and `withdrawByProof` shall revert and the owner's AAVE calls and setters shall keep working (`:148-153`, `:1849`). |
 | OWN-8 | Unwanted | If `migrateTreasury` is called while the book is not liquid, then it shall revert `TreasuryNotLiquid` (`:1821-1834`). |
+| OWN-9 | Unwanted | If `migrateTreasury`'s `approve` returns false, or the successor takes a different amount than the book, then it shall revert `WithdrawTransferFailed` (`:1837-1841`). |
+| OWN-10 | Unwanted | If the USDC transfer to `yieldRecipient` fails, then `harvestYield` and `skimExcessUsdc` shall revert `WithdrawTransferFailed` and leave the books unchanged (`:1767-1768`, `:1789-1790`). |
+| OWN-11 | Unwanted | If `fundTreasury` is called with zero, then it shall revert `InvalidAmount` (`:1806`). |
 
 ## 7. Deployment and environments (ENV)
 
@@ -236,6 +239,15 @@ deposits instead of `supplyToAave`. **Rewrite** — the same property checked th
 WD-1 is covered by the 45 tests of `contracts/ethereum/test/AckiNackiBridgeWithdrawByProof.t.sol`,
 which stay as they are. ENV-4 states the scope and has no test.
 
+Three branches cannot be reached, so `forge coverage` will always count them as not hit; the author
+either removes them or keeps them as defensive checks:
+
+- `skimExcessUsdc` reverting `InvalidRecipient` (`:1785`): `yieldRecipient` is never zero — the
+  constructor sets the deployer (`:799`), `setYieldRecipient` refuses zero (`:1877`) and
+  `acceptOwnership` sets the new owner (`:1900`).
+- After CFG-1, `setAaveEnabled(true)` without a pool (`:1864`) and `aUsdcBalance()` without an
+  aToken (`:1948`).
+
 `contracts/ethereum/test/AckiNackiBridgeArbSepoliaAaveFork.t.sol`:
 
 | Test | Action | Covers | Layer |
@@ -268,7 +280,7 @@ which stay as they are. ENV-4 states the scope and has no test.
 | TC-09 | A withdrawal that `U` covers makes no call to the pool. | WD-2, HL-3 | U |
 | TC-10 | A withdrawal with a shortfall leaves `L` equal to the target on the new book. | WD-5, ST-2 | U |
 | TC-11 | The pool can return the shortfall but not the extra: the payout succeeds, `L` is below the target, and the event names the amount not pulled and the reason. | WD-6, WD-8, HL-2 | U |
-| TC-12 | The pool cannot return the shortfall: the withdrawal reverts and the nullifier stays unused. | WD-4 | U |
+| TC-12 | The pool cannot return the shortfall, in two cases: it holds less than the shortfall (`InsufficientTreasury`, `:1930`), and it returns less than it was asked for (`AaveWithdrawFailed`, `:1935`, never hit by a test today). Each time the withdrawal reverts and the nullifier stays unused. | WD-4 | U |
 | TC-13 | `supplyToAave(uint256)` no longer exists: a call with its selector `0x70ded44d` reverts. | CFG-9 | U |
 | TC-14 | Handler-driven invariants INV-1, INV-2, INV-3, ST-1, VT-1, VT-2, VT-3, HL-1, HL-2, HL-4 (§8). | §8 | I |
 | TC-15 | A deposit below the threshold makes no call to the test market. | DEP-4 | F |
@@ -283,3 +295,8 @@ which stay as they are. ENV-4 states the scope and has no test.
 | TC-24 | With principal in the pool, USDC sent to the bridge directly is skimmable at once: `excessUsdc()` equals it, `skimExcessUsdc` pays it to `yieldRecipient`, `B` and `S` unchanged. | OWN-5 | U |
 | TC-25 | The pool lost part of the principal (redeem haircut on the mock) and USDC sent directly covers the loss: `excessUsdc()` never exceeds `U + A − B`, and a skim never takes `U + A` below `B`. | OWN-5, HL-4 | U |
 | TC-26 | A paused bridge with principal in the pool: `migrateTreasury` reverts `TreasuryNotLiquid`; after `withdrawFromAave(type(uint256).max)` it moves the whole book. No test checks `TreasuryNotLiquid` today. | OWN-8 | U |
+| TC-27 | `harvestYield` while the pool returns less than it was asked for: reverts `AaveWithdrawFailed` (`:1763`), `accruedYield()` and the books unchanged. | OWN-4 | U |
+| TC-28 | `migrateTreasury` with USDC whose `approve` returns false, and with a successor that takes less than the book: each reverts `WithdrawTransferFailed`, the book stays on the old bridge. | OWN-9 | U |
+| TC-29 | USDC whose `transfer` to `yieldRecipient` returns false: `harvestYield` and `skimExcessUsdc` each revert `WithdrawTransferFailed`, `S`, `B` and `accruedYield()` unchanged. | OWN-10 | U |
+| TC-30 | `fundTreasury(0)` reverts `InvalidAmount`, from the owner and from the predecessor. | OWN-11 | U |
+| TC-31 | `withdrawFromAave(type(uint256).max)` pulls `S` when the pool holds more than `S` (interest), and `A` when it holds less (loss) — both sides of `_backedPrincipal` (`:1920-1924`). | OWN-1 | U |

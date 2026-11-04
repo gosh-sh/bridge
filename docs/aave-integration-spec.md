@@ -42,6 +42,7 @@ the code.
 | `T` | target: `B × r / 10 000` | today's reserve, `:1913` |
 | `M` | multiplier, an owner setting; default 2× | new |
 | `H` | threshold: `M × T` | new |
+| `X` | excess: `min(U − (B − S), U + A − B)` when positive, else 0 — USDC above the liquid part of the principal that the bridge can give away and still cover its debt | new; today `excessUsdc()` is `U − B`, `:1776-1779` |
 | Pool | the AAVE V3 pool `aavePool` and its aToken `aUSDC` | `:124`, `:127` |
 
 "The pool refuses" means any of: `approve` returns false, `supply` reverts (reserve paused or
@@ -53,7 +54,8 @@ frozen, supply cap reached, any other revert), or the pool credits zero aUSDC.
 |---|---|---|
 | CFG-1 | Unwanted | If `aavePool` or `aUSDC` is zero, then the constructor shall revert `InvalidAaveAddress`, on every chain. Today one zero reverts and two zeros pass (`:726-729`). |
 | CFG-2 | Ubiquitous | `aavePool` and `aUSDC` shall stay `immutable` (`:124`, `:127`). |
-| CFG-3 | Ubiquitous | `r` shall default to 1 000 (`:801`) and never exceed `MAX_LIQUID_RESERVE_BPS` = 5 000 (`:65`). Only the owner sets it, with `setLiquidReserveBps` (`:1870`). |
+| CFG-3 | Ubiquitous | `r` shall default to 1 000 (`:801`) and stay between 1 000 and `MAX_LIQUID_RESERVE_BPS` = 5 000 (`:65`). Only the owner sets it, with `setLiquidReserveBps` (`:1870`). |
+| CFG-10 | Unwanted | If a call would set `r` below 1 000, then it shall revert. Today only the upper bound is checked and 0 passes (`:1870-1872`); a zero target would make every deposit and every withdrawal call the pool. |
 | CFG-4 | Ubiquitous | `M` shall be an owner setting that defaults to 2×. Only the owner sets it. |
 | CFG-5 | Unwanted | If a call would leave `M ≤ 1×`, then it shall revert. |
 | CFG-6 | Unwanted | If a call to `setLiquidReserveBps` or to the multiplier setter would leave `r × M` above 100%, then it shall revert. |
@@ -73,6 +75,7 @@ frozen, supply cap reached, any other revert), or the pool credits zero aUSDC.
 | DEP-6 | Unwanted | If the pool refuses the supply, then the deposit shall still succeed, its USDC shall stay on the bridge and `S` shall not change. |
 | DEP-7 | Event-driven | When the supply succeeds, `S` shall grow by the aUSDC the pool actually credited, not by the USDC sent (today's rule, `:1675-1679`; the aUSDC delta is booked, not the amount sent), and the bridge shall emit `SuppliedToAave` (`:1681`). |
 | DEP-8 | Ubiquitous | USDC on the bridge above the principal (`U − (B − S)`, when positive) shall never be supplied. |
+| DEP-9 | Event-driven | When the pool refuses the supply, the bridge shall emit an event with the amount it tried to supply and the reason: the pool's revert data, or a distinct reason for `approve` returning false and for zero credited aUSDC. The name of the event is the author's choice. |
 
 ## 5. Withdrawal (WD)
 
@@ -85,11 +88,12 @@ frozen, supply cap reached, any other revert), or the pool credits zero aUSDC.
 | WD-5 | Event-driven | When `U` does not cover the payout, the bridge shall also try to pull the target computed on the book after the debit, up to what the position holds, so that after the payout `L` equals that target. |
 | WD-6 | Unwanted | If the part above the shortfall cannot be pulled, then the payout shall still succeed. |
 | WD-7 | Ubiquitous | A pull may reach aUSDC above `S`: user principal is paid before yield (`:1589-1592`). |
+| WD-8 | Event-driven | When the part above the shortfall cannot be pulled, the bridge shall emit an event with the amount it did not pull and the pool's revert data. The name of the event is the author's choice. |
 
 ## 6. Owner operations (OWN)
 
-These stay as they are. `migrateTreasury` is listed because the band keeps principal in the pool, so
-the owner has to pull it back before a migration.
+These stay as they are, except OWN-5, which measures the excess as `X`. `migrateTreasury` is listed
+because the band keeps principal in the pool, so the owner has to pull it back before a migration.
 
 | ID | Form | Requirement |
 |---|---|---|
@@ -97,7 +101,7 @@ the owner has to pull it back before a migration.
 | OWN-2 | Event-driven | When the owner calls `emergencyWithdrawAll`, the bridge shall pull everything, set `aaveEnabled` to false, revert `EmergencyLeftoverAToken` if aUSDC is left, and keep any shortfall booked in `S` (`:1704-1724`). |
 | OWN-3 | Ubiquitous | `writeOffUnbackedPrincipal` — owner only — shall lower `S` to `A` and revert `NothingToWriteOff` when there is nothing to lower (`:1727`). |
 | OWN-4 | Ubiquitous | `harvestYield(amount)` — owner only — shall pay `yieldRecipient` at most `accruedYield()` and never take `U + A` below `B` (`HarvestWouldBreakSolvency`, `:1744-1754`). |
-| OWN-5 | Ubiquitous | `skimExcessUsdc(amount)` — owner only — shall pay `yieldRecipient` at most `excessUsdc()` (`:1776-1790`). |
+| OWN-5 | Ubiquitous | `excessUsdc()` shall return `X`, and `skimExcessUsdc(amount)` — owner only — shall pay `yieldRecipient` at most `X` (`:1776-1790`). USDC sent to the bridge directly can then be skimmed while principal sits in the pool, and never when it covers a loss in the pool. |
 | OWN-6 | Ubiquitous | `yieldRecipient` shall default to the owner and follow a new owner when it was still the default (`:799`, `:1895-1900`). |
 | OWN-7 | State-driven | While the bridge is paused, `deposit` and `withdrawByProof` shall revert and the owner's AAVE calls and setters shall keep working (`:148-153`, `:1849`). |
 | OWN-8 | Unwanted | If `migrateTreasury` is called while the book is not liquid, then it shall revert `TreasuryNotLiquid` (`:1821-1834`). |
@@ -123,7 +127,7 @@ both setters, `pause` / `unpause`, interest accrual on the mock, and the mock's 
 | ID | Property |
 |---|---|
 | INV-1 | While the pool returns what it holds, `U + A ≥ B`. |
-| INV-2 | `1× < M`, `r ≤ 5 000` and `r × M ≤ 100%`. |
+| INV-2 | `1× < M`, `1 000 ≤ r ≤ 5 000` and `r × M ≤ 100%`. |
 | INV-3 | `S ≤ B`: only user principal is booked as supplied. |
 
 ### State transitions
@@ -201,11 +205,11 @@ deposits instead of `supplyToAave`. **Rewrite** — the same property checked th
 | `test_writeOffUnbackedPrincipal_revertsWhenBooksAreEmpty` | Keep | OWN-3 | U |
 | `test_writeOffUnbackedPrincipal_onlyOwner` | Keep | OWN-3 | U |
 | `test_writeOffUnbackedPrincipal_clampsToDust` | Keep (setup) | OWN-3 | U |
-| `test_setLiquidReserveBps_capped` | Keep, extend with `r × M` | CFG-3, CFG-6 | U |
+| `test_setLiquidReserveBps_capped` | Keep, extend with the lower bound and `r × M` | CFG-3, CFG-6, CFG-10 | U |
 | `test_transferOwnership_flowsAllAuthorities` | Keep, extend with the multiplier setter | CFG-4, OWN-6 | U |
 | `test_acceptOwnership_movesDefaultYieldRecipient_harvestPaysNewOwner` | Keep (setup) | OWN-6 | U |
 | `test_acceptOwnership_keepsExplicitYieldRecipient` | Keep | OWN-6 | U |
-| `testFuzz_totalAssetsCoversTreasury` | Rewrite: fuzz deposits, `r` and `M` instead of `supplyToAave` | INV-1 | I |
+| `testFuzz_totalAssetsCoversTreasury` | Rewrite: fuzz deposits, `r` within 1 000–5 000 (today from 0, `AckiNackiBridgeAave.t.sol:522`) and `M` instead of `supplyToAave` | INV-1 | I |
 | `testFuzz_depositAboveTransferLimitLeavesCustodyUnchanged` | Keep | DEP-1 | I |
 | `test_tvlCapIncludesPrincipalSuppliedToAave` | Keep (setup) | DEP-1 | U |
 
@@ -228,6 +232,9 @@ deposits instead of `supplyToAave`. **Rewrite** — the same property checked th
 | `test_skimExcessUsdc_afterEmergency` | Keep (setup) | OWN-5, OWN-2 | U |
 | `test_harvestYield_afterEmergency_revertsNoYield` | Keep (setup) | OWN-4, OWN-5 | U |
 | `test_skimExcessUsdc_noExcess_reverts` | Keep | OWN-5 | U |
+
+WD-1 is covered by the 45 tests of `contracts/ethereum/test/AckiNackiBridgeWithdrawByProof.t.sol`,
+which stay as they are. ENV-4 states the scope and has no test.
 
 `contracts/ethereum/test/AckiNackiBridgeArbSepoliaAaveFork.t.sol`:
 
@@ -253,33 +260,26 @@ deposits instead of `supplyToAave`. **Rewrite** — the same property checked th
 | TC-01 | A deposit that leaves `L` one unit below `H` makes no call to the pool (`vm.expectCall` with count 0). | DEP-4, HL-3 | U |
 | TC-02 | A deposit that leaves `L` exactly at `H` supplies `L − T`. | DEP-3 | U |
 | TC-03 | The first deposit into an empty bridge (`B` was 0) supplies everything above the target. | DEP-3 | U |
-| TC-04 | The pool refuses — one case each for a reverting `supply`, a paused reserve, a frozen reserve, a supply cap, zero credited aUSDC and `approve` false: the deposit succeeds, emits `Deposit`, `U` grows by the deposit, `S` unchanged. `MockAavePool` has no reverting mode today; the case needs one or `vm.mockCallRevert`. | DEP-6, HL-1 | U |
+| TC-04 | The pool refuses — one case each for a reverting `supply`, a paused reserve, a frozen reserve, a supply cap, zero credited aUSDC and `approve` false: the deposit succeeds, emits `Deposit`, `U` grows by the deposit, `S` unchanged, and the refusal event carries the amount and the reason of that case. `MockAavePool` has no reverting mode today; the case needs one or `vm.mockCallRevert`. | DEP-2, DEP-6, DEP-9, HL-1 | U |
 | TC-05 | USDC sent to the bridge directly, then a crossing deposit: the directly sent USDC stays on the bridge, `S ≤ B`. | DEP-8, INV-3 | U |
 | TC-06 | Multiplier setter: owner only; default 2×; reverts at 1× and below. | CFG-4, CFG-5 | U |
 | TC-07 | `setLiquidReserveBps` and the multiplier setter each revert when `r × M` would exceed 100%. | CFG-6 | U |
 | TC-08 | After the owner changes `r` or `M`, the next deposit uses the new threshold. | CFG-7 | U |
 | TC-09 | A withdrawal that `U` covers makes no call to the pool. | WD-2, HL-3 | U |
 | TC-10 | A withdrawal with a shortfall leaves `L` equal to the target on the new book. | WD-5, ST-2 | U |
-| TC-11 | The pool can return the shortfall but not the extra: the payout succeeds and `L` is below the target. | WD-6, HL-2 | U |
+| TC-11 | The pool can return the shortfall but not the extra: the payout succeeds, `L` is below the target, and the event names the amount not pulled and the reason. | WD-6, WD-8, HL-2 | U |
 | TC-12 | The pool cannot return the shortfall: the withdrawal reverts and the nullifier stays unused. | WD-4 | U |
 | TC-13 | `supplyToAave(uint256)` no longer exists: a call with its selector `0x70ded44d` reverts. | CFG-9 | U |
 | TC-14 | Handler-driven invariants INV-1, INV-2, INV-3, ST-1, VT-1, VT-2, VT-3, HL-1, HL-2, HL-4 (§8). | §8 | I |
 | TC-15 | A deposit below the threshold makes no call to the test market. | DEP-4 | F |
-| TC-16 | The test market's reserve is paused, then frozen, through the pool's admin role on the fork: a crossing deposit succeeds and its USDC stays on the bridge. | DEP-6 | F |
-| TC-17 | The test market's supply cap is lowered below the supply on the fork: a crossing deposit succeeds. | DEP-6 | F |
-| TC-18 | The reserve's free liquidity is borrowed out on the fork: a withdrawal whose shortfall the pool cannot return reverts; one whose shortfall it can return but not the extra succeeds. | WD-4, WD-6 | F |
+| TC-16 | The test market's reserve is paused, then frozen, through the pool's admin role on the fork: a crossing deposit succeeds, its USDC stays on the bridge, and the refusal event carries the pool's revert data. | DEP-6, DEP-9 | F |
+| TC-17 | The test market's supply cap is lowered below the supply on the fork: a crossing deposit succeeds and the refusal event carries the pool's revert data. | DEP-6, DEP-9 | F |
+| TC-18 | The reserve's free liquidity is borrowed out on the fork: a withdrawal whose shortfall the pool cannot return reverts; one whose shortfall it can return but not the extra succeeds and emits the event of WD-8. | WD-4, WD-6, WD-8 | F |
 | TC-19 | After `vm.warp` with interest accrued, a refill and a harvest keep `U + A ≥ B`. | INV-1, WD-5 | F |
-| TC-20 | `DeployRealBridge` and `DeployShellnetE2EBridge` run on the fork: the deployed bridge's `aavePool()` and `aUSDC()` equal the two constants; on any other chain id `DeployRealBridge` reverts. | ENV-1, ENV-2 | F |
-| TC-21 | After the deposit (`test_40`–`44`): the bridge's `aavePool()` and `aUSDC()` equal the two constants, and part of the 2 USDC is in the pool (`S > 0`). | ENV-2, DEP-3 | E |
+| TC-20 | `DeployRealBridge` and `DeployShellnetE2EBridge` run on the fork: the deployed bridge's `aavePool()` and `aUSDC()` equal the two constants; on any other chain id `DeployRealBridge` reverts. | ENV-1, ENV-2, ENV-3 | F |
+| TC-21 | After the deposit (`test_40`–`44`): the bridge's `aavePool()` and `aUSDC()` equal the two constants, and part of the 2 USDC is in the pool (`S > 0`). | ENV-2, ENV-3, DEP-3 | E |
 | TC-22 | After `withdrawByProof` (`test_70`–`73`): the bridge pulled from the pool and paid 2 USDC. | WD-3 | E |
-
-## 10. Open questions
-
-Decisions this specification needs and does not make. Each is answered in gosh-sh/bridge-audit#120
-before the code is written.
-
-| ID | Question |
-|---|---|
-| OQ-1 | `excessUsdc()` counts USDC above the whole book, `U − B` (`:1776-1779`). While principal sits in the pool, `U < B`, so USDC sent to the bridge directly cannot be skimmed until it exceeds `B − U`. DEP-8 measures the excess as `U − (B − S)`. Should `excessUsdc()` use the same measure? |
-| OQ-2 | `r` = 0 is accepted today (`:1870-1874`). With a zero target the threshold is zero, and every deposit supplies — the per-transaction AAVE gas the band exists to avoid. Should `r` have a lower bound above zero? |
-| OQ-3 | DEP-6 lets a deposit succeed when the pool refuses, so a broken pool leaves no trace on chain. Should the bridge emit an event naming the refusal, so that monitoring sees it? |
+| TC-23 | `setLiquidReserveBps(0)` and `setLiquidReserveBps(999)` revert; `setLiquidReserveBps(1_000)` passes. | CFG-10 | U |
+| TC-24 | With principal in the pool, USDC sent to the bridge directly is skimmable at once: `excessUsdc()` equals it, `skimExcessUsdc` pays it to `yieldRecipient`, `B` and `S` unchanged. | OWN-5 | U |
+| TC-25 | The pool lost part of the principal (redeem haircut on the mock) and USDC sent directly covers the loss: `excessUsdc()` never exceeds `U + A − B`, and a skim never takes `U + A` below `B`. | OWN-5, HL-4 | U |
+| TC-26 | A paused bridge with principal in the pool: `migrateTreasury` reverts `TreasuryNotLiquid`; after `withdrawFromAave(type(uint256).max)` it moves the whole book. No test checks `TreasuryNotLiquid` today. | OWN-8 | U |

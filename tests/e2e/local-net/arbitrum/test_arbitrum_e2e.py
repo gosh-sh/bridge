@@ -256,8 +256,8 @@ def test_40_deposit_sent(run, ctx):
 
 
 def test_41_deposit_event_received(run, arb, ctx):
-    """The deposit is mined, confirmed, and its Deposit event is found. The bridge is on the AAVE
-    market of 421614, and the deposit put part of its 2 USDC into the pool."""
+    """TC-21. The deposit is mined, confirmed, and its Deposit event is found. The bridge is on the
+    AAVE market of 421614, and the deposit put part of its 2 USDC into the pool."""
     state = step_done(run, "evm_confirm", "the Deposit event is received", 900)
     assert state[1].startswith("depositId"), state
     bridge = ctx["bridge"]
@@ -454,8 +454,8 @@ WITHDRAWN_FROM_AAVE = "0x" + keccak256(b"WithdrawnFromAave(uint256,uint256)").he
 
 
 def test_72a_withdrawal_pulled_from_aave(arb, ctx):
-    """The payout needed more than the USDC the bridge kept liquid: withdrawByProof pulled it back
-    from the pool, and nothing the users are owed is booked as supplied any more."""
+    """TC-22. The payout needed more than the USDC the bridge kept liquid: withdrawByProof pulled
+    it back from the pool, and nothing the users are owed is booked as supplied any more."""
     bridge = ctx["bridge"].lower()
     logs = arb.receipt(ctx["withdraw_tx"])["logs"]
     pulls = [l for l in logs if l["address"].lower() == bridge and l["topics"][0] == WITHDRAWN_FROM_AAVE]

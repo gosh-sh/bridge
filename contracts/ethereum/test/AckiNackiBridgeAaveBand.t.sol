@@ -228,7 +228,7 @@ contract AckiNackiBridgeAaveBandTest is AaveBridgeFixture {
     // Refill in withdrawByProof
     // -----------------------------------------------------------------
 
-    /// @dev TC-09: a payout `U` covers makes no call to the pool.
+    /// @dev TC-09: a payout `L` covers makes no call to the pool.
     function test_tc09_payoutCoveredByLiquidMakesNoPoolCall() public {
         _seed();
         vm.expectCall(address(pool), abi.encodeWithSelector(IAavePool.withdraw.selector), 0);

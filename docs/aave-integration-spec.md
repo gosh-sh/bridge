@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Normative, implemented by gosh-sh/bridge#142.** What the AAVE integration must do: the change request on that PR (items 1–13) and the decisions recorded in gosh-sh/bridge-audit#120. Every test case of §9 exists under the TC id in its name or NatSpec. Two readings the implementation had to make are recorded on #142: `withdrawByProof` decides whether to call the pool on `L`, not `U` (WD-2), so that INV-3 holds with USDC above the principal on the bridge — only what `U` cannot pay is required, the rest is best effort; and so INV-3 holds only while the pool serves that best-effort pull. |
+| Status | **Normative, implemented by gosh-sh/bridge#142.** What the AAVE integration must do: the change request on that PR (items 1–13) and the decisions recorded in gosh-sh/bridge-audit#120. Every test case of §9 exists under the TC id in its name or NatSpec. `withdrawByProof` decides whether to call the pool on `L`, not `U` (WD-2, WD-3, WD-5, HL-3, INV-3), as agreed on #142. |
 | Written against | `d58c8553`, the #142 branch. A `file:line` points at that commit and marks behaviour that stays as it is; a requirement without one is new. Re-verify against the merge commit and bump this line when #142 lands. |
 | Genre | Design and correctness. The operator runbook is [`aave-yield.md`](aave-yield.md); the verified contract reference is [`EVM-contracts-spec.md`](EVM-contracts-spec.md). |
 | Paths | Relative to the repository root. |
@@ -58,7 +58,7 @@ Every term this document uses is defined here, and no other word is used for the
 | **Pool** | `aavePool`, the AAVE V3 `Pool` contract the bridge supplies to and pulls from (`:124`). On Arbitrum Sepolia it is the pool of the AAVE test market. |
 | **Principal** | Users' money: the USDC the bridge owes eccUSDC holders, `treasuryBalance`. Interest earned in the pool is yield, not principal. |
 | **Pull** | The bridge withdrawing USDC from the pool (`_pullFromAave`, `:1929`). |
-| **Refill** | The part of a pull above the shortfall, which brings the liquid principal back to the target (WD-5). |
+| **Refill** | The part of a pull above the shortfall, which brings `S` back to at most `B` and the liquid principal back to the target (WD-5). |
 | **Reserve (AAVE)** | AAVE's name for one asset's market inside the pool, here USDC. It has its own pause and freeze switches and a supply cap, set by AAVE's admin roles. Not the same as `liquidReserveBps`, which the glossary calls the target. |
 | **Refuse** | The pool refuses a supply when `approve` returns false, `supply` reverts (reserve paused or frozen, supply cap reached, any other revert), or the pool credits zero aUSDC. |
 | **Shortfall** | How much the USDC on the bridge falls short of a payout. |
@@ -118,10 +118,10 @@ Every term this document uses is defined here, and no other word is used for the
 | ID | Form | Requirement |
 |---|---|---|
 | WD-1 | Ubiquitous | The checks of `withdrawByProof` shall stay — `dstBridge`, identity, chain, replay, `WithdrawTreasuryShortfall` — and the book shall be debited before any external call (`:1513-1587`). |
-| WD-2 | State-driven | While `U` covers the payout, `withdrawByProof` shall pay from `U` and make no call to the pool. |
-| WD-3 | Event-driven | When `U` does not cover the payout, the bridge shall pull at least the shortfall from the pool. |
+| WD-2 | State-driven | While `L` covers the payout, `withdrawByProof` shall pay from `U` and make no call to the pool. `L` rather than `U`: USDC above the principal on the bridge pays out, but a payout from it would leave `S > B`. |
+| WD-3 | Event-driven | When `L` does not cover the payout, the bridge shall pull at least the shortfall, `max(0, amount − U)`, from the pool. |
 | WD-4 | Unwanted | If the shortfall itself cannot be pulled, then the withdrawal shall revert (`InsufficientTreasury` or `AaveWithdrawFailed`, `:1929-1935`) and its nullifier shall stay unused. |
-| WD-5 | Event-driven | When `U` does not cover the payout, the bridge shall also try to pull the target computed on the book after the debit, up to what the position holds, so that after the payout `L` equals that target. |
+| WD-5 | Event-driven | When `L` does not cover the payout, the bridge shall also try to pull, up to what the position holds, enough to bring `S` back to at most `B` and `L` to the target computed on the book after the debit. |
 | WD-6 | Unwanted | If the part above the shortfall cannot be pulled, then the payout shall still succeed. |
 | WD-7 | Ubiquitous | A pull may reach aUSDC above `S`: user principal is paid before yield (`:1589-1592`). |
 | WD-8 | Event-driven | When the part above the shortfall cannot be pulled, the bridge shall emit an event with the amount it did not pull and the pool's revert data. The name of the event is the author's choice. |
@@ -167,7 +167,7 @@ both setters, `pause` / `unpause`, interest accrual on the mock, and the mock's 
 |---|---|
 | INV-1 | While the pool returns what it holds, `U + A ≥ B`. |
 | INV-2 | `1× < M`, `1 000 ≤ r ≤ 5 000` and `r × M ≤ 100%`. |
-| INV-3 | `S ≤ B`: only user principal is booked as supplied. |
+| INV-3 | `S ≤ B`: only user principal is booked as supplied. Holds while the pool serves the pull of WD-5; after a payout whose refill the pool refused (WD-6), the next payout it serves restores it. |
 
 ### State transitions
 
@@ -190,7 +190,7 @@ both setters, `pause` / `unpause`, interest accrual on the mock, and the mock's 
 |---|---|
 | HL-1 | No deposit that passes DEP-1 reverts, whatever the pool does. |
 | HL-2 | No withdrawal reverts because of the part above the shortfall. |
-| HL-3 | A deposit below the threshold and a withdrawal that `U` covers make no call to the pool, so they pay no AAVE gas. |
+| HL-3 | A deposit below the threshold and a withdrawal that `L` covers make no call to the pool, so they pay no AAVE gas. |
 | HL-4 | No owner function moves user principal off the bridge: `harvestYield` and `skimExcessUsdc` never take `U + A` below `B`. |
 
 ## 9. Traceability
@@ -315,7 +315,7 @@ either removes them or keeps them as defensive checks:
 | TC-06 | Multiplier setter: owner only; default 2×; reverts at 1× and below. | CFG-4, CFG-5 | U |
 | TC-07 | `setLiquidReserveBps` and the multiplier setter each revert when `r × M` would exceed 100%. | CFG-6 | U |
 | TC-08 | After the owner changes `r` or `M`, the next deposit uses the new threshold. | CFG-7 | U |
-| TC-09 | A withdrawal that `U` covers makes no call to the pool. | WD-2, HL-3 | U |
+| TC-09 | A withdrawal that `L` covers makes no call to the pool. | WD-2, HL-3 | U |
 | TC-10 | A withdrawal with a shortfall leaves `L` equal to the target on the new book. | WD-5, ST-2 | U |
 | TC-11 | The pool can return the shortfall but not the extra: the payout succeeds, `L` is below the target, and the event names the amount not pulled and the reason. | WD-6, WD-8, HL-2 | U |
 | TC-12 | The pool cannot return the shortfall, in two cases: it holds less than the shortfall (`InsufficientTreasury`, `:1930`), and it returns less than it was asked for (`AaveWithdrawFailed`, `:1935`, never hit by a test today). Each time the withdrawal reverts and the nullifier stays unused. | WD-4 | U |

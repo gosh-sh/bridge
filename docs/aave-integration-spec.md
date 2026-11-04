@@ -29,7 +29,47 @@ Every requirement and property is covered by at least one test case in [§9](#9-
 test carries its test case ID (`TC-…`) in its name or NatSpec, so the table can be checked against
 the code.
 
-## 2. Terms
+## 2. Glossary
+
+Every term this document uses is defined here, and no other word is used for the same thing.
+
+### Words
+
+| Term | Meaning |
+|---|---|
+| **AAVE test market** | AAVE V3 deployed by AAVE itself on the test network Arbitrum Sepolia (chain id 421614), as listed in AAVE's address book: the pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, the aToken `0x460b97BD498E1157530AEb3086301d5225b91216`, and Circle's test USDC `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` as the listed asset. It runs AAVE's own code; only the network and the tokens are test ones. It is not a mock. The bridge takes these addresses from `contracts/ethereum/script/DeployRealBridge.s.sol:101-103`. |
+| **aToken, aUSDC** | The token AAVE mints to the bridge for the USDC it supplies. Its balance grows as borrowers pay interest. The bridge holds its address in the immutable `aUSDC` (`contracts/ethereum/src/AckiNackiBridge.sol:127`). |
+| **Band** | The range in which the bridge keeps its liquid principal: from the target up to the threshold. A deposit that takes it to the threshold sends everything above the target to the pool; a withdrawal that runs short brings it back to the target. |
+| **Book** | The bridge's accounting, as opposed to the tokens it holds: `treasuryBalance` (owed to users) and `suppliedPrincipal` (put into the pool). |
+| **Crossing deposit** | A deposit after which the liquid principal is at or above the threshold, so it supplies the pool (DEP-3). |
+| **Certora property categories** | The classification used by Certora Prover specifications: valid states, state transitions, variable transitions, high-level properties (§1, §8). |
+| **EARS** | Easy Approach to Requirements Syntax (Mavin et al., Rolls-Royce, 2009): five sentence templates for requirements (§1). |
+| **Excess** | `X` below. |
+| **Fork test** | A Foundry test run with `FOUNDRY_PROFILE=fork FORK_URL=<RPC>`. Forge copies the state of the chain behind the RPC into a local EVM as the test reads it and runs the test there: the code of the real contracts executes, and no transaction reaches the chain. Here the chain is Arbitrum Sepolia and the contracts are the AAVE test market. Layer F. |
+| **Haircut** | A switch of `MockAavePool` that models a loss in the pool: a supply haircut credits less aUSDC than the USDC supplied (`setSupplyHaircut`), a redeem haircut returns less USDC than was pulled (`setRedeemHaircut`). |
+| **Handler** | The contract a Foundry invariant test drives. It exposes the actions — deposit, withdrawal, owner calls, the mock's failure modes — that the fuzzer calls in random order. |
+| **Leftover** | A switch of `MockAavePool` (`setLeftoverOnMaxWithdraw`) that leaves aUSDC behind when the bridge pulls everything, as a paused or illiquid pool would. |
+| **Liquid principal** | `L` below. |
+| **Local EVM** | The EVM inside `forge test` with no fork: an empty chain in memory, with no RPC. Layers U and I run on it. |
+| **Local-net e2e** | `.woodpecker/local-net-e2e.yaml`: a whole Acki Nacki network on one host, working against the public Arbitrum Sepolia, with a bridge deployed fresh on every run ([`tests/e2e/local-net/README.md`](../tests/e2e/local-net/README.md)). Layer E. |
+| **`MockAave`** | `contracts/ethereum/test/mocks/MockAave.sol`: a fake pool (`MockAavePool`) and aToken (`MockAUSDC`) written for tests, with switches for haircuts and leftovers. Only on a local EVM (ENV-3). |
+| **Multiplier** | `M` below. |
+| **Nullifier** | The key `withdrawByProof` records for each paid withdrawal, so that a proof pays once. A reverted withdrawal leaves it unused, and the withdrawal can be retried. |
+| **Pool** | `aavePool`, the AAVE V3 `Pool` contract the bridge supplies to and pulls from (`:124`). On Arbitrum Sepolia it is the pool of the AAVE test market. |
+| **Principal** | Users' money: the USDC the bridge owes eccUSDC holders, `treasuryBalance`. Interest earned in the pool is yield, not principal. |
+| **Pull** | The bridge withdrawing USDC from the pool (`_pullFromAave`, `:1929`). |
+| **Refill** | The part of a pull above the shortfall, which brings the liquid principal back to the target (WD-5). |
+| **Reserve (AAVE)** | AAVE's name for one asset's market inside the pool, here USDC. It has its own pause and freeze switches and a supply cap, set by AAVE's admin roles. Not the same as `liquidReserveBps`, which the glossary calls the target. |
+| **Refuse** | The pool refuses a supply when `approve` returns false, `supply` reverts (reserve paused or frozen, supply cap reached, any other revert), or the pool credits zero aUSDC. |
+| **Shortfall** | How much the USDC on the bridge falls short of a payout. |
+| **Supply** | The bridge depositing USDC into the pool and receiving aUSDC for it. |
+| **Supply cap** | The most USDC the AAVE reserve accepts in total; a supply above it reverts. |
+| **Target** | `T` below. |
+| **TC-…** | A test case of §9.2. |
+| **Threshold** | `H` below. |
+| **`yieldRecipient`** | The address that receives harvested yield and skimmed excess; by default the owner (`:799`). |
+
+### Symbols
 
 | Symbol | Meaning | Source |
 |---|---|---|
@@ -43,10 +83,6 @@ the code.
 | `M` | multiplier, an owner setting; default 2× | new |
 | `H` | threshold: `M × T` | new |
 | `X` | excess: `min(U − (B − S), U + A − B)` when positive, else 0 — USDC above the liquid part of the principal that the bridge can give away and still cover its debt | new; today `excessUsdc()` is `U − B`, `:1776-1779` |
-| Pool | the AAVE V3 pool `aavePool` and its aToken `aUSDC` | `:124`, `:127` |
-
-"The pool refuses" means any of: `approve` returns false, `supply` reverts (reserve paused or
-frozen, supply cap reached, any other revert), or the pool credits zero aUSDC.
 
 ## 3. Configuration (CFG)
 
@@ -160,7 +196,7 @@ both setters, `pause` / `unpause`, interest accrual on the mock, and the mock's 
 ## 9. Traceability
 
 Layers: **U** — unit test on a local EVM with `MockAave`; **I** — Foundry invariant or fuzz test,
-same setup; **F** — fork test against the AAVE V3 test deployment on Arbitrum Sepolia,
+same setup; **F** — fork test against the AAVE test market,
 `FOUNDRY_PROFILE=fork FORK_URL=<Arbitrum Sepolia RPC>`; **E** — the local-net e2e: a local Acki
 Nacki network and the public Arbitrum Sepolia ([`tests/e2e/local-net/README.md`](../tests/e2e/local-net/README.md)).
 
@@ -253,7 +289,7 @@ either removes them or keeps them as defensive checks:
 | Test | Action | Covers | Layer |
 |---|---|---|---|
 | `test_fork_aTokenIsThisPoolsCircleUsdc` | Keep | ENV-2 | F |
-| `test_fork_supplyToAave` | Rewrite: a crossing deposit supplies the test market | DEP-3, DEP-7 | F |
+| `test_fork_supplyToAave` | Rewrite: a crossing deposit supplies the AAVE test market | DEP-3, DEP-7 | F |
 | `test_fork_harvestYield_whileTheMarketHasABorrower` | Keep (setup) | OWN-4 | F |
 | `test_fork_withdrawFromAave` | Keep (setup) | OWN-1 | F |
 | `test_fork_emergencyWithdrawAll` | Keep (setup) | OWN-2 | F |
@@ -283,9 +319,9 @@ either removes them or keeps them as defensive checks:
 | TC-12 | The pool cannot return the shortfall, in two cases: it holds less than the shortfall (`InsufficientTreasury`, `:1930`), and it returns less than it was asked for (`AaveWithdrawFailed`, `:1935`, never hit by a test today). Each time the withdrawal reverts and the nullifier stays unused. | WD-4 | U |
 | TC-13 | `supplyToAave(uint256)` no longer exists: a call with its selector `0x70ded44d` reverts. | CFG-9 | U |
 | TC-14 | Handler-driven invariants INV-1, INV-2, INV-3, ST-1, VT-1, VT-2, VT-3, HL-1, HL-2, HL-4 (§8). | §8 | I |
-| TC-15 | A deposit below the threshold makes no call to the test market. | DEP-4 | F |
-| TC-16 | The test market's reserve is paused, then frozen, through the pool's admin role on the fork: a crossing deposit succeeds, its USDC stays on the bridge, and the refusal event carries the pool's revert data. | DEP-6, DEP-9 | F |
-| TC-17 | The test market's supply cap is lowered below the supply on the fork: a crossing deposit succeeds and the refusal event carries the pool's revert data. | DEP-6, DEP-9 | F |
+| TC-15 | A deposit below the threshold makes no call to the AAVE test market. | DEP-4 | F |
+| TC-16 | The AAVE test market's reserve is paused, then frozen, through the pool's admin role on the fork: a crossing deposit succeeds, its USDC stays on the bridge, and the refusal event carries the pool's revert data. | DEP-6, DEP-9 | F |
+| TC-17 | The AAVE test market's supply cap is lowered below the supply on the fork: a crossing deposit succeeds and the refusal event carries the pool's revert data. | DEP-6, DEP-9 | F |
 | TC-18 | The reserve's free liquidity is borrowed out on the fork: a withdrawal whose shortfall the pool cannot return reverts; one whose shortfall it can return but not the extra succeeds and emits the event of WD-8. | WD-4, WD-6, WD-8 | F |
 | TC-19 | After `vm.warp` with interest accrued, a refill and a harvest keep `U + A ≥ B`. | INV-1, WD-5 | F |
 | TC-20 | `DeployRealBridge` and `DeployShellnetE2EBridge` run on the fork: the deployed bridge's `aavePool()` and `aUSDC()` equal the two constants; on any other chain id `DeployRealBridge` reverts. | ENV-1, ENV-2, ENV-3 | F |

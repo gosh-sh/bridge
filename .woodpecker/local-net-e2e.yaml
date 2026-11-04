@@ -313,6 +313,10 @@ steps:
         for n in node0 node1 node2 node3 node4; do echo \"===== \$n: \$(docker inspect dexdo_e2e-\$n-1 --format '{{.State.Status}} since {{.State.StartedAt}}, created {{.Created}}' 2>/dev/null) =====\"; docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=40 \$n 2>/dev/null | grep -vE ' TRACE | DEBUG '; done;
         echo '===== node0 (logs/node0/node.log, non-trace tail 60) ====='; grep -vE ' TRACE | DEBUG ' logs/node0/node.log 2>/dev/null | tail -n 60;
         echo '===== block_manager (logs/bm0/bm.log, tail 120) ====='; tail -n 120 logs/bm0/bm.log 2>/dev/null;
+        echo \"===== block_manager start: \$(docker inspect dexdo_e2e-block_manager-1 --format '{{.State.StartedAt}}, created {{.Created}}' 2>/dev/null) =====\";
+        docker compose -f docker/dexdo-e2e.compose.yaml logs block_manager 2>/dev/null | grep -vE ' TRACE | DEBUG ' | head -n 30;
+        echo '===== the first blocks node0 built and the block manager stored ====='; grep -m 3 'finish block: seq_no' logs/node0/node.log 2>/dev/null; grep -m 3 'database:.*Block seq_no' logs/bm0/bm.log 2>/dev/null;
+        echo '===== block_manager (logs/bm0/bm.log, non-trace head 60) ====='; grep -vE ' TRACE |msquic' logs/bm0/bm.log 2>/dev/null | head -n 60;
         echo '===== q_server0 (docker logs, tail 80) ====='; docker compose -f docker/dexdo-e2e.compose.yaml logs --tail=80 q_server0 2>/dev/null;
         echo '===== test work dir ====='; ls -la ~/$WORK_ROOT/work_dir 2>/dev/null; true"
 

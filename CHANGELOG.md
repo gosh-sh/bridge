@@ -80,7 +80,7 @@ assigns it when the release is tagged.
   word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
   revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
   before the upgrade are proven with the release their bridge was deployed for.
-- **`eccUSDCBridge` 1.15.0** (code hash `24adf1c630247edd5e397cecb5f0c5290a9081cfef4d137224cd1a80b76a9d07`):
+- **`eccUSDCBridge` 1.15.0** (code hash `71074c89af517458c73566d3e84937279547622e01e827eb9bf7161e156135a3`):
   `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
   `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
   evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
@@ -254,6 +254,14 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `eccUSDCBridge` 1.15.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `71074c89…`):
+  `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
+  `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240) until the owner's anchors are off for the verifier's
+  parent chain, and `deployL2Verifier` throws 240 on a closed chain for a parent chain the owner
+  still anchors. Before, the owner could still reach a closed Arbitrum chain by accepting a
+  parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
+  (or Ethereum) first, then the Arbitrum chain. `updateCode` drops the verifier code and the
+  verifiers: install and deploy them again after the upgrade.
 - `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
   no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
   verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.

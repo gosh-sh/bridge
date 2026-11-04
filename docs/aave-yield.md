@@ -1,33 +1,34 @@
 # AAVE yield — operator runbook
 
-*Verified against `contracts/ethereum/src/AckiNackiBridge.sol` at commit `a69ba36`, 2026-08-19.
-Line references are to that file.*
+*Verified against `contracts/ethereum/src/AckiNackiBridge.sol`, 2026-11-04. The design and its
+acceptance criteria are in [`aave-integration-spec.md`](aave-integration-spec.md).*
 
-Idle USDC is lent to the AAVE V3 USDC market. This page is what an operator needs: where the money
-is, which command collects what, and the two ways to get it wrong. The contract-level detail is in
+User principal above a liquid reserve is lent to the AAVE V3 USDC market. This page is what an
+operator needs: how the bridge moves money in and out of the pool, where the money is, which command
+collects what, and the ways to get it wrong. The contract-level detail is in
 [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §10.
 
 ## Which market a deploy wires
 
-`DeployRealBridge` (`contracts/ethereum/script/DeployRealBridge.s.sol`) fills `aavePool` and `aUSDC`
-only on the chain ids below, and only when `USE_AAVE=true`. The flag defaults to false. Both
-addresses are constructor immutables. A bridge deployed with either address zero cannot be switched
-onto a market later: `setAaveEnabled(true)` reverts `InvalidAaveAddress`. `DeployShellnetE2EBridge`,
-which is what the shellnet runbooks run, always passes zeros and does not take `USE_AAVE`.
+The bridge is deployed on Arbitrum Sepolia (421614) only, and always on its AAVE V3 USDC market.
+The constructor reverts `InvalidAaveAddress` when either AAVE address is zero, on every chain.
+`DeployRealBridge` (`contracts/ethereum/script/DeployRealBridge.s.sol`) reverts on any other chain
+id; it and `DeployShellnetE2EBridge` take the three addresses from
+`contracts/ethereum/script/ArbitrumSepoliaAave.sol`, with no override. On local anvil (31337)
+`DeployShellnetE2EBridge`, `DeployTestBridge` and `GenDepositSetup` deploy a mock market instead.
 
 | Chain | Chain id | USDC the pool lists | Pool | aToken |
 |---|---:|---|---|---|
-| Ethereum | 1 | Circle `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | `0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2` | `0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c` |
-| Ethereum Sepolia | 11155111 | Aave's faucet token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8`. This is not Circle's Sepolia USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`. | `0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951` | `0x16dA4541aD1807f4443d92D26044C1147406EB80` |
 | Arbitrum Sepolia | 421614 | Circle `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` | `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff` | `0x460b97BD498E1157530AEb3086301d5225b91216` |
 
-Arbitrum Sepolia is the testnet market whose underlying is Circle's USDC. Read on 2026-10-28: the
-aToken's `UNDERLYING_ASSET_ADDRESS()` was that USDC, its `POOL()` was that pool, and the reserve was
-active, not frozen and not paused, with a supply cap of 10_500_000. Testnet markets move. Before a
-deploy, call those two views again and confirm `getReserveData(usdc)` still returns this aToken.
-`AckiNackiBridgeArbSepoliaAaveForkTest` does that check and then calls `supplyToAave`,
-`harvestYield` (the reserve already has a borrower), `withdrawFromAave`, `emergencyWithdrawAll`
-and a `withdrawByProof` that tops the payout up from the pool:
+Read on 2026-10-28: the aToken's `UNDERLYING_ASSET_ADDRESS()` was that USDC, its `POOL()` was that
+pool, and the reserve was active, not frozen and not paused, with a supply cap of 10_500_000.
+Testnet markets move. Before a deploy, call those two views again and confirm
+`getReserveData(usdc)` still returns this aToken. `AckiNackiBridgeArbSepoliaAaveForkTest` does
+that check and then runs the supply in `deposit`, the refill in `withdrawByProof`, a paused, a
+frozen and a capped reserve, a reserve with its liquidity borrowed out, `harvestYield`,
+`withdrawFromAave`, `emergencyWithdrawAll` and both deploy scripts against the live market.
+`.woodpecker/solidity.yaml` runs it on every pull request:
 
 ```bash
 cd contracts/ethereum
@@ -35,9 +36,8 @@ FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
   forge test --match-contract AckiNackiBridgeArbSepoliaAaveForkTest -vv
 ```
 
-`USE_AXIOM_ORACLE` deploys `AxiomBlockHeaderOracle` only on chain ids 1 and 11155111. On 421614
-leave it unset: the script deploys `MockBlockHeaderOracle`. Setting it `true` reverts
-`Axiom oracle not supported on this chain` and does not fall back to the mock. The bridge stores
+`DeployRealBridge` deploys `MockBlockHeaderOracle`. `USE_AXIOM_ORACLE=true` reverts
+`Axiom oracle not supported on Arbitrum Sepolia` and does not fall back to the mock. The bridge stores
 the oracle address and does not call it on the deposit path.
 
 A shellnet withdrawal of this bridge also needs `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID` on Acki
@@ -48,8 +48,8 @@ The shellnet e2e deploy sets 3; this script does not.
 The bridge already recorded for Arbitrum Sepolia,
 `0x3FB082a905a895151224F6d93bD074E816338638` (`README.md`), has no pool, so the AAVE bridge
 replaces it on the same chain. Follow
-[Replacing a bridge on the same chain](#replacing-a-bridge-on-the-same-chain) and deploy in its
-step 1 with `USE_AAVE=true`. Two steps differ for `0x3FB0…8638`:
+[Replacing a bridge on the same chain](#replacing-a-bridge-on-the-same-chain). Two steps differ
+for `0x3FB0…8638`:
 
 * It predates `dstBridge`, so in step 3 its burns are proven with the `ackinacki-bridge` release
   it was deployed for.
@@ -75,7 +75,7 @@ anchor level 2 only, so deploy with the output of `compute_bridge_anchors --leve
 `--at-head` or `--seed-seqno`): `BUNDLE_STRIDE`, `GENESIS_BK_SET_COMMITMENT`,
 `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`, `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and
 `GENESIS_SEED_SEQNO` exported as `GENESIS_LAST_SEEN_BLOCK_SEQNO`, as
-`deploy_bridge_bundle.sh` does. Set `PRIVATE_KEY` to the key of the kit's `RELAYER_ADDRESS`:
+`tests/e2e/local-net/prover-host/jobs/deploy.sh` does. Set `PRIVATE_KEY` to the key of the kit's `RELAYER_ADDRESS`:
 the deploying account becomes the owner, and preflight requires the owner to be
 `RELAYER_ADDRESS`. Its `daemon-live.env` then needs:
 
@@ -95,19 +95,44 @@ the deploying account becomes the owner, and preflight requires the owner to be
   `block.chainid` is the host chain id, and a burn towards this bridge names 421614 itself, so
   a deploy that sets only `WITHDRAW_ALT_TOKEN_ID=3` needs 0, 0 and 3.
 
+## How money moves in and out of the pool
+
+No call supplies the pool on its own: `supplyToAave` is gone. Two numbers set the band:
+`liquidReserveBps` (`r`, default `1_000` = 10 %, between 10 % and 50 %) and `supplyMultiplierBps`
+(`M`, default `20_000` = 2×, above 1×), with `r × M` at most 100 %. Write `B` for
+`treasuryBalance()`, `S` for `suppliedPrincipal()`, `U` for the bridge's USDC and `L` for the
+liquid principal, `min(U, B − S)`. The target is `T = B × r` and the threshold `H = T × M`.
+
+* **`deposit`** books the deposit and emits `Deposit`; then, while `aaveEnabled()`, if `L ≥ H` it
+  supplies `L − T`, leaving `T` liquid, and emits `SuppliedToAave`. Below the threshold it makes no
+  pool call. A pool that refuses — paused or frozen reserve, supply cap, a revert, nothing
+  credited, `approve` false — does not fail the deposit: the supply is undone, the USDC stays on
+  the bridge and `AaveSupplyRefused(amount, reason)` carries the pool's revert data. USDC above
+  the principal (`U − (B − S)`) is never supplied.
+* **`withdrawByProof`** pays from the USDC on hand while the liquid principal covers the payout,
+  with no pool call. Otherwise it pulls what the USDC on hand cannot pay — that part is required,
+  and if the pool cannot return it the payout reverts and its nullifier stays unused — and in the
+  same `withdraw` tries to pull enough more to leave `T` of the new book liquid. When the pool
+  cannot serve that extra part, the payout still goes through with only the required part pulled,
+  and `AaveRefillFailed(amount, reason)` names the part not pulled and the pool's revert data.
+
+`AaveSupplyRefused` and `AaveRefillFailed` are the events to alert on: either one means the pool
+is refusing the bridge.
+
 ## Where the money is
 
 | | What it means | Read it with |
 |---|---|---|
-| **Owed to users** | A book number. Up on deposit, down on a proven payout; also up on `fundTreasury` and to zero on `migrateTreasury` when a bridge is replaced (below). | `treasuryBalance()` (`:108`) |
+| **Owed to users** | A book number. Up on deposit, down on a proven payout; also up on `fundTreasury` and to zero on `migrateTreasury` when a bridge is replaced (below). | `treasuryBalance()` |
 | **Liquid** | USDC on the contract, spendable now. | `usdc.balanceOf(bridge)` |
-| **In AAVE** | `suppliedPrincipal()` is what we put in; `aUsdcBalance()` is what it is worth now. | both (`:123`, `:1387`) |
+| **In AAVE** | `suppliedPrincipal()` is what we put in; `aUsdcBalance()` is what it is worth now. | both |
 
 Two derived numbers decide everything below:
 
-* `accruedYield()` = `aUsdcBalance() − suppliedPrincipal()` — yield **still inside AAVE** (`:1393`).
-* `excessUsdc()` = `usdc.balanceOf(bridge) − treasuryBalance()` — surplus **already on the contract**
-  (`:1307`).
+* `accruedYield()` = `aUsdcBalance() − suppliedPrincipal()` — yield **still inside AAVE**.
+* `excessUsdc()` = `min(U + S − B, U + A − B)` with `A` = `aUsdcBalance()`, at most `U` and never
+  below zero — surplus **already on the contract**. USDC sent to the bridge directly is skimmable
+  while principal sits in the pool, and never while it covers a loss in the pool.
 
 Solvent iff `totalAssets() ≥ treasuryBalance()`. `treasuryBalance` is book value and is never
 reconciled against real assets, so a loss in AAVE does not shrink it — it surfaces later, on a payout.
@@ -118,8 +143,8 @@ reconciled against real assets, so a loss in AAVE does not shrink it — it surf
 
 | Yield is… | Command | Fails with |
 |---|---|---|
-| in AAVE | `harvestYield(amount)` (`:1287`) | `NoYield` if `amount` is 0 or above `accruedYield()`; pays at most liquid + aUSDC − `treasuryBalance()`; `HarvestWouldBreakSolvency` when that surplus is zero |
-| on the contract | `skimExcessUsdc(amount)` (`:1315`) | `NoExcessUsdc` if `excessUsdc() == 0` |
+| in AAVE | `harvestYield(amount)` | `NoYield` if `amount` is 0 or above `accruedYield()`; pays at most liquid + aUSDC − `treasuryBalance()`; `HarvestWouldBreakSolvency` when that surplus is zero |
+| on the contract | `skimExcessUsdc(amount)` | `NoExcessUsdc` if `excessUsdc() == 0` |
 
 Both send to `yieldRecipient`, never to the caller. `skimExcessUsdc` accepts `type(uint256).max` for
 "all of it"; `harvestYield` does not — pass `accruedYield()`. The call pays at most the surplus of
@@ -132,8 +157,8 @@ supplied to AAVE, and that absence is the guarantee.
 
 | You called | Yield ends up | Collect with |
 |---|---|---|
-| `withdrawFromAave(max)` (`:1258`) | stays in AAVE — it pulls only the booked principal | `harvestYield` |
-| `emergencyWithdrawAll()` (`:1270`) | on the contract — it pulls principal **and** interest, and zeroes the book | `skimExcessUsdc` |
+| `withdrawFromAave(max)` | stays in AAVE — it pulls only the booked principal | `harvestYield` |
+| `emergencyWithdrawAll()` | on the contract — it pulls principal **and** interest, and zeroes the book | `skimExcessUsdc` |
 
 ### After an emergency unwind — three cases, not one
 
@@ -148,7 +173,7 @@ supplied to AAVE, and that absence is the guarantee.
 Yield can be back in AAVE after an emergency in three ways: the module was re-enabled and re-supplied
 (the normal one); someone sent aUSDC to the bridge directly, which reads as pure yield because the
 book says we supplied nothing; or rounding dust survived the `withdraw(max)`. In all three
-`harvestYield` works — note it has **no** `aaveEnabled` guard (`:1287-1289`), so a disabled module
+`harvestYield` works — note it has **no** `aaveEnabled` guard, so a disabled module
 does not block collection. `withdrawFromAave`, by contrast, reverts `InvalidAmount` while
 `min(suppliedPrincipal(), aUsdcBalance())` is zero, and for any explicit amount above it.
 
@@ -157,17 +182,13 @@ cases without anyone having to remember what was called last.
 
 ## Two ways to get it wrong
 
-**1. Re-supplying before you skim.** `supplyToAave` subtracts only the liquid reserve, not the
-surplus (`:1358-1363`), so uncollected yield goes back into the pool and is booked as *principal*.
-It is then invisible to both collectors. Not lost — it keeps earning — but recovering it needs a
-`withdrawFromAave(max)` first. Correct order after an emergency:
+**1. Re-enabling before you skim.** After `emergencyWithdrawAll`, the next crossing deposit
+supplies only principal — USDC above it is never supplied — so uncollected interest is not swept
+into the pool. Still, collect it first, so the books are simple to read:
 
 ```
-skimExcessUsdc(max)  →  setAaveEnabled(true)  →  supplyToAave(max)
+skimExcessUsdc(max)  →  setAaveEnabled(true)
 ```
-
-To undo it later, use `withdrawFromAave(max)`, not `emergencyWithdrawAll` — the latter also disables
-the module and you would have to re-enable it.
 
 **If `emergencyWithdrawAll` reverts `EmergencyLeftoverAToken`.** AAVE paid some USDC but left
 aUSDC on the bridge (reserve cap / pause). The whole call reverts, so `aaveEnabled` and
@@ -189,7 +210,7 @@ that pocket. `skimExcessUsdc` is for whatever already sits on the contract.
 `emergencyWithdrawAll` keeps on the books when AAVE redeemed less than it was given. The position is
 worth less than the book; users are owed the same. What still works and what does not:
 
-* Payouts keep drawing on whatever aUSDC is there — `withdrawByProof` pulls the shortfall up to
+* Payouts keep drawing on whatever aUSDC is there — `withdrawByProof` pulls up to
   `aUsdcBalance()`, interest included. Once liquid USDC plus aUSDC no longer covers a payout it
   reverts `InsufficientTreasury`; that is a real shortfall, and only fresh USDC sent to the bridge
   closes it.
@@ -208,10 +229,10 @@ guard doing its job, and it may be telling you there is a shortfall. Check `tota
 
 ## Check the recipient before the first collection
 
-The constructor sets `owner = yieldRecipient = msg.sender` (`:554-555`), and `transferOwnership`
-moves **only** `owner` (`:1347`). The constructor takes no recipient argument, so on any deploy where
+The constructor sets `owner = yieldRecipient = msg.sender`, and `transferOwnership`
+moves **only** `owner`. The constructor takes no recipient argument, so on any deploy where
 ownership was handed to a multisig afterwards, yield still goes to the deploying key until someone
-calls `setYieldRecipient` (`:1341`).
+calls `setYieldRecipient`.
 
 Separating the two roles is intentional and fine. The hazard is that they separate *silently*.
 
@@ -238,14 +259,19 @@ Alert a keeper on any of these:
 totalAssets() < treasuryBalance()                 # solvency breach
 suppliedPrincipal() > aUsdcBalance()              # AAVE lost value; see "If AAVE lost money"
 aaveEnabled() == false AND suppliedPrincipal > 0  # stuck position, needs a manual unwind
-excessUsdc() > 0 across a collection cycle        # uncollected surplus; the next supply absorbs it
+excessUsdc() > 0 across a collection cycle        # uncollected surplus
+AaveSupplyRefused or AaveRefillFailed emitted     # the pool refuses the bridge
 ```
 
 ## Other owner controls
 
-`setLiquidReserveBps` — the share of user principal kept liquid. Default `1_000` = 10 % (`:557`),
-capped at 50 % (`:67`). Ours, not an AAVE convention. `setAaveEnabled` — gate on new supplies;
-`emergencyWithdrawAll` turns it off, and only an explicit call turns it back on.
+`setLiquidReserveBps` — the share of the book kept liquid. Default `1_000` = 10 %, at least 10 %
+(`ReserveBpsTooLow`), at most 50 % (`ReserveBpsTooHigh`). `setSupplyMultiplierBps` — how far the
+liquid principal has to grow above that target before a deposit supplies it. Default `20_000` =
+2×, above 1× (`MultiplierTooLow`). Either setter reverts `ReserveBandTooWide` when `r × M` would
+exceed 100 %, and the next deposit uses the new values. Ours, not an AAVE convention.
+`setAaveEnabled` — gate on new supplies; `emergencyWithdrawAll` turns it off, and only an explicit
+call turns it back on.
 
 The owner cannot replace a verifier — those bindings are immutable — and can reduce
 `treasuryBalance` only by handing all of it to a successor with `migrateTreasury`. The bridge checks

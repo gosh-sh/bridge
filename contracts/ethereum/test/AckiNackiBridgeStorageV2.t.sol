@@ -14,6 +14,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeStorageV2Test
 /// @notice Storage v2.0 (2026-08-04) invariants — see `docs/EVM-contracts-spec.md` §4.
@@ -67,8 +68,8 @@ contract AckiNackiBridgeStorageV2Test is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             vb,
             VerifyBlockConfigLib.disabledWithdraw()
         );

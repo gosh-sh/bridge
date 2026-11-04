@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Normative.** What the AAVE integration must do once gosh-sh/bridge#142 is done: the change request on that PR (items 1–13) and the decisions recorded in gosh-sh/bridge-audit#120. The code does not meet it yet. |
+| Status | **Normative, implemented by gosh-sh/bridge#142.** What the AAVE integration must do: the change request on that PR (items 1–13) and the decisions recorded in gosh-sh/bridge-audit#120. Every test case of §9 exists under the TC id in its name or NatSpec. Two readings the implementation had to make are recorded on #142: `withdrawByProof` decides whether to call the pool on `L`, not `U` (WD-2), so that INV-3 holds with USDC above the principal on the bridge — only what `U` cannot pay is required, the rest is best effort; and so INV-3 holds only while the pool serves that best-effort pull. |
 | Written against | `d58c8553`, the #142 branch. A `file:line` points at that commit and marks behaviour that stays as it is; a requirement without one is new. Re-verify against the merge commit and bump this line when #142 lands. |
 | Genre | Design and correctness. The operator runbook is [`aave-yield.md`](aave-yield.md); the verified contract reference is [`EVM-contracts-spec.md`](EVM-contracts-spec.md). |
 | Paths | Relative to the repository root. |

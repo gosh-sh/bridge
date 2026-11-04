@@ -33,6 +33,10 @@ from keccak import keccak256  # noqa: E402
 
 ARB_RPC = os.environ.get("ARB_RPC", "https://sepolia-rollup.arbitrum.io/rpc")
 ARB_USDC = "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d"
+# The AAVE V3 USDC market every bridge on 421614 is deployed against
+# (contracts/ethereum/script/ArbitrumSepoliaAave.sol).
+ARB_AAVE_POOL = "0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff"
+ARB_AUSDC = "0x460b97BD498E1157530AEb3086301d5225b91216"
 ARB_CHAIN, SEPOLIA_CHAIN = 421614, 11155111
 ARB_ROLLUP = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4"
 # Sepolia's beacon chain: genesis time, seconds per slot, slots per sync-committee period.
@@ -170,6 +174,9 @@ class Arbitrum:
     def call(self, to, signature, args=b""):
         data = "0x" + keccak256(signature.encode())[:4].hex() + args.hex()
         return int(self.rpc("eth_call", [{"to": to, "data": data}, "latest"]), 16)
+
+    def receipt(self, tx):
+        return self.rpc("eth_getTransactionReceipt", [tx])
 
     def code(self, address):
         return self.rpc("eth_getCode", [address, "latest"])

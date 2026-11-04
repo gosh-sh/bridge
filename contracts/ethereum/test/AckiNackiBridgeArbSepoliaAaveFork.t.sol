@@ -18,6 +18,8 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockPrimaryVerifier.sol";
+import "../script/DeployRealBridge.s.sol";
+import "../script/DeployShellnetE2EBridge.s.sol";
 
 interface IAaveAToken {
     function UNDERLYING_ASSET_ADDRESS() external view returns (address);
@@ -26,6 +28,26 @@ interface IAaveAToken {
 
 interface IDebtToken {
     function totalSupply() external view returns (uint256);
+}
+
+interface IPoolAddressesProvider {
+    function getPoolConfigurator() external view returns (address);
+    function getACLManager() external view returns (address);
+    function getACLAdmin() external view returns (address);
+}
+
+interface IPoolWithProvider {
+    function ADDRESSES_PROVIDER() external view returns (address);
+}
+
+interface IACLManager {
+    function addPoolAdmin(address admin) external;
+}
+
+interface IPoolConfigurator {
+    function setReservePause(address asset, bool paused) external;
+    function setReserveFreeze(address asset, bool freeze) external;
+    function setSupplyCap(address asset, uint256 newSupplyCap) external;
 }
 
 /// @title AckiNackiBridgeArbSepoliaAaveForkTest
@@ -38,9 +60,10 @@ interface IDebtToken {
 /// ```
 ///
 /// The three addresses are the ones `DeployRealBridge` writes on chain id
-/// 421614. Supply, harvest, withdraw, emergency unwind and a payout that
-/// tops up from the pool all run against that market. The withdrawal proof
-/// is the test mock: the pool pull is the real one.
+/// 421614. The supply in `deposit`, the refill in `withdrawByProof`, harvest,
+/// withdraw and emergency unwind all run against that market; pause, freeze
+/// and the supply cap are set through its own `PoolConfigurator`. The
+/// withdrawal proof is the test mock: the pool calls are the real ones.
 contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
     address constant AAVE_V3_POOL = 0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff;
     address constant USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
@@ -118,58 +141,116 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         );
     }
 
-    function test_fork_supplyToAave() public {
+    event AaveSupplyRefused(uint256 amount, bytes reason);
+    event AaveRefillFailed(uint256 amount, bytes reason);
+
+    /// @dev Supply in `deposit`: one 10 USDC deposit into an empty bridge
+    ///      leaves the 10% target liquid and supplies the rest.
+    function test_fork_depositSuppliesAboveTarget() public {
         _deposit(10 * UsdcTestLib.UNIT);
-        uint256 liquidBefore = usdc.balanceOf(address(bridge));
-        bridge.supplyToAave(type(uint256).max);
 
         assertApproxEqAbs(
             bridge.suppliedPrincipal(), 9 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "90% supplied"
         );
-        // AAVE's rayDiv can credit 1 wei less aUSDC than the USDC that left.
-        assertApproxEqAbs(
-            usdc.balanceOf(address(bridge)),
-            liquidBefore - bridge.suppliedPrincipal(),
-            DRIFT_TOLERANCE,
-            "liquid reserve stays"
-        );
+        assertEq(usdc.balanceOf(address(bridge)), 1 * UsdcTestLib.UNIT, "target liquid");
         assertApproxEqAbs(
             bridge.aUsdcBalance(), bridge.suppliedPrincipal(), DRIFT_TOLERANCE, "aUSDC"
         );
     }
 
-    function test_fork_harvestYield_whileTheMarketHasABorrower() public {
+    /// @dev TC-15: a deposit below the threshold makes no call to the market.
+    function test_fork_tc15_belowThresholdMakesNoPoolCall() public {
+        _deposit(10 * UsdcTestLib.UNIT);
+        vm.expectCall(AAVE_V3_POOL, abi.encodeWithSelector(IAavePool.supply.selector), 0);
+        _deposit(1 * UsdcTestLib.UNIT);
+        assertEq(usdc.balanceOf(address(bridge)), 2 * UsdcTestLib.UNIT, "deposit stayed liquid");
+    }
+
+    /// @dev TC-16: a paused reserve refuses the supply; the deposit goes through.
+    function test_fork_tc16_pausedReserveDoesNotBlockDeposit() public {
+        _configurator().setReservePause(USDC, true);
+        _assertDepositRefused();
+    }
+
+    /// @dev TC-16: a frozen reserve refuses the supply; the deposit goes through.
+    function test_fork_tc16_frozenReserveDoesNotBlockDeposit() public {
+        _configurator().setReserveFreeze(USDC, true);
+        _assertDepositRefused();
+    }
+
+    /// @dev TC-17: a supply cap below the reserve's supply refuses the supply.
+    function test_fork_tc17_supplyCapDoesNotBlockDeposit() public {
+        _configurator().setSupplyCap(USDC, 1);
+        _assertDepositRefused();
+    }
+
+    /// @dev TC-18: the reserve's free USDC is borrowed out down to zero — a
+    ///      payout with a shortfall reverts and its nullifier stays unused.
+    function test_fork_tc18_noLiquidityForTheShortfallReverts() public {
+        _recordAnchor();
+        _fillBridge();
+        deal(USDC, AUSDC, 0);
+
+        vm.expectRevert();
+        _pay(20 * UsdcTestLib.UNIT, 1);
+        assertFalse(bridge.isNullifierUsed(1), "nullifier unused");
+        assertEq(bridge.treasuryBalance(), 100 * UsdcTestLib.UNIT, "book unchanged");
+    }
+
+    /// @dev TC-18: the reserve can return the shortfall but not the refill —
+    ///      the payout goes through and the event names the amount not pulled.
+    function test_fork_tc18_shortfallOnlyPaysAndReports() public {
+        _recordAnchor();
+        _fillBridge();
+        // U = 10, S = 90. A 20 USDC payout is short 10; the new book is 80,
+        // so the refill would pull 8 more.
+        uint256 shortfall = 10 * UsdcTestLib.UNIT;
+        uint256 extra = 8 * UsdcTestLib.UNIT;
+        deal(USDC, AUSDC, shortfall);
+        bytes memory reason = _poolWithdrawRevertData(shortfall + extra);
+
+        vm.expectEmit(false, false, false, true, address(bridge));
+        emit AaveRefillFailed(extra, reason);
+        uint256 paidBefore = usdc.balanceOf(RECIPIENT);
+        _pay(20 * UsdcTestLib.UNIT, 1);
+
+        assertEq(usdc.balanceOf(RECIPIENT) - paidBefore, 20 * UsdcTestLib.UNIT, "paid");
+        assertEq(usdc.balanceOf(address(bridge)), 0, "below the target");
+        assertApproxEqAbs(
+            bridge.suppliedPrincipal(), 80 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "S = new book"
+        );
+    }
+
+    /// @dev TC-19 / WD-5: interest accrued, a payout that refills the target,
+    ///      then a harvest — the bridge stays solvent throughout.
+    function test_fork_tc19_refillAndHarvestAfterInterestStaySolvent() public {
         address debt = IAavePool(AAVE_V3_POOL).getReserveData(USDC).variableDebtTokenAddress;
         assertGt(IDebtToken(debt).totalSupply(), 0, "a borrower is already in the USDC reserve");
 
-        _deposit(50 * UsdcTestLib.UNIT);
-        _deposit(50 * UsdcTestLib.UNIT);
-        bridge.supplyToAave(type(uint256).max);
-        assertApproxEqAbs(
-            bridge.suppliedPrincipal(), 90 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "principal"
-        );
-
+        _recordAnchor();
+        _fillBridge();
         vm.warp(block.timestamp + 365 days);
         vm.roll(block.number + 1);
-        _deposit(1 * UsdcTestLib.UNIT);
-        bridge.supplyToAave(500_000);
+        assertGt(bridge.accruedYield(), 0, "the borrowed reserve paid interest");
+
+        _pay(20 * UsdcTestLib.UNIT, 1);
+        _assertSolvent();
+        assertEq(usdc.balanceOf(address(bridge)), 8 * UsdcTestLib.UNIT, "target of the new book");
 
         uint256 yield = bridge.accruedYield();
-        assertGt(yield, 0, "the borrowed reserve paid interest");
         uint256 take = yield / 2;
         if (take == 0) take = yield;
-
         uint256 sinkBefore = usdc.balanceOf(yieldSink);
         uint256 principalBefore = bridge.suppliedPrincipal();
         bridge.harvestYield(take);
 
         assertApproxEqAbs(usdc.balanceOf(yieldSink) - sinkBefore, take, DRIFT_TOLERANCE, "harvest");
         assertEq(bridge.suppliedPrincipal(), principalBefore, "harvest leaves principal");
+        _assertSolvent();
     }
 
     function test_fork_withdrawFromAave() public {
         _deposit(10 * UsdcTestLib.UNIT);
-        bridge.supplyToAave(type(uint256).max);
         uint256 principalBefore = bridge.suppliedPrincipal();
         uint256 liquidBefore = usdc.balanceOf(address(bridge));
 
@@ -181,7 +262,6 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
 
     function test_fork_emergencyWithdrawAll() public {
         _deposit(10 * UsdcTestLib.UNIT);
-        bridge.supplyToAave(type(uint256).max);
         uint256 supplied = bridge.suppliedPrincipal();
         uint256 liquidBefore = usdc.balanceOf(address(bridge));
 
@@ -195,10 +275,11 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         );
     }
 
-    function test_fork_withdrawByProof_topsUpFromAave() public {
+    /// @dev WD-3, WD-5: a payout larger than the liquid USDC pulls the
+    ///      shortfall plus the target of the new book.
+    function test_fork_withdrawByProof_refillsFromAave() public {
         _recordAnchor();
         _deposit(10 * UsdcTestLib.UNIT);
-        bridge.supplyToAave(type(uint256).max);
         uint256 liquid = usdc.balanceOf(address(bridge));
         uint256 payout = 4 * UsdcTestLib.UNIT;
         assertLt(liquid, payout, "the payout must reach into AAVE");
@@ -207,12 +288,117 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         uint256 paidBefore = usdc.balanceOf(RECIPIENT);
         _pay(payout, 1);
 
+        uint256 target = (10 * UsdcTestLib.UNIT - payout) / 10;
         assertEq(usdc.balanceOf(RECIPIENT) - paidBefore, payout, "recipient paid");
         assertEq(bridge.treasuryBalance(), 10 * UsdcTestLib.UNIT - payout, "book of users");
         assertApproxEqAbs(
-            aBefore - bridge.aUsdcBalance(), payout - liquid, DRIFT_TOLERANCE, "pool pull"
+            aBefore - bridge.aUsdcBalance(), payout - liquid + target, DRIFT_TOLERANCE, "pool pull"
         );
-        assertEq(usdc.balanceOf(address(bridge)), 0, "liquid spent");
+        assertEq(usdc.balanceOf(address(bridge)), target, "target refilled");
+    }
+
+    /// @dev TC-20: both deploy scripts wire the market of 421614.
+    function test_fork_tc20_deployScriptsWireTheMarket() public {
+        _setDeployEnv();
+        AckiNackiBridge real = new DeployRealBridge().deploy();
+        assertEq(address(real.aavePool()), AAVE_V3_POOL, "real: pool");
+        assertEq(address(real.aUSDC()), AUSDC, "real: aUSDC");
+        assertEq(address(real.usdc()), USDC, "real: USDC");
+        assertTrue(real.aaveEnabled(), "real: enabled");
+
+        AckiNackiBridge shellnet = new DeployShellnetE2EBridge().deploy();
+        assertEq(address(shellnet.aavePool()), AAVE_V3_POOL, "shellnet: pool");
+        assertEq(address(shellnet.aUSDC()), AUSDC, "shellnet: aUSDC");
+        assertEq(address(shellnet.usdc()), USDC, "shellnet: USDC");
+    }
+
+    /// @dev TC-20 / ENV-1: `DeployRealBridge` refuses every other chain id.
+    function test_fork_tc20_deployRealBridgeRefusesOtherChains() public {
+        _setDeployEnv();
+        DeployRealBridge script = new DeployRealBridge();
+        uint256[3] memory others = [uint256(1), 11_155_111, 42_161];
+        for (uint256 i; i < others.length; ++i) {
+            vm.chainId(others[i]);
+            vm.expectRevert(bytes("DeployRealBridge: Arbitrum Sepolia (421614) only"));
+            script.deploy();
+        }
+    }
+
+    function _setDeployEnv() internal {
+        vm.setEnv("PRIVATE_KEY", vm.toString(uint256(0xA11CE5)));
+        vm.setEnv("WIRE_VERIFY_BLOCK", "true");
+        vm.setEnv("GENESIS_BK_SET_COMMITMENT", vm.toString(BK_SET));
+        vm.setEnv("GENESIS_PREV_MAX_LEVEL_LAYER_HASH", "0");
+        vm.setEnv("BUNDLE_STRIDE", "16384");
+        vm.setEnv("WITHDRAW_ACC_FR", vm.toString(ACC_FR));
+        vm.setEnv("WITHDRAW_DAPP_FR", vm.toString(DAPP_FR));
+    }
+
+    function _fillBridge() internal {
+        _deposit(50 * UsdcTestLib.UNIT);
+        _deposit(50 * UsdcTestLib.UNIT);
+        assertApproxEqAbs(
+            bridge.suppliedPrincipal(), 90 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "principal"
+        );
+        assertEq(usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT, "target");
+    }
+
+    function _assertSolvent() internal view {
+        assertGe(
+            usdc.balanceOf(address(bridge)) + bridge.aUsdcBalance(),
+            bridge.treasuryBalance(),
+            "U + A >= B"
+        );
+    }
+
+    /// @dev A crossing 10 USDC deposit into the empty bridge, with the
+    ///      market refusing supplies: everything stays liquid and the
+    ///      event carries what the pool itself reverts with.
+    function _assertDepositRefused() internal {
+        uint256 toSupply = 9 * UsdcTestLib.UNIT;
+        bytes memory reason = _poolSupplyRevertData(toSupply);
+        vm.prank(user);
+        usdc.approve(address(bridge), 10 * UsdcTestLib.UNIT);
+        vm.expectEmit(false, false, false, true, address(bridge));
+        emit AaveSupplyRefused(toSupply, reason);
+        vm.prank(user);
+        bridge.deposit(10 * UsdcTestLib.UNIT, bytes32(uint256(uint160(user))));
+
+        assertEq(bridge.depositCounter(), 1, "deposit recorded");
+        assertEq(bridge.suppliedPrincipal(), 0, "nothing booked");
+        assertEq(usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT, "USDC stayed");
+        assertEq(usdc.allowance(address(bridge), AAVE_V3_POOL), 0, "no allowance left");
+    }
+
+    function _poolSupplyRevertData(uint256 amount) internal returns (bytes memory data) {
+        address probe = makeAddr("supply-probe");
+        deal(USDC, probe, amount);
+        vm.startPrank(probe);
+        usdc.approve(AAVE_V3_POOL, amount);
+        bool ok;
+        (ok, data) = AAVE_V3_POOL.call(
+            abi.encodeWithSelector(IAavePool.supply.selector, USDC, amount, probe, uint16(0))
+        );
+        vm.stopPrank();
+        assertFalse(ok, "the market must refuse the probe");
+    }
+
+    function _poolWithdrawRevertData(uint256 amount) internal returns (bytes memory data) {
+        vm.prank(address(bridge));
+        bool ok;
+        (ok, data) = AAVE_V3_POOL.call(
+            abi.encodeWithSelector(IAavePool.withdraw.selector, USDC, amount, address(bridge))
+        );
+        assertFalse(ok, "the market must refuse the probe");
+    }
+
+    function _configurator() internal returns (IPoolConfigurator) {
+        IPoolAddressesProvider provider =
+            IPoolAddressesProvider(IPoolWithProvider(AAVE_V3_POOL).ADDRESSES_PROVIDER());
+        IACLManager acl = IACLManager(provider.getACLManager());
+        vm.prank(provider.getACLAdmin());
+        acl.addPoolAdmin(address(this));
+        return IPoolConfigurator(provider.getPoolConfigurator());
     }
 
     function _deposit(uint256 amount) internal {

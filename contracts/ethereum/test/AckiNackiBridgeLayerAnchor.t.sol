@@ -15,6 +15,7 @@ import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/Bn254FrLib.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeLayerAnchorTest
 /// @notice Regression for AB-Q4 — the chain anchor (`prevMaxLevelLayerHash`)
@@ -85,8 +86,8 @@ contract AckiNackiBridgeLayerAnchorTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             vb,
             VerifyBlockConfigLib.disabledWithdraw()
         );

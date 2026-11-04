@@ -20,11 +20,9 @@
 # `withdrawByProof` are permissionless). Never share it: the relayer replaces
 # whatever transaction waits at its account's next nonce, so two daemons on
 # one key replace each other's transactions. Do NOT reuse it for anything of
-# value on any other network. For the deploy path
-# (`scripts/deploy_bridge_bundle.sh`) re-export it as `PRIVATE_KEY` — e.g.
-# `CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS PRIVATE_KEY=$RELAYER_PRIVATE_KEY
-# LEVEL=1 WITHDRAW_ACC_FR=<AN bridge account field element> PREDECESSOR_BRIDGE=<previous
-# bridge or the zero address> ./scripts/deploy_bridge_bundle.sh`.
+# value on any other network. To deploy a bridge with it, re-export it as
+# `PRIVATE_KEY` for `DeployShellnetE2EBridge` on Arbitrum Sepolia
+# (tests/e2e/local-net/prover-host/jobs/deploy.sh is the worked example).
 # RPC_URL is the primary Ethereum endpoint; the relayer falls back to the
 # RPC_FAILOVER_URLS entries in order when it fails
 # (crates/bridge-relayer-daemon/src/eth_rpc.rs). Together they must serve

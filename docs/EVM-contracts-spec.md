@@ -43,6 +43,12 @@ note here calling out the drift.
 > `src/AckiNackiBridge.sol`, `src/IBridgeWithdrawalVerifier.sol`, `script/DeployRealBridge.s.sol`
 > and `script/PredecessorEnv.sol` as of this change. Other citations were not re-anchored.
 >
+> **Drift note, 2026-11-04 (AAVE band, Arbitrum only).** `supplyToAave` is gone: `deposit`
+> supplies above the liquid target and `withdrawByProof` refills it (§10). AAVE is mandatory, the
+> bridge is Arbitrum Sepolia only, and `supplyMultiplierBps` took slot 5, moving every later slot
+> by one (§4.1). §4.1, §5's AAVE rows, §10, §11's AAVE names, §12 and §13 are re-anchored to this
+> change; the note below is history.
+>
 > **Drift note, 2026-11-04 (Arbitrum Sepolia AAVE).** §10, §12.1, §12.2, §12.3 and §13
 > now include chain id 421614. `DeployRealBridge._resolveTokenAddresses` accepts it.
 > `USE_AAVE` defaults false, and `USE_AXIOM_ORACLE=true` reverts on this chain. The
@@ -177,23 +183,24 @@ relying on them for a storage-level migration.
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
-| 0 | 0 | `depositCounter` | `uint256` | 100 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 108 | `deposit` (+), `fundTreasury` (+), `withdrawByProof` (−), `migrateTreasury` (→ 0) |
-| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 110 | constructor only |
-| 2 | 20 | `aaveEnabled` | `bool` | 126 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 3 | 0 | `suppliedPrincipal` | `uint256` | 129 | `supplyToAave`, `_pullFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
-| 4 | 0 | `liquidReserveBps` | `uint256` | 134 | constructor (`1_000`), `setLiquidReserveBps` |
-| 5 | 0 | `owner` | `address` | 137 | constructor, `acceptOwnership` |
-| 6 | 0 | `pendingOwner` | `address` | 140 | `transferOwnership`, `acceptOwnership` |
-| 7 | 0 | `yieldRecipient` | `address` | 143 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
-| 7 | 20 | `paused` | `bool` | 149 | `pause`, `unpause` |
-| 8 | 0 | `_reentrancyStatus` | `uint256` | 154 | `nonReentrant` |
-| 9 | 0 | `storedBkSetCommitment` | `uint256` | 182 | constructor, `applyBkSetUpdate` |
-| 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
-| 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
-| 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
-| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 296 | `withdrawByProof` |
-| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 315 | `_appendLayer` |
+| 0 | 0 | `depositCounter` | `uint256` | 109 | `deposit` |
+| 1 | 0 | `treasuryBalance` | `uint256` | 113 | `deposit` (+), `fundTreasury` (+), `withdrawByProof` (−), `migrateTreasury` (→ 0) |
+| 2 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 119 | constructor only |
+| 2 | 20 | `aaveEnabled` | `bool` | 135 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
+| 3 | 0 | `suppliedPrincipal` | `uint256` | 138 | `deposit` (+, through `_supplyAboveTarget`), `withdrawByProof` and `withdrawFromAave` (−, through `_bookPull`), `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
+| 4 | 0 | `liquidReserveBps` | `uint256` | 143 | constructor (`1_000`), `setLiquidReserveBps` |
+| 5 | 0 | `supplyMultiplierBps` | `uint256` | 148 | constructor (`20_000`), `setSupplyMultiplierBps` |
+| 6 | 0 | `owner` | `address` | 151 | constructor, `acceptOwnership` |
+| 7 | 0 | `pendingOwner` | `address` | 154 | `transferOwnership`, `acceptOwnership` |
+| 8 | 0 | `yieldRecipient` | `address` | 157 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
+| 8 | 20 | `paused` | `bool` | 163 | `pause`, `unpause` |
+| 9 | 0 | `_reentrancyStatus` | `uint256` | 168 | `nonReentrant` |
+| 10 | 0 | `storedBkSetCommitment` | `uint256` | 196 | constructor, `applyBkSetUpdate` |
+| 11 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 203 | `applyBkSetUpdate` |
+| 11 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 207 | constructor, `verifyBlock` |
+| 12 | 0 | `storedPrevBkSetCommitment` | `uint256` | 214 | `applyBkSetUpdate` |
+| 13 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 306 | `withdrawByProof` |
+| 14 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 325 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -265,15 +272,15 @@ Validation performed (and *not* performed):
 |---|---:|---|
 | `_blockHeaderOracle != 0` | 580 | else `InvalidOracle` |
 | `_usdc != 0` | 581 | else `InvalidUsdc` |
-| AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
+| `_aavePool != 0` and `_aUSDC != 0` | 754 | else `InvalidAaveAddress`. AAVE is mandatory on every chain. |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
 | `genesisBkSetCommitment != 0` when the verifier triple is wired | 763 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:160` checks it before the deploy too. |
 | `predecessor != 0` ⇒ C4 verifier set, the address has code, and returns this deployment's `dappFr` and `accFr` from `bridgeWithdrawalDappFr()` / `bridgeWithdrawalAccFr()` | 793-795, 811-826 | else `InvalidPredecessor(address)`. Code at the address on this chain is what ties the predecessor to this chain; the identity check ties it to the same AN-side bridge. A probe that reverts gives `InvalidPredecessor`; one whose return data does not decode reverts the deployment without a reason. Whether the predecessor is paused is not checked. |
 | verifier triple is all-or-nothing | 743 | else `PartialVerifyBlockWiring`. Test `test/AckiNackiBridgeWithdrawByProof.t.sol:305` pins it. With no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` at call time (`:934`). |
 
-Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
-`liquidReserveBps = 1_000` (10 %), reentrancy guard armed, `OwnershipTransferred(0, msg.sender)`
+Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = true`,
+`liquidReserveBps = 1_000` (10 %), `supplyMultiplierBps = 20_000` (2×), reentrancy guard armed, `OwnershipTransferred(0, msg.sender)`
 emitted (`:637-643`).
 
 ---
@@ -651,44 +658,54 @@ All deploy scripts except `DeployRealBridge` with `USE_AXIOM_ORACLE=true` wire t
 
 ---
 
-## 10. AAVE yield module (owner-only)
+## 10. AAVE yield module
 
-Idle USDC can be routed into the AAVE V3 USDC market; user principal accounting (`treasuryBalance`)
-is independent of the aToken balance. For the operator's view of this module — which collector
-applies to which pocket, the ordering rule, and the `owner` / `yieldRecipient` divergence — see
-[`aave-yield.md`](aave-yield.md). That page also lists the three markets `DeployRealBridge` can
-wire (Ethereum, Ethereum Sepolia, Arbitrum Sepolia), and that the pool is filled only when
-`USE_AAVE=true`. `aavePool` and `aUSDC` are immutables.
+User principal above a liquid reserve is supplied to the AAVE V3 USDC market; user principal
+accounting (`treasuryBalance`) is independent of the aToken balance. The design and its acceptance
+criteria are in [`aave-integration-spec.md`](aave-integration-spec.md); the operator's view —
+which collector applies to which pocket, and the `owner` / `yieldRecipient` divergence — is
+[`aave-yield.md`](aave-yield.md). `aavePool` and `aUSDC` are immutables and never zero. The bridge
+is deployed on Arbitrum Sepolia only (§12).
+
+Notation: `U` = `usdc.balanceOf(this)`, `A` = `aUsdcBalance()`, `B` = `treasuryBalance`,
+`S` = `suppliedPrincipal`, `r` = `liquidReserveBps`, `M` = `supplyMultiplierBps`. The liquid
+principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1964`, `B − S` floored at 0), the target
+`T = B·r/10⁴` (`_liquidTarget`, `:1958`), the threshold `H = T·M/10⁴`.
 
 | Function | Line | Behaviour |
 |---|---:|---|
-| `supplyToAave(amount)` | 1443 | Requires `aaveEnabled`. `available = _amountSupplyable()`; `amount == type(uint256).max` supplies all of it. `approve` + `supply`, `suppliedPrincipal +=` the aUSDC actually minted; none minted reverts `AaveSupplyFailed`. |
-| `withdrawFromAave(amount)` | 1464 | Pull back preemptively, at most `_backedPrincipal()` = `min(suppliedPrincipal, aUsdcBalance())`; `type(uint256).max` pulls exactly that. Zero, or an explicit amount above it, reverts `InvalidAmount`. |
-| `emergencyWithdrawAll()` | 1481 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `suppliedPrincipal`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
-| `writeOffUnbackedPrincipal()` | — | ETH-28: sets `suppliedPrincipal = aUsdcBalance()` when the book is larger, emits `UnbackedPrincipalWrittenOff(dropped)`; otherwise reverts `NothingToWriteOff`. Moves no tokens. |
-| `harvestYield(amount)` | 1504 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. Also reverts `HarvestWouldBreakSolvency` unless liquid USDC + aUSDC ≥ `treasuryBalance + amount`. Transfers `amount`; anything a pool pays above it stays liquid. |
-| `skimExcessUsdc(amount)` | 1532 | QC-A1-3: sweeps liquid USDC above `treasuryBalance` (typically post-emergency yield) to `yieldRecipient`. |
-| `setAaveEnabled(bool)` | 1544 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
-| `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
-| `setYieldRecipient(addr)` | 1557 | Non-zero. |
-| `fundTreasury(amount)` | 1802 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
-| `migrateTreasury(successor)` | 1821 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid (`TreasuryNotLiquid`); zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
-| `transferOwnership(addr)` | 1565 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
+| `deposit` → `_supplyAboveTarget()` | 871, 1976 | After `Deposit` is emitted, while `aaveEnabled`: if `L > T` and `L ≥ H`, supplies `L − T` through `this.supplyForSelf(amount)` and adds the aUSDC credited to `S` (`SuppliedToAave(amount, S)`). Any revert of that call — `approve` false (`ApproveFailed`), a reverting `approve` or `supply`, nothing credited (`AaveSupplyFailed(amount, 0)`) — is caught, undoes the supply and its allowance, and emits `AaveSupplyRefused(amount, reason)` with the revert data. The deposit never reverts because of AAVE. |
+| `supplyForSelf(amount)` | 1996 | External only so that its revert rolls the supply back; any caller but the bridge reverts `NotSelf`. `approve`, `supply`, returns the aUSDC delta. |
+| `withdrawByProof` → `_refillFromAave(required, wanted)` | 1542, 2009 | Measured before the debit: when `L < amount`, `required = max(0, amount − U)` and `wanted = amount − L + max(0, S − B) + T'`, `T'` the target of the new book. Pulls `min(wanted, A)` in one `withdraw`; if that reverts it emits `AaveRefillFailed(pulled − required, reason)` and pulls only `required` (`_pullFromAave`). `required > A` reverts `InsufficientTreasury`; a failed required pull reverts with the pool's error and leaves the nullifier unused. While `L ≥ amount` there is no pool call. |
+| `withdrawFromAave(amount)` | 1705 | Pull back preemptively, at most `_backedPrincipal()` = `min(S, A)`; `type(uint256).max` pulls exactly that. Zero, or an explicit amount above it, reverts `InvalidAmount`. |
+| `emergencyWithdrawAll()` | 1722 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `S`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
+| `writeOffUnbackedPrincipal()` | — | ETH-28: sets `S = A` when the book is larger, emits `UnbackedPrincipalWrittenOff(dropped)`; otherwise reverts `NothingToWriteOff`. Moves no tokens. |
+| `harvestYield(amount)` | 1762 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. Also reverts `HarvestWouldBreakSolvency` unless `U + A ≥ B + amount`. Transfers `amount`; anything a pool pays above it stays liquid. |
+| `excessUsdc()` | 1796 | `min(U + S − B, U + A − B)`, each floored at 0, capped at `U`: USDC above the principal that a pool loss does not need. |
+| `skimExcessUsdc(amount)` | 1811 | Sends at most `excessUsdc()` to `yieldRecipient`; `type(uint256).max` sends all of it; otherwise `NoExcessUsdc`. |
+| `setAaveEnabled(bool)` | 1891 | Gate on new supplies. |
+| `setLiquidReserveBps(bps)` | 1898 | `MIN_LIQUID_RESERVE_BPS` (10 %, `ReserveBpsTooLow`) to `MAX_LIQUID_RESERVE_BPS` (50 %, `ReserveBpsTooHigh`); `bps × M ≤ 10⁸` (`ReserveBandTooWide(bps, M)`). |
+| `setSupplyMultiplierBps(bps)` | 1908 | Above `10_000` (`MultiplierTooLow`); `r × bps ≤ 10⁸` (`ReserveBandTooWide(r, bps)`). Emits `SupplyMultiplierBpsSet(bps)`. |
+| `setYieldRecipient(addr)` | 1915 | Non-zero. |
+| `fundTreasury(amount)` | 1829 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
+| `migrateTreasury(successor)` | 1848 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
+| `transferOwnership(addr)` | 1923 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
-Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
-floored at 0 (`:1593`). `_pullFromAave(amount)` reverts `InsufficientTreasury` if `amount` exceeds
-`aUsdcBalance()`, withdraws exactly `amount`, requires the *received* delta to cover it
-(`AaveWithdrawFailed`), and lowers `suppliedPrincipal` by `amount` floored at 0 (`:1601-1618`).
+Helpers: `_pullFromAave(amount)` (`:2035`) reverts `InsufficientTreasury` if `amount` exceeds
+`A`, withdraws exactly `amount` and books it with `_bookPull` (`:2045`), which requires the
+*received* delta to cover what had to arrive (`AaveWithdrawFailed`) and lowers `S` by the amount
+pulled, floored at 0. A pull may reach aUSDC above `S`: user principal is paid before yield.
 
-Views: `aUsdcBalance()`, `accruedYield()` = `aUsdcBalance − suppliedPrincipal` floored at 0,
-`totalAssets()` = liquid USDC + aUSDC (`:1625-1640`).
+Views: `aUsdcBalance()`, `accruedYield()` = `A − S` floored at 0, `totalAssets()` = `U + A`
+(`:2057-2069`).
 
 ### 10.1 Access-control matrix
 
 | Function | Caller |
 |---|---|
 | `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone, while not `paused` |
-| `pause`, `unpause`, `supplyToAave`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `migrateTreasury`, `setAaveEnabled`, `setLiquidReserveBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `pause`, `unpause`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `migrateTreasury`, `setAaveEnabled`, `setLiquidReserveBps`, `setSupplyMultiplierBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `supplyForSelf` | the bridge itself, from `deposit` |
 | `fundTreasury` | `owner` or `predecessor` |
 | `acceptOwnership` | `pendingOwner` |
 | everything else | view/pure |
@@ -718,9 +735,11 @@ contract and AAVE, and skim `balanceOf(this) − treasuryBalance`. `emergencyWit
 | `TreasuryMigrated(address,uint256)` | `0x8a7c92de40fc5fb3ac08137bd5d6656cae1706c5026efc082c00156a6b25a325` | `successor` |
 | `Paused(address)` | `0x62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a258` | `by` |
 | `Unpaused(address)` | `0x5db9ee0a495bf2e6ff9c91a7834c1ba4fdd244a5e8aa4e537bd38aeae4b073aa` | `by` |
+| `AaveSupplyRefused(uint256,bytes)` | `0x863f40a1dc5b5cfdbbea5d5370f509ac7cfa1969a8499bb7479bb1929fec7154` | — |
+| `AaveRefillFailed(uint256,bytes)` | `0x2177c91dd6ccdf39c47c2a67a6fa79f3d9c865779bcab4e2136c0b67b419cfd4` | — |
 
 Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnabledSet`,
-`LiquidReserveBpsSet`, `OwnershipTransferred`, `YieldRecipientSet`, `EmergencyWithdrawAll`,
+`LiquidReserveBpsSet`, `SupplyMultiplierBpsSet`, `OwnershipTransferred`, `YieldRecipientSet`, `EmergencyWithdrawAll`,
 `ExcessUsdcSkimmed` (`:294-306`), `UnbackedPrincipalWrittenOff`.
 
 ### 11.2 Selectors
@@ -744,6 +763,9 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0x8456cb59` | `pause()` |
 | `0x3f4ba83a` | `unpause()` |
 | `0x5c975abb` | `paused()` |
+| `0x5100d42b` | `setSupplyMultiplierBps(uint256)` |
+| `0x8ea5da8f` | `supplyMultiplierBps()` |
+| `0x1fc34cd1` | `supplyForSelf(uint256)` |
 
 (Computed from the signatures above; `0xc9630cb0` and `0xecb3dc88` cross-check against
 `deposit_calldata` and `get_deposit_counter` in `frontend/src/web3.rs`.)
@@ -753,9 +775,11 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositTooLarge`,
 `TransferTooLarge`, `TvlCapReached`,
 `InvalidAnAccount`, `InsufficientTreasury`, `InvalidRecipient`, `InvalidOracle`,
-`InvalidAaveAddress`, `NotOwner`, `Reentrancy`, `AaveDisabled`, `ReserveBpsTooHigh`,
-`NothingToSupply`, `AaveWithdrawFailed`, `AaveSupplyFailed`, `NothingToWriteOff`,
-`HarvestWouldBreakSolvency`, `NoYield`, `NoExcessUsdc`.
+`InvalidAaveAddress`, `NotOwner`, `Reentrancy`, `ReserveBpsTooHigh`, `ReserveBpsTooLow`,
+`MultiplierTooLow`, `ReserveBandTooWide`, `AaveWithdrawFailed`, `NothingToWriteOff`,
+`HarvestWouldBreakSolvency`, `NoYield`, `NoExcessUsdc`, `NotSelf`. `ApproveFailed` and
+`AaveSupplyFailed` are never reverted out of `deposit`: they are the `reason` of
+`AaveSupplyRefused`.
 
 Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `NothingToMigrate`,
 `TreasuryNotLiquid`, and `InvalidPredecessor` from the constructor.
@@ -783,12 +807,12 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:155`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:165-166`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`, `:283`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. Reads the optional `PREDECESSOR_BRIDGE` (`:171`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
-| `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
+| `DeployRealBridge.s.sol` | Production. Arbitrum Sepolia (421614) only: any other chain id reverts. Mock oracle (`USE_AXIOM_ORACLE=true` reverts), the AAVE market of `ArbitrumSepoliaAave.sol` with no override, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`, with `aave_pool` and `aave_ausdc`. Reads the optional `PREDECESSOR_BRIDGE`. `deploy()` returns the bridge. |
+| `DeployShellnetE2EBridge.s.sol` | Shellnet E2E on Arbitrum Sepolia: mock oracle, SHPLONK triple + C4, the AAVE market of `ArbitrumSepoliaAave.sol`; `USDC_ADDRESS`, if set, must be that market's USDC. On anvil (31337) `USDC_ADDRESS` is required and a mock market is deployed; any other chain reverts. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil. Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. `deploy()` returns the bridge. |
+| `ArbitrumSepoliaAave.sol` | The USDC, pool and aToken of 421614 both deploy scripts read. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
-| `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
-| `GenDepositSetup.s.sol` | Local only: mock USDC + oracle + bare bridge, mints and pre-approves so a `cast` loop can emit real `Deposit` events for proof generation. |
+| `DeployTestBridge.s.sol` | Local anvil smoke: oracle, a mock AAVE market for `USDC_ADDRESS` (required) and a bridge with `verifyBlock` and withdrawals disabled. Any other chain reverts. |
+| `GenDepositSetup.s.sol` | Local only: mock USDC, a mock AAVE market, oracle and bridge; mints and pre-approves so a `cast` loop can emit real `Deposit` events for proof generation. |
 | `ShplonkDeployLib.sol` | `create`-deploys Yul `.bin` → `ShplonkHalo2Verifier` → typed adapter, for each of the four circuits. |
 
 ### 12.2 Environment variables
@@ -796,8 +820,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | Var | Consumed by | Meaning |
 |---|---|---|
 | `PRIVATE_KEY` | all | Broadcaster. |
-| `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle` on chain ids 1 and 11155111. On 421614 `true` reverts; leave it unset for `MockBlockHeaderOracle`. |
-| `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
+| `USE_AXIOM_ORACLE` | RealBridge | `true` reverts: Axiom has no deployment on Arbitrum. Leave it unset. |
 | `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:155`, unconditional). On mainnet the value is `envBool` with no default (`:152`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
@@ -826,14 +849,12 @@ address.
 
 | Chain | USDC | AAVE V3 Pool | aUSDC | Axiom V2 Core |
 |---|---|---|---|---|
-| Mainnet (1) | `0xA0b86991…eB48` | `0x87870Bca…A4E2` | `0x98C23E9d…6F5c` | `0x69963768…C98B` |
-| Sepolia (11155111) | `0x94a9D9AC…E4C8` (Aave-faucet test USDC) | `0x6Ae43d32…8951` | `0x16dA4541…EB80` | `0x69963768…C98B` (mock core) |
 | Arbitrum Sepolia (421614) | `0x75faf114…AA4d` (Circle) | `0xBfC91D59…2Eff` | `0x460b97BD…1216` | not deployed; `USE_AXIOM_ORACLE=true` reverts |
 
 No deployment-address artefact is committed to this repo (`deployment_real.json` is produced at
 deploy time and not tracked; `contracts/ethereum/broadcast/` is gitignored, `.gitignore:26`), so
 live addresses must come from the operator's deploy record and the forge broadcast log at
-`contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json`.
+`contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/421614/run-latest.json`.
 
 The current shellnet deployment at the time of writing is **Deploy #8, Sepolia, 2026-08-17** —
 bridge, four SHPLONK verifiers, mock oracle, bootstrap seed `8768512` (`W·P = 1024`-aligned, §12.2).
@@ -857,9 +878,11 @@ was written in, so the suite was read, not executed).
 
 | File | Focus |
 |---|---|
-| `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
-| `AckiNackiBridgeAaveFork.t.sol` (4) | Ethereum Sepolia fork against real AAVE (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 11155111. |
-| `AckiNackiBridgeArbSepoliaAaveFork.t.sol` (7) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, a `withdrawByProof` top-up, and the live `0x3FB0…8638` accepted as `predecessor` with its treasury covered by `fundTreasury` (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
+| `AckiNackiBridgeAave.t.sol` | Constructor wiring (no bridge without AAVE), the supply in `deposit`, withdraw/harvest/emergency, the setters, ownership, `totalAssets` fuzz over `r` and `M`. |
+| `AckiNackiBridgeAaveBand.t.sol` | The band, one test per case of `aave-integration-spec.md` §9.1, named after it (TC-01..13, TC-23..26). |
+| `AckiNackiBridgeAaveInvariant.t.sol` | TC-14: a handler drives deposits, payouts, direct USDC, interest, a pool that refuses supplies or runs short, and every owner AAVE path; INV-1..3 hold after each call, and ST-1, ST-2, VT-1..3, HL-1, HL-2, HL-4 inside it. |
+| `AckiNackiBridgeAavePayout.t.sol` | `withdrawByProof` against a pool whose book and aToken balance disagree (ETH-28). |
+| `AckiNackiBridgeArbSepoliaAaveFork.t.sol` | Arbitrum Sepolia fork, run by `.woodpecker/solidity.yaml`: the Circle USDC market, the supply in `deposit` and the refill in `withdrawByProof`, a paused, frozen and capped reserve through the market's `PoolConfigurator`, a reserve with its liquidity borrowed out, interest, harvest, withdraw, emergency unwind, both deploy scripts (TC-15..20), and the live `0x3FB0…8638` accepted as `predecessor` (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
@@ -883,7 +906,8 @@ Mocks (`test/mocks/`): `MockPrimaryVerifier` / `MockFallbackVerifier` are `shoul
 adapter rejects — that gap is how the raw-vs-`Fr` `blockId` bug in `applyBkSetUpdate` stayed hidden
 (`test/mocks/MockPrimaryVerifier.sol:22-30`). `MockLayerHashesMovementVerifier` is a plain toggle
 with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI modes. Plus `MockERC20`,
-`MockAave`.
+`MockAave` (supply and redeem haircuts, a refusing `supply`, a withdraw limit),
+`helpers/MockAaveLib.sol` (one mock market per USDC address, so every test bridge has one).
 
 ---
 
@@ -980,9 +1004,9 @@ Read off the code, without a formal audit claim.
    Transfer is two-step: `transferOwnership` records `pendingOwner` (`:140`) and only
    `acceptOwnership` (`:1576`), called by that address, moves `owner`. A mistyped address can never
    accept, so the mistake is recoverable by overwriting `pendingOwner`.
-6. ~~*`approve` return value ignored* in `supplyToAave`; `deposit` books the requested amount, not
-   the observed delta.~~ **Closed.** `supplyToAave` reverts `ApproveFailed` on a falsy return
-   (`:1452`, error at `:384`), and the transfer paths measure `balanceOf` before and after and
+6. ~~*`approve` return value ignored* in the supply; `deposit` books the requested amount, not
+   the observed delta.~~ **Closed.** `supplyForSelf` reverts `ApproveFailed` on a falsy return,
+   which `deposit` reports as `AaveSupplyRefused` with the supply undone, and the transfer paths measure `balanceOf` before and after and
    revert `TransferAmountMismatch` when the delta differs from the amount booked (`:1403-1425`,
    error at `:361`). A fee-on-transfer or rebasing token now fails closed instead of crediting
    book value it never received.

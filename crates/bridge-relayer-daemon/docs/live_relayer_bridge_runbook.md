@@ -1,5 +1,11 @@
 # Live relayer runbook — shellnet → Sepolia (L2 anchoring)
 
+> **`deploy_bridge_bundle.sh` is gone.** The bridge is deployed on Arbitrum Sepolia (421614)
+> only, against the AAVE market there, with `DeployShellnetE2EBridge`;
+> [`tests/e2e/local-net/prover-host/jobs/deploy.sh`](../../../tests/e2e/local-net/prover-host/jobs/deploy.sh)
+> is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
+> the script describe bridges already deployed and no longer apply to a new one.
+
 How to deploy, run and recover `relayer daemon-live`, the AN→ETH relayer that
 proves Acki Nacki shellnet state and posts it to an `AckiNackiBridge` on
 Sepolia. Withdrawals (`withdrawByProof`, Circuit 4) are covered by the

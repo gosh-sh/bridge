@@ -14,6 +14,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeAnchorParityTest
 /// @notice Prover ↔ contract parity of the chain anchor (bridge-audit#122).
@@ -46,11 +47,12 @@ contract AckiNackiBridgeAnchorParityTest is Test {
         fallback_.setShouldAccept(true);
         layerHashes.setShouldAccept(true);
 
+        address usdc = address(new MockERC20("Mock USDC", "mUSDC", 6));
         bridge = new AckiNackiBridge(
             address(new MockBlockHeaderOracle()),
-            address(new MockERC20("Mock USDC", "mUSDC", 6)),
-            address(0),
-            address(0),
+            usdc,
+            MockAaveLib.pool(usdc),
+            MockAaveLib.aToken(usdc),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primary)),
                 IFallbackVerifier(address(fallback_)),

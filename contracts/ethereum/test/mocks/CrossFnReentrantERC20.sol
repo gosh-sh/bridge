@@ -16,7 +16,6 @@ contract CrossFnReentrantERC20 is MockERC20 {
         VerifyBlock,
         ApplyBkSetUpdate,
         WithdrawByProof,
-        SupplyToAave,
         WithdrawFromAave,
         EmergencyWithdrawAll,
         HarvestYield,
@@ -176,8 +175,6 @@ contract CrossFnReentrantERC20 is MockERC20 {
             );
         } else if (target == CrossFnTarget.WithdrawByProof) {
             bridge.withdrawByProof(wdProof, wdPub);
-        } else if (target == CrossFnTarget.SupplyToAave) {
-            bridge.supplyToAave(reenterAmount);
         } else if (target == CrossFnTarget.WithdrawFromAave) {
             bridge.withdrawFromAave(reenterAmount);
         } else if (target == CrossFnTarget.EmergencyWithdrawAll) {

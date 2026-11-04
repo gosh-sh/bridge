@@ -7,6 +7,7 @@ import "../src/MockBlockHeaderOracle.sol";
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /**
  * @title FuzzVerifiers
@@ -182,8 +183,8 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -198,7 +199,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
         uint256 counterBefore = bridge.depositCounter();
         uint256 treasuryBefore = bridge.treasuryBalance();
-        uint256 bridgeBalBefore = usdc.balanceOf(address(bridge));
+        uint256 assetsBefore = bridge.totalAssets();
 
         vm.startPrank(user);
         usdc.approve(address(bridge), amount);
@@ -209,9 +210,7 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
         assertEq(
             bridge.treasuryBalance(), treasuryBefore + amount, "Treasury must increase by amount"
         );
-        assertEq(
-            usdc.balanceOf(address(bridge)), bridgeBalBefore + amount, "Bridge USDC must increase"
-        );
+        assertEq(bridge.totalAssets(), assetsBefore + amount, "Bridge assets must increase");
     }
 
     /// @notice Amounts outside valid range must revert
@@ -247,10 +246,6 @@ contract FuzzAckiNackiBridgeDepositTest is Test {
 
         assertEq(bridge.depositCounter(), count, "Counter must match deposit count");
         assertEq(bridge.treasuryBalance(), totalDeposited, "Treasury must equal total deposited");
-        assertEq(
-            usdc.balanceOf(address(bridge)),
-            totalDeposited,
-            "Bridge USDC must equal total deposited"
-        );
+        assertEq(bridge.totalAssets(), totalDeposited, "Bridge assets must equal total deposited");
     }
 }

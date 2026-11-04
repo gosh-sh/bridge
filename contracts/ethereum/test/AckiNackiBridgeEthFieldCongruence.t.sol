@@ -18,6 +18,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeEthFieldCongruenceTest
 /// @notice Halo2 Yul reduces every instance `mod f_q` (`BN254_R`); R15
@@ -357,12 +358,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         address at = address(uint160(pub.dstBridge));
         deployCodeTo(
             "AckiNackiBridge.sol:AckiNackiBridge",
-            abi.encode(
-                address(new MockBlockHeaderOracle()),
-                address(new MockERC20("Mock USDC", "mUSDC", 6)),
-                address(0),
-                address(0),
-                _acceptingVerifyBlockConfig(),
+            _withdrawBridgeArgs(
                 VerifyBlockConfigLib.withWithdrawShellnet(
                     verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
                 )
@@ -370,6 +366,21 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             at
         );
         bridge = AckiNackiBridge(at);
+    }
+
+    function _withdrawBridgeArgs(AckiNackiBridge.BridgeWithdrawConfig memory withdrawCfg)
+        internal
+        returns (bytes memory)
+    {
+        address usdc = address(new MockERC20("Mock USDC", "mUSDC", 6));
+        return abi.encode(
+            address(new MockBlockHeaderOracle()),
+            usdc,
+            MockAaveLib.pool(usdc),
+            MockAaveLib.aToken(usdc),
+            _acceptingVerifyBlockConfig(),
+            withdrawCfg
+        );
     }
 
     function _acceptingVerifyBlockConfig()
@@ -406,8 +417,8 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primary)),
                 IFallbackVerifier(address(fallback_)),

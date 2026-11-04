@@ -24,6 +24,42 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **AAVE is mandatory, automatic, and Arbitrum Sepolia only** (#142). Redeploy the bridge:
+  storage slots from `owner` on move down by one (`supplyMultiplierBps` is slot 5), and the
+  constructor reverts `InvalidAaveAddress` when either AAVE address is zero, on every chain.
+  - `supplyToAave(uint256)` is removed, and with it the errors `AaveDisabled` and
+    `NothingToSupply`. A keeper that called it has nothing left to call. `deposit` now keeps
+    `liquidReserveBps` of the book liquid and supplies the rest once the liquid principal reaches
+    `supplyMultiplierBps` times that; below it a deposit makes no pool call. A pool that refuses
+    never fails a deposit: it emits `AaveSupplyRefused` and the USDC stays on the bridge. USDC sent
+    to the bridge directly is never supplied.
+  - `withdrawByProof` pays from the bridge's USDC while the liquid principal covers the payout.
+    Otherwise it pulls from AAVE what the USDC on hand cannot pay — if the pool cannot return that,
+    the payout reverts and its nullifier stays unused, as before — and tries to pull enough more to
+    leave the target of the new book liquid; a refused refill emits `AaveRefillFailed` and the
+    payout still goes through.
+  - `setLiquidReserveBps` reverts `ReserveBpsTooLow` below `1_000` (10 %); it and
+    `setSupplyMultiplierBps` revert `ReserveBandTooWide(reserveBps, multiplierBps)` when their
+    product exceeds 100 %, and `setSupplyMultiplierBps` reverts `MultiplierTooLow` at 1× or below.
+  - `excessUsdc()` returns the liquid USDC above the principal that a pool loss does not need,
+    `min(U + S − B, U + A − B)`: USDC sent to the bridge is skimmable while principal sits in the
+    pool, and never while it covers a loss.
+  - `DeployRealBridge` deploys on Arbitrum Sepolia (421614) only, on the AAVE market there: pool
+    `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, aToken
+    `0x460b97BD498E1157530AEb3086301d5225b91216`, Circle USDC
+    `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, from `script/ArbitrumSepoliaAave.sol` with no
+    override. Chain ids 1 and 11155111 and `USE_AAVE` are gone; `USE_AXIOM_ORACLE=true` reverts.
+    `deployment_real.json` gains `aave_pool` and `aave_ausdc`. `DeployShellnetE2EBridge` gets the
+    same market on 421614 and reverts on any chain but 421614 and anvil; `DeployTestBridge` runs on
+    anvil only and needs `USDC_ADDRESS`.
+  - `DeployReuseVerifiersBridge.s.sol` and `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+    are removed. Deploy with `DeployShellnetE2EBridge` on Arbitrum Sepolia, fed by
+    `compute_bridge_anchors`, as `tests/e2e/local-net/prover-host/jobs/deploy.sh` does.
+  - Replacing the live 421614 bridge `0x3FB082a905a895151224F6d93bD074E816338638` follows
+    `docs/aave-yield.md`; it predates `migrateTreasury`, so the new bridge's owner covers its
+    `treasuryBalance()` with `fundTreasury`. Before `migrateTreasury` on a bridge with this change,
+    pull the position back with `withdrawFromAave(type(uint256).max)` (`TreasuryNotLiquid`
+    otherwise).
 - **A withdrawal proof names the one EVM bridge that may pay it** (bridge-audit#140). A second
   `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
   first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
@@ -146,13 +182,22 @@ assigns it when the release is tagged.
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
 - The five `*.patch` files in the repository root and `scripts/check_eth_beacon_lc_sources.sh`
   are removed: acki-nacki takes the AN contracts through `contracts/an/place.json`. Nothing to do.
-- `DeployRealBridge` accepts Arbitrum Sepolia (421614) and wires its AAVE V3 USDC market only with
-  `USE_AAVE=true`: pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
-  `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, aToken `0x460b97BD498E1157530AEb3086301d5225b91216`.
-  `USE_AXIOM_ORACLE=true` reverts there. `aavePool` and `aUSDC` are immutable, so a deploy without
-  `USE_AAVE=true` cannot turn AAVE on later. Replacing the live 421614 bridge
-  `0x3FB082a905a895151224F6d93bD074E816338638` follows `docs/aave-yield.md`; it predates
-  `migrateTreasury`, so the new bridge's owner covers its `treasuryBalance()` with `fundTreasury`.
+- `AckiNackiBridge` gains `setSupplyMultiplierBps(uint256)` (owner) and the view
+  `supplyMultiplierBps()`, default `20_000` (2×); it emits `SupplyMultiplierBpsSet(uint256)`. A
+  deposit supplies once the liquid principal reaches that multiple of the target. New events to
+  alert on: `AaveSupplyRefused(uint256 amount, bytes reason)` — the pool refused a deposit's
+  supply, the USDC stayed on the bridge — and `AaveRefillFailed(uint256 amount, bytes reason)` —
+  a payout went through but the pool did not return the refill above the shortfall. `reason` is
+  the pool's revert data. `supplyForSelf(uint256)` is external only for the bridge's own use and
+  reverts `NotSelf` for any other caller.
+- `DeployShellnetE2EBridge`, `DeployTestBridge` and `GenDepositSetup` deploy a mock AAVE market
+  on local anvil (31337). `DeployShellnetE2EBridge` and `DeployRealBridge` expose `deploy()`,
+  which returns the bridge. The local e2e (`tests/e2e/local-net`) checks that the bridge is on the
+  421614 market, that the deposit supplied part of its USDC, and that `withdrawByProof` pulled it
+  back.
+- `.woodpecker/solidity.yaml` runs the Arbitrum Sepolia fork suite
+  (`AckiNackiBridgeArbSepoliaAaveForkTest`) against `https://sepolia-rollup.arbitrum.io/rpc` on
+  every pull request; an outage of that RPC fails the check.
 
 ### Fixes
 

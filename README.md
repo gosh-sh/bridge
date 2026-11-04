@@ -166,7 +166,7 @@ Contracts on their own:
 cd contracts/ethereum
 forge test                                                   # full suite
 forge test --match-contract AckiNackiBridgeWithdrawByProof -vv
-FOUNDRY_PROFILE=fork FORK_URL=<RPC> forge test --match-contract AaveFork  # the suite for the RPC's chain runs, the other skips
+FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc forge test --match-contract AaveFork  # Arbitrum Sepolia; CI runs it too
 ```
 
 The suite is inventoried per file, with what each one covers, in

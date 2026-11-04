@@ -180,8 +180,8 @@ make test-all              # every crate's tests + forge test; lists what failed
 make pre-push              # everything a branch should pass; see CI below
 make format                # rustfmt every crate, then forge fmt
 
-cd contracts/ethereum && forge test                          # fork suites skip without FORK_URL
-FOUNDRY_PROFILE=fork FORK_URL=<RPC URL> forge test --match-contract AaveFork
+cd contracts/ethereum && forge test                          # the fork suite skips without FORK_URL
+FOUNDRY_PROFILE=fork FORK_URL=<Arbitrum Sepolia RPC URL> forge test --match-contract AaveFork
 
 # AN→ETH relayer — only from the prover workspace
 cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon
@@ -217,7 +217,7 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 | Pipeline | Trigger | Checks |
 |---|---|---|
 | `hygiene.yaml` | PRs, pushes to `main` | `gitleaks` over the whole history (`.gitleaks.toml`, `.gitleaksignore`); `lychee` over the Markdown (`lychee.toml`); English-only text (`scripts/check_english_only.py`, `make english-check`; a `non-english-ok` marker exempts a line) |
-| `solidity.yaml` | PRs, pushes to `main` | `forge build`, `forge fmt --check`, `forge test --no-match-contract Fork` |
+| `solidity.yaml` | PRs, pushes to `main` | `forge build`, `forge fmt --check`, `forge test --no-match-contract Fork`, then the Arbitrum Sepolia fork suite (`AckiNackiBridgeArbSepoliaAaveForkTest`) against the public RPC |
 | `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json`, the ABIs built into `eth-lc-relayer` and the CLI's `USDCBridge.abi.json` copy against the compiled contracts (`scripts/check_lc_relayer_abis.py`) |
 | `verifier_sources.yaml` | PRs, pushes touching `contracts/ethereum/verifiers/` | Every `*AggregatorVerifier.sol` compiles with `solc` 0.8.19 to its `.bin` byte for byte; EIP-170 |
 | `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
@@ -231,7 +231,7 @@ is not ticked for the event, makes Woodpecker refuse the whole pipeline before a
 
 **The Rust jobs that run on a PR or on `main`:** `bridge-circuits.yaml` (the vendored circuits),
 `rust-tests.yaml` (`make test-rust`) and `images.yaml`, which compiles every workspace into the
-service images but runs no tests. The fork suites and `forge coverage` have no PR-triggered
+service images but runs no tests. `forge coverage` has no PR-triggered
 pipeline. Those exist only as GitLab jobs in `.gitlab-ci.yml`, which
 nothing runs from GitHub, so `make pre-push` is what stands between a branch and a Rust regression
 in the three crates it explicitly runs — the root workspace, `bridge-relayer-daemon` and

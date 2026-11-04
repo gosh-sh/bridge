@@ -1,5 +1,11 @@
 # Advanced-user Withdraw Runbook — self-deploy path
 
+> **`deploy_bridge_bundle.sh` is gone.** The bridge is deployed on Arbitrum Sepolia (421614)
+> only, against the AAVE market there, with `DeployShellnetE2EBridge`;
+> [`tests/e2e/local-net/prover-host/jobs/deploy.sh`](../../../tests/e2e/local-net/prover-host/jobs/deploy.sh)
+> is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
+> the script describe bridges already deployed and no longer apply to a new one.
+
 Operational guide for advanced users deploying their own
 `AckiNackiBridge` + running their own bundle relayer end-to-end,
 then driving withdrawals through the `ackinacki-bridge` CLI against

@@ -148,6 +148,7 @@ struct MockInner {
     gloas_fork_slot_set: bool,
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
+    committee_period_read_fails: bool,
 }
 
 impl MockAnSubmitter {
@@ -176,6 +177,7 @@ impl MockAnSubmitter {
                 gloas_fork_slot_set: true,
                 gloas_gets: 0,
                 gloas_get_fails_from: None,
+                committee_period_read_fails: false,
             }),
         }
     }
@@ -212,6 +214,14 @@ impl MockAnSubmitter {
     /// reads it once to pin the proof and once more before the owner flip.
     pub fn fail_gloas_gets_from(&self, n: u32) {
         self.inner.lock().expect("poisoned").gloas_get_fails_from = Some(n);
+    }
+
+    /// `get_committee_period` errors, as a node that does not answer.
+    pub fn fail_committee_period_reads(&self) {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .committee_period_read_fails = true;
     }
 
     pub fn gloas_gets(&self) -> u32 {
@@ -487,7 +497,13 @@ impl AnSubmitter for MockAnSubmitter {
     }
 
     async fn get_committee_period(&self) -> Result<u64, RelayerError> {
-        Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
+        let inner = self.inner.lock().expect("poisoned");
+        if inner.committee_period_read_fails {
+            return Err(RelayerError::AckiNacki(
+                "getCommitteeState: transport error".into(),
+            ));
+        }
+        Ok(inner.period.unwrap_or(0))
     }
 
     async fn get_committee_state(&self) -> Result<CommitteeState, RelayerError> {

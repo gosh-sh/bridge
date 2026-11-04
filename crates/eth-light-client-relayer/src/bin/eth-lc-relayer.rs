@@ -320,8 +320,9 @@ enum Cmd {
         #[arg(long, env = "LIGHT_CLIENT_ROTATE_PROVER_BIN")]
         rotate_prover_bin: Option<PathBuf>,
         /// Working directory for the provers. Required when the daemon may
-        /// rotate: the rotate stages read `kzg_bn254_21.srs` there and keep
-        /// their proving keys in `rotate-keys/`. Otherwise optional: a relative
+        /// rotate: the rotate stages read `kzg_bn254_21.srs` and
+        /// `kzg_bn254_20.srs` there and keep their proving keys in
+        /// `rotate-keys/`. Otherwise optional: a relative
         /// `--srs-path` resolves against it, and the SRS is checked to
         /// be there at startup. Defaults to the binary's own directory.
         #[arg(long, env = "LIGHT_CLIENT_PROVER_DIR")]
@@ -1139,7 +1140,7 @@ fn rotate_config(
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "--prover-dir (LIGHT_CLIENT_PROVER_DIR) required unless --no-rotate: the rotate \
-                 stages read kzg_bn254_21.srs there and keep rotate-keys/"
+                 stages read kzg_bn254_21.srs and kzg_bn254_20.srs there and keep rotate-keys/"
             )
         })?;
     anyhow::ensure!(
@@ -2145,6 +2146,11 @@ mod tests {
             .to_string();
         assert!(err.contains("kzg_bn254_21.srs"), "{err}");
         std::fs::write(params.join("kzg_bn254_21.srs"), "srs").unwrap();
+        let err = cfg(bins(dir.path()), Some(&params))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("kzg_bn254_20.srs"), "{err}");
+        std::fs::write(params.join("kzg_bn254_20.srs"), "srs").unwrap();
         let rotate = cfg(bins(dir.path()), Some(&params)).unwrap().unwrap();
         assert_eq!(rotate.key_dir(), params.join("rotate-keys"));
         assert_eq!(rotate.timeout, Duration::from_secs(1));

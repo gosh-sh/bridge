@@ -685,9 +685,17 @@ impl BeaconSource for InMemoryBeaconSource {
             .ok_or_else(|| {
                 RelayerError::beacon(format!("in-memory beacon: no update for period {period}"))
             })?;
+        // The chain of the queued updates: the HTTP source reads one for
+        // every answer.
+        let chain = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .last()
+            .and_then(|u| u.chain);
         Ok(PeriodUpdate {
             raw_json,
-            chain: None,
+            chain,
         })
     }
 }

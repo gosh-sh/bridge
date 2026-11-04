@@ -120,8 +120,14 @@ impl RotateInputs {
                 attested / SLOTS_PER_SYNC_PERIOD
             )));
         }
-        attested_slot(&self.committee_json)
+        let before = attested_slot(&self.committee_json)
             .map_err(|e| refuse(format!("the update of the period before: {e}")))?;
+        if before / SLOTS_PER_SYNC_PERIOD + 1 != self.period {
+            return Err(refuse(format!(
+                "the update of the period before is attested at slot {before}, period {}",
+                before / SLOTS_PER_SYNC_PERIOD
+            )));
+        }
         Ok(())
     }
 }
@@ -317,6 +323,12 @@ impl RotateOutput {
     pub fn current_commit(&self) -> [u8; 32] {
         word(&self.bundle.public_inputs, ROTATE_CURRENT_COMMIT_INDEX)
     }
+
+    /// The Gloas fork slot the proof was made for.
+    pub fn gloas_fork_slot(&self) -> u64 {
+        let w = word(&self.bundle.public_inputs, ROTATE_GLOAS_FORK_SLOT_INDEX);
+        u64::from_le_bytes(w[..8].try_into().expect("8 bytes"))
+    }
 }
 
 fn word(public_inputs: &[u8], index: usize) -> [u8; 32] {
@@ -447,8 +459,9 @@ pub struct SubprocessRotateConfig {
     pub step_snark_prover_bin: PathBuf,
     /// `rotate_tree_n8` (`--features aggregation`).
     pub rotate_prover_bin: PathBuf,
-    /// `--prover-dir`: the SRS file `kzg_bn254_21.srs` (the shard stage cuts
-    /// its k=20 from it) and the key cache `rotate-keys/`; also the provers'
+    /// `--prover-dir`: the SRS files `kzg_bn254_21.srs` and
+    /// `kzg_bn254_20.srs` (the shard stage's, cut from the first with
+    /// `downsize_srs`) and the key cache `rotate-keys/`; also the provers'
     /// working directory.
     pub prover_dir: PathBuf,
     pub log_dir: PathBuf,
@@ -461,22 +474,43 @@ impl SubprocessRotateConfig {
         self.prover_dir.join("kzg_bn254_21.srs")
     }
 
+    pub fn shard_srs(&self) -> PathBuf {
+        self.prover_dir.join("kzg_bn254_20.srs")
+    }
+
     pub fn key_dir(&self) -> PathBuf {
         self.prover_dir.join("rotate-keys")
     }
 
-    /// The SRS file is where the stages will read it.
+    /// The SRS files are where the stages will read them.
     pub fn check(&self) -> Result<(), RelayerError> {
-        let srs = self.srs();
-        if !srs.is_file() {
-            return Err(RelayerError::ProofGeneration(format!(
-                "rotate SRS {}: not a file (the Hermez kzg_bn254_21.srs release asset)",
-                srs.display()
-            )));
+        for (srs, what) in [
+            (self.srs(), "the Hermez kzg_bn254_21.srs release asset"),
+            (
+                self.shard_srs(),
+                "cut from kzg_bn254_21.srs with `downsize_srs --k 20`",
+            ),
+        ] {
+            if !srs.is_file() {
+                return Err(RelayerError::ProofGeneration(format!(
+                    "rotate SRS {}: not a file ({what})",
+                    srs.display()
+                )));
+            }
         }
         Ok(())
     }
 }
+
+/// The daemon's endpoints and key path, kept out of the stages' environment.
+const STAGE_ENV_REMOVED: [&str; 6] = [
+    "BEACON_URL",
+    "ETH_RPC_URL",
+    "AN_GRAPHQL_URL",
+    "AN_KEYS_PATH",
+    "PARENT_RPC_URL",
+    "ARBITRUM_RPC_URL",
+];
 
 pub struct SubprocessRotateRunner {
     cfg: SubprocessRotateConfig,
@@ -495,7 +529,7 @@ impl SubprocessRotateRunner {
             Stage::Shard => {
                 let mut cmd = Command::new(&cfg.shard_prover_bin);
                 cmd.env("SHARD_OUT_DIR", out)
-                    .env("SHARD_SRS_PATH", cfg.srs());
+                    .env("SHARD_SRS_PATH", cfg.shard_srs());
                 cmd
             },
             Stage::StepSnark => {
@@ -516,6 +550,11 @@ impl SubprocessRotateRunner {
                 cmd
             },
         };
+        // The stages read none of these, and their transcripts are written
+        // straight from the child's descriptors, past `redact_urls`.
+        for var in STAGE_ENV_REMOVED {
+            cmd.env_remove(var);
+        }
         cmd.current_dir(&cfg.prover_dir)
             .env("ROTATE_UPDATE_PATH", dir.update_path())
             .env("ROTATE_KEY_DIR", cfg.key_dir());
@@ -689,5 +728,51 @@ impl RotateStageRunner for MockRotateRunner {
             fs::write(out.join("rotate_vk_blob.bin"), Self::VK_BLOB)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stages' transcripts bypass `redact_urls`, so the daemon's
+    /// endpoints never reach their environment.
+    #[test]
+    fn a_stage_does_not_inherit_the_daemon_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = SubprocessRotateRunner::new(SubprocessRotateConfig {
+            shard_prover_bin: "shard".into(),
+            step_snark_prover_bin: "step".into(),
+            rotate_prover_bin: "tree".into(),
+            prover_dir: dir.path().into(),
+            log_dir: dir.path().into(),
+            timeout: Duration::from_secs(1),
+        });
+        let rotate_dir = RotateDir::new(dir.path(), 1);
+        let inputs = RotateInputs {
+            period: 1,
+            update_json: String::new(),
+            committee_json: String::new(),
+            chain: None,
+        };
+        for stage in [Stage::Shard, Stage::StepSnark, Stage::Tree] {
+            let cmd = runner.command(stage, &rotate_dir, &inputs, dir.path());
+            let envs: Vec<_> = cmd.as_std().get_envs().collect();
+            for var in STAGE_ENV_REMOVED {
+                assert!(
+                    envs.contains(&(std::ffi::OsStr::new(var), None)),
+                    "{}: {var}",
+                    stage.name()
+                );
+            }
+        }
+        let shard = runner.command(Stage::Shard, &rotate_dir, &inputs, dir.path());
+        let srs = shard
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "SHARD_SRS_PATH")
+            .and_then(|(_, v)| v)
+            .unwrap();
+        assert_eq!(Path::new(srs), dir.path().join("kzg_bn254_20.srs"));
     }
 }

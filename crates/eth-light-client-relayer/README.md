@@ -29,7 +29,9 @@ prove, gone once the bundle is read back, and `rotate-<P>/` per rotate, kept
 until the contract has moved past P) and `--log-dir` (the command's own log, a
 file per day beside stdout, and every prover's transcript). `daemon` reads
 them from `ETH_LC_RELAYER_{STATE,WORK,LOG}_DIR`, `arbitrum-anchors` from
-`ARBITRUM_ANCHORS_{STATE,WORK,LOG}_DIR`. Nothing goes to the system temp
+`ARBITRUM_ANCHORS_{STATE,WORK,LOG}_DIR`. The one exception is the rotate: its
+stages write their proving keys to `<prover-dir>/rotate-keys/` (about 40 GB)
+on the first rotate after a binary upgrade. Nothing goes to the system temp
 directory or `$HOME`. The contract ABIs are built in; no `*_ABI_PATH` is read.
 
 ## How it runs
@@ -109,9 +111,21 @@ eth-lc-relayer arbitrum-vector --parent-rpc-url … --arbitrum-rpc-url … --out
 `--no-rotate` turns the background rotate off; `submit-rotate --state-dir`
 still sends a bundle proved elsewhere, and the next daemon tick reads
 `getCommitteeState` and continues. The rotate stages need
-`kzg_bn254_21.srs` in `--prover-dir`, keep their
+`kzg_bn254_21.srs` and `kzg_bn254_20.srs` in `--prover-dir` (the second cut
+from the first: `downsize_srs --input kzg_bn254_21.srs --output
+kzg_bn254_20.srs --k 20`, built from `eth-light-client-prover`), keep their
 proving keys in `<prover-dir>/rotate-keys/`, and each stage is killed after
 `--rotate-timeout-secs` (default 10800).
+
+A failed stage is started again after 10, then 20 minutes, from the beacon
+node's answers fetched anew; after the third failure in a period the daemon
+leaves that period's rotate alone and says so in the log. A `submitRotate`
+whose outcome stays unknown is sent at most five times a period. Once the cause
+is fixed, remove `<work-dir>/rotate-<P>/` and restart the daemon to prove
+period P again. `--owner-hop` takes the period at the boundary only after
+those five sends; once the contract refuses the hop (`disableOwnerRotation`),
+the daemon stops hopping and waits for the rotate. Take `--owner-hop` off when
+the owner rotation is disabled.
 `--flip-owner` opts in to the owner flip after the first accepted update. It is
 **off** by default: after it, L1 deposits outside checkpoint blocks have no
 anchor writer; L2s keep the owner path

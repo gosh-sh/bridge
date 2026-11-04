@@ -71,7 +71,8 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
   cli/work/  cli/logs/
   params/relayer/                    # SRS k=17..22, inner keys, SHA256SUMS (finalize-params.sh); pk_cache/ rw
   params/deposit-prover/             # kzg_params_18.srs; the proving key the first proof writes
-  params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_21.srs; step-key/ from `compose run lc-keygen`;
+  params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_20.srs, kzg_bn254_21.srs;
+                                     #   step-key/ from `compose run lc-keygen`;
                                      #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
 ```
 
@@ -117,7 +118,15 @@ next to it.
    `params/lc-prover/`, then the step key once per image:
    `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB). The rotate needs the
    Hermez `kzg_bn254_21.srs` there too: the release asset of that name, checked against the
-   release's `SHA256SUMS`.
+   release's `SHA256SUMS`. Its shard stage reads `kzg_bn254_20.srs`, cut from that file once
+   with the image's `downsize_srs`:
+
+   ```bash
+   docker compose --profile ops run --rm --entrypoint /opt/bridge/bin/downsize_srs lc-keygen \
+     --input /data/params/kzg_bn254_21.srs --output /data/params/kzg_bn254_20.srs --k 20
+   ```
+
+   The daemon refuses to start with the rotate on while either file is missing.
 
    The rotate keys are not an install step: the daemon writes them to `rotate-keys/` during
    its first rotate after an image upgrade, and writes them again when the image changes.

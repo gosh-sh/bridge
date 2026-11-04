@@ -200,8 +200,8 @@ same setup; **F** — fork test against the AAVE test market,
 `FOUNDRY_PROFILE=fork FORK_URL=<Arbitrum Sepolia RPC>`; **E** — the local-net e2e: a local Acki
 Nacki network and the public Arbitrum Sepolia ([`tests/e2e/local-net/README.md`](../tests/e2e/local-net/README.md)).
 
-Layers U and I run on every PR (`.woodpecker/solidity.yaml`). Layer F shall run on every PR too;
-today no pipeline runs it. Layer E runs on PRs labelled `local-network`.
+Layers U and I run on every PR (`.woodpecker/solidity.yaml`). Layer F shall run on every PR too
+(DLV-1); today no pipeline runs it. Layer E runs on PRs labelled `local-network`.
 
 ### 9.1 Existing tests
 
@@ -336,3 +336,14 @@ either removes them or keeps them as defensive checks:
 | TC-29 | USDC whose `transfer` to `yieldRecipient` returns false: `harvestYield` and `skimExcessUsdc` each revert `WithdrawTransferFailed`, `S`, `B` and `accruedYield()` unchanged. | OWN-10 | U |
 | TC-30 | `fundTreasury(0)` reverts `InvalidAmount`, from the owner and from the predecessor. | OWN-11 | U |
 | TC-31 | `withdrawFromAave(type(uint256).max)` pulls `S` when the pool holds more than `S` (interest), and `A` when it holds less (loss) — both sides of `_backedPrincipal` (`:1920-1924`). | OWN-1 | U |
+
+## 10. Delivery (DLV)
+
+What the change has to bring besides the contract and the tests.
+
+| ID | Form | Requirement |
+|---|---|---|
+| DLV-1 | Ubiquitous | The Arbitrum Sepolia fork suite (layer F) shall run in CI on every PR. Today no pipeline runs it (`.woodpecker/solidity.yaml`, header). |
+| DLV-2 | Ubiquitous | `forge coverage` shall hit every reachable AAVE branch of `AckiNackiBridge.sol`; the unreachable ones are listed in §9.1. On `d58c8553` the file stands at 96% of lines and 76% of branches. |
+| DLV-3 | Ubiquitous | `CHANGELOG.md` under `[Unreleased]` shall list, as breaking, the removal of `supplyToAave`, of `USE_AAVE` and of the Ethereum deploy paths, and, as new, the band, the multiplier setter and the two events. |
+| DLV-4 | Ubiquitous | `docs/aave-yield.md` and `docs/EVM-contracts-spec.md` shall describe the new behaviour, and the "Written against" line of this document shall name the merge commit. |

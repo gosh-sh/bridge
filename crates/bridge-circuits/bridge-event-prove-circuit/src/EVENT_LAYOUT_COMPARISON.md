@@ -39,7 +39,7 @@ Body inline: `[0..6)` ABI prefix, `[6..38)` `sk_u_commit` (LE Fr),
 | idx | role           | refs   | size (B) | content                                              |
 |-----|----------------|--------|----------|------------------------------------------------------|
 | C0  | ExtOut wrapper | 1→C1   | —        | ExtOut header + child_hashes[0]=sha256(C1)           |
-| C1  | event body     | 2→C3,C2| 126      | scalars inline, then child_hashes for C2, C3         |
+| C1  | event body     | 2→C3,C2| 146      | scalars inline, then child_hashes for C2, C3         |
 | C2  | recipient cell | 0      | 22 *     | `00 28` + 20 recipient bytes                         |
 | C3  | sender cell    | 0      | 36       | `00 43` + 34 B encoding `std_addr$10` + wc + acc_id  |
 
@@ -47,18 +47,26 @@ Body inline: `[0..6)` ABI prefix, `[6..38)` `sk_u_commit` (LE Fr),
 where `RECIPIENT_LEN_FIXED = 20`). Solidity caps recipient ≤ 64 bytes; a
 variable-length path is deferred (see §5).
 
-#### Body byte layout (126 B, matches constants in `bridge_event_prove_circuit.rs`)
+#### Body byte layout (146 B, matches constants in `bridge_event_prove_circuit.rs`)
+
+The event is `WithdrawalInitiated(uint256 dstChainId, bytes recipient,
+uint128 amount, uint32 tokenId, uint160 dstBridge, address sender)`; its id
+is the low 31 bits of `sha256("WithdrawalInitiated(uint256,bytes,uint128,uint32,uint160,address)v2")`.
 
 ```
 [0..2)    d1 + d2                                         (header)
-[2..6)    ABI event id = 0x3c838959                        (EVENT_ABI_PREFIX_*)
-[6..38)   dstChainId  (uint256, BE)        ← PRIVATE       (EVENT_DST_CHAIN_ID_*)
-[38..54)  amount      (uint128, BE)        ← PRIVATE       (EVENT_AMOUNT_*)
+[2..6)    ABI event id = 0x728804fc                        (EVENT_ABI_PREFIX_*)
+[6..38)   dstChainId  (uint256, BE)        ← PUBLIC        (EVENT_DST_CHAIN_ID_*)
+[38..54)  amount      (uint128, BE)        ← PUBLIC        (EVENT_AMOUNT_*)
 [54..58)  tokenId     (uint32,  BE)        ← PUBLIC        (EVENT_TOKEN_ID_*)
-[58..62)  child_depths (2 × u16 BE)
-[62..94)  child_hashes[0] = sha256(C2 recipient)
-[94..126) child_hashes[1] = sha256(C3 sender)
+[58..78)  dstBridge   (uint160, BE)        ← PUBLIC        (EVENT_DST_BRIDGE_*)
+[78..82)  child_depths (2 × u16 BE)
+[82..114) child_hashes[0] = sha256(C2 recipient)
+[114..146) child_hashes[1] = sha256(C3 sender)
 ```
+
+146 bytes plus SHA-256 padding is three compression blocks, the same as
+the 126-byte body before `dstBridge`.
 
 Why both ref cells exist: under TVM Solidity ABI v2, `bytes` (recipient) and
 `address` (sender, 267 bits) overflow the parent and are emitted as refs.
@@ -88,7 +96,7 @@ and never extracts it as an Fr.
 | Body `refs_count`             | 0                          | 2                                                                                |
 | ABI prefix offset / length    | `[0..6)`                   | `[2..6)` (after d1+d2)                                                           |
 | Leading scalar endianness     | LE Fr (`sk_u_commit`)      | BE u256 (`dstChainId`), BE u128 (`amount`), BE u80×2 (recipient α-split)         |
-| Public event fields           | `voucher_nominal`, `token_type` | `tokenId`, `amount`, `recipientHi`, `recipientLo`, `dstChainId`             |
+| Public event fields           | `voucher_nominal`, `token_type` | `tokenId`, `amount`, `recipientHi`, `recipientLo`, `dstChainId`, `dstBridge` |
 | Private event fields          | `sk_u` (secret)            | recipient cell raw bytes, sender cell raw bytes                                  |
 | Recipient/sender              | inline                     | each its own ref cell (C2, C3)                                                   |
 | SHA-256 chain links           | 1                          | 3 (wrapper→body, body→recipient, body→sender)                                    |
@@ -127,7 +135,8 @@ From body (`entries[1].cell_repr_data`):
 - `tokenId` ← BE-pack `body[54..58)` — slot `PUB_TOKEN_ID`.
 - `amount` ← BE-pack `body[38..54)` — slot `PUB_AMOUNT`.
 - `dstChainId` ← BE-pack `body[6..38)` — slot `PUB_DST_CHAIN_ID`.
-- ABI event id: `body[2..6)` constrained to `0x3c838959` (4 byte equalities).
+- `dstBridge` ← BE-pack `body[58..78)` — slot `PUB_DST_BRIDGE`.
+- ABI event id: `body[2..6)` constrained to `0x728804fc` (4 byte equalities).
 - `d1` refs_count constrained for **all 4 cells** (1, 2, 0, 0): low 3 bits of
   the byte are decomposed and compared against the constants.
 
@@ -196,7 +205,7 @@ hashes) has been dropped along with the `w-8`/`w-128` features.
 
 ### 4.6 Public instance layout (column 0, v2)
 
-`TOTAL_PUBLIC_INPUTS = 11` slots, all Fr values. Slot indices are
+`TOTAL_PUBLIC_INPUTS = 12` slots, all Fr values. Slot indices are
 exported as `PUB_*` constants.
 
 ```
@@ -215,7 +224,13 @@ exported as `PUB_*` constants.
 [9]   finalRoot      output of verify_chain_of_dense_proofs (Fr)
 [10]  anchorLayer    1-indexed layer number (range-checked
                      `1..=MAX_ANCHOR_LAYER`)
+[11]  dstBridge      BE u160 from body[58..78) — the EVM bridge
+                     `eccUSDCBridge` bound `dstChainId` to when it burnt;
+                     `withdrawByProof` pays only if it is `address(this)`
 ```
+
+`dstBridge` is not in the nullifier preimage: two bridges never accept
+the same proof, so a nullifier only has to be unique within one bridge.
 
 ### 4.7 senderAccFr (slot 5) — algebraic decode
 

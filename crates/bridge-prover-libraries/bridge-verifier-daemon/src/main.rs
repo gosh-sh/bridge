@@ -1020,12 +1020,14 @@ fn finalize_bk_update_failure(seq_no: u32, msg: &str, last_seen: &mut u32) {
 // =====================================================================
 //
 // The verifier daemon models the Ethereum bridge contract. Circuit 4
-// publishes exactly 11 public instances:
+// publishes exactly 12 public instances:
 //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-//    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
-// The 10 leading slots are bound to the proof by the circuit. Slot 9,
-// `final_root`, is the single Poseidon root the prover committed to;
-// slot 10 is the 1-indexed layer whose window the contract scans.
+//    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer,
+//    dst_bridge]
+// Slot 9, `final_root`, is the single Poseidon root the prover committed
+// to; slot 10 is the 1-indexed layer whose window the contract scans.
+// Slot 11, `dst_bridge`, is the EVM bridge the event names; only the
+// contract checks it, against its own address.
 
 //
 // Acceptance gate: the daemon does an off-circuit membership check —
@@ -1190,8 +1192,9 @@ fn process_event_proof(
 
     // Public instance layout (per `event_verifier.rs`):
     //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
-    let expected_num_instances = 11;
+    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer,
+    //    dst_bridge]
+    let expected_num_instances = 12;
     if file.public_instances_hex.len() != expected_num_instances {
         let msg = format!(
             "expected {} public instances, got {}",

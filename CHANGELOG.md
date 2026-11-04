@@ -24,6 +24,49 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **A withdrawal proof names the one EVM bridge that may pay it** (bridge-audit#140). A second
+  `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
+  first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
+  made before the switch below are paid by the bridge they named. Upgrade in this order:
+  `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
+  then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. Replacing an
+  existing bridge closes withdrawals to its chain (`setEvmBridge(<chainId>, 0)`) until the old
+  bridge has paid the burns bound to it and its principal has moved; deposits stay open. The
+  order is in `docs/aave-yield.md`, "Replacing a bridge on the same chain".
+- **Circuit 4 verification key rotated.** Withdrawal proofs built for the previous key do not
+  verify against the new `BridgeWithdrawalAggregatorVerifier`, and new proofs do not verify
+  against the old one. `BridgeWithdrawalAggregatorVerifier.{bin,sol}` and its
+  `_calldata.bin` are regenerated; the `vkDigest` pinned in `ShplonkDeployLib`
+  (`WITHDRAWAL_VK_DIGEST`) and the Yul code hash (`WITHDRAWAL_YUL_CODEHASH`) change with them.
+  The verifier is immutable in `AckiNackiBridge`, so a bridge needs a new deployment. Circuit 4
+  has twelve public inputs, the twelfth being `dstBridge`; `proof_event_*.json` carries twelve
+  `public_instances_hex`, the aggregated calldata is 3 712 bytes with the inner-VK digest at
+  word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
+  revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
+  before the upgrade are proven with the release their bridge was deployed for.
+- **`eccUSDCBridge` 1.15.0** (code hash `24adf1c630247edd5e397cecb5f0c5290a9081cfef4d137224cd1a80b76a9d07`):
+  `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
+  `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
+  evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
+  EVM bridge set is refused with reason 239 (`ERR_NO_EVM_BRIDGE`) and burns nothing. The binding
+  is not carried through `updateCode`: call `setEvmBridge` for every chain right after the
+  upgrade, before withdrawals reopen. The zerostate binds `BRIDGE_ZS_L1_BRIDGE` for
+  `BRIDGE_ZS_L1_CHAIN_ID`.
+- **`AckiNackiBridge.withdrawByProof`**: `WithdrawalPublicInputs` gains `dstBridge` as its last
+  field, so the selector is `0xc7d38069` (was `0xa9753d18`) and
+  `IBridgeWithdrawalVerifier.verifyWithdrawal` is `0xbcd3e6c9`. A proof whose `dstBridge` is not
+  the bridge's own address reverts `WrongDstBridge(uint256)`. Tooling that encodes the call by
+  hand needs the twelve-field tuple.
+- **`ackinacki-bridge withdraw`** needs `eccUSDCBridge` 1.15.0. Before burning it requires
+  `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
+  the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
+  names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
+  bridge the message names and `--allow-retry` — the idempotency key does not include the
+  bridge, so the run resumes without a second burn; without the flag it stops with exit 3. Deposits still work against 1.14.0.
+- **`relayer daemon-withdraw` and `relayer daemon-bridge`** park a `proof_event_*.json` whose
+  `dstBridge` is another bridge without sending it, and treat `WrongDstBridge` as permanent;
+  `relayer submit-withdraw` and `relayer withdraw-e2e` refuse such a proof. `bridge-verifier-daemon`
+  accepts twelve public instances and refuses eleven.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
@@ -33,6 +76,14 @@ assigns it when the release is tagged.
   move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
   are unchanged, and the relayers build them in from the new folder. Rebuild with
   `make SOLD_0_81_1=<sold 0.81.1>`.
+- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains a last field, `predecessor`** —
+  the bridge on the same chain whose treasury this one may take over with `migrateTreasury` /
+  `fundTreasury`, or zero. A non-zero one must have code on this chain and the same
+  `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`, else the deploy reverts `InvalidPredecessor`; it need not
+  be paused. New view: `predecessor()`. Update tooling that encodes the constructor; deployed
+  bridges are unchanged. The bridge deploy scripts read it from `PREDECESSOR_BRIDGE` (optional,
+  zero by default); `deploy_bridge_bundle.sh` requires `PREDECESSOR_BRIDGE` to be set, to the zero
+  address if there is none.
 - Every long-running service takes three directories and writes nowhere else
   (bridge-audit#132): `--state-dir`, `--work-dir`, `--log-dir`, each with an environment
   variable (`DEPOSIT_RELAYER_*_DIR`, `ETH_LC_RELAYER_*_DIR`, `ARBITRUM_ANCHORS_*_DIR`,
@@ -72,6 +123,12 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
+- `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused only) sends the whole
+  `treasuryBalance` to a contract whose `predecessor()` returns this bridge; emits
+  `TreasuryMigrated`. The bridge cannot tell a real successor from any contract giving that answer:
+  the owner key decides where the book goes. Pull AAVE principal back first (`TreasuryNotLiquid`).
+- `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
+  `treasuryBalance` with no `Deposit` event and no `MAX_BRIDGE_TVL` check; emits `TreasuryFunded`.
 - `deposit-relayer` needs an EVM RPC that serves `eth_getLogs` and transaction receipts for at
   least the last 7 days (30 preferred); one that keeps ~10 000 blocks cannot prove a deposit
   older than that. Check `RPC_URL` before the next restart.

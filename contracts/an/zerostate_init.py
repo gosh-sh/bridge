@@ -170,6 +170,14 @@ def initialize(ctx: dict) -> None:
               params={"chainId": L1_CHAIN_ID, "l1Bridge": L1_BRIDGE, "allowed": "true"},
               image=ctx["account_tvc"], keys=ctx["keys"])
 
+    # The same L1 bridge is the one withdrawals to that chain are bound to: the
+    # upgrade cell carries no EVM bridge either, and without one every
+    # `initiateWithdrawal` is refunded with ERR_NO_EVM_BRIDGE.
+    _debugger(ctx, abi=ctx["artefact"](BRIDGE_ABI), address=ctx["address"],
+              method="setEvmBridge",
+              params={"dstChainId": L1_CHAIN_ID, "evmBridge": L1_BRIDGE},
+              image=ctx["account_tvc"], keys=ctx["keys"])
+
     # The upgrade cell does not carry the light-client code either, and the
     # bridge derives the light-client address from it, so without this a fresh
     # chain has no anchor writer to deploy or trust.

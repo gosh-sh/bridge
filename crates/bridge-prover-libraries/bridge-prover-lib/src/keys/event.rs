@@ -53,7 +53,7 @@ pub(super) const PREFIX: &str = "event";
 ///
 /// Distinct from `MANIFEST_FORMAT`: this describes the CIRCUIT the keys
 /// were built for, that one describes the FILE that says so.
-pub(super) const EVENT_CIRCUIT_REVISION: u32 = 3;
+pub(super) const EVENT_CIRCUIT_REVISION: u32 = 4;
 
 /// Deterministic seed for the synthetic-witness keygen path. Any seed
 /// produces the same VK/PK shape.

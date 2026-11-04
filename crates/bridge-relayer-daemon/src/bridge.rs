@@ -481,6 +481,9 @@ pub trait BridgeClient: Send + Sync {
 /// hits `EthBridgeClient` directly via the blanket impl below.
 #[async_trait]
 pub trait WithdrawBridge: Send + Sync {
+    /// The bridge contract `withdrawByProof` is sent to; a proof that names
+    /// another one (`dstBridge`) reverts `WrongDstBridge` there.
+    fn bridge_address(&self) -> Address;
     async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError>;
     async fn dry_run_withdraw(
         &self,
@@ -500,6 +503,10 @@ where
     P: Provider<N> + Clone + Send + Sync + 'static,
     N: Network,
 {
+    fn bridge_address(&self) -> Address {
+        self.address
+    }
+
     async fn is_nullifier_used(&self, nullifier: U256) -> Result<bool, RelayerError> {
         EthBridgeClient::is_nullifier_used(self, nullifier).await
     }
@@ -912,6 +919,7 @@ mod sol_bindings {
                 uint256 nullifier;
                 uint256 finalRoot;
                 uint256 anchorLayer;
+                uint256 dstBridge;
             }
 
             function withdrawByProof(
@@ -936,6 +944,7 @@ mod sol_bindings {
             error NullifierAlreadyUsed(uint256 nullifier);
             error FieldElementOutOfRange(uint256 value);
             error DstChainIdMismatch(uint256 supplied, uint256 expected);
+            error WrongDstBridge(uint256 dstBridge);
             error RecipientHalfOutOfRange(uint256 value);
             error WithdrawIdentityMismatch();
             error UnknownAnchor(uint256 finalRoot);
@@ -2208,11 +2217,12 @@ pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmi
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 10] = [
+    let permanent_selectors: [[u8; 4]; 11] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
         AckiNackiBridge::TransferTooLarge::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
+        AckiNackiBridge::WrongDstBridge::SELECTOR,
         AckiNackiBridge::UnsupportedTokenId::SELECTOR,
         AckiNackiBridge::RecipientHalfOutOfRange::SELECTOR,
         AckiNackiBridge::InvalidRecipient::SELECTOR,
@@ -2306,6 +2316,10 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
         ),
         E::WithdrawIdentityMismatch(_) => ("WithdrawIdentityMismatch", String::new()),
         E::UnknownAnchor(x) => ("UnknownAnchor", format!("finalRoot: {}", word(x.finalRoot))),
+        E::WrongDstBridge(x) => (
+            "WrongDstBridge",
+            format!("dstBridge: 0x{:040x}", x.dstBridge),
+        ),
         E::InvalidNumLayers(x) => (
             "InvalidNumLayers",
             format!("anchorLayer: {}", x.anchorLayer),
@@ -2411,6 +2425,7 @@ fn to_sol_withdrawal_pub(
         nullifier: pub_inputs.nullifier,
         finalRoot: pub_inputs.final_root,
         anchorLayer: pub_inputs.anchor_layer,
+        dstBridge: pub_inputs.dst_bridge,
     }
 }
 
@@ -2918,6 +2933,25 @@ mod tests {
     }
 
     #[test]
+    fn proof_for_another_bridge_is_parked_and_names_it() {
+        // A proof bound to a different EVM bridge never pays here, whatever
+        // the anchor or treasury do later.
+        let reason = format!(
+            "execution reverted, data: \
+             {}0000000000000000000000003fb082a905a895151224f6d93bd074e816338638",
+            selector_hex_of::<AckiNackiBridge::WrongDstBridge>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "WrongDstBridge(dstBridge: 0x3fb082a905a895151224f6d93bd074e816338638)"
+        );
+    }
+
+    #[test]
     fn excessive_withdrawal_is_parked_and_names_the_limit() {
         let reason = format!(
             "execution reverted: {}",
@@ -3293,6 +3327,13 @@ mod tests {
                 }
                 .abi_encode(),
                 "DstChainIdMismatch",
+            ),
+            (
+                B::WrongDstBridge {
+                    dstBridge: one,
+                }
+                .abi_encode(),
+                "WrongDstBridge",
             ),
             (
                 B::UnsupportedTokenId {

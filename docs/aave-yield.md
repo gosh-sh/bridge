@@ -11,7 +11,7 @@ is, which command collects what, and the two ways to get it wrong. The contract-
 
 | | What it means | Read it with |
 |---|---|---|
-| **Owed to users** | A book number. Up on deposit, down on a proven payout — nothing else. | `treasuryBalance()` (`:98`) |
+| **Owed to users** | A book number. Up on deposit, down on a proven payout; also up on `fundTreasury` and to zero on `migrateTreasury` when a bridge is replaced (below). | `treasuryBalance()` (`:108`) |
 | **Liquid** | USDC on the contract, spendable now. | `usdc.balanceOf(bridge)` |
 | **In AAVE** | `suppliedPrincipal()` is what we put in; `aUsdcBalance()` is what it is worth now. | both (`:123`, `:1387`) |
 
@@ -159,7 +159,76 @@ excessUsdc() > 0 across a collection cycle        # uncollected surplus; the nex
 capped at 50 % (`:67`). Ours, not an AAVE convention. `setAaveEnabled` — gate on new supplies;
 `emergencyWithdrawAll` turns it off, and only an explicit call turns it back on.
 
-The owner cannot reduce `treasuryBalance` and cannot replace a verifier — those bindings are
-immutable. The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
+The owner cannot replace a verifier — those bindings are immutable — and can reduce
+`treasuryBalance` only by handing all of it to a successor with `migrateTreasury`. The bridge checks
+only that the target has code and returns it from `predecessor()`, which any contract can do, so
+the owner key decides where that money goes (see
+[Replacing a bridge on the same chain](#replacing-a-bridge-on-the-same-chain)). The owner can pause the bridge (`pause()` / `unpause()`): `deposit`, `verifyBlock`,
 `applyBkSetUpdate` and `withdrawByProof` revert while it is paused, and the yield controls above stay
 available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec.md`, §10.1).
+
+## Replacing a bridge on the same chain
+
+A withdrawal proof names the one EVM bridge that may pay it. `eccUSDCBridge` on Acki Nacki writes
+the bridge its owner set for the destination chain (`setEvmBridge(dstChainId, evmBridge)`, read back
+with `getEvmBridge`) into every `WithdrawalInitiated` event; Circuit 4 publishes it as `dstBridge`;
+`withdrawByProof` refuses any other address with `WrongDstBridge`. A new bridge on a chain that
+already has one therefore cannot pay a burn bound to the old one, and the old one cannot pay a burn
+bound to the new one, whether either is paused or not. Burns made before the switch are paid by the
+old bridge, and only by it.
+
+The old bridge's user principal (`treasuryBalance`) has to follow the eccUSDC it backs once the old
+bridge has paid what it owes, and the new bridge cannot pay anyone until it has that principal. So
+withdrawals to the chain close for the time the old bridge needs to pay the burns already made, and
+reopen on the new bridge once the principal is there. Deposits stay open throughout. The order is:
+
+1. **Deploy the new bridge and trust it.** `PREDECESSOR_BRIDGE` (optional, zero by default) names
+   the old bridge only so that the old bridge's `migrateTreasury` will accept the new one in step 4;
+   the constructor reverts `InvalidPredecessor` unless that address has code on this chain and was
+   deployed for the same `WITHDRAW_DAPP_FR` and `WITHDRAW_ACC_FR`. It plays no part in replay
+   protection. Leave the new bridge unpaused: a paused bridge reverts `verifyBlock`, so it would
+   anchor nothing. Start its `verifyBlock` relayer, its withdrawal relayer and a
+   `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
+   `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccUSDCBridge`, so that deposits into the new
+   bridge are finalized. Deposits into the old bridge still are too.
+2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccUSDCBridge`. From that
+   message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
+   (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
+   because `getEvmBridge` is unset. The burns made before this message are bound to the old bridge,
+   and the set is now closed.
+3. **Let the old bridge pay what it owes.** Keep it unpaused and keep its `verifyBlock` relayer,
+   its `relayer daemon-withdraw` (or `daemon-bridge`) and its `deposit-relayer` running, until it
+   has emitted `WithdrawalByProofExecuted` for every burn made before step 2. Every one of them is
+   paid there or nowhere. A user whose `ackinacki-bridge withdraw` stopped after the burn resumes it
+   with `--bridge-address <old> --allow-retry`; the resume does not repeat the check that refuses a new burn. A
+   bridge deployed before `dstBridge` existed, such as the 421614 bridge
+   `0x3FB082a905a895151224F6d93bD074E816338638`, verifies only proofs of the previous Circuit 4:
+   prove those burns with the `ackinacki-bridge` release that bridge was deployed for. This step
+   takes as long as anchoring and proving the last of those burns, and withdrawals to the chain stay
+   closed for all of it.
+4. **Retire the old bridge and move the principal.** `pause()` it and pull its AAVE position back
+   (`withdrawFromAave` or `emergencyWithdrawAll`) so its whole `treasuryBalance` is liquid USDC.
+   - An old bridge that has `migrateTreasury(address)`: its owner calls
+     `migrateTreasury(<new bridge>)`. It needs the old bridge paused, its `treasuryBalance`
+     liquid (`TreasuryNotLiquid` otherwise), and a target with code whose `predecessor()` is
+     the old bridge (`NotSuccessor` otherwise). Check the target address yourself: that test
+     catches a typo, not a contract written to pass it. The whole `treasuryBalance` moves and the
+     old bridge's book drops to 0. USDC above the book and any aUSDC yield stay behind for
+     `skimExcessUsdc` / `harvestYield`. The new bridge emits `TreasuryFunded`, the old one
+     `TreasuryMigrated`.
+   - An older bridge, such as `0x3FB082a905a895151224F6d93bD074E816338638`, has no way to
+     release its principal. The new bridge's owner covers that amount instead: `approve` the new
+     bridge, then `fundTreasury(<old treasuryBalance>)`. The USDC left in the old bridge stays
+     there.
+
+   `fundTreasury` credits `treasuryBalance` without a `Deposit` event, so nothing is minted on
+   Acki Nacki. Only the owner and `predecessor` may call it. A deposit the old bridge took before
+   its pause is in the `treasuryBalance` that moves, and Acki Nacki still finalizes it: the old
+   bridge stays trusted until step 6.
+5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccUSDCBridge`.
+   Point `ackinacki-bridge withdraw --bridge-address` at the new bridge.
+6. **Stop trusting the old bridge** (`setTrustedL1Bridge(<chainId>, <old>, false)`) and stop its
+   relayers, only after every deposit it took has been finalized: every deposit id below its
+   `depositCounter`, which the pause froze. `eccUSDCBridge` refuses a deposit from an untrusted
+   bridge (`ERR_UNSUPPORTED_SRC_CHAIN`), and step 4 moved that deposit's USDC to the new bridge, so
+   a deposit refused here has no way back.

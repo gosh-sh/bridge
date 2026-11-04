@@ -41,7 +41,7 @@ library ShplonkDeployLib {
     bytes32 internal constant LAYER_HASHES_YUL_CODEHASH =
         0xe1f47d047e03d59dcacb747fd168efe120da942a84a4e7003d74e8208d99f07b;
     bytes32 internal constant WITHDRAWAL_YUL_CODEHASH =
-        0xf3a462e3006568299a439c58c12da7356abf3b73b4ae84c5c168aa0b44ffc18f;
+        0x392b8e2d78d79b99bb2c81b61fd89518d3d6bf492b5143307b23831ad9d1dcbf;
 
     /// @dev Poseidon digest of the inner-circuit VK witnesses, in the exact
     ///      32-byte layout the aggregator emits at instance slot `12 + NUM_INNER`.
@@ -54,7 +54,7 @@ library ShplonkDeployLib {
     bytes32 internal constant LAYER_HASHES_VK_DIGEST =
         0x022fe6c98b76a4733105a03be905bf3cfcf4cb4373fb856c53ec894a27bb4e17;
     bytes32 internal constant WITHDRAWAL_VK_DIGEST =
-        0x1e91c1fe1986129e357231c9b2158797e2feb6fc9caddd9caea846ff5614e0ab;
+        0x270ab8cffad039f940180424f011e766bf24d3d2afa4a5068892caa9ef10d6ac;
 
     struct VerifyBlockVerifiers {
         IPrimaryVerifier primary;

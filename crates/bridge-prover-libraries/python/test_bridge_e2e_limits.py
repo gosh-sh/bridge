@@ -23,6 +23,8 @@ class WithdrawalChainLimits(unittest.TestCase):
         def getter(address, abi, name, params):
             if name == "getDepositLimits":
                 return {"maxTransfer": "50000000", "outstanding": "1000000" if params["chainId"] == "11155111" else "0"}
+            if name == "getEvmBridge":
+                return {"value0": "0x" + "42" * 20}
             return {"minted": "1000000", "burned": "0"}
 
         with patch.object(bridge.common, "run_getter", side_effect=getter), \
@@ -44,6 +46,24 @@ class WithdrawalChainLimits(unittest.TestCase):
                     patch.object(bridge, "encode_initiate_withdrawal_body") as encode, \
                     patch.object(bridge.common, "call_contract") as send:
                 with self.assertRaises(RuntimeError):
+                    self.withdraw()
+                encode.assert_not_called()
+                send.assert_not_called()
+
+    def test_unbound_or_unreadable_evm_bridge_stops_before_ecc_transfer(self):
+        for bound in ({"value0": "0"}, {"value0": "0x0"}, {}, None):
+            def getter(address, abi, name, params, bound=bound):
+                if name == "getDepositLimits":
+                    return {"maxTransfer": "50000000", "outstanding": "1000000"}
+                if name == "getEvmBridge":
+                    return bound
+                return {"minted": "1000000", "burned": "0"}
+
+            with self.subTest(bound=bound), \
+                    patch.object(bridge.common, "run_getter", side_effect=getter), \
+                    patch.object(bridge, "encode_initiate_withdrawal_body") as encode, \
+                    patch.object(bridge.common, "call_contract") as send:
+                with self.assertRaisesRegex(RuntimeError, r"getEvmBridge\(11155111\)"):
                     self.withdraw()
                 encode.assert_not_called()
                 send.assert_not_called()

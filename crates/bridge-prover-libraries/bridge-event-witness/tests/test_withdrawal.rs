@@ -13,14 +13,16 @@ use bridge_event_witness::{
 };
 
 /// First record from `withdrawals.txt`, captured by
-/// `acki-nacki/tests/exchange/generate_withdrawals.py`.
-const EVENT_BOC_B64: &str = "te6ccgEBBAEAyQABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAIZdmoHXvdgAQJwPIOJWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAA9CQAAAAAIDAgBDgAm3yq/MUPIYsiAFU9xmlVK1j7ShCFBTfqlHoaqgQg+0MAAodC01zGY0wFMpJaO4RLxFTkQ49E4=";
+/// `crates/bridge-prover-libraries/python/capture_withdrawal_fixtures.py`.
+const EVENT_BOC_B64: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAFcmro7a1gAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9CQAAAAAM/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEIdoOfRZocIfPbLTU7IlRS1PBWIn4bOQDPFUR0DaXn+QACh0LTXMZjTAUyklo7hEvEVORDj0Tg==";
 
-const EXPECTED_TOKEN_ID: u32 = 2;
+const EXPECTED_TOKEN_ID: u32 = 3;
 const EXPECTED_RECIPIENT_HEX: &str = "742d35cc6634c0532925a3b844bc454e4438f44e";
-/// dst_chain_id = 1, padded to 32 BE bytes.
+/// dst_chain_id = 11155111 = 0xAA36A7, padded to 32 BE bytes.
 const EXPECTED_DST_CHAIN_ID_HEX: &str =
-    "0000000000000000000000000000000000000000000000000000000000000001";
+    "0000000000000000000000000000000000000000000000000000000000aa36a7";
+/// The EVM bridge the capture bound chain 11155111 to.
+const EXPECTED_DST_BRIDGE_HEX: &str = "3fb082a905a895151224f6d93bd074e816338638";
 /// amount = 1_000_000 = 0xF4240, padded to 16 BE bytes.
 const EXPECTED_AMOUNT_HEX: &str = "000000000000000000000000000f4240";
 
@@ -46,6 +48,7 @@ fn first_withdrawal_decodes_to_expected_fields() {
     assert_eq!(w.event.recipient_hex, EXPECTED_RECIPIENT_HEX);
     assert_eq!(w.event.dst_chain_id_hex, EXPECTED_DST_CHAIN_ID_HEX);
     assert_eq!(w.event.amount_hex, EXPECTED_AMOUNT_HEX);
+    assert_eq!(w.event.dst_bridge_hex, EXPECTED_DST_BRIDGE_HEX);
     // sender_hex is the 34-byte cell payload after the 2-byte d1+d2 header,
     // i.e. the tail of entries[3].cell_repr_data_hex. Check both the length
     // invariant and that the decoded field matches the raw cell walk.
@@ -62,8 +65,8 @@ fn first_withdrawal_decodes_to_expected_fields() {
     assert_eq!(w.entries[2].refs_count, 0, "recipient refs_count");
     assert_eq!(w.entries[3].refs_count, 0, "sender refs_count");
 
-    // Body cell length = 126 bytes = 252 hex chars.
-    assert_eq!(w.entries[1].cell_repr_data_hex.len(), 252);
+    // Body cell length = 146 bytes = 292 hex chars.
+    assert_eq!(w.entries[1].cell_repr_data_hex.len(), 292);
     // Recipient cell length = 22 bytes = 44 hex chars.
     assert_eq!(w.entries[2].cell_repr_data_hex.len(), 44);
     // Sender cell length = 36 bytes = 72 hex chars.
@@ -117,5 +120,6 @@ fn decoding_the_event_alone_gives_the_fields_the_exporter_gives() {
     assert_eq!(event.recipient_hex, witness.event.recipient_hex);
     assert_eq!(event.dst_chain_id_hex, witness.event.dst_chain_id_hex);
     assert_eq!(event.token_id, witness.event.token_id);
+    assert_eq!(event.dst_bridge_hex, witness.event.dst_bridge_hex);
     assert_eq!(event.sender_hex, witness.event.sender_hex);
 }

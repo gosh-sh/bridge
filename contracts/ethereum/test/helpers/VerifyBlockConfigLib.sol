@@ -93,7 +93,8 @@ library VerifyBlockConfigLib {
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            altTokenId: 0,
+            predecessor: IPredecessorBridge(address(0))
         });
     }
 
@@ -112,8 +113,20 @@ library VerifyBlockConfigLib {
             accFr: accFr,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0
+            altTokenId: 0,
+            predecessor: IPredecessorBridge(address(0))
         });
+    }
+
+    /// @notice `withWithdraw` plus the bridge this deployment replaces.
+    function withWithdrawAfter(
+        IBridgeWithdrawalVerifier verifier,
+        uint256 dappFr,
+        uint256 accFr,
+        address predecessor
+    ) internal pure returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
+        bw = withWithdraw(verifier, dappFr, accFr);
+        bw.predecessor = IPredecessorBridge(predecessor);
     }
 
     /// @notice Shellnet E2E wiring: logical `altDstChainId` accepted only on
@@ -133,7 +146,8 @@ library VerifyBlockConfigLib {
                 accFr: accFr,
                 altDstChainId: altDstChainId,
                 altDstHostChainId: altDstHostChainId,
-                altTokenId: altTokenId
+                altTokenId: altTokenId,
+                predecessor: IPredecessorBridge(address(0))
             });
     }
 }

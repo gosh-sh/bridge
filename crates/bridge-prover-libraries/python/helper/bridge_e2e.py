@@ -222,9 +222,27 @@ def require_bridged_headroom(amount: int, chain_id: int = DST_CHAIN_ID) -> None:
         )
 
 
+def require_evm_bridge(chain_id: int = DST_CHAIN_ID) -> int:
+    """Refuse before sending ECC when no EVM bridge is bound to the chain."""
+    raw = common.run_getter(
+        USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getEvmBridge", {"dstChainId": str(chain_id)},
+    )
+    try:
+        bridge = int(str(raw["value0"]), 0)
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"getEvmBridge({chain_id}) failed: {raw!r}") from error
+    if bridge == 0:
+        raise RuntimeError(
+            f"getEvmBridge({chain_id}) is unset; initiateWithdrawal would refund with 239 "
+            "(ERR_NO_EVM_BRIDGE). The owner sets it with setEvmBridge."
+        )
+    return bridge
+
+
 def call_initiate_withdrawal(msig_address: str, msig_abi: str, msig_key_path: str,
                              dst_chain_id: int, recipient_hex: str):
     require_bridged_headroom(WITHDRAWAL_AMOUNT, dst_chain_id)
+    require_evm_bridge(dst_chain_id)
     payload = encode_initiate_withdrawal_body(dst_chain_id, recipient_hex)
     params = {
         "dest":    USDC_BRIDGE_ADDRESS_LEGACY,   # ABI `address` field — legacy form

@@ -35,7 +35,7 @@ AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
-RUN_SECS = 4 * 3600         # how long a run may take, for the committee-period check
+RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: 103 min)
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 
@@ -83,7 +83,7 @@ def test_10_local_network_bridge_active(an):
     """The zerostate bridge is up at the version this commit ships."""
     got = an("bridge")
     assert got.get("BRIDGE_ACTIVE") == "true", f"eccUSDCBridge is not Active: {got}"
-    assert got.get("BRIDGE_VERSION") == "1.14.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.14.0"
+    assert got.get("BRIDGE_VERSION") == "1.15.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.15.0"
 
 
 def test_11_build_on_prover_host(ph, sha):
@@ -158,6 +158,8 @@ def test_23_trust_set(an, arb, ctx):
     """Acki Nacki trusts the new bridge for 421614, and the bridge holds the genesis anchor."""
     got = an("trust", ctx["bridge"])
     assert got.get("TRUSTED") == "true", f"isTrustedL1Bridge({ARB_CHAIN}, bridge) is false after setTrustedL1Bridge"
+    assert int(got.get("EVM_BRIDGE", "0"), 16) == int(ctx["bridge"], 16), \
+        f"getEvmBridge({ARB_CHAIN}) is {got.get('EVM_BRIDGE')} after setEvmBridge, want {ctx['bridge']}"
     g = ctx["genesis"]
     assert arb.call(ctx["bridge"], "storedBkSetCommitment()") == int(g["GENESIS_BK_SET_COMMITMENT"], 16)
     assert arb.call(ctx["bridge"], "storedPrevMaxLevelLayerHash()") == int(g["GENESIS_PREV_MAX_LEVEL_LAYER_HASH"], 16)

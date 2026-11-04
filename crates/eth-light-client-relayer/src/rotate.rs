@@ -517,7 +517,14 @@ pub struct SubprocessRotateRunner {
 }
 
 impl SubprocessRotateRunner {
-    pub fn new(cfg: SubprocessRotateConfig) -> Self {
+    /// The directories are made absolute: every stage runs in `prover_dir`,
+    /// where a relative path would resolve a second time.
+    pub fn new(mut cfg: SubprocessRotateConfig) -> Self {
+        for dir in [&mut cfg.prover_dir, &mut cfg.log_dir] {
+            if let Ok(abs) = std::path::absolute(&*dir) {
+                *dir = abs;
+            }
+        }
         Self {
             cfg,
         }
@@ -774,5 +781,23 @@ mod tests {
             .and_then(|(_, v)| v)
             .unwrap();
         assert_eq!(Path::new(srs), dir.path().join("kzg_bn254_20.srs"));
+    }
+
+    /// A relative `--prover-dir` would resolve again inside the stage, which
+    /// runs in that directory.
+    #[test]
+    fn a_relative_prover_dir_reaches_the_stages_absolute() {
+        let runner = SubprocessRotateRunner::new(SubprocessRotateConfig {
+            shard_prover_bin: "shard".into(),
+            step_snark_prover_bin: "step".into(),
+            rotate_prover_bin: "tree".into(),
+            prover_dir: "params".into(),
+            log_dir: "logs".into(),
+            timeout: Duration::from_secs(1),
+        });
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(runner.cfg.prover_dir, cwd.join("params"));
+        assert_eq!(runner.cfg.log_dir, cwd.join("logs"));
+        assert_eq!(runner.cfg.shard_srs(), cwd.join("params/kzg_bn254_20.srs"));
     }
 }

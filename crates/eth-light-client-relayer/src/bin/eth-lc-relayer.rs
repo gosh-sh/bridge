@@ -1612,7 +1612,7 @@ async fn run_daemon(
                 cfg,
                 source,
                 Arc::new(MockProofGenerator::new()),
-                Arc::new(MockAnSubmitter::accepting()),
+                Arc::new(MockAnSubmitter::dry_run()),
             )?;
             return run(
                 attach_execution(
@@ -1629,7 +1629,7 @@ async fn run_daemon(
             cfg,
             source,
             Arc::new(gen),
-            Arc::new(MockAnSubmitter::accepting()),
+            Arc::new(MockAnSubmitter::dry_run()),
         )?;
         return run(
             attach_execution(

@@ -188,8 +188,8 @@ impl PeriodCount {
     }
 }
 
-/// `submitRotate` calls one proof gets without a confirmation before the
-/// period is given up and the boundary takes the owner hop.
+/// `submitRotate` calls without a confirmation the owner hop waits for at
+/// the boundary. The proof itself is kept and sent again past them.
 const MAX_ROTATE_SENDS: u32 = 5;
 
 /// Failed rotates of one period before it is not started again.
@@ -241,6 +241,8 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         work_dir: PathBuf,
         vk_pin: [u8; 32],
     ) -> Self {
+        // The stages run with the prover directory as their working directory.
+        let work_dir = std::path::absolute(&work_dir).unwrap_or(work_dir);
         self.rotate = Some(RotateWiring {
             runner,
             work_dir,
@@ -897,10 +899,9 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     });
                 }
                 error!(from_period, to_period, %reason, "submitRotate refused");
-                // Anything but the contract's own refusal is sent again,
-                // within the sends of the period.
+                // Anything but the contract's own refusal is sent again.
                 let Some(code) = code else {
-                    self.give_up_unconfirmed_rotate(from_period, &reason);
+                    self.note_unconfirmed_rotate(from_period, &reason);
                     return Ok(TickOutcome::AnRejected {
                         reason,
                     });
@@ -930,13 +931,12 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             },
             // The proof went out and its fate is unknown: the chain may have
             // run the rotation after the wait gave up. The proof is kept and
-            // sent again, up to `MAX_ROTATE_SENDS`; the checks before it see a
-            // landed rotation.
+            // sent again; the checks before it see a landed rotation.
             SubmitOutcome::Pending {
                 reason,
             } => {
                 self.mark_rotate_in_flight(to_period)?;
-                self.give_up_unconfirmed_rotate(from_period, &reason);
+                self.note_unconfirmed_rotate(from_period, &reason);
                 Ok(TickOutcome::AnPending {
                     reason,
                 })
@@ -948,7 +948,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 reason,
             } => {
                 self.mark_rotate_in_flight(to_period)?;
-                self.give_up_unconfirmed_rotate(from_period, &reason);
+                self.note_unconfirmed_rotate(from_period, &reason);
                 Ok(TickOutcome::AnPending {
                     reason,
                 })
@@ -956,28 +956,18 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         }
     }
 
-    /// After a send without a confirmation: keep the proof for the next tick,
-    /// or, once it has had `MAX_ROTATE_SENDS`, drop it so the boundary takes
-    /// the owner hop.
-    fn give_up_unconfirmed_rotate(&mut self, from_period: u64, reason: &str) {
+    /// After a send without a confirmation: the proof is kept and sent again
+    /// on the next tick, for as long as the contract has not moved past it.
+    /// `MAX_ROTATE_SENDS` only bounds how long the owner hop waits for it.
+    fn note_unconfirmed_rotate(&mut self, from_period: u64, reason: &str) {
         let Some(rotate) = self.rotate.as_mut() else {
             return;
         };
         let sends = rotate.sends.of(from_period);
-        if sends < MAX_ROTATE_SENDS {
-            warn!(from_period, sends, %reason, "submitRotate not confirmed; sending it again next tick");
-            rotate.note = Some(format!(
-                "the rotate proof from period {from_period} is unconfirmed after {sends} of \
-                 {MAX_ROTATE_SENDS} sends: {reason}"
-            ));
-            return;
-        }
-        error!(from_period, sends, %reason, "submitRotate never confirmed; giving the period up");
-        rotate.ready = None;
-        rotate.refused = Some(from_period);
+        warn!(from_period, sends, %reason, "submitRotate not confirmed; sending it again next tick");
         rotate.note = Some(format!(
-            "submitRotate of the proof from period {from_period} was not confirmed after {sends} \
-             sends, last: {reason}"
+            "the rotate proof from period {from_period} is unconfirmed after {sends} sends (the \
+             owner hop waits for {MAX_ROTATE_SENDS}): {reason}"
         ));
     }
 
@@ -2379,6 +2369,86 @@ mod tests {
         assert_eq!(r.state().last_committee_period, Some(2), "{out:?}");
         r.tick().await.unwrap();
         assert_eq!(rig.submitter.rotate_submits(), MAX_ROTATE_SENDS);
+    }
+
+    /// `--dry-run` with rotate on: the mock contract is bootstrapped by the
+    /// first step, so the rotate runs and the loop crosses the boundary.
+    #[tokio::test]
+    async fn a_dry_run_rotates_across_the_boundary() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let source = InMemoryBeaconSource::new(vec![
+            update(p + 70, p + 64),
+            update(p + 102, p + 96),
+            update(2 * p + 40, 2 * p + 8),
+        ]);
+        source.set_period_update(0, period_update(100));
+        source.set_period_update(1, period_update(p + 100));
+        let submitter = Arc::new(MockAnSubmitter::dry_run());
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        cfg.pin_fork_slot_from_beacon = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(source),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap()
+        .with_rotate(
+            Arc::new(crate::rotate::MockRotateRunner::new([0xC0; 32])),
+            "work-relative".into(),
+            crate::rotate::MockRotateRunner::vk_pin(),
+        );
+        assert!(r.rotate.as_ref().unwrap().work_dir.is_absolute());
+        r.rotate.as_mut().unwrap().work_dir = dir.path().join("work");
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        r.wait_for_rotate().await;
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { .. }),
+            "{out:?}"
+        );
+        assert_eq!(r.state().last_committee_period, Some(2));
+    }
+
+    /// A node outage that eats more sends than the owner hop waits for does
+    /// not cost the proof: without the hop it is sent until it lands.
+    #[tokio::test]
+    async fn an_unconfirmed_rotate_is_kept_past_the_send_count() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+            false,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.script_rotate(
+            (0..MAX_ROTATE_SENDS + 1)
+                .map(|_| SubmitOutcome::NotSent {
+                    reason: "submitRotate: error sending request: Connection refused".into(),
+                })
+                .collect(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        for _ in 0..=MAX_ROTATE_SENDS {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(rig.submitter.rotate_submits(), MAX_ROTATE_SENDS + 1);
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert_eq!(rig.runner.runs().len(), 3);
     }
 
     /// Once the contract refuses the owner hop (`disableOwnerRotation`), the

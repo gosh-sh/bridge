@@ -157,8 +157,8 @@ assigns it when the release is tagged.
   transcripts are `rotate-<P>-<stage>-<time>-{stdout,stderr}.log` in `--log-dir`. A failed
   stage is started again after 10, then 20 minutes, from the beacon node's answers fetched anew;
   after the third failure in a period the daemon leaves that period alone. A `submitRotate`
-  whose outcome stays unknown no longer holds up the steps: it is sent again on the next ticks,
-  at most five times a period. A bundle proven for another Gloas fork slot than the contract's
+  whose outcome stays unknown no longer holds up the steps: it is sent again on the next ticks
+  until it lands or the contract moves past it. A bundle proven for another Gloas fork slot than the contract's
   is proven again instead of sent. To prove a period again by hand, stop the daemon, remove
   `<work-dir>/rotate-<P>/` and start it. The prove takes about 1.5 h; the tree stage peaks at
   about 50 GB RSS and the step prover keeps running beside it, so plan for about 75 GB (a
@@ -166,7 +166,7 @@ assigns it when the release is tagged.
   nodes need the tvm-sdk#284 decider (tvm-sdk `v3.1.0.an`).
 - `--owner-hop` works with rotate on: at the first update of a new period without a sent rotate,
   the daemon logs an error naming why (still proving, failed, refused) and falls back to the owner
-  hop; a rotate sent and not yet confirmed gets its five sends first. Once the contract refuses
+  hop; a rotate sent and not yet confirmed gets five sends first. Once the contract refuses
   the hop (after `disableOwnerRotation`) the daemon stops hopping and proves the rotate past the
   boundary instead; take `--owner-hop` off when disabling owner rotation. It no longer requires
   `--no-rotate`. `docker/compose.yaml` runs `eth-lc-relayer` that way

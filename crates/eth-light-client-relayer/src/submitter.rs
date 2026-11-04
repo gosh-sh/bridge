@@ -149,6 +149,10 @@ struct MockInner {
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
+    /// `--dry-run`: the first accepted step bootstraps the committee period,
+    /// and every accepted step sets the current committee to its own, as
+    /// the contract's would be.
+    follow_steps: bool,
 }
 
 impl MockAnSubmitter {
@@ -178,8 +182,17 @@ impl MockAnSubmitter {
                 gloas_gets: 0,
                 gloas_get_fails_from: None,
                 committee_period_read_fails: false,
+                follow_steps: false,
             }),
         }
+    }
+
+    /// The submitter of `--dry-run`: a contract bootstrapped by the first
+    /// step it accepts, whose committee follows the steps.
+    pub fn dry_run() -> Self {
+        let mock = Self::accepting();
+        mock.inner.lock().expect("poisoned").follow_steps = true;
+        mock
     }
 
     /// What `getGloasForkSlot` returns. Default is set / `GLOAS_NOT_SCHEDULED`.
@@ -359,6 +372,12 @@ impl AnSubmitter for MockAnSubmitter {
         inner.proven.insert(hash);
         if advance {
             inner.head_slot = Some(slot);
+        }
+        if inner.follow_steps {
+            if inner.period.is_none() {
+                inner.period = Some(slot / crate::types::SLOTS_PER_SYNC_PERIOD);
+            }
+            inner.current_committee = bundle.parsed.committee_commitment;
         }
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,

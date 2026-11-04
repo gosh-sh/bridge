@@ -214,7 +214,7 @@ flowchart TD
   beacon node's answers fetched anew; the third failure in a period leaves that period's
   rotate alone, and the log says so. A `submitRotate` whose outcome stays unknown (the wait
   timed out, the node did not answer) does not hold up the steps of P: it is sent again on
-  the following ticks, at most five times a period. A bundle proven for another Gloas fork
+  the following ticks until it lands or the contract moves past it. A bundle proven for another Gloas fork
   slot than the contract's `getGloasForkSlot` is not sent; it is proven again. To prove a
   period again by hand once the cause is fixed, stop the daemon, remove
   `<work-dir>/rotate-<P>/` and start it again.

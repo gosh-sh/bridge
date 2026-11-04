@@ -120,10 +120,11 @@ proving keys in `<prover-dir>/rotate-keys/`, and each stage is killed after
 A failed stage is started again after 10, then 20 minutes, from the beacon
 node's answers fetched anew; after the third failure in a period the daemon
 leaves that period's rotate alone and says so in the log. A `submitRotate`
-whose outcome stays unknown is sent at most five times a period. Once the cause
+whose outcome stays unknown is sent again on every tick until it lands or the
+contract moves past it. Once the cause
 is fixed, remove `<work-dir>/rotate-<P>/` and restart the daemon to prove
-period P again. `--owner-hop` takes the period at the boundary only after
-those five sends; once the contract refuses the hop (`disableOwnerRotation`),
+period P again. `--owner-hop` takes the period at the boundary only after five
+such sends; once the contract refuses the hop (`disableOwnerRotation`),
 the daemon stops hopping and waits for the rotate. Take `--owner-hop` off when
 the owner rotation is disabled.
 `--flip-owner` opts in to the owner flip after the first accepted update. It is

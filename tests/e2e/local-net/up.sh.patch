@@ -1,20 +1,6 @@
 --- a/tests/dexdo/up.sh
 +++ b/tests/dexdo/up.sh
-@@ -90,7 +90,12 @@
- #  * nginx caches its upstream (block_manager) IP at config-load; if block_manager
- #    were (re)created AFTER nginx, its new IP would leave nginx 502-ing the /v2
- #    gateway. So order is: nodes -> block_manager -> q_server + nginx (last).
--echo "==> [4/5] up aerospike + nodes first"
-+# block_manager comes up BEFORE the nodes (--no-deps skips its depends_on on them): it
-+# indexes blocks only from the moment it attaches, and the nodes start producing at
-+# once, so starting it after them let the chain run ahead and GraphQL never got the
-+# first blocks. Its getent pre-wait holds block-manager until the node names resolve.
-+echo "==> [4/5] up aerospike and block_manager, then the nodes"
-+docker compose -f "$COMPOSE" up -d --no-deps aerospike block_manager
- docker compose -f "$COMPOSE" up -d aerospike node0 node1 node2 node3 node4
- 
- # Wait until every node container is actually running before touching the network
-@@ -101,6 +106,15 @@
+@@ -101,12 +101,38 @@
    i=0
    until [ "$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null | xargs -r docker inspect -f '{{.State.Running}}' 2>/dev/null)" = "true" ]; do
      i=$((i+1))
@@ -30,7 +16,30 @@
      if [ "$i" -ge 120 ]; then echo "!! node$n not running after 120s" >&2; break; fi
      sleep 1
    done
-@@ -219,6 +233,25 @@
+   echo "    node$n running"
+ done
+ 
++# block_manager indexes blocks only from the moment it attaches to a node's block
++# stream (UDP 12000 on node0..2), and a connect that fails puts that node on a 10 s
++# cooldown, hard-coded in block-manager. Started before the nodes listen, its first
++# connects fail, and the blocks the network makes during the cooldown never reach
++# GraphQL. So start it only once all three stream endpoints are bound.
++echo "==> [4b2/5] wait until node0..2 listen on the block stream (udp 12000)"
++for n in 0 1 2; do
++  cid=$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null)
++  i=0
++  until docker exec "$cid" bash -c 'for f in /proc/net/udp /proc/net/udp6; do while read -r _ l _; do [[ $l == *:2EE0 ]] && exit 0; done < "$f"; done; exit 1' 2>/dev/null; do
++    i=$((i+1))
++    if [ "$i" -ge 120 ]; then echo "!! node$n does not listen on udp 12000 after 60s" >&2; break; fi
++    sleep 0.5
++  done
++  echo "    node$n listens on udp 12000 ($(date -u +%T))"
++done
++
+ # block_manager now attaches to a settled network -> clean DNS sandbox, no wedge.
+ echo "==> [4c/5] up block_manager on the settled network, then q_server + nginx"
+ docker compose -f "$COMPOSE" up -d block_manager
+@@ -219,6 +245,25 @@
    sleep 5
  done
  

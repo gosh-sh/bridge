@@ -784,7 +784,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | Script | Purpose |
 |---|---|
 | `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:155`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:165-166`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`, `:283`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. Reads the optional `PREDECESSOR_BRIDGE` (`:171`). |
-| `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
+| `DeployShellnetE2EBridge.s.sol` | Shellnet E2E; the local-net e2e runs it on Arbitrum Sepolia (`tests/e2e/local-net/prover-host/jobs/deploy.sh:14`). Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
 | `DeployTestBridge.s.sol` | Local/testnet smoke: oracle + bridge with everything disabled. |
@@ -826,8 +826,6 @@ address.
 
 | Chain | USDC | AAVE V3 Pool | aUSDC | Axiom V2 Core |
 |---|---|---|---|---|
-| Mainnet (1) | `0xA0b86991…eB48` | `0x87870Bca…A4E2` | `0x98C23E9d…6F5c` | `0x69963768…C98B` |
-| Sepolia (11155111) | `0x94a9D9AC…E4C8` (Aave-faucet test USDC) | `0x6Ae43d32…8951` | `0x16dA4541…EB80` | `0x69963768…C98B` (mock core) |
 | Arbitrum Sepolia (421614) | `0x75faf114…AA4d` (Circle) | `0xBfC91D59…2Eff` | `0x460b97BD…1216` | not deployed; `USE_AXIOM_ORACLE=true` reverts |
 
 No deployment-address artefact is committed to this repo (`deployment_real.json` is produced at
@@ -858,7 +856,6 @@ was written in, so the suite was read, not executed).
 | File | Focus |
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
-| `AckiNackiBridgeAaveFork.t.sol` (4) | Ethereum Sepolia fork against real AAVE (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 11155111. |
 | `AckiNackiBridgeArbSepoliaAaveFork.t.sol` (7) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, a `withdrawByProof` top-up, and the live `0x3FB0…8638` accepted as `predecessor` with its treasury covered by `fundTreasury` (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |

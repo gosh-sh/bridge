@@ -430,11 +430,11 @@ Before committing new artefacts:
 
 ## Two pause domains
 
-Custody on Ethereum (USDC in `AckiNackiBridge`, some of it in AAVE) and the ECC
+Custody on Arbitrum (USDC in `AckiNackiBridge`, some of it in AAVE) and the ECC
 ledger on Acki Nacki are two books. Each side has its own stop switch, and
 neither reaches the other:
 
-- Ethereum: `AckiNackiBridge.pause()` / `unpause()`. While `paused` is true,
+- Arbitrum: `AckiNackiBridge.pause()` / `unpause()`. While `paused` is true,
   `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert
   `BridgePaused`. Owner AAVE management stays available so funds can be moved
   out of the pool.

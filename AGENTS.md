@@ -181,7 +181,7 @@ make pre-push              # everything a branch should pass; see CI below
 make format                # rustfmt every crate, then forge fmt
 
 cd contracts/ethereum && forge test                          # fork suites skip without FORK_URL
-FOUNDRY_PROFILE=fork FORK_URL=<RPC URL> forge test --match-contract AaveFork
+FOUNDRY_PROFILE=fork FORK_URL=<Arbitrum Sepolia RPC> forge test --match-contract ArbSepoliaAaveFork
 
 # AN→ETH relayer — only from the prover workspace
 cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemon

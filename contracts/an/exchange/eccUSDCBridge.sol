@@ -51,7 +51,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.14.0";
+    string constant version = "1.15.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -63,6 +63,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         bytes recipient,
         uint128 amount,
         uint32 tokenId,
+        uint160 dstBridge,
         address sender
     );
     event WithdrawalRefused(
@@ -124,6 +125,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // deliberately NOT carried through `onCodeUpgrade` — after a code upgrade
     // the bridge accepts no deposits until the owner re-seeds it (fail-closed).
     mapping(uint256 => mapping(uint256 => bool)) _trustedL1Bridge;
+
+    // Destination-chain EVM bridge: dstChainId -> the one `AckiNackiBridge`
+    // that may pay this bridge's withdrawals to that chain. `initiateWithdrawal`
+    // writes it into `WithdrawalInitiated`, Circuit 4 makes it a public input,
+    // and the EVM bridge refuses a proof that names another address, so a
+    // proof pays out on one bridge only. Zero = unset: the withdrawal is
+    // refunded (`ERR_NO_EVM_BRIDGE`). Owner-managed via `setEvmBridge`; like
+    // `_trustedL1Bridge` it is NOT carried through `onCodeUpgrade`.
+    mapping(uint256 => uint160) _evmBridgeByChain;
 
     // Canonicality anchor: source chain id -> L1 block hash -> admitted. The
     // deposit proof binds its event to a block, but says nothing about that
@@ -593,6 +603,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
         uint32 tokenId = keys[0];
         require(tokenId == USDC_ECC_ID, ERR_UNSUPPORTED_TOKEN);
+        uint160 dstBridge = _evmBridgeByChain[dstChainId];
+        if (dstBridge == 0) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_NO_EVM_BRIDGE);
+            return;
+        }
         if (currencies[tokenId] > varuint32(MAX_TRANSFER_AMOUNT)) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                               ERR_TRANSFER_TOO_LARGE);
@@ -622,13 +638,16 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _outstandingByChain[dstChainId] -= amount;
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
-        emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId, msg.sender);
+        emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId,
+                                                   dstBridge, msg.sender);
     }
 
     /// @dev Returns the ECC and says why on `WithdrawalRefused`, so a refusal
     ///      leaves a record a relayer or a UI can read: `reason` is the error
     ///      code the call would have thrown if a refusal threw —
-    ///      `ERR_TRANSFER_TOO_LARGE` (234) over the per-transfer cap,
+    ///      `ERR_NO_EVM_BRIDGE` (239) when no EVM bridge is set for the
+    ///      destination chain, `ERR_TRANSFER_TOO_LARGE` (234) over the
+    ///      per-transfer cap,
     ///      `ERR_BURN_EXCEEDS_BRIDGED` (233) when the burn would take bridged
     ///      burned above bridged minted, `ERR_CHAIN_BALANCE_EXCEEDED` (236)
     ///      when the destination chain accounts for less than this amount.
@@ -684,6 +703,26 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         } else {
             delete _trustedL1Bridge[chainId][l1Bridge];
         }
+    }
+
+    /// @notice Owner-managed destination bridge: the EVM `AckiNackiBridge` on
+    ///         `dstChainId` that withdrawals to that chain are bound to. It goes
+    ///         into every `WithdrawalInitiated`, and a withdrawal proof pays out
+    ///         only on that address. Zero clears it, and withdrawals to the chain
+    ///         are refunded until it is set again. Changing it leaves earlier
+    ///         burns bound to the bridge that was set when they were made.
+    function setEvmBridge(uint256 dstChainId, uint160 evmBridge) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
+        ensureBalance();
+        if (evmBridge == 0) {
+            delete _evmBridgeByChain[dstChainId];
+        } else {
+            _evmBridgeByChain[dstChainId] = evmBridge;
+        }
+    }
+
+    /// @notice The EVM bridge withdrawals to `dstChainId` are bound to; 0 if unset.
+    function getEvmBridge(uint256 dstChainId) external view returns (uint160) {
+        return _evmBridgeByChain[dstChainId];
     }
 
     /// @notice Returns the trusted L1 bridge SET for `chainId` (address -> true).
@@ -780,18 +819,20 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///      retains `updateCode`, which resets these flags, and can replace
     ///      the recorded client through `setLightClientCode` followed by
     ///      `deployLightClient`. This call does not revoke owner trust or
-    ///      upgrade authority. Requires a recorded client for the chain;
-    ///      it does not check that the account is Active. Idempotent.
+    ///      upgrade authority. Requires a recorded light client or L2
+    ///      verifier for the chain; it does not check that the account is
+    ///      Active. Idempotent.
     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         _disableOwnerAnchors(_lightClientL1ChainId);
     }
 
     /// @notice Same as `disableOwnerAnchors()`, for an explicit chain id.
-    ///         Any chain with a light client in `_lightClients` is accepted;
-    ///         a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226),
+    ///         Any chain with a light client in `_lightClients` or an L2
+    ///         verifier in `_l2Verifiers` is accepted; a chain with neither
+    ///         reverts `ERR_LIGHT_CLIENT_UNSET` (226),
     ///         and chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
     ///         A chain with an Arbitrum block verifier reverts
-    ///         `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) until the owner
+    ///         `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240) until the owner
     ///         writer is off for the verifier's parent chain: the verifier
     ///         admits blocks under any parent-chain block the bridge accepts,
     ///         so an owner who still anchors the parent still reaches the
@@ -902,7 +943,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         verifier code replaces the recorded verifier; with the code of
     ///         the recorded one it throws `ERR_L2_VERIFIER_DEPLOYED` (238).
     ///         On a chain whose owner writer is already off it throws
-    ///         `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239) unless the owner
+    ///         `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240) unless the owner
     ///         writer is off for `parentChainId` too, so a new verifier cannot
     ///         reopen the chain through a parent the owner still anchors.
     /// @param l2ChainId     — EIP-155 id of the Arbitrum chain (42161, 421614).

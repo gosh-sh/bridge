@@ -47,7 +47,7 @@ use bridge_relayer_daemon::{
     RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
     SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
     WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
+    WithdrawalPublicInputs, GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -62,10 +62,17 @@ use tracing::{error, info, warn};
     about = "Acki Nacki → Ethereum bridge relayer (Phase 5.1 skeleton)"
 )]
 struct Args {
-    /// Where to persist `state.json`. Only used by the `smoke-fixture`
-    /// subcommand; `sentry-watch` is stateless.
-    #[arg(long, default_value = "./relayer-state.json")]
-    state: PathBuf,
+    /// Directory for `relayer-state.json`, the cursor of the daemon modes
+    /// (bridge-audit#132). `daemon-live` keeps it under `--prover-state-dir`
+    /// and refuses a different directory here; `sentry-watch` is stateless.
+    #[arg(long, env = "RELAYER_STATE_DIR", global = true)]
+    state_dir: Option<PathBuf>,
+
+    /// Removed: the state is a directory now. Kept hidden so an old command
+    /// line or `RELAYER_STATE_PATH` in the environment fails with the
+    /// migration hint instead of a bare "unexpected argument".
+    #[arg(long, env = "RELAYER_STATE_PATH", hide = true)]
+    state: Option<PathBuf>,
 
     /// Fallback Ethereum RPC endpoints behind `--rpc-url`, comma-separated,
     /// tried in order when the one before fails (see
@@ -83,6 +90,12 @@ struct Args {
     #[command(subcommand)]
     cmd: Cmd,
 }
+
+/// The daemon modes' cursor file inside their state directory.
+const RELAYER_STATE_FILE_NAME: &str = "relayer-state.json";
+/// `daemon-live`'s own log file inside its log directory; `tracing-appender`
+/// adds the day to the name.
+const LOG_FILE_PREFIX: &str = "relayer.log";
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
@@ -254,7 +267,7 @@ enum Cmd {
     /// the historical `export-c4-poseidon-snark --fixture` subprocess),
     /// aggregates the inner snark (`aggregate-proof`, which self-checks the
     /// regenerated Yul source == committed `.sol`), cross-checks the calldata
-    /// binds the eleven public inputs, and writes a `proof_event` JSON that
+    /// binds the twelve public inputs, and writes a `proof_event` JSON that
     /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
@@ -396,10 +409,21 @@ enum Cmd {
         /// Directory with SRS + circuit PKs (`KeyManager`).
         #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
         params_dir: PathBuf,
-        /// Directory for `prover_state.json` / `prover_bk_set.json` /
-        /// `bootstrap_seed.json`.
+        /// The state directory: `prover_state.json`, `prover_bk_set.json`,
+        /// `bootstrap_seed.json` and `relayer-state.json` (the cursor that
+        /// `--state` used to name; bridge-audit#132).
         #[arg(long, env = "BRIDGE_STATE_DIR", default_value = "./state")]
         prover_state_dir: PathBuf,
+        /// Directory for the files of a proof in flight: the wrapped snarks
+        /// and the aggregator's calldata, gone once read back. Never the
+        /// system temp directory. Created when missing.
+        #[arg(long, env = "BRIDGE_WORK_DIR")]
+        work_dir: PathBuf,
+        /// Directory for the daemon's own log, one file per day beside
+        /// stdout; the aggregator's output is in it line by line. Created
+        /// when missing.
+        #[arg(long, env = "BRIDGE_LOG_DIR")]
+        log_dir: PathBuf,
         /// Fallback BK-set JSON if GQL fetch fails at startup.
         #[arg(
             long,
@@ -616,13 +640,50 @@ fn exit_status(err: &anyhow::Error) -> Option<i32> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
     let args = Args::parse();
+    if let Some(old) = &args.state {
+        // Before bridge-audit#132 the cursor was a file path. Now the daemon
+        // modes name it inside a state directory.
+        anyhow::bail!(
+            "--state / RELAYER_STATE_PATH ({}) is gone: the state is a directory now. Move the \
+             file into a directory as {RELAYER_STATE_FILE_NAME} and pass that directory as \
+             --state-dir / RELAYER_STATE_DIR (daemon-live: --prover-state-dir / \
+             BRIDGE_STATE_DIR); see CHANGELOG.md.",
+            old.display()
+        );
+    }
+    let log_dir = match &args.cmd {
+        Cmd::DaemonLive {
+            log_dir, ..
+        } => Some(log_dir.clone()),
+        _ => None,
+    };
+    if let Some(dir) = &log_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("log directory {}: {e}", dir.display()))?;
+    }
+    init_tracing(log_dir.as_deref()).map_err(|e| anyhow::anyhow!("log file: {e}"))?;
     let _ = RPC_FAILOVER_URLS.set(args.rpc_failover_urls.clone());
+    // The cursor file of the daemon modes other than `daemon-live`.
+    let state_file = |dir: &Option<PathBuf>| -> anyhow::Result<PathBuf> {
+        let dir = dir.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--state-dir / RELAYER_STATE_DIR is required: the directory for \
+                 {RELAYER_STATE_FILE_NAME}"
+            )
+        })?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| anyhow::anyhow!("state directory {}: {e}", dir.display()))?;
+        Ok(dir.join(RELAYER_STATE_FILE_NAME))
+    };
 
+    let global_state_dir = args.state_dir.clone();
     match args.cmd {
         Cmd::Status => {
-            info!("relayer state file = {}", args.state.display());
+            info!(
+                "relayer state file = {}",
+                state_file(&args.state_dir)?.display()
+            );
             Ok(())
         },
         Cmd::SmokeFixture {
@@ -634,7 +695,7 @@ async fn main() -> anyhow::Result<()> {
             max_ticks,
             anchor_level,
         } => smoke_fixture(
-            args.state,
+            state_file(&args.state_dir)?,
             fixtures_dir,
             verifiers_dir,
             rpc_url,
@@ -683,7 +744,7 @@ async fn main() -> anyhow::Result<()> {
                 multiplier: backoff_multiplier,
             };
             run_daemon(
-                args.state,
+                state_file(&args.state_dir)?,
                 fixtures_dir,
                 verifiers_dir,
                 rpc_url,
@@ -826,7 +887,7 @@ async fn main() -> anyhow::Result<()> {
                 multiplier: backoff_multiplier,
             };
             run_bridge_daemon(
-                args.state,
+                state_file(&args.state_dir)?,
                 proofs_dir,
                 rpc_url,
                 bridge_address,
@@ -849,6 +910,8 @@ async fn main() -> anyhow::Result<()> {
             gql_endpoint,
             params_dir,
             prover_state_dir,
+            work_dir,
+            log_dir: _,
             bk_set_config,
             bootstrap_seqno,
             backoff_initial_secs,
@@ -897,8 +960,27 @@ async fn main() -> anyhow::Result<()> {
                 .as_deref()
                 .map(bridge_gql_fetcher::gql_client::parse_endpoint_list)
                 .unwrap_or_default();
+            // One state directory: the cursor sits beside the prover state. A
+            // global `--state-dir` naming another directory would be silently
+            // ignored; refuse it instead.
+            if let Some(dir) = &global_state_dir {
+                let same = match (dir.canonicalize(), prover_state_dir.canonicalize()) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => dir == &prover_state_dir,
+                };
+                if !same {
+                    anyhow::bail!(
+                        "--state-dir / RELAYER_STATE_DIR ({}) differs from --prover-state-dir \
+                         ({}): daemon-live keeps {RELAYER_STATE_FILE_NAME} in the prover state \
+                         directory; drop --state-dir or point both at one directory",
+                        dir.display(),
+                        prover_state_dir.display()
+                    );
+                }
+            }
+            let relayer_state_path = prover_state_dir.join(RELAYER_STATE_FILE_NAME);
             run_daemon_live(
-                args.state,
+                relayer_state_path,
                 rpc_url,
                 bridge_address,
                 private_key,
@@ -906,6 +988,7 @@ async fn main() -> anyhow::Result<()> {
                 gql_failover_endpoints,
                 params_dir,
                 prover_state_dir,
+                work_dir,
                 bk_set_config,
                 bootstrap_seqno,
                 backoff,
@@ -1631,6 +1714,19 @@ where
             },
         };
 
+        // A proof bound to another EVM bridge never pays on this one.
+        if !pub_inputs.names_bridge(bridge.bridge_address()) {
+            warn!(
+                proof = %proof_path.display(),
+                dst_bridge = %format!("{:#042x}", pub_inputs.dst_bridge),
+                bridge = %bridge.bridge_address(),
+                "proof is bound to another bridge (dstBridge); parking"
+            );
+            st.parked_permanent += 1;
+            st.done.insert(proof_path);
+            continue;
+        }
+
         // Idempotency: skip anything already withdrawn on-chain.
         match bridge.is_nullifier_used(pub_inputs.nullifier).await {
             Ok(true) => {
@@ -1977,6 +2073,17 @@ async fn run_bridge_daemon(
     }
 }
 
+/// Refuse a proof bound to another EVM bridge before spending gas on it.
+fn ensure_names_bridge(pub_inputs: &WithdrawalPublicInputs, bridge: Address) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        pub_inputs.names_bridge(bridge),
+        "the proof is bound to bridge {:#042x} (dstBridge), not {bridge}: withdrawByProof there \
+         would revert WrongDstBridge",
+        pub_inputs.dst_bridge,
+    );
+    Ok(())
+}
+
 async fn submit_withdraw(
     proof_event: PathBuf,
     rpc_url: String,
@@ -1987,6 +2094,7 @@ async fn submit_withdraw(
     let bundle = PartnerWithdrawalProof::from_json_bytes(&std::fs::read(&proof_event)?)?;
     let proof = bundle.proof_bytes()?;
     let pub_inputs = bundle.public_inputs()?;
+    ensure_names_bridge(&pub_inputs, bridge_address)?;
 
     if dry_run {
         let provider = read_provider(&rpc_url).await?;
@@ -2107,6 +2215,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
 
     let proof_bytes = summary.proof.proof_bytes()?;
     let pub_inputs = summary.proof.public_inputs()?;
+    ensure_names_bridge(&pub_inputs, bridge_address)?;
 
     if args.dry_run {
         let provider = read_provider(&rpc_url).await?;
@@ -2209,6 +2318,7 @@ async fn run_daemon_live(
     gql_failover_endpoints: Vec<String>,
     params_dir: PathBuf,
     prover_state_dir: PathBuf,
+    work_dir: PathBuf,
     bk_set_config: PathBuf,
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
@@ -2228,6 +2338,18 @@ async fn run_daemon_live(
     use tokio::sync::Mutex;
 
     std::fs::create_dir_all(&prover_state_dir)?;
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
+    // Absolute from here on: the provers and the aggregator run in their own
+    // directories, and `--work-dir ./work` is the documented form.
+    let work_dir = work_dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
+    info!(
+        state_dir = %prover_state_dir.display(),
+        work_dir = %work_dir.display(),
+        "daemon-live: service directories",
+    );
     let state_paths = StatePaths::under(&prover_state_dir);
     let prover_state_path = state_paths.prover_state_json.clone();
     let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
@@ -2541,9 +2663,10 @@ async fn run_daemon_live(
         &aggregation.verifiers_dir,
         &params_dir,
     )
-    .with_pk_cache_dir(&aggregation.pk_cache_dir);
+    .with_pk_cache_dir(&aggregation.pk_cache_dir)
+    .with_scratch_dir(&work_dir);
     let pipeline = Circuit12ShplonkPipeline::new(
-        PoseidonSnarkWrapper::new(&params_dir),
+        PoseidonSnarkWrapper::new(&params_dir).with_scratch_dir(&work_dir),
         SubprocessAggregator::new(aggregator_cfg),
     );
     let aggregated = Arc::new(AggregatedBlockSource::new(
@@ -2648,13 +2771,40 @@ fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+/// Daily files kept in the log directory before the oldest is deleted.
+const LOG_KEEP_FILES: usize = 14;
+
+/// stdout always; with a log directory also one file per day there
+/// (`LOG_FILE_PREFIX.<date>`), written synchronously so nothing is lost when
+/// the process exits through `std::process::exit` (the exit-status paths).
+fn init_tracing(log_dir: Option<&Path>) -> std::io::Result<()> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let stdout = fmt::layer();
+    match log_dir {
+        Some(dir) => {
+            let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix(LOG_FILE_PREFIX)
+                .max_log_files(LOG_KEEP_FILES)
+                .build(dir)
+                .map_err(std::io::Error::other)?;
+            let file = fmt::layer().with_ansi(false).with_writer(file_appender);
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .with(file)
+                .try_init();
+        },
+        None => {
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .try_init();
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2710,6 +2860,7 @@ mod withdraw_scan_tests {
         dry_run_reason: Option<String>,
         fail_first_only: bool,
         submit_reason: Option<(String, bool)>,
+        address: Option<alloy::primitives::Address>,
         calls: Mutex<Calls>,
     }
 
@@ -2720,8 +2871,16 @@ mod withdraw_scan_tests {
         submit: usize,
     }
 
+    /// Slot 11 (`dstBridge`) of [`write_valid_proof_fixture`] is `12`.
+    const FIXTURE_DST_BRIDGE: alloy::primitives::Address =
+        alloy::primitives::Address::with_last_byte(12);
+
     #[async_trait]
     impl bridge_relayer_daemon::WithdrawBridge for StubBridge {
+        fn bridge_address(&self) -> alloy::primitives::Address {
+            self.address.unwrap_or(FIXTURE_DST_BRIDGE)
+        }
+
         async fn is_nullifier_used(
             &self,
             _n: alloy::primitives::U256,
@@ -2937,6 +3096,29 @@ mod withdraw_scan_tests {
             calls.dry_run, 0,
             "already-used proof must short-circuit before dry-run"
         );
+    }
+
+    #[tokio::test]
+    async fn proof_for_another_bridge_is_parked_without_touching_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proof_path = write_valid_proof_fixture(tmp.path(), 3);
+
+        let bridge = StubBridge {
+            address: Some(alloy::primitives::Address::with_last_byte(13)),
+            ..Default::default()
+        };
+        let mut st = WithdrawScanState::default();
+
+        let transient = withdraw_scan_once(&bridge, tmp.path(), false, &mut st)
+            .await
+            .unwrap();
+
+        assert!(!transient);
+        assert_eq!(st.parked_permanent, 1);
+        assert_eq!(st.paid, 0);
+        assert!(st.done.contains(&proof_path));
+        let calls = bridge.calls.lock().unwrap();
+        assert_eq!((calls.is_used, calls.dry_run, calls.submit), (0, 0, 0));
     }
 }
 

@@ -505,6 +505,7 @@ mod end_to_end {
             nullifier: U256::from(7),
             final_root: U256::from(9),
             anchor_layer: U256::from(1),
+            dst_bridge: U256::ZERO,
         }
     }
 

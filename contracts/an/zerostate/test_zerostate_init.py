@@ -114,13 +114,14 @@ class InitializeTest(unittest.TestCase):
 
     def test_commands_run_in_order(self):
         commands = self.run_initialize()
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 7)
         self.assertIn("-m getBridgeData", commands[0])
         self.assertIn("-m updateCode", commands[1])
         self.assertIn("-m setTrustedL1Bridge", commands[2])
-        self.assertIn("-m setLightClientCode", commands[3])
-        self.assertIn("-m setL2VerifierCode", commands[4])
-        self.assertIn("add contract", commands[5])
+        self.assertIn("-m setEvmBridge", commands[3])
+        self.assertIn("-m setLightClientCode", commands[4])
+        self.assertIn("-m setL2VerifierCode", commands[5])
+        self.assertIn("add contract", commands[6])
 
     def test_encoder_runs_with_the_placed_abi_and_decodes_output(self):
         encoder = self.run_initialize()[0]
@@ -160,11 +161,11 @@ class InitializeTest(unittest.TestCase):
         ctx = self.context(run)
         header = ctx["abi_header"]
         zerostate_init.initialize(ctx)
-        # getBridgeData, updateCode, setTrustedL1Bridge, setLightClientCode,
-        # setL2VerifierCode: every call that goes through `_debugger` must
-        # carry the caller's expire header; `add contract` (commands[5]) does
-        # not go through `_debugger` and carries none.
-        for cmd in run.commands[:5]:
+        # getBridgeData, updateCode, setTrustedL1Bridge, setEvmBridge,
+        # setLightClientCode, setL2VerifierCode: every call that goes through
+        # `_debugger` must carry the caller's expire header; `add contract`
+        # (commands[6]) does not go through `_debugger` and carries none.
+        for cmd in run.commands[:6]:
             self.assertIn(f"--abi-header {header}", cmd)
 
     def test_encoder_params_match_getBridgeData(self):
@@ -197,31 +198,36 @@ class InitializeTest(unittest.TestCase):
 
     def test_owner_calls_are_signed_with_the_bridge_key(self):
         commands = self.run_initialize()
-        for cmd in commands[2:5]:
+        for cmd in commands[2:6]:
             self.assertIn("--sign ./config/USDCBridge.keys.json", cmd)
             self.assertIn("/placed/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json", cmd)
 
     def test_light_client_code_comes_from_the_placed_artefact(self):
         self.assertIn(
-            "code-of:/placed/contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc",
-            self.run_initialize()[3],
+            "code-of:/placed/contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc",
+            self.run_initialize()[4],
         )
 
     def test_l2_verifier_code_comes_from_the_placed_artefact(self):
         self.assertIn(
-            "code-of:/placed/contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc",
-            self.run_initialize()[4],
+            "code-of:/placed/contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc",
+            self.run_initialize()[5],
         )
 
     def test_account_is_added_with_balance_and_dapp_id(self):
-        add = self.run_initialize()[5]
+        add = self.run_initialize()[6]
         self.assertIn("/tmp/stub.tvc 1000000000000 0:" + "1a" * 32, add)
         self.assertIn("0x" + "00" * 32, add)
 
     def test_chain_defaults_to_sepolia_and_address_is_explicit(self):
-        params = params_argument(self.run_initialize()[2])
+        commands = self.run_initialize()
+        params = params_argument(commands[2])
         self.assertEqual(params["chainId"], "11155111")
         self.assertEqual(params["l1Bridge"], "0x" + "42" * 20)
+        # Withdrawals to that chain are bound to the same bridge.
+        params = params_argument(commands[3])
+        self.assertEqual(params["dstChainId"], "11155111")
+        self.assertEqual(params["evmBridge"], "0x" + "42" * 20)
 
     def test_l1_parameters_come_from_the_environment(self):
         os.environ["BRIDGE_ZS_L1_CHAIN_ID"] = "1"
@@ -231,6 +237,7 @@ class InitializeTest(unittest.TestCase):
             run = FakeRun()
             reloaded.initialize(self.context(run))
             self.assertIn("0x" + "fe" * 20, run.commands[2])
+            self.assertIn("0x" + "fe" * 20, run.commands[3])
         finally:
             del os.environ["BRIDGE_ZS_L1_CHAIN_ID"], os.environ["BRIDGE_ZS_L1_BRIDGE"]
             __import__("importlib").reload(zerostate_init)

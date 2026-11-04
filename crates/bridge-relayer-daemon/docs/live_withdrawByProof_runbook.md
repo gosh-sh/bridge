@@ -322,16 +322,29 @@ and rewrites `L1_config/env`:
 ```bash
 cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
-PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 ./scripts/deploy_bridge_bundle.sh
+CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS PRIVATE_KEY=$RELAYER_PRIVATE_KEY LEVEL=1 \
+WITHDRAW_ACC_FR=<AN bridge account field element> \
+PREDECESSOR_BRIDGE=<the bridge whose treasury this one takes over, or 0x0000000000000000000000000000000000000000> \
+  ./scripts/deploy_bridge_bundle.sh
 ```
+
+Then bind the new bridge on Acki Nacki: the owner of `eccUSDCBridge` calls
+`setTrustedL1Bridge(<chain id>, <new bridge>, true)` and
+`setEvmBridge(<chain id>, <new bridge>)`. Every burn names the bridge
+`getEvmBridge(<chain id>)` returns at that moment, and only that bridge pays it
+(`WrongDstBridge` otherwise). Until the binding is set, `ackinacki-bridge withdraw
+--bridge-address <new bridge>` stops before the burn. If another bridge already
+serves the chain, follow `docs/aave-yield.md`, "Replacing a bridge on the same
+chain", instead.
 
 ### Step 2 — Seed the bridge treasury (fresh deploy only)
 
 `withdrawByProof` pays out from `treasuryBalance` (`AckiNackiBridge.sol:1188`).
 A fresh deploy starts at zero; the crypto path can pass and the tx will
 still revert with `WithdrawTreasuryShortfall(pub.amount, treasuryBalance)`
-(selector `0xbb651fce`). The only path that increments `treasuryBalance`
-is `deposit()` (`AckiNackiBridge.sol:578-593`) — there is no admin setter.
+(selector `0xbb651fce`). `deposit()` raises `treasuryBalance`, and so does
+the owner's `fundTreasury(amount)`, which pulls USDC without minting anything
+on Acki Nacki. There is no setter.
 Seed it once, then reuse across demos on the same deploy.
 
 Full recipe in [Case 3d](#case-3d--withdrawtreasuryshortfall--bridge-treasury-empty).
@@ -817,7 +830,8 @@ Sepolia revert. The log prints the selector.
 
 | Selector | Error | Root cause pattern |
 |---|---|---|
-| `WithdrawalProofRejected()` | SHPLONK adapter equality prelude failed, or the crypto pairing failed | The 11 inner-instance slots recovered from `proof` calldata (`instances[12..22]`, see `BridgeWithdrawalAggregatorVerifier.sol:30-40`) don't match the `WithdrawalPublicInputs` struct passed alongside — or `_verifyShplonk` returned false. Note that `acc_fr` drift and a missing/mis-selected anchor both revert earlier with the more specific `WithdrawIdentityMismatch` (`AckiNackiBridge.sol:1303`) and `UnknownAnchor` respectively, so if you're seeing `WithdrawalProofRejected` those two are already ruled out. Look for a stale/mis-packed calldata blob or a fresh keygen against the wrong VK. |
+| `WithdrawalProofRejected()` | SHPLONK adapter equality prelude failed, or the crypto pairing failed | The 12 inner-instance slots recovered from `proof` calldata (`instances[12..23]`, see `BridgeWithdrawalAggregatorVerifier.sol:33-44`) don't match the `WithdrawalPublicInputs` struct passed alongside — or `_verifyShplonk` returned false. Note that `acc_fr` drift and a missing/mis-selected anchor both revert earlier with the more specific `WithdrawIdentityMismatch` (`AckiNackiBridge.sol:1303`) and `UnknownAnchor` respectively, so if you're seeing `WithdrawalProofRejected` those two are already ruled out. Look for a stale/mis-packed calldata blob or a fresh keygen against the wrong VK. |
+| `WrongDstBridge(uint256)` = `0x5ccdadb4` | `pub.dstBridge` is not this bridge's address | The burn on Acki Nacki named another EVM bridge (the argument): `eccUSDCBridge.getEvmBridge(dstChainId)` pointed there when it was burnt. That bridge pays it; this one never will. `daemon-withdraw` / `daemon-bridge` park such a file without submitting. |
 | `WithdrawIdentityMismatch()` | `pub.dappFr`/`pub.accFr` don't match the bridge's stored withdrawal identity | Reverts before crypto (`AckiNackiBridge.sol:1303`). `bridgeWithdrawalAccFr` (and its `dappFr` sibling) are `immutable` on this contract (`AckiNackiBridge.sol:229`), so a witness "regeneration" cannot clear this — the same witness would be rejected on a rerun. The fix is on the ETH side: redeploy `AckiNackiBridge` with `(dappFr, accFr)` set to the AN-side withdrawal identity the prover is aimed at, or point the prover at the identity the currently-deployed bridge was constructed with. **This installation cannot pay out burns that have already been emitted against the "wrong" identity.** The public inputs of a Circuit-4 proof bind `accFr` (slot 7) and `dappFr` (slot 6) at proving time — these are the bridge-withdrawal identity slots, distinct from `senderAccFr` (slot 5), which is the burning account's own Fr-encoded ID and is not what the contract compares. At `withdrawByProof` time `AckiNackiBridge.sol:1302` checks `pub.dappFr == bridgeWithdrawalDappFr` and `pub.accFr == bridgeWithdrawalAccFr` (both `immutable`, `AckiNackiBridge.sol:229`), so a burn whose event carries identity X will never verify against a bridge deployed for identity Y. If the operator switches identities by redeploying, users whose burns were emitted before the switch have to be made whole outside this contract (custodial refund, or a fresh burn against the new identity). See [`WITHDRAW_ACC_FR` derivation](#reference-values-chain-invariant-on-shellnet). |
 | `NullifierAlreadyUsed(uint256)` | Same nullifier consumed twice | The `withdraw-e2e` command was re-run against the same captured event (identical `(block_id, tokenId, amount, recipient, sender, events_pos)` 7-tuple → identical Poseidon nullifier). Fire a fresh burn — no proof-side workaround exists. `events_pos` is bound into the preimage, so two *distinct* `WithdrawalInitiated` events in the same AN block do not collide — this error truly means the same event was replayed. |
 | `UnknownAnchor(uint256 finalRoot)` | `pub.finalRoot` not present in `_layerWindows[pub.anchorLayer]` | Covering bundle not yet on-chain at the given anchor layer, or the proof was built against a stale/mis-selected anchor. Wait for the bundle daemon to submit + confirm the covering bundle, then retry — or fix the anchor selection upstream. A proof whose dry-run passed earlier and now reverts here has lost its anchor to eviction — [Case 3e](#case-3e--anchor-eviction-deadline----anchor-layer-runway-is-finite). |
@@ -829,11 +843,12 @@ Sepolia revert. The log prints the selector.
 ```bash
 # Re-run the exact eth_call with --trace for a decoded reason.
 # withdrawByProof takes a bytes proof plus a WithdrawalPublicInputs
-# struct of 11 uint256s, encoded as a tuple literal on the CLI.
+# struct of 12 uint256s (the last is dstBridge), encoded as a tuple literal
+# on the CLI. Selector 0xc7d38069.
 cast call $BRIDGE \
-  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
   <calldata_hex_from_log> \
-  '(<11 comma-separated pi values from log>)' \
+  '(<12 comma-separated pi values from log>)' \
   --rpc-url $RPC --trace
 ```
 
@@ -1024,7 +1039,7 @@ highest active layer. The clock runs only while the bridge relays — a
 layer that gets no appends evicts nothing.
 
 **The L2-deploy sharp edge.** Shellnet is an L2 deploy:
-[`deploy/shellnet-l2/scripts/preflight.sh`](../deploy/shellnet-l2/scripts/preflight.sh)
+[`docker/relayer/preflight.sh`](../../../docker/relayer/preflight.sh)
 refuses any `BRIDGE_ANCHOR_LEVEL` but 2. There the L1 and L2 rings
 advance together, one slot per bundle, so an event's L1 anchor — when it
 has one — is evicted by the same `verifyBlock` as its L2 anchor.
@@ -1046,7 +1061,7 @@ proof carries:
 # From the proof withdraw-e2e wrote under --prover-out-dir
 # (<NNNNNN> is --prover-seq-no, zero-padded to six digits).
 # public_instances_hex holds little-endian field elements:
-# slot 9 is finalRoot, slot 10 is anchorLayer.
+# slot 9 is finalRoot, slot 10 is anchorLayer, slot 11 is dstBridge.
 PROOF=proofs/proof_event_<NNNNNN>.json
 ANCHOR=0x$(jq -r '.public_instances_hex[9]' "$PROOF" \
   | python3 -c 'import sys; print(bytes.fromhex(sys.stdin.read().strip())[::-1].hex())')

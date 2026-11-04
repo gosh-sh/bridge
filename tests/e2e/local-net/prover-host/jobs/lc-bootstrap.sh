@@ -7,9 +7,9 @@
 # Args: LC, the light client's address.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 cp /run/input "$WORK/lc-owner.keys.json"
-an=(--an-graphql-url "$GQL" --an-keys-path "$WORK/lc-owner.keys.json" --an-lc-abi-path "$LC_ABI"
+an=(--an-graphql-url "$GQL" --an-keys-path "$WORK/lc-owner.keys.json"
     --an-light-client "$LC" --an-sender "$LC")
 eth-lc-relayer set-gloas-fork-slot --slot "$SEPOLIA_GLOAS_FORK_SLOT" "${an[@]}"
-eth-lc-relayer set-committee --bundle-dir "$OUT/lc-bootstrap" --state "$OUT/lc-state.json" "${an[@]}"
-eth-lc-relayer flip-owner "${an[@]}" --an-usdc-bridge "$AN_BRIDGE" --an-usdc-abi-path "$AN_BRIDGE_ABI"
+eth-lc-relayer set-committee --bundle-dir "$OUT/lc-bootstrap" --state-dir "$OUT/lc-state" "${an[@]}"
+eth-lc-relayer flip-owner "${an[@]}" --an-usdc-bridge "$AN_BRIDGE"
 log "light client set up; owner rotation and owner anchors on 11155111 are off"

@@ -30,8 +30,8 @@ L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE")
 BRIDGE_TVC = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc"
 BRIDGE_ABI = "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
 VOUCHER_TVC = "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc"
-LIGHT_CLIENT_TVC = "contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc"
-L2_VERIFIER_TVC = "contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc"
+LIGHT_CLIENT_TVC = "contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc"
+L2_VERIFIER_TVC = "contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc"
 ENCODER_TVC = "contracts/an/zerostate/BridgeZerostateData.tvc"
 ENCODER_ABI = "contracts/an/zerostate/BridgeZerostateData.abi.json"
 
@@ -168,6 +168,14 @@ def initialize(ctx: dict) -> None:
     _debugger(ctx, abi=ctx["artefact"](BRIDGE_ABI), address=ctx["address"],
               method="setTrustedL1Bridge",
               params={"chainId": L1_CHAIN_ID, "l1Bridge": L1_BRIDGE, "allowed": "true"},
+              image=ctx["account_tvc"], keys=ctx["keys"])
+
+    # The same L1 bridge is the one withdrawals to that chain are bound to: the
+    # upgrade cell carries no EVM bridge either, and without one every
+    # `initiateWithdrawal` is refunded with ERR_NO_EVM_BRIDGE.
+    _debugger(ctx, abi=ctx["artefact"](BRIDGE_ABI), address=ctx["address"],
+              method="setEvmBridge",
+              params={"dstChainId": L1_CHAIN_ID, "evmBridge": L1_BRIDGE},
               image=ctx["account_tvc"], keys=ctx["keys"])
 
     # The upgrade cell does not carry the light-client code either, and the

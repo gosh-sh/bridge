@@ -59,6 +59,8 @@
 
 pub mod an_config;
 pub mod daemon;
+pub mod dirs;
+pub mod redact;
 pub mod error;
 #[cfg(test)]
 mod fake_rpc;
@@ -72,9 +74,12 @@ pub mod supported_chains;
 pub mod types;
 pub mod voucher;
 
-pub use an_config::AnConfig;
+pub use an_config::{bridge_abi, AnConfig, BRIDGE_ABI_JSON};
 pub use daemon::{
     BackoffConfig, DaemonRunSummary, LastOutcome, RelayerMetrics, RelayerMetricsSnapshot,
+};
+pub use dirs::{
+    prepare_dir, refuse_unrecognised_state, ServiceDirs, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 pub use error::RelayerError;
 pub use prover::{

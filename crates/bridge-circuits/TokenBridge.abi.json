@@ -34,6 +34,17 @@
 			]
 		},
 		{
+			"name": "mintAndSendBridged",
+			"inputs": [
+				{"name":"recipient","type":"address"},
+				{"name":"value","type":"uint128"},
+				{"name":"nonce","type":"uint64"},
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "mintAndSendAccumulator",
 			"inputs": [
 				{"name":"buyer","type":"address"},
@@ -53,15 +64,227 @@
 			]
 		},
 		{
+			"name": "setTrustedL1Bridge",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"l1Bridge","type":"uint256"},
+				{"name":"allowed","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setEvmBridge",
+			"inputs": [
+				{"name":"dstChainId","type":"uint256"},
+				{"name":"evmBridge","type":"uint160"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getEvmBridge",
+			"inputs": [
+				{"name":"dstChainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"uint160"}
+			]
+		},
+		{
+			"name": "getTrustedL1Bridges",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"map(uint256,bool)"}
+			]
+		},
+		{
+			"name": "isTrustedL1Bridge",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"l1Bridge","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "setAcceptedBlockHash",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"},
+				{"name":"accepted","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setLightClientCode",
+			"inputs": [
+				{"name":"code","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "deployLightClient",
+			"inputs": [
+				{"name":"pubkey","type":"uint256"},
+				{"name":"l1ChainId","type":"uint256"},
+				{"name":"bootstrapCommittee","type":"uint256"},
+				{"name":"bootstrapPeriod","type":"uint64"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getLightClient",
+			"inputs": [
+				{"name":"l1ChainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"address"}
+			]
+		},
+		{
+			"name": "disableOwnerAnchors",
+			"inputs": [
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "disableOwnerAnchorsOn",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setPaused",
+			"inputs": [
+				{"name":"paused","type":"bool"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setOutstandingByChain",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"amount","type":"uint128"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "acceptBlockHashFromLightClient",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "forgetBlockHashFromLightClient",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "setL2VerifierCode",
+			"inputs": [
+				{"name":"code","type":"cell"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "deployL2Verifier",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"},
+				{"name":"parentChainId","type":"uint256"},
+				{"name":"rollup","type":"uint160"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "getL2Verifier",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"verifier","type":"address"},
+				{"name":"parentChainId","type":"uint256"}
+			]
+		},
+		{
+			"name": "acceptBlockHashFromL2Verifier",
+			"inputs": [
+				{"name":"l2ChainId","type":"uint256"},
+				{"name":"parentBlockHash","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "isAcceptedBlockHash",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"blockHash","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "getAnchorConfig",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"lightClient","type":"address"},
+				{"name":"ownerAnchorsEnabled","type":"bool"}
+			]
+		},
+		{
+			"name": "isOwnerAnchorsEnabled",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
+			"name": "getLightClientL1ChainId",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"uint256"}
+			]
+		},
+		{
+			"name": "isPaused",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
+			]
+		},
+		{
 			"name": "finalizeDeposit",
 			"inputs": [
 				{"name":"proof","type":"bytes"},
-				{"name":"srcDappId","type":"uint256"},
-				{"name":"srcSender","type":"bytes"},
-				{"name":"recipient_an","type":"uint256"},
-				{"name":"amount","type":"uint128"},
-				{"name":"tokenId","type":"uint32"},
-				{"name":"srcDepositId","type":"uint256"}
+				{"name":"publicInputs","type":"bytes"}
 			],
 			"outputs": [
 			]
@@ -69,12 +292,12 @@
 		{
 			"name": "confirmDeposit",
 			"inputs": [
-				{"name":"srcDappId","type":"uint256"},
-				{"name":"srcSender","type":"bytes"},
-				{"name":"recipient_an","type":"uint256"},
+				{"name":"depositId","type":"uint256"},
+				{"name":"contractAddr","type":"uint256"},
+				{"name":"dappId","type":"uint256"},
+				{"name":"chainId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"tokenId","type":"uint32"},
-				{"name":"srcDepositId","type":"uint256"}
+				{"name":"anAccount","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -139,6 +362,17 @@
 			]
 		},
 		{
+			"name": "getDepositLimits",
+			"inputs": [
+				{"name":"chainId","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"maxTransfer","type":"uint128"},
+				{"name":"maxTvl","type":"uint128"},
+				{"name":"outstanding","type":"uint128"}
+			]
+		},
+		{
 			"name": "getDepositVoucherCodeHash",
 			"inputs": [
 			],
@@ -191,7 +425,21 @@
 				{"name":"recipient","type":"bytes"},
 				{"name":"amount","type":"uint128"},
 				{"name":"tokenId","type":"uint32"},
+				{"name":"dstBridge","type":"uint160"},
 				{"name":"sender","type":"address"}
+			],
+			"outputs": [
+			]
+		},
+		{
+			"name": "WithdrawalRefused",
+			"inputs": [
+				{"name":"dstChainId","type":"uint256"},
+				{"name":"recipient","type":"bytes"},
+				{"name":"amount","type":"uint128"},
+				{"name":"tokenId","type":"uint32"},
+				{"name":"sender","type":"address"},
+				{"name":"reason","type":"uint16"}
 			],
 			"outputs": [
 			]
@@ -199,12 +447,12 @@
 		{
 			"name": "DepositFinalized",
 			"inputs": [
-				{"name":"srcDappId","type":"uint256"},
-				{"name":"srcSender","type":"bytes"},
-				{"name":"recipient","type":"uint256"},
+				{"name":"depositId","type":"uint256"},
+				{"name":"contractAddr","type":"uint256"},
+				{"name":"dappId","type":"uint256"},
+				{"name":"chainId","type":"uint256"},
 				{"name":"amount","type":"uint128"},
-				{"name":"tokenId","type":"uint32"},
-				{"name":"srcDepositId","type":"uint256"}
+				{"name":"anAccount","type":"uint256"}
 			],
 			"outputs": [
 			]
@@ -212,8 +460,10 @@
 	],
 	"fields": [
 		{"init":true,"name":"_pubkey","type":"uint256"},
-		{"init":false,"name":"_timestamp","type":"uint64"},
 		{"init":false,"name":"_constructorFlag","type":"bool"},
+		{"init":false,"name":"_messages","type":"map(uint32,map(uint256,bool))"},
+		{"init":false,"name":"_messageHash","type":"uint256"},
+		{"init":false,"name":"_messageExpire","type":"uint32"},
 		{"init":false,"name":"_ownerPubkey","type":"uint256"},
 		{"init":false,"name":"_usdcWallet","type":"address"},
 		{"init":false,"name":"_totalMinted","type":"uint128"},
@@ -221,6 +471,18 @@
 		{"init":false,"name":"_mintAccumulatorNonce","type":"uint64"},
 		{"init":false,"name":"_totalMintedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
-		{"init":false,"name":"_depositVoucherCode","type":"cell"}
+		{"init":false,"name":"_outstandingByChain","type":"map(uint256,uint128)"},
+		{"init":false,"name":"_depositVoucherCode","type":"cell"},
+		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},
+		{"init":false,"name":"_evmBridgeByChain","type":"map(uint256,uint160)"},
+		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},
+		{"init":false,"name":"_lightClientCode","type":"cell"},
+		{"init":false,"name":"_lightClients","type":"map(uint256,address)"},
+		{"init":false,"name":"_lightClientL1ChainId","type":"uint256"},
+		{"init":false,"name":"_ownerAnchorsDisabled","type":"map(uint256,bool)"},
+		{"init":false,"name":"_l2VerifierCode","type":"cell"},
+		{"init":false,"name":"_l2Verifiers","type":"map(uint256,address)"},
+		{"init":false,"name":"_l2VerifierParent","type":"map(uint256,uint256)"},
+		{"init":false,"name":"_paused","type":"bool"}
 	]
 }

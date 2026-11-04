@@ -165,7 +165,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Block the bridge was deployed in: where the `LayerAnchorAppended` scan (preflight, then stage 4b) stops when a window is not covered yet; changes together with `BRIDGE_ADDRESS` (unset = genesis). `--get-logs-chunk-blocks` / `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and `--get-logs-pause-ms` / `BRIDGE_GET_LOGS_PAUSE_MS` fit the scan to a capped, rate-limited RPC |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
-| `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain), `.sol` (the proof self-check) and `_calldata.bin` (word 23 is the adapter `vkDigest` pin) |
+| `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain), `.sol` (the proof self-check) and `_calldata.bin` (word 24 is the adapter `vkDigest` pin) |
 | `--params-dir`          | `BRIDGE_PARAMS_DIR`         | KZG ceremony + generated pk/vk. Needs `kzg_bn254_21.srs`; see Step 0 |
 | `--snark-dir`           | `BRIDGE_SNARK_DIR`          | Aggregator scratch (must be absolute; smoke scripts canonicalize). Withdrawals sharing it prove one at a time (`.prove.lock` inside) |
 | `--work-dir`            | `BRIDGE_WORK_DIR`           | Per-withdrawal working directory |
@@ -585,7 +585,7 @@ withdraw complete:
   AN tx:        0x…
   msg id:       0x…
   block:        seq=<N> id=0x…
-  proof:        <NNNN> bytes, 11 public inputs, self_verified=true
+  proof:        <NNNN> bytes, 12 public inputs, self_verified=true
   ETH tx:       0x… (confirmed)
 ```
 
@@ -640,7 +640,7 @@ claiming there is no record — it never opened one to find out.
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
+| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
 **Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went
@@ -865,6 +865,12 @@ The refusal names the bridge's error and its arguments first — for example
 `NullifierAlreadyUsed`, `BridgePaused`, `WithdrawTreasuryShortfall`,
 `UnknownAnchor` and `WithdrawalProofRejected` says what to do. The node's
 own text follows on a `node said:` line.
+
+Exit 13 also comes before any proof, when the captured
+`WithdrawalInitiated` names another EVM bridge than `--bridge-address`
+(the one Acki Nacki bound the chain to when it burnt). Only that bridge
+pays the burn. Re-run with `--bridge-address` set to the bridge the
+message names and `--allow-retry`; the burn is not repeated.
 
 Reverts it cannot name, and what lies behind the ones it can, are
 advanced-runbook territory — see the selector → error table in
@@ -1796,6 +1802,7 @@ Vendored ABIs live under `abi/`:
   body cell, and for `deposit` its getters, `finalizeDeposit` and its events
 - `UpdateCustodianMultisigWallet.abi.json` — for the outer `sendTransaction`
 
-`deposit` also compiles in `DepositVoucher.tvc` and the voucher and
-light-client ABIs from `contracts/an/0.81.0_compiled/exchange/`: the
-voucher's address is computed from its code.
+`deposit` also compiles in `DepositVoucher.tvc` and its ABI from
+`contracts/an/0.81.0_compiled/exchange/` and the light-client ABI from
+`contracts/an/0.81.1_compiled/exchange/`: the voucher's address is computed
+from its code.

@@ -31,6 +31,9 @@ BUNDLE_STRIDE=16384
 # --- Withdraw (Phase 2) ---
 # WITHDRAW_ACC_FR=0x...
 # WITHDRAW_DAPP_FR=0x...
+# Optional, zero by default: the bridge on this chain whose treasury this
+# deploy may take over (migrateTreasury / fundTreasury). It need not be paused.
+# PREDECESSOR_BRIDGE=0x...
 
 # --- Oracle ---
 USE_AXIOM_ORACLE=false               # true for mainnet-style deploy

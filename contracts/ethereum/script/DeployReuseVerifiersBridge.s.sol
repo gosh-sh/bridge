@@ -8,6 +8,7 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "./PredecessorEnv.sol";
 
 /// @title DeployReuseVerifiersBridge
 /// @notice Deploy a fresh AckiNackiBridge that REUSES already-deployed Sepolia
@@ -16,6 +17,7 @@ import "../src/IBridgeWithdrawalVerifier.sol";
 ///         genesis anchor + Circuit-4 identity/token config change per E2E run.
 ///         Used for the full AN→ETH new-block E2E where we need a bridge with an
 ///         empty nullifier map genesis'd to a fresh chain segment.
+///         `PREDECESSOR_BRIDGE` is optional (`PredecessorEnv`).
 contract DeployReuseVerifiersBridge is Script {
     address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
 
@@ -48,7 +50,8 @@ contract DeployReuseVerifiersBridge is Script {
             accFr: vm.envUint("WITHDRAW_ACC_FR"),
             altDstChainId: vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(1)),
             altDstHostChainId: vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(11_155_111)),
-            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3))
+            altTokenId: vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(3)),
+            predecessor: IPredecessorBridge(PredecessorEnv.read())
         });
 
         vm.startBroadcast(pk);

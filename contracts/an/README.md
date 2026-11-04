@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.14.0, `DepositVoucher` at 1.4.0,
+`exchange/` — `eccUSDCBridge` at version 1.15.0, `DepositVoucher` at 1.4.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
@@ -51,7 +51,7 @@ for one chain and needs a light client or an Arbitrum block verifier deployed
 for it (`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
 for chain id 0). A chain with an Arbitrum block verifier closes only after its
 parent chain: until the owner writer is off there, `disableOwnerAnchorsOn`
-throws `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239), because a parent-chain block
+throws `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240), because a parent-chain block
 the owner accepts lets the verifier admit any block of the Arbitrum chain. The
 no-argument `disableOwnerAnchors()` does the same for the chain whose client
 was deployed last. Neither checks that the light-client
@@ -81,7 +81,8 @@ flags. Both owner keys therefore remain trusted after a flip.
 | `exchange/` | Sources and a `Makefile` that builds them in place |
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
 | `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
-| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
+| `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json` |
+| `0.81.1_compiled/exchange/` | `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 | `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
@@ -181,7 +182,7 @@ than 393 168 blocks past N.
 
 1. The zerostate installs the verifier code. On a bridge without it, send
    `setL2VerifierCode` with the code of
-   `0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc`.
+   `0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc`.
 2. Deploy a light client for the parent chain first: its accepted blocks are
    what the verifier's assertions are checked against.
 3. `deployL2Verifier(421614, 11155111, 0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4)`
@@ -200,8 +201,8 @@ than 393 168 blocks past N.
    parent chain (`disableOwnerAnchorsOn(parentChainId)`, or the light client
    relayer's flip), then `disableOwnerAnchorsOn(l2ChainId)` for the Arbitrum
    chain. In the other order the second call throws
-   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (239). On a closed Arbitrum chain,
-   `deployL2Verifier` throws 239 too for a parent chain the owner still
+   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240). On a closed Arbitrum chain,
+   `deployL2Verifier` throws 240 too for a parent chain the owner still
    anchors.
 
 The verifier code and the recorded verifiers are not carried through
@@ -227,8 +228,10 @@ minute, and miss many batches; a free Alchemy key keeps it. When an assertion en
 ## Transfer and network limits
 
 Deposits and withdrawals are limited to **50 USDC** (50,000,000 base units).
-Each L1 bridge limits `treasuryBalance` (deposited principal minus completed
-payouts) to **10,000 USDC**, including principal supplied to Aave. Yield and
+Each L1 bridge refuses a deposit that would take `treasuryBalance` (deposited
+principal minus completed payouts) past **10,000 USDC**, including principal
+supplied to Aave. Owner `fundTreasury` and `migrateTreasury` top-ups are not
+checked against that cap. Yield and
 direct token donations do not increase that counter or its capacity.
 `MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the first deposit width guard;
 the lower product ceiling is `MAX_TRANSFER_AMOUNT`.
@@ -252,13 +255,13 @@ breaks both — see *Restoring a chain's outstanding amount* below.
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
 with 235; the latter is retryable after withdrawals. Both checks precede proof
-verification and are repeated on confirmation. A withdrawal that is oversized,
-that would burn more than bridged minted less bridged burned, or that exceeds
-its destination chain's outstanding amount returns the attached ECC without
-burning it and emits `WithdrawalRefused` instead of `WithdrawalInitiated`. That
-event carries the same fields plus `reason` — the error code the call would have
-thrown had the refusal thrown: 234, 233 and 236 for the three cases in that
-order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
+verification and are repeated on confirmation. A withdrawal to a chain with no
+EVM bridge set, or one that is oversized, that would burn more than bridged
+minted less bridged burned, or that exceeds its destination chain's outstanding
+amount returns the attached ECC without burning it and emits `WithdrawalRefused`
+instead of `WithdrawalInitiated`. That event carries the same fields except
+`dstBridge`, plus `reason` — the error code the call would have thrown had the
+refusal thrown: 239, 234, 233 and 236 for the four cases in that order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
 it uses no `rawReserve`.
 `ensureBalance()` is free. Dapp 0 contains only system contracts, and mainnet
 has an unlimited dapp configuration deployed for dapp 0. Withdrawal messages
@@ -271,6 +274,27 @@ block time (errors 402 and 401); an identical recorded message is rejected with
 expire; voucher identity remains the deposit double-mint protection. CLI and
 relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
 same BOC while valid.
+
+### Which EVM bridge pays a withdrawal
+
+`WithdrawalInitiated` names the EVM bridge that may pay it: `dstBridge`, the
+address the owner set for the destination chain with
+`setEvmBridge(dstChainId, evmBridge)` (read back with `getEvmBridge(dstChainId)`,
+0 if unset; `evmBridge = 0` clears it). Circuit 4 publishes those bytes of the
+event, and `AckiNackiBridge.withdrawByProof` refuses a proof naming any address
+but its own (`WrongDstBridge`). A withdrawal to a chain with no EVM bridge set is
+refused with 239 and burns nothing.
+
+`setEvmBridge` decides where every later burn to that chain is paid; a burn
+already made stays bound to the bridge it named. When an EVM bridge is replaced,
+`setEvmBridge(dstChainId, 0)` closes withdrawals to that chain while the old
+bridge pays the burns bound to it, and `setEvmBridge` with the new bridge reopens
+them once the principal has moved — the order is in `docs/aave-yield.md`,
+"Replacing a bridge on the same chain".
+
+Like `_trustedL1Bridge`, the binding is not carried through `updateCode`: after
+an upgrade every withdrawal is refused with 239 until the owner calls
+`setEvmBridge` again for each chain.
 
 ### Restoring a chain's outstanding amount
 
@@ -377,22 +401,21 @@ AN identity/history. That migration is not implemented. Amounts above
 
 ## Rebuilding
 
-    make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0
+    make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
+        SOLD_0_81_1=/path/to/sold-0.81.1
 
 The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
-`eccUSDCBridge.tvc` and 0.81.0 for `DepositVoucher.tvc`,
+`eccUSDCBridge.tvc`, 0.81.0 for `DepositVoucher.tvc` and 0.81.1 for
 `EthBeaconLightClient.tvc` and `ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
 Any other compiler changes the code hash, so the `Makefile` builds each contract
-with its own compiler, `SOLD_0_80` or `SOLD_0_81`, and stops when a variable is
+with its own compiler, `SOLD_0_80`, `SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is
 unset or the binary reports a different version.
 
 `sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
 but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` and
-`ArbitrumBlockVerifier.tvc` need more than the version: their sources call
-`gosh.keccak256`, so `SOLD_0_81` has to be the `sold` 0.81.0 built from
-[gosh-sh/TVM-Solidity-Compiler `feature/keccak256-builtin`](https://github.com/gosh-sh/TVM-Solidity-Compiler/tree/feature/keccak256-builtin),
-whose tvm-sdk carries the `KECCAK256` instruction. A stock 0.81.0 emits the
-mnemonic its assembler does not know. The bridge does not import the verifier,
+`ArbitrumBlockVerifier.tvc` call `gosh.keccak256`, which release
+[`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1) is the first to
+assemble. The bridge does not import the verifier,
 only `ArbitrumBlockVerifierDeploy.sol`, a contract with the verifier's state
 variables and the two calls the bridge makes: importing the verifier would
 compile `EthTrie` into the bridge, which `sold` 0.80.0 cannot build. Keep the
@@ -462,7 +485,7 @@ it against the tracked artefact before and after an upgrade.
 
 `zerostate_init.py` brings a premined `eccUSDCBridge` to the state a fresh chain
 needs: it builds the data cell with `BridgeZerostateData`, upgrades the premine
-stub to the bridge's code, seeds the trusted L1 bridge, installs the
+stub to the bridge's code, seeds the trusted L1 bridge and binds withdrawals to that chain to it, installs the
 light-client and Arbitrum block verifier code, and writes the account into the
 zerostate. acki-nacki places
 it next to the contracts and calls `initialize(ctx)` while generating a
@@ -470,7 +493,8 @@ zerostate, so a new setup call or a new storage field is a change in this
 repository alone.
 
 Set `BRIDGE_ZS_L1_BRIDGE` to the fresh paired L1 bridge's nonzero `0x` address
-before generating a zerostate. There is no default: missing or malformed values
+before generating a zerostate. It is both the trusted L1 bridge for deposits and
+the EVM bridge withdrawals to `BRIDGE_ZS_L1_CHAIN_ID` are bound to. There is no default: missing or malformed values
 stop generation before any account is changed. `BRIDGE_ZS_L1_CHAIN_ID` defaults
 to Sepolia (`11155111`); set it to the deployment's EIP-155 chain id for another
 network.

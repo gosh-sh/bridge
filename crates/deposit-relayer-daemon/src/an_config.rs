@@ -13,8 +13,20 @@
 
 use acki_nacki_interface::ExtendedAddress;
 use serde::{Deserialize, Serialize};
+use tvm_client::abi::Abi;
 
 use crate::{error::RelayerError, submitter::AnSubmitConfig};
+
+/// The ABI of the AN-side bridge (`eccUSDCBridge`, `USDCBridge.abi.json`),
+/// built in: the same copy the CLI uses, kept in sync with the contract by
+/// `scripts/check_bridge_abi_in_sync.sh`. No ABI is read from a file at
+/// runtime (bridge-audit#132).
+pub const BRIDGE_ABI_JSON: &str = include_str!("../../ackinacki-bridge/abi/USDCBridge.abi.json");
+
+/// The built-in bridge ABI as `tvm_client` wants it.
+pub fn bridge_abi() -> Abi {
+    Abi::Json(BRIDGE_ABI_JSON.to_string())
+}
 
 fn default_confirm_timeout_secs() -> u64 {
     60
@@ -35,9 +47,6 @@ pub struct AnConfig {
     /// Path to the relayer's tvm-cli keys JSON (signer for `finalizeDeposit`).
     #[serde(default)]
     pub keys_path: String,
-    /// Path to the AN-side bridge contract ABI (`USDCBridge.abi.json`).
-    #[serde(default)]
-    pub bridge_abi_path: String,
     /// AN-side bridge contract in SDK 3.0 `dapp_id::account_id` form.
     #[serde(default)]
     pub token_bridge: String,
@@ -54,7 +63,6 @@ impl Default for AnConfig {
         Self {
             graphql_url: String::new(),
             keys_path: String::new(),
-            bridge_abi_path: String::new(),
             token_bridge: String::new(),
             sender: String::new(),
             confirm_timeout_secs: default_confirm_timeout_secs(),
@@ -94,7 +102,6 @@ impl AnConfig {
     pub fn is_live_submit_ready(&self) -> bool {
         !self.graphql_url.is_empty()
             && !self.keys_path.is_empty()
-            && !self.bridge_abi_path.is_empty()
             && !self.token_bridge.is_empty()
             && !self.sender.is_empty()
     }
@@ -180,6 +187,22 @@ mod tests {
         assert_eq!(sc.from, sender);
         assert_eq!(sc.token_bridge, bridge);
         assert_eq!(sc.confirm_timeout_secs, 7);
+    }
+
+    #[test]
+    fn the_built_in_bridge_abi_is_the_full_contract_abi() {
+        let abi: serde_json::Value = serde_json::from_str(BRIDGE_ABI_JSON).unwrap();
+        let functions: Vec<&str> = abi["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        assert!(functions.contains(&"finalizeDeposit"), "{functions:?}");
+        assert!(functions.contains(&"isAcceptedBlockHash"), "{functions:?}");
+        // The voucher check reads the bridge's storage layout.
+        assert!(!abi["fields"].as_array().unwrap().is_empty());
+        assert!(matches!(bridge_abi(), Abi::Json(_)));
     }
 
     #[test]

@@ -261,6 +261,11 @@ pub struct DepositArgs {
     pub state_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_WORK_DIR")]
     pub work_dir: Option<PathBuf>,
+    /// Where each prover tool's stderr is kept, one file per run, named
+    /// after the operation and the tool. Without it only the tail a failure
+    /// quotes is shown.
+    #[arg(long, env = "BRIDGE_DEPOSIT_LOG_DIR")]
+    pub log_dir: Option<PathBuf>,
     #[arg(long, default_value_t = 1800)]
     pub prover_timeout_s: u64,
     /// 0 waits forever.
@@ -398,6 +403,8 @@ pub struct DepositParams {
     /// resume or an abandon run without `HOME` and without `--work-dir`:
     /// every operation records its own before its first write.
     pub work_dir: Option<PathBuf>,
+    /// Where the prover tools' transcripts go; `None` keeps none.
+    pub log_dir: Option<PathBuf>,
     pub prover_timeout: Duration,
     pub anchor_timeout: Option<Duration>,
     pub relayer_grace: Duration,
@@ -587,6 +594,11 @@ impl DepositArgs {
             confirmations: self.confirmations,
             state_dir: abs(state_dir, "state-dir")?,
             work_dir: work_dir.map(|w| abs(w, "work-dir")).transpose()?,
+            log_dir: self
+                .log_dir
+                .clone()
+                .map(|l| abs(l, "log-dir"))
+                .transpose()?,
             prover_timeout: secs(self.prover_timeout_s),
             anchor_timeout: (self.anchor_timeout_s > 0).then(|| secs(self.anchor_timeout_s)),
             relayer_grace: secs(self.relayer_grace_s),

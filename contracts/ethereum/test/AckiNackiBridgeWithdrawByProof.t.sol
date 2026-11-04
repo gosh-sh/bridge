@@ -209,7 +209,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: seedAnchor,
-            anchorLayer: 1
+            anchorLayer: 1,
+            dstBridge: uint256(uint160(address(bridge)))
         });
     }
 
@@ -642,6 +643,7 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         pub.dstChainId = SHELLNET_LOGICAL_DST_CHAIN_ID;
         pub.tokenId = SHELLNET_USDC_TOKEN_ID;
         pub.finalRoot = layers[0];
+        pub.dstBridge = uint256(uint160(address(shellnetBridge)));
 
         vm.chainId(SEPOLIA_CHAIN_ID);
         shellnetBridge.withdrawByProof(_dummyProof(), pub);

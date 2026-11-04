@@ -14,8 +14,9 @@
 # crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3 (Case 1).
 #
 # Usage:
-#   LEVEL=1 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh   # L1 anchor
-#   LEVEL=2 PRIVATE_KEY=<burner> ./scripts/deploy_bridge_bundle.sh   # L2 anchor
+#   CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=1 PRIVATE_KEY=<burner> \
+#   WITHDRAW_ACC_FR=<AN bridge account Fr> PREDECESSOR_BRIDGE=<previous bridge or 0x0…0> \
+#     ./scripts/deploy_bridge_bundle.sh   # L1 anchor; LEVEL=2 for the L2 anchor
 #
 # Inputs (env):
 #   LEVEL                      1 or 2 (required)
@@ -27,6 +28,12 @@
 #                              (relative to crates/bridge-prover-libraries)
 #   WITHDRAW_ACC_FR            authoritative AN bridge account field element;
 #                              required and immutable after deployment
+#   PREDECESSOR_BRIDGE         the Sepolia bridge whose treasury this deploy may
+#                              take over (migrateTreasury / fundTreasury), or
+#                              0x0000000000000000000000000000000000000000 for none;
+#                              required and immutable. The previous bridge keeps
+#                              paying the burns made before the AN bridge's
+#                              setEvmBridge names the new one
 set -euo pipefail
 set +x
 umask 077
@@ -34,6 +41,7 @@ umask 077
 : "${LEVEL:?set LEVEL=1 or LEVEL=2}"
 : "${PRIVATE_KEY:?set PRIVATE_KEY=<sepolia burner>}"
 : "${WITHDRAW_ACC_FR:?set authoritative WITHDRAW_ACC_FR (or an explicit dummy for verifyBlock-only smoke)}"
+: "${PREDECESSOR_BRIDGE:?set PREDECESSOR_BRIDGE to the bridge whose treasury this deploy may take over, or the zero address for none}"
 [[ "${CONFIRM_NEW_BRIDGE_DEPLOY:-}" == DEPLOY_NEW_CONTRACTS ]] || {
   echo "Refusing broadcast: set CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS" >&2
   exit 2
@@ -93,6 +101,7 @@ cd "$CONTRACTS_DIR"
 export PRIVATE_KEY
 export WIRE_WITHDRAW_BY_PROOF=true
 export WITHDRAW_ACC_FR
+export PREDECESSOR_BRIDGE
 
 echo ">>> forge script DeployShellnetE2EBridge (chain 11155111)"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge \
@@ -162,5 +171,10 @@ cat <<EOF
     cd $PROVER_DIR
     export BRIDGE_CONFIG_DIR=./L${LEVEL}_config
     set -a && source "\$BRIDGE_CONFIG_DIR/env" && set +a
-    ./target/release/relayer --state "\$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live
+    export BRIDGE_STATE_DIR=\$BRIDGE_CONFIG_DIR/state
+    mkdir -p work logs && ./target/release/relayer daemon-live --work-dir ./work --log-dir ./logs
+
+    On Acki Nacki the eccUSDCBridge owner calls setTrustedL1Bridge(<chain id>, $BRIDGE_ADDRESS, true)
+    and setEvmBridge(<chain id>, $BRIDGE_ADDRESS); until then no burn names this bridge. If another
+    bridge serves the chain, follow docs/aave-yield.md, "Replacing a bridge on the same chain".
 EOF

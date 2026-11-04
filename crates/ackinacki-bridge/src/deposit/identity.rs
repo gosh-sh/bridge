@@ -31,7 +31,7 @@ pub const VOUCHER_ABI: &str =
     include_str!("../../../../contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json");
 /// The `EthBeaconLightClient` ABI.
 pub const LIGHT_CLIENT_ABI: &str =
-    include_str!("../../../../contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.abi.json");
+    include_str!("../../../../contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json");
 /// The `eccUSDCBridge` ABI, a copy of the deployed one.
 pub const BRIDGE_ABI: &str = include_str!("../../abi/USDCBridge.abi.json");
 

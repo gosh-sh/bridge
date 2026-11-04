@@ -38,6 +38,12 @@
 //!                       `layerWindows[anchorLayer]` for `finalRoot`, so a
 //!                       wrong hint just fails that membership check. 0 is
 //!                       reserved as "invalid/unset".
+//!  11: dstBridge      — BE-pack of body[58..78)              (uint160)
+//!                       The EVM bridge the AN-side bridge bound this
+//!                       withdrawal to (`setEvmBridge` there). The EVM
+//!                       bridge pays only when it equals its own address,
+//!                       so a proof cannot be paid by another bridge on the
+//!                       same chain.
 //!
 //! Why no `senderDappFr`: the TVM address type (`std_addr$10`, see
 //! `MsgAddrStd { anycast, workchain_id, address }` in
@@ -72,10 +78,10 @@
 //!  1. SHA-256 of all 4 preimages via `gosh-sha256-chip`.
 //!  2. Three child-hash equality links: wrapper→body, body→recipient,
 //!     body→sender.
-//!  3. Extract `tokenId`, `amount`, `dstChainId` from
+//!  3. Extract `tokenId`, `amount`, `dstChainId`, `dstBridge` from
 //!     `entries[1].cell_repr_data` (all PUBLIC in v2). Extract
 //!     `recipientHi`/`recipientLo` from `entries[2].cell_repr_data`.
-//!  4. Constrain ABI event id == 0x3c838959 at body bytes [2..6).
+//!  4. Constrain ABI event id == 0x728804fc at body bytes [2..6).
 //!  5. Constrain `d1` refs_count of each cell (1, 2, 0, 0).
 //!  6. Pack root SHA-256 hash to `repr_hash_fr`.
 //!  7. `ext_msg_leaf = Poseidon96(dapp_id, account_id, repr_hash)`.
@@ -89,8 +95,9 @@
 //!     two identical `WithdrawalInitiated` events in one AN block yield
 //!     distinct nullifiers.
 //! 13. Push public instances in the [`PUB_*`] order — leading fields,
-//!     `nullifier`, `final_root`, then `anchorLayer` (1-indexed,
-//!     range-checked `1..=MAX_ANCHOR_LAYER`) — to instance column 0.
+//!     `nullifier`, `final_root`, `anchorLayer` (1-indexed,
+//!     range-checked `1..=MAX_ANCHOR_LAYER`), then `dstBridge` — to
+//!     instance column 0.
 
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::halo2_proofs::halo2curves::ff::Field as _;
@@ -149,7 +156,8 @@ pub const PUB_ACC_FR: usize = 7;
 pub const PUB_NULLIFIER: usize = 8;
 pub const PUB_FINAL_ROOT: usize = 9;
 pub const PUB_ANCHOR_LAYER: usize = 10;
-pub const TOTAL_PUBLIC_INPUTS: usize = 11;
+pub const PUB_DST_BRIDGE: usize = 11;
+pub const TOTAL_PUBLIC_INPUTS: usize = 12;
 
 /// First-cut hardcoded recipient length — Ethereum addresses are 20 bytes.
 /// All 10 captured fixtures match this. To support variable lengths,
@@ -160,21 +168,23 @@ const SHA256_HASH_LEN: usize = 32;
 
 // ───── Event body byte layout (cell_repr_data-relative offsets) ────────────
 //
-// The body cell (entries[1]) is exactly 126 bytes:
-//   [0..2)    d1 + d2
-//   [2..6)    ABI event id  (0x3c838959 for WithdrawalInitiated)
-//   [6..38)   dstChainId    (uint256, 32 B, BE)              ← private
-//   [38..54)  amount        (uint128, 16 B, BE)              ← private
-//   [54..58)  tokenId       (uint32,   4 B, BE)              ← public
-//   [58..62)  child_depths  (2 × u16 BE)
-//   [62..94)  child_hash[0] = sha256(recipient cell)
-//   [94..126) child_hash[1] = sha256(sender cell)
+// The body cell (entries[1]) is exactly 146 bytes:
+//   [0..2)     d1 + d2
+//   [2..6)     ABI event id  (0x728804fc for WithdrawalInitiated)
+//   [6..38)    dstChainId    (uint256, 32 B, BE)             ← public
+//   [38..54)   amount        (uint128, 16 B, BE)             ← public
+//   [54..58)   tokenId       (uint32,   4 B, BE)             ← public
+//   [58..78)   dstBridge     (uint160, 20 B, BE)             ← public
+//   [78..82)   child_depths  (2 × u16 BE)
+//   [82..114)  child_hash[0] = sha256(recipient cell)
+//   [114..146) child_hash[1] = sha256(sender cell)
 pub const EVENT_ABI_PREFIX_START: usize = 2;
 pub const EVENT_ABI_PREFIX_END: usize = 6;
 const EVENT_BOC_DATA_BYTES_OFFSET: usize = 6;
 const EVENT_DST_CHAIN_ID_FIELD_LEN: usize = 32;
 const EVENT_AMOUNT_FIELD_LEN: usize = 16;
 const EVENT_TOKEN_ID_FIELD_LEN: usize = 4;
+const EVENT_DST_BRIDGE_FIELD_LEN: usize = 20;
 
 pub const EVENT_DST_CHAIN_ID_START: usize = EVENT_BOC_DATA_BYTES_OFFSET;
 pub const EVENT_DST_CHAIN_ID_END: usize = EVENT_DST_CHAIN_ID_START + EVENT_DST_CHAIN_ID_FIELD_LEN;
@@ -182,13 +192,15 @@ pub const EVENT_AMOUNT_START: usize = EVENT_DST_CHAIN_ID_END;
 pub const EVENT_AMOUNT_END: usize = EVENT_AMOUNT_START + EVENT_AMOUNT_FIELD_LEN;
 pub const EVENT_TOKEN_ID_START: usize = EVENT_AMOUNT_END;
 pub const EVENT_TOKEN_ID_END: usize = EVENT_TOKEN_ID_START + EVENT_TOKEN_ID_FIELD_LEN;
+pub const EVENT_DST_BRIDGE_START: usize = EVENT_TOKEN_ID_END;
+pub const EVENT_DST_BRIDGE_END: usize = EVENT_DST_BRIDGE_START + EVENT_DST_BRIDGE_FIELD_LEN;
 
 /// ABI event id of `WithdrawalInitiated` (first 4 bytes of the truncated
 /// SHA-256 of the canonical signature, per TVM Solidity ABI v2).
-pub const ABI_EVENT_ID: [u8; 4] = [0x3c, 0x83, 0x89, 0x59];
+pub const ABI_EVENT_ID: [u8; 4] = [0x72, 0x88, 0x04, 0xfc];
 
 /// Fixed byte length of the body cell's `cell_repr_data`.
-pub const BODY_CELL_LEN: usize = 126;
+pub const BODY_CELL_LEN: usize = 146;
 
 /// Fixed byte length of the recipient cell's `cell_repr_data`
 /// (when `recipient.length == RECIPIENT_LEN_FIXED`).
@@ -574,6 +586,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 nullifier_fr,
                 final_root,
                 anchor_layer_fr,
+                dst_bridge_fr,
             ) = {
                 let gate = range.gate();
                 let ctx = builder.pool(0).main();
@@ -627,7 +640,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 }
 
                 // === ABI event id constraint ===
-                // body[2..6) must equal 0x3c838959.
+                // body[2..6) must equal 0x728804fc.
                 for (i, &expected_byte) in ABI_EVENT_ID.iter().enumerate() {
                     let expected =
                         ctx.load_constant(Fr::from(expected_byte as u64));
@@ -635,7 +648,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 }
 
                 // === Field extraction from body / recipient (cell_repr_data) ===
-                // All four are PUBLIC in v2. Each is BE-packed (matching the
+                // All are PUBLIC. Each is BE-packed (matching the
                 // ABI v2 wire layout); ETH-side reassembly is a straight
                 // `bytes -> uint{N}` decode.
                 let be_powers = |len: usize| -> Vec<QuantumCell<Fr>> {
@@ -667,6 +680,13 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                     to_existing(&body_bytes[EVENT_TOKEN_ID_START..EVENT_TOKEN_ID_END]);
                 let token_powers = be_powers(EVENT_TOKEN_ID_FIELD_LEN);
                 let token_id = gate.inner_product(ctx, token_cells, token_powers);
+
+                // dstBridge (uint160 BE, slot PUB_DST_BRIDGE). 20 range-checked
+                // bytes pack below 2^160, so no reduction mod r.
+                let dst_bridge_cells =
+                    to_existing(&body_bytes[EVENT_DST_BRIDGE_START..EVENT_DST_BRIDGE_END]);
+                let dst_bridge_powers = be_powers(EVENT_DST_BRIDGE_FIELD_LEN);
+                let dst_bridge_fr = gate.inner_product(ctx, dst_bridge_cells, dst_bridge_powers);
 
                 // recipientHi / recipientLo — split α (10 / 10 BE bytes
                 // out of the 20-byte address payload at recipient[2..22)).
@@ -1018,6 +1038,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                     nullifier_fr,
                     final_root,
                     anchor_layer_fr,
+                    dst_bridge_fr,
                 )
             };
 
@@ -1033,6 +1054,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
             //   8  PUB_NULLIFIER
             //   9  PUB_FINAL_ROOT
             //  10  PUB_ANCHOR_LAYER
+            //  11  PUB_DST_BRIDGE
             let slots: [AssignedValue<Fr>; TOTAL_PUBLIC_INPUTS] = [
                 token_id,
                 amount_fr,
@@ -1045,6 +1067,7 @@ impl Circuit<Fr> for BridgeEventProveCircuit {
                 nullifier_fr,
                 final_root,
                 anchor_layer_fr,
+                dst_bridge_fr,
             ];
             for slot in slots {
                 builder.assigned_instances[0].push(slot);
@@ -1801,6 +1824,32 @@ mod tests {
     fn test_build_synthetic_event_keygen_inputs_mock_prover() {
         let (circuit, instances) = build_synthetic_event_keygen_inputs(0xC0FFEE);
         assert_eq!(instances.len(), TOTAL_PUBLIC_INPUTS);
+        let prover = MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
+        prover.assert_satisfied();
+    }
+
+    /// `PUB_DST_BRIDGE` is the 20 bytes the contract wrote at
+    /// `body[58..78)`, and the circuit refuses any other value in the slot:
+    /// a proof for one EVM bridge cannot be re-labelled for another.
+    #[test]
+    fn test_dst_bridge_instance_is_bound_to_the_event_body() {
+        let w = load_first_withdrawal_embedded();
+        let body = &w.entries[1].cell_repr_data;
+        let mut want = [0u8; 32];
+        want[12..].copy_from_slice(&body[EVENT_DST_BRIDGE_START..EVENT_DST_BRIDGE_END]);
+        assert_ne!(want, [0u8; 32], "the fixture event names an EVM bridge");
+
+        let (circuit, instances) = build_synthetic_event_keygen_inputs(0xB41D6E);
+        assert_eq!(instances[PUB_DST_BRIDGE], be_bytes_to_fr(&want));
+
+        let mut swapped = instances.clone();
+        swapped[PUB_DST_BRIDGE] += Fr::from(1u64);
+        let prover = MockProver::<Fr>::run(K, &circuit, vec![swapped]).unwrap();
+        assert!(
+            prover.verify().is_err(),
+            "a dstBridge instance other than the event's must not verify"
+        );
+
         let prover = MockProver::<Fr>::run(K, &circuit, vec![instances]).unwrap();
         prover.assert_satisfied();
     }

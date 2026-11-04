@@ -93,7 +93,10 @@ impl RelayerState {
         attested_slot: u64,
     ) {
         self.last_finalized_slot = Some(finalized_slot);
-        self.last_committee_period = Some(period);
+        // Not lower: a rotate sent early in a period moves the committee to
+        // the next one while updates of this period still arrive.
+        self.last_committee_period =
+            Some(self.last_committee_period.map_or(period, |p| p.max(period)));
         self.last_execution_block_hash = Some(exec_hash);
         self.last_attested_slot = Some(attested_slot);
         self.updates_applied = self.updates_applied.saturating_add(1);

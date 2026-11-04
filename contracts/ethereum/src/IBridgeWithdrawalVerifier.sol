@@ -8,8 +8,9 @@ pragma solidity ^0.8.19;
 ///         `(dappFr, accFr)` emitted a `WithdrawalInitiated` event with the
 ///         specified `amount` payable to `recipient` (an EVM address), submitted
 ///         by the AN-side actor identified by `senderAccFr`, targeting
-///         `dstChainId` (must equal Ethereum's `block.chainid`), and binding
-///         to a unique `nullifier` for replay protection. The event is
+///         `dstChainId` (must equal Ethereum's `block.chainid`) and the one
+///         EVM bridge `dstBridge` that may pay it, and binding to a unique
+///         `nullifier` for replay protection. The event is
 ///         anchored off-circuit to one specific `finalRoot` — the verifier
 ///         (this adapter, on-chain) checks that `finalRoot` is in the
 ///         window named by `anchorLayer` (populated by `verifyBlock`).
@@ -20,13 +21,14 @@ pragma solidity ^0.8.19;
 ///                 bytes   recipient,
 ///                 uint128 amount,
 ///                 uint32  tokenId,
+///                 uint160 dstBridge,
 ///                 address sender
 ///             );
 ///
-///         The `WithdrawalPublicInputs` struct below mirrors slots [0..10] of
-///         the Halo2 circuit's 11-element public-input vector byte-for-byte.
+///         The `WithdrawalPublicInputs` struct below mirrors slots [0..11] of
+///         the Halo2 circuit's 12-element public-input vector byte-for-byte.
 interface IBridgeWithdrawalVerifier {
-    /// @notice Public-input slots [0..10] of the Circuit 4 proof.
+    /// @notice Public-input slots [0..11] of the Circuit 4 proof.
     /// @dev Field order matches the Halo2 circuit's public-input layout
     ///      byte-for-byte. The on-chain adapter forwards this struct
     ///      verbatim to `verifyProof`.
@@ -62,11 +64,16 @@ interface IBridgeWithdrawalVerifier {
         /// @notice 1-indexed layer window (`1..=MAX_LAYER_HASHES`) the
         ///         contract scans for `finalRoot`. Range-checked in-circuit.
         uint256 anchorLayer;
+        /// @notice The EVM bridge the AN-side bridge bound this withdrawal
+        ///         to (`setEvmBridge` there), as a 160-bit integer. The
+        ///         circuit reads it from the hashed event bytes; the bridge
+        ///         pays only when it equals `address(this)`.
+        uint256 dstBridge;
     }
 
     /// @notice Verify a Circuit 4 (single-final-root) proof.
     /// @param proof SHPLONK proof bytes (Halo2 KZG aggregator calldata: instances ‖ proof).
-    /// @param pub Public-input slots [0..10] — the 11 field elements.
+    /// @param pub Public-input slots [0..11] — the 12 field elements.
     /// @return isValid true on a passing proof; reverts inside the underlying SHPLONK
     ///         verifier are caught and surfaced as `false`.
     function verifyWithdrawal(bytes calldata proof, WithdrawalPublicInputs calldata pub)

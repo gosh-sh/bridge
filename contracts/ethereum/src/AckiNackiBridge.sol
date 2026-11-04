@@ -8,6 +8,7 @@ import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
+import "./IPredecessorBridge.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -32,7 +33,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      to the per-layer rolling windows (`_layerWindows`).
 ///      `withdrawByProof` consumes those windows plus a Circuit 4
 ///      (`bridge-event-prove-circuit`) SHPLONK aggregator proof whose
-///      11 public inputs include `finalRoot` and `anchorLayer`. The bridge
+///      12 public inputs include `finalRoot`, `anchorLayer` and `dstBridge`. The bridge
 ///      calls `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit
 ///      (this contract) — the circuit only proves that the event's hash
 ///      chain extends *into* `finalRoot` via a dense-chain extension and
@@ -271,6 +272,14 @@ contract AckiNackiBridge {
     /// @notice See `BridgeWithdrawConfig.altTokenId`.
     uint256 public immutable bridgeWithdrawalAltTokenId;
 
+    /// @notice The bridge this one replaces on the same chain, or zero. It
+    ///         only authorizes the treasury handover: the predecessor may call
+    ///         `fundTreasury`, and its `migrateTreasury` accepts only a bridge
+    ///         that names it here. Replay between the two needs nothing from
+    ///         it — each withdrawal proof names the bridge that pays it
+    ///         (`WithdrawalPublicInputs.dstBridge`).
+    IPredecessorBridge public immutable predecessor;
+
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
@@ -338,6 +347,12 @@ contract AckiNackiBridge {
     /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
     ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
     event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
+    /// @notice `fundTreasury`: `from` (the owner or `predecessor`) added
+    ///         `amount` to `treasuryBalance` without a `Deposit`.
+    event TreasuryFunded(address indexed from, uint256 amount, uint256 treasuryBalanceAfter);
+    /// @notice `migrateTreasury`: this paused bridge handed its whole
+    ///         `treasuryBalance` to `successor`.
+    event TreasuryMigrated(address indexed successor, uint256 amount);
 
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     event Paused(address indexed by);
@@ -450,6 +465,18 @@ contract AckiNackiBridge {
     error LayerHashActiveZero(uint256 index);
     /// @notice No skimable liquid USDC above `treasuryBalance` (QC-A1-3).
     error NoExcessUsdc();
+    /// @notice `fundTreasury` caller is neither `owner` nor `predecessor`.
+    error NotOwnerOrPredecessor();
+    /// @notice `migrateTreasury` needs the bridge paused.
+    error NotPaused();
+    /// @notice `migrateTreasury` target does not name this bridge as its
+    ///         `predecessor`.
+    error NotSuccessor(address successor);
+    /// @notice `migrateTreasury`: nothing to hand over.
+    error NothingToMigrate();
+    /// @notice `migrateTreasury`: part of `treasuryBalance` is still in AAVE;
+    ///         `withdrawFromAave` or `emergencyWithdrawAll` first.
+    error TreasuryNotLiquid(uint256 liquid, uint256 treasuryBalance);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -507,6 +534,13 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
     error InvalidBridgeWithdrawalIdentity();
+    /// @notice The withdrawal proof names another EVM bridge
+    ///         (`pub.dstBridge != address(this)`).
+    error WrongDstBridge(uint256 dstBridge);
+    /// @notice `BridgeWithdrawConfig.predecessor` is not an `AckiNackiBridge`
+    ///         on this chain wired to the same AN-side `(dappFr, accFr)`, or
+    ///         it was set while `withdrawByProof` is disabled.
+    error InvalidPredecessor(address predecessor);
     /// @notice Only `tokenId == 0` (bridged USDC) is currently supported.
     ///         Non-zero token ids are reserved for multi-token wiring in a
     ///         future milestone.
@@ -650,6 +684,12 @@ contract AckiNackiBridge {
         ///         (see `DeployRealBridge`); not enforced here because
         ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
         uint256 altTokenId;
+        /// @notice The `AckiNackiBridge` this deployment replaces on the same
+        ///         chain whose treasury it may take over, or zero. Must have
+        ///         code here and carry the same `(dappFr, accFr)`; else
+        ///         `InvalidPredecessor`. Requires `bridgeWithdrawalVerifier`
+        ///         to be non-zero.
+        IPredecessorBridge predecessor;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -669,7 +709,8 @@ contract AckiNackiBridge {
     ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
     ///                            to disable. When `bridgeWithdrawalVerifier`
     ///                            is non-zero, both `dappFr` and `accFr`
-    ///                            must be non-zero.
+    ///                            must be non-zero. `predecessor` names the
+    ///                            bridge whose treasury this one may take over.
     /// @dev Pass address(0) for `_aavePool`/`_aUSDC` to disable AAVE.
     ///      `_usdc` must always be non-zero — deposits pull USDC via `transferFrom`.
     constructor(
@@ -749,6 +790,10 @@ contract AckiNackiBridge {
         bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
         bridgeWithdrawalAltDstHostChainId = _bw.altDstHostChainId;
         bridgeWithdrawalAltTokenId = _bw.altTokenId;
+        if (address(_bw.predecessor) != address(0)) {
+            _requirePredecessor(_bw);
+        }
+        predecessor = _bw.predecessor;
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -757,6 +802,27 @@ contract AckiNackiBridge {
         _reentrancyStatus = _NOT_ENTERED;
 
         emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    /// @dev A predecessor's treasury backs eccUSDC of the same AN-side bridge,
+    ///      so it has to be deployed on this chain (it has code at this address
+    ///      here) and bound to the same `(dappFr, accFr)`. The field is
+    ///      immutable.
+    function _requirePredecessor(BridgeWithdrawConfig memory _bw) private view {
+        IPredecessorBridge p = _bw.predecessor;
+        if (address(_bw.bridgeWithdrawalVerifier) == address(0) || address(p).code.length == 0) {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.bridgeWithdrawalDappFr() returns (uint256 dappFr) {
+            if (dappFr != _bw.dappFr) revert InvalidPredecessor(address(p));
+        } catch {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.bridgeWithdrawalAccFr() returns (uint256 accFr) {
+            if (accFr != _bw.accFr) revert InvalidPredecessor(address(p));
+        } catch {
+            revert InvalidPredecessor(address(p));
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1412,17 +1478,22 @@ contract AckiNackiBridge {
     ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
     ///      only — `pub.dstChainId == altDstChainId` while
     ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the
-    ///      same proof is rejected because nullifiers are per-contract *and*
-    ///      `dstChainId` must match the executing chain (or its scoped alias).
-    ///   3. `pub.dappFr == bridgeWithdrawalDappFr` and
+    ///      same proof is rejected because `dstChainId` must match the
+    ///      executing chain (or its scoped alias).
+    ///   3. `pub.dstBridge == address(this)`: the AN-side bridge wrote the
+    ///      EVM bridge it pays out through into the event, and the circuit
+    ///      binds it to the event bytes, so another bridge on the same chain
+    ///      — an earlier or a later one — cannot pay the same burn.
+    ///      Nullifiers are per-contract and need no cross-bridge lookup.
+    ///   4. `pub.dappFr == bridgeWithdrawalDappFr` and
     ///      `pub.accFr == bridgeWithdrawalAccFr` (defensive — also enforced
     ///      by the verifier under the same identity, but checked here so
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
-    ///   4. `pub.nullifier` has not been used before (replay protection).
-    ///   5. `pub.tokenId == 0` (only bridged USDC is currently supported;
+    ///   5. `pub.nullifier` has not been used before (replay protection).
+    ///   6. `pub.tokenId == 0` (only bridged USDC is currently supported;
     ///      non-zero token ids reserved for multi-token in a future milestone).
-    ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
+    ///   7. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
     ///
     /// State updates (CEI):
@@ -1437,7 +1508,7 @@ contract AckiNackiBridge {
     /// @param proof   Circuit 4 proof bytes accepted by
     ///                `IBridgeWithdrawalVerifier` (Halo2 SHPLONK aggregator
     ///                proof in production).
-    /// @param pub     Public-input slots [0..10]; see `IBridgeWithdrawalVerifier`.
+    /// @param pub     Public-input slots [0..11]; see `IBridgeWithdrawalVerifier`.
     /// @return success Always `true` on a successful payout; reverts on failure.
     function withdrawByProof(
         bytes calldata proof,
@@ -1450,6 +1521,9 @@ contract AckiNackiBridge {
         if (pub.amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
+        if (pub.dstBridge != uint256(uint160(address(this)))) {
+            revert WrongDstBridge(pub.dstBridge);
+        }
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
             revert WithdrawIdentityMismatch();
         }
@@ -1496,7 +1570,7 @@ contract AckiNackiBridge {
             revert UnknownAnchor(pub.finalRoot);
         }
 
-        // ---- Crypto: verify the withdrawal proof. The 11 public inputs flow
+        // ---- Crypto: verify the withdrawal proof. The 12 public inputs flow
         //      verbatim through the adapter; the layer-window check above
         //      guards against a forged `finalRoot` that the circuit alone
         //      cannot bind to the bridge's view of AN state.
@@ -1716,6 +1790,56 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(yieldRecipient, toSkim);
         }
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
+    }
+
+    /// @notice Add `amount` USDC to `treasuryBalance` without a `Deposit`, so
+    ///         nothing is minted on Acki Nacki. For eccUSDC already backed by
+    ///         a predecessor's treasury: `predecessor` calls it from
+    ///         `migrateTreasury`, and the owner calls it for a predecessor
+    ///         that cannot migrate. Caller must `approve` first. Not capped by
+    ///         `MAX_BRIDGE_TVL` (that cap gates `deposit` only) and allowed
+    ///         while paused.
+    function fundTreasury(uint256 amount) external nonReentrant {
+        if (msg.sender != owner && msg.sender != address(predecessor)) {
+            revert NotOwnerOrPredecessor();
+        }
+        if (amount == 0) revert InvalidAmount();
+        treasuryBalance += _pullExactUsdc(amount);
+        emit TreasuryFunded(msg.sender, amount, treasuryBalance);
+    }
+
+    /// @notice Hand the whole `treasuryBalance` to `successor`, the bridge
+    ///         that names this one as its `predecessor`. Leaves this bridge
+    ///         with nothing to pay withdrawals from; USDC above the book
+    ///         (`excessUsdc`, aUSDC yield) stays here for the owner.
+    /// @dev Paused only: a live bridge would keep paying from the book it
+    ///      just gave away. AAVE-supplied principal must be pulled back first.
+    ///      The `predecessor()` check catches a wrong address, not a hostile
+    ///      one: any contract can return this bridge from `predecessor()` and
+    ///      take the approved USDC in its `fundTreasury`, so this is an owner
+    ///      power over the whole book.
+    function migrateTreasury(address successor) external onlyOwner nonReentrant {
+        if (!paused) revert NotPaused();
+        if (successor == address(this) || successor.code.length == 0) {
+            revert NotSuccessor(successor);
+        }
+        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
+            if (address(p) != address(this)) revert NotSuccessor(successor);
+        } catch {
+            revert NotSuccessor(successor);
+        }
+        uint256 amount = treasuryBalance;
+        if (amount == 0) revert NothingToMigrate();
+        uint256 liquid = usdc.balanceOf(address(this));
+        if (liquid < amount) revert TreasuryNotLiquid(liquid, amount);
+
+        treasuryBalance = 0;
+        if (!usdc.approve(successor, amount)) revert WithdrawTransferFailed(successor, amount);
+        AckiNackiBridge(successor).fundTreasury(amount);
+        if (usdc.balanceOf(address(this)) != liquid - amount) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        emit TreasuryMigrated(successor, amount);
     }
 
     /// @notice Pause user-facing entrypoints (`deposit`, `verifyBlock`,

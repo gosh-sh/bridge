@@ -13,11 +13,26 @@ checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
 parent chain, which is necessary for a span to carry it, not sufficient.
-Committee rotate: the daemon only auto-`submitRotate`s the committed
-fixture period. A live period jump returns `RotateRequired` — prove
-`rotate_tree_n8` on n14 and run `eth-lc-relayer submit-rotate --state`.
-`--no-rotate` opts out of even that. tvm-sdk#284 co-deploys with this
-contract.
+Committee rotate: once the contract holds period P and the beacon serves
+`updates?start_period=P`, the daemon proves the rotate P→P+1 in the
+background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
+`--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
+and sends `submitRotate` when the bundle passes its checks against the
+contract (`docs/eth-light-client.md` §3.3). `--no-rotate` turns it off;
+`--owner-hop` is the fallback at the boundary when no rotate was sent.
+The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).
+
+Every long-running command writes only into the three directories it is
+given (bridge-audit#132): `--state-dir` (the state file, its lock and the
+temporary file of its atomic write), `--work-dir` (one subdirectory per step
+prove, gone once the bundle is read back, and `rotate-<P>/` per rotate, kept
+until the contract has moved past P) and `--log-dir` (the command's own log, a
+file per day beside stdout, and every prover's transcript). `daemon` reads
+them from `ETH_LC_RELAYER_{STATE,WORK,LOG}_DIR`, `arbitrum-anchors` from
+`ARBITRUM_ANCHORS_{STATE,WORK,LOG}_DIR`. The one exception is the rotate: its
+stages write their proving keys to `<prover-dir>/rotate-keys/` (about 40 GB)
+on the first rotate after a binary upgrade. Nothing goes to the system temp
+directory or `$HOME`. The contract ABIs are built in; no `*_ABI_PATH` is read.
 
 ## How it runs
 
@@ -39,17 +54,18 @@ eth-lc-relayer beacon-watch --beacon-url https://lodestar-mainnet.chainsafe.io
 
 # 2. Shadow loop (tests / laptop): mock prove + mock AN, no rotate prove
 eth-lc-relayer daemon --beacon-url https://lodestar-mainnet.chainsafe.io \
-  --mock-prove --dry-run --no-rotate --state ./eth-lc-relayer-state.json
+  --mock-prove --dry-run --no-rotate \
+  --state-dir ./state --work-dir ./work --log-dir ./logs
 
 # 3. Live systemd: scripts/ursus/eth-light-client-relayer.service
 #    build: cargo build --release --features live-submit
 #    ExecStart has no --dry-run / --mock-prove
 
-# 4. Real step prove on n14
+# 4. Real step prove on the prover host
 eth-lc-relayer prove-one --beacon-url … \
   --step-prover-bin ../../eth-light-client-prover/target/release/examples/export_step_vk_blob \
   --srs-path $HOME/srs/hermez-raw-19 \
-  --out-dir ./bundle
+  --out-dir ./bundle --work-dir ./work --log-dir ./logs
 
 # 4a. Keep the step proving key between proves: generate it once per prover
 #     build (STEP_KEY_DIR=<dir> STEP_KEYGEN_ONLY=1 export_step_vk_blob), then
@@ -63,7 +79,7 @@ eth-lc-relayer set-gloas-fork-slot --slot 11296768 …
 
 # 6. Submit step / rotate
 eth-lc-relayer submit-one --bundle-dir ./bundle …
-eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree --state ./eth-lc-relayer-state.json …
+eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree --state-dir ./state …
 
 # 7. Is this deposit's execution hash on the checkpoint parent chain?
 eth-lc-relayer ancestry-one --beacon-url … \
@@ -73,35 +89,49 @@ eth-lc-relayer ancestry-one --beacon-url … \
 #    --submit-ancestry on the daemon, or this one-shot + live-submit)
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
   --older-anchor-hash 0x… \
-  --an-graphql-url … --an-keys-path … --an-lc-abi-path ./abi/EthBeaconLightClient.abi.json \
+  --an-graphql-url … --an-keys-path … \
   --an-light-client 'dapp::account' --an-sender 'dapp::account'
 
 # 9. One-shot owner flip (the daemon does it only with --flip-owner)
-eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' \
-  --an-usdc-abi-path ./abi/USDCBridge.abi.json …
+eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' …
 
 # 10. Bridge on an Arbitrum chain: anchor the blocks that hold deposits through
 #     ArbitrumBlockVerifier.proveBlock (live-submit), next to deposit-relayer
-#     daemon. Keep --anchor-state across restarts: the proofs in it cannot be
-#     fetched again.
+#     daemon. Keep --state-dir across restarts: the proofs in its state file
+#     cannot be fetched again.
 eth-lc-relayer arbitrum-anchors --parent-rpc-url … --arbitrum-rpc-url … \
   --bridge-address 0x… --from-block <bridge deploy block> \
-  --an-graphql-url … --an-keys-path … --an-bridge-abi-path ./abi/eccUSDCBridge.abi.json \
-  --an-verifier-abi-path ./abi/ArbitrumBlockVerifier.abi.json --an-token-bridge 'dapp::account'
+  --an-graphql-url … --an-keys-path … --an-token-bridge 'dapp::account' \
+  --state-dir ./anchors/state --work-dir ./anchors/work --log-dir ./anchors/logs
 
 # 11. One proveBlock vector from the live chains, for the bench (sends nothing)
 eth-lc-relayer arbitrum-vector --parent-rpc-url … --arbitrum-rpc-url … --out ./vector.json
 ```
 
-`--no-rotate` opts out of even the fixture auto-rotate. A live period
-is never proved in-process: prove on n14 and `submit-rotate --state`
-(tvm-sdk#284; the rotate tree is ~40 GB). The next daemon tick reads
-`getCommitteeState` and continues.
+`--no-rotate` turns the background rotate off; `submit-rotate --state-dir`
+still sends a bundle proved elsewhere, and the next daemon tick reads
+`getCommitteeState` and continues. The rotate stages need
+`kzg_bn254_21.srs` and `kzg_bn254_20.srs` in `--prover-dir` (the second cut
+from the first: `downsize_srs --input kzg_bn254_21.srs --output
+kzg_bn254_20.srs --k 20`, built from `eth-light-client-prover`), keep their
+proving keys in `<prover-dir>/rotate-keys/`, and each stage is killed after
+`--rotate-timeout-secs` (default 10800).
+
+A failed stage is started again after 10, then 20 minutes, from the beacon
+node's answers fetched anew; after the third failure in a period the daemon
+leaves that period's rotate alone and says so in the log. A `submitRotate`
+whose outcome stays unknown is sent again on every tick until it lands or the
+contract moves past it. Once the cause
+is fixed, remove `<work-dir>/rotate-<P>/` and restart the daemon to prove
+period P again. `--owner-hop` takes the period at the boundary only after five
+such sends; once the contract refuses the hop (`disableOwnerRotation`),
+the daemon stops hopping and waits for the rotate. Take `--owner-hop` off when
+the owner rotation is disabled.
 `--flip-owner` opts in to the owner flip after the first accepted update. It is
 **off** by default: after it, L1 deposits outside checkpoint blocks have no
 anchor writer; L2s keep the owner path
 (`scripts/ursus/flip_deposit_to_light_client.md`). It needs
-`AN_USDC_BRIDGE` and `AN_USDC_ABI_PATH`. Relayer keys must be the owner pubkey.
+`AN_USDC_BRIDGE`. Relayer keys must be the owner pubkey.
 Pin the Gloas slot with `set-gloas-fork-slot` before proving (`256` until it
 is set). A later published date is the same call, including after the flip.
 `gloas-slot-user-cell --slot <n>` prints an `updateCode` user cell that

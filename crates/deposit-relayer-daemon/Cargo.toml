@@ -27,6 +27,8 @@ thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The daemon's own log goes to `--log-dir` as well as stdout (bridge-audit#132).
+tracing-appender = "0.2"
 hex = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 # Prometheus facade: the library records through `metrics::*` macros, the

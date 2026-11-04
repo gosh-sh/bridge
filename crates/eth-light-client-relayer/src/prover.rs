@@ -1,5 +1,6 @@
-//! Proof generation: mock (tests / `--mock-prove`) or subprocess into
-//! `eth-light-client-prover` examples.
+//! Step proof generation: mock (tests / `--mock-prove`) or a subprocess into
+//! `eth-light-client-prover`'s `export_step_vk_blob`. The rotate is
+//! [`crate::rotate`].
 
 use std::{
     path::{Path, PathBuf},
@@ -12,29 +13,18 @@ use tokio::process::Command;
 
 use crate::{
     error::RelayerError,
-    types::{
-        pack_step_public_inputs, FinalityUpdate, RotateProofBundle, StepProofBundle,
-        ROTATE_ATTESTED_SLOT_INDEX, ROTATE_INSTANCE_LEN, ROTATE_PERIOD_INDEX,
-        SLOTS_PER_SYNC_PERIOD,
-    },
+    types::{pack_step_public_inputs, FinalityUpdate, StepProofBundle},
 };
 
 #[async_trait]
 pub trait ProofGenerator: Send + Sync {
     async fn generate_step(&self, update: &FinalityUpdate)
         -> Result<StepProofBundle, RelayerError>;
-
-    async fn generate_rotate(
-        &self,
-        to_period: u64,
-        chain: Option<crate::types::BeaconChainParams>,
-    ) -> Result<RotateProofBundle, RelayerError>;
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct MockProofGenerator {
     pub fail_step: bool,
-    pub fail_rotate: bool,
     pub committee_commitment: [u8; 32],
 }
 
@@ -65,38 +55,6 @@ impl ProofGenerator for MockProofGenerator {
             parsed,
         })
     }
-
-    async fn generate_rotate(
-        &self,
-        to_period: u64,
-        chain: Option<crate::types::BeaconChainParams>,
-    ) -> Result<RotateProofBundle, RelayerError> {
-        if self.fail_rotate {
-            return Err(RelayerError::ProofGeneration(
-                "mock configured to fail rotate".into(),
-            ));
-        }
-        let mut public_inputs = vec![0u8; ROTATE_INSTANCE_LEN * 32];
-        let off = ROTATE_PERIOD_INDEX * 32;
-        public_inputs[off..off + 8].copy_from_slice(&to_period.to_le_bytes());
-        let attested_slot = to_period
-            .saturating_sub(1)
-            .saturating_mul(SLOTS_PER_SYNC_PERIOD)
-            .saturating_add(64);
-        let attested_off = ROTATE_ATTESTED_SLOT_INDEX * 32;
-        public_inputs[attested_off..attested_off + 8].copy_from_slice(&attested_slot.to_le_bytes());
-        if let Some(chain) = chain {
-            let fork_off = crate::types::ROTATE_GLOAS_FORK_SLOT_INDEX * 32;
-            public_inputs[fork_off..fork_off + 8]
-                .copy_from_slice(&chain.gloas_fork_slot.to_le_bytes());
-        }
-        Ok(RotateProofBundle {
-            public_inputs,
-            proof: vec![0xCD; 64],
-            period: to_period,
-            attested_slot,
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -105,24 +63,19 @@ pub struct SubprocessProverConfig {
     /// (`cargo build --release --example export_step_vk_blob` in
     /// `eth-light-client-prover/`).
     pub step_prover_bin: PathBuf,
-    /// The rotate prover: a prebuilt `rotate_tree_n8` example (built with
-    /// `--features aggregation`). `None` when the daemon runs `--no-rotate`;
-    /// a period jump then fails instead of spawning anything.
-    pub rotate_prover_bin: Option<PathBuf>,
-    /// Working directory of both provers. `rotate_tree_n8` reads its shard
-    /// snarks (`out/shard_snark`) and the outer SRS (`../params/`) there, and
-    /// the period check before it reads `fixtures/mainnet/` there, so a
-    /// daemon that may rotate needs it; a relative `srs_path` resolves
-    /// against it. `None` runs each prover in the directory its binary is
-    /// in.
+    /// Working directory of the step prover; a relative `srs_path` resolves
+    /// against it. `None` runs it in the directory its binary is in.
     pub prover_dir: Option<PathBuf>,
     pub srs_path: PathBuf,
     pub timeout: Duration,
-    /// Where to keep the prover transcript
-    /// (`prover-<attested_slot>-{stdout,stderr}.log`). `None` leaves it in
-    /// the per-run temp dir (lost after the run); the error message still
-    /// carries the stderr tail.
-    pub log_dir: Option<PathBuf>,
+    /// Where each prove gets its directory of inputs and outputs, removed
+    /// once the bundle is read back. Never the system temp directory
+    /// (bridge-audit#132).
+    pub work_dir: PathBuf,
+    /// Where the prover transcripts go, one pair of files per run
+    /// (`step-<attested_slot>-<ts>-{stdout,stderr}.log`); the error message
+    /// still carries the stderr tail.
+    pub log_dir: PathBuf,
 }
 
 impl SubprocessProverConfig {
@@ -181,9 +134,62 @@ impl SubprocessProofGenerator {
         }
     }
 
+    /// One directory per prove inside the work directory, gone with the
+    /// returned guard; never the system temp directory.
+    fn prove_dir(&self, prefix: &str) -> Result<tempfile::TempDir, RelayerError> {
+        let fail = |e: std::io::Error| {
+            RelayerError::ProofGeneration(format!(
+                "work directory {}: {e}",
+                self.cfg.work_dir.display()
+            ))
+        };
+        std::fs::create_dir_all(&self.cfg.work_dir).map_err(fail)?;
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(&self.cfg.work_dir)
+            .map_err(fail)
+    }
+
+    /// The transcript of one prover run, both streams, in the log
+    /// directory. Written even when the prover failed: that is when it is
+    /// read.
+    fn write_transcript(&self, stem: &str, output: &std::process::Output) {
+        // A timestamp in the name: a retry of the same slot or period must
+        // not overwrite the transcript of the failed run.
+        let ts = unix_now();
+        self.write_log(
+            format!("{stem}-{ts}-stdout.log"),
+            crate::redact::redact_urls(&String::from_utf8_lossy(&output.stdout)),
+        );
+        self.write_log(
+            format!("{stem}-{ts}-stderr.log"),
+            crate::redact::redact_urls(&String::from_utf8_lossy(&output.stderr)),
+        );
+    }
+
+    /// Written where the transcript would be when the prover was killed on
+    /// timeout and left no output.
+    fn write_timeout_note(&self, stem: &str) {
+        self.write_log(
+            format!("{stem}-{}-timeout.log", unix_now()),
+            format!(
+                "killed after {:?} (timeout); no output was kept\n",
+                self.cfg.timeout
+            ),
+        );
+    }
+
+    fn write_log(&self, name: String, text: String) {
+        let path = self.cfg.log_dir.join(name);
+        if let Err(e) =
+            std::fs::create_dir_all(&self.cfg.log_dir).and_then(|()| std::fs::write(&path, text))
+        {
+            tracing::warn!(log = %path.display(), error = %e, "prover transcript not written");
+        }
+    }
+
     async fn run_step(&self, update: &FinalityUpdate) -> Result<StepProofBundle, RelayerError> {
-        let work = tempfile::tempdir()
-            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
+        let work = self.prove_dir(&format!("step-{}-", update.attested_slot))?;
         let json_path = work.path().join("finality_update.json");
         std::fs::write(&json_path, &update.raw_json)?;
         if update.committee_json.is_empty() {
@@ -229,26 +235,19 @@ impl SubprocessProofGenerator {
 
         let output = tokio::time::timeout(self.cfg.timeout, output)
             .await
-            .map_err(|_| RelayerError::ProofGeneration("step prove timed out".into()))?
+            .map_err(|_| {
+                self.write_timeout_note(&format!("step-{}", update.attested_slot));
+                RelayerError::ProofGeneration("step prove timed out".into())
+            })?
             .map_err(|e| {
                 RelayerError::ProofGeneration(format!(
                     "spawn {}: {e}",
                     self.cfg.step_prover_bin.display()
                 ))
             })?;
-        // Keep the prover transcript next to the bundle: `prove-one` copies the
-        // bundle out, the daemon's tempdir is dropped, so the error also
-        // carries the stderr tail.
-        let log_dir = match &self.cfg.log_dir {
-            Some(d) => {
-                let _ = std::fs::create_dir_all(d);
-                d.clone()
-            },
-            None => out_dir.clone(),
-        };
-        let stem = format!("prover-{}", update.attested_slot);
-        let _ = std::fs::write(log_dir.join(format!("{stem}-stdout.log")), &output.stdout);
-        let _ = std::fs::write(log_dir.join(format!("{stem}-stderr.log")), &output.stderr);
+        // The transcript outlives the prove directory, which is dropped with
+        // the bundle; the error also carries the stderr tail.
+        self.write_transcript(&format!("step-{}", update.attested_slot), &output);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: String = stderr
@@ -291,123 +290,6 @@ impl SubprocessProofGenerator {
             parsed,
         })
     }
-
-    async fn run_rotate(
-        &self,
-        to_period: u64,
-        chain: Option<crate::types::BeaconChainParams>,
-    ) -> Result<RotateProofBundle, RelayerError> {
-        let rotate_bin = self.cfg.rotate_prover_bin.as_deref();
-        let fixtures_dir = match rotate_bin {
-            Some(bin) => self.cfg.work_dir_for(bin),
-            None => self
-                .cfg
-                .prover_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(".")),
-        };
-        let fixture_period = fixture_rotate_period(&fixtures_dir);
-        if fixture_period != to_period {
-            return Err(RelayerError::ProofGeneration(format!(
-                "rotate_tree_n8 proves the committed fixture (period {fixture_period}), not live \
-                 period {to_period}; prove the hand-off on n14 and submit-rotate"
-            )));
-        }
-        let work = tempfile::tempdir()
-            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir: {e}")))?;
-        let tree_out = work.path().join("rotate_tree");
-        std::fs::create_dir_all(&tree_out)?;
-        let rotate_bin = rotate_bin.ok_or_else(|| {
-            RelayerError::ProofGeneration(
-                "no rotate prover: pass --rotate-prover-bin (LIGHT_CLIENT_ROTATE_PROVER_BIN) or \
-                 run with --no-rotate"
-                    .into(),
-            )
-        })?;
-        let mut cmd = Command::new(rotate_bin);
-        cmd.current_dir(self.cfg.work_dir_for(rotate_bin))
-            .env("EMIT_VKBLOB", "1")
-            .env("TREE_OUT", &tree_out)
-            .env("STEP_SRS", &self.cfg.srs_path);
-        if let Some(chain) = &chain {
-            cmd.env(
-                crate::types::BeaconChainParams::ENV_FORK_VERSION,
-                chain.fork_version_hex(),
-            )
-            .env(
-                crate::types::BeaconChainParams::ENV_GENESIS_VALIDATORS_ROOT,
-                chain.genesis_validators_root_hex(),
-            )
-            .env(
-                crate::types::BeaconChainParams::ENV_GLOAS_FORK_SLOT,
-                chain.gloas_fork_slot.to_string(),
-            );
-        }
-        let status = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .status();
-        let child = tokio::time::timeout(self.cfg.timeout, status)
-            .await
-            .map_err(|_| RelayerError::ProofGeneration("rotate prove timed out".into()))?
-            .map_err(|e| {
-                RelayerError::ProofGeneration(format!("spawn {}: {e}", rotate_bin.display()))
-            })?;
-        if !child.success() {
-            return Err(RelayerError::ProofGeneration(format!(
-                "rotate_tree_n8 exited {child}"
-            )));
-        }
-        let bundle = RotateProofBundle::from_dir(&tree_out)?;
-        if bundle.period != to_period {
-            return Err(RelayerError::ProofGeneration(format!(
-                "rotate proof is for period {}, not {to_period}",
-                bundle.period
-            )));
-        }
-        Ok(bundle)
-    }
-}
-
-/// Period `rotate_tree_n8` will prove: attested slot of the first
-/// `fixtures/mainnet/update_period_*.json`, else the synthetic committee
-/// at slot `9412 × 8192` (period 9413). It does not take a live update.
-pub(crate) fn fixture_rotate_period(prover_dir: &std::path::Path) -> u64 {
-    const SYNTHETIC_PERIOD: u64 = 9413;
-    let dir = prover_dir.join("fixtures/mainnet");
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return SYNTHETIC_PERIOD;
-    };
-    for entry in rd.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("update_period_") || !name.ends_with(".json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let data = if v.is_array() {
-            &v[0]["data"]
-        } else {
-            &v["data"]
-        };
-        let slot = data["attested_header"]["beacon"]["slot"]
-            .as_u64()
-            .or_else(|| {
-                data["attested_header"]["beacon"]["slot"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-            });
-        if let Some(slot) = slot {
-            return slot / crate::types::SLOTS_PER_SYNC_PERIOD + 1;
-        }
-    }
-    SYNTHETIC_PERIOD
 }
 
 #[async_trait]
@@ -418,14 +300,13 @@ impl ProofGenerator for SubprocessProofGenerator {
     ) -> Result<StepProofBundle, RelayerError> {
         self.run_step(update).await
     }
+}
 
-    async fn generate_rotate(
-        &self,
-        to_period: u64,
-        chain: Option<crate::types::BeaconChainParams>,
-    ) -> Result<RotateProofBundle, RelayerError> {
-        self.run_rotate(to_period, chain).await
-    }
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -445,14 +326,17 @@ mod tests {
         parse_finality_update(json).unwrap()
     }
 
-    fn cfg(step: &Path, rotate: Option<&Path>, dir: Option<&Path>) -> SubprocessProverConfig {
+    fn cfg(step: &Path, dir: Option<&Path>) -> SubprocessProverConfig {
+        // The tests keep the fake prover in a temp directory of their own:
+        // work and log directories go beside it.
+        let root = step.parent().expect("the fake prover has a directory");
         SubprocessProverConfig {
             step_prover_bin: step.to_path_buf(),
-            rotate_prover_bin: rotate.map(Path::to_path_buf),
             prover_dir: dir.map(Path::to_path_buf),
             srs_path: "srs.bin".into(),
             timeout: Duration::from_secs(10),
-            log_dir: None,
+            work_dir: root.join("work-files"),
+            log_dir: root.join("logs"),
         }
     }
 
@@ -509,7 +393,7 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let bin = dir.path().join("step-prover.sh");
         fake_step_prover(dir.path(), &bin);
-        let gen = SubprocessProofGenerator::new(cfg(&bin, None, Some(&work)));
+        let gen = SubprocessProofGenerator::new(cfg(&bin, Some(&work)));
         let bundle = gen.generate_step(&update_with_committee()).await.unwrap();
         assert_eq!(bundle.proof, b"proof");
         assert_eq!(
@@ -531,7 +415,7 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
         let bin = bin_dir.join("step-prover.sh");
         fake_step_prover(dir.path(), &bin);
-        let gen = SubprocessProofGenerator::new(cfg(&bin, None, None));
+        let gen = SubprocessProofGenerator::new(cfg(&bin, None));
         gen.generate_step(&update_with_committee()).await.unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("cwd"))
@@ -546,7 +430,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("step-prover.sh");
         install_script(&bin, "#!/bin/sh\necho 'no SRS here' >&2\nexit 3\n");
-        let gen = SubprocessProofGenerator::new(cfg(&bin, None, None));
+        let gen = SubprocessProofGenerator::new(cfg(&bin, None));
         let err = gen
             .generate_step(&update_with_committee())
             .await
@@ -556,29 +440,17 @@ mod tests {
         assert!(err.contains("no SRS here"), "{err}");
     }
 
-    #[tokio::test]
-    async fn run_rotate_without_a_rotate_binary_names_the_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let gen = SubprocessProofGenerator::new(cfg(Path::new("step"), None, Some(dir.path())));
-        let err = gen
-            .generate_rotate(9413, None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--rotate-prover-bin"), "{err}");
-    }
-
     #[test]
     fn the_srs_is_read_where_the_step_prover_runs() {
         let step = Path::new("/opt/provers/export_step_vk_blob");
-        let relative = cfg(step, None, Some(Path::new("/work")));
+        let relative = cfg(step, Some(Path::new("/work")));
         assert_eq!(relative.step_srs_path(), PathBuf::from("/work/srs.bin"));
-        let in_bin_dir = cfg(step, None, None);
+        let in_bin_dir = cfg(step, None);
         assert_eq!(
             in_bin_dir.step_srs_path(),
             PathBuf::from("/opt/provers/srs.bin")
         );
-        let mut absolute = cfg(step, None, Some(Path::new("/work")));
+        let mut absolute = cfg(step, Some(Path::new("/work")));
         absolute.srs_path = "/srs/kzg_bn254_19.srs".into();
         assert_eq!(
             absolute.step_srs_path(),
@@ -616,50 +488,11 @@ mod tests {
 
     #[tokio::test]
     async fn subprocess_step_rejects_empty_committee() {
-        let gen = SubprocessProofGenerator::new(cfg(Path::new("step"), None, Some(Path::new("."))));
+        let gen = SubprocessProofGenerator::new(cfg(Path::new("step"), Some(Path::new("."))));
         let err = gen.generate_step(&sample_update()).await.unwrap_err();
         match err {
             RelayerError::ProofGeneration(m) => {
                 assert!(m.contains("committee_json empty"), "{m}");
-            },
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn fixture_rotate_period_is_synthetic_without_an_update_file() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(fixture_rotate_period(dir.path()), 9413);
-    }
-
-    #[test]
-    fn fixture_rotate_period_reads_the_beacon_updates_array() {
-        let dir = tempfile::tempdir().unwrap();
-        let mainnet = dir.path().join("fixtures/mainnet");
-        std::fs::create_dir_all(&mainnet).unwrap();
-        std::fs::write(
-            mainnet.join("update_period_1835.json"),
-            r#"[{"data":{"attested_header":{"beacon":{"slot":"15032320"}}}}]"#,
-        )
-        .unwrap();
-        assert_eq!(fixture_rotate_period(dir.path()), 1836);
-    }
-
-    #[tokio::test]
-    async fn run_rotate_refuses_a_live_period_before_spawning() {
-        let gen = SubprocessProofGenerator::new(SubprocessProverConfig {
-            step_prover_bin: "export_step_vk_blob".into(),
-            rotate_prover_bin: None,
-            prover_dir: Some(".".into()),
-            srs_path: ".".into(),
-            timeout: Duration::from_secs(1),
-            log_dir: None,
-        });
-        let err = gen.generate_rotate(1, None).await.unwrap_err();
-        match err {
-            RelayerError::ProofGeneration(m) => {
-                assert!(m.contains("committed fixture"), "{m}");
-                assert!(m.contains("not live period 1"), "{m}");
             },
             other => panic!("{other:?}"),
         }

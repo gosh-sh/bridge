@@ -8,6 +8,7 @@ import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
+import "./PredecessorEnv.sol";
 import "./ShplonkDeployLib.sol";
 
 /// @title DeployShellnetE2EBridge
@@ -23,6 +24,9 @@ import "./ShplonkDeployLib.sol";
 ///      or any other real chain bricks user withdrawals (NB-Q8). The `WIRE_WITHDRAW_BY_PROOF`
 ///      env var is kept only so CI runs against a fresh anvil can opt out; setting it to
 ///      `false` off anvil reverts.
+///
+///      `PREDECESSOR_BRIDGE` is optional: the bridge on this chain whose
+///      treasury this one may take over (`PredecessorEnv`).
 contract DeployShellnetE2EBridge is Script {
     // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
     // The previous constant (0x94a9D9AC...) was a Pruvendo-owned mock with
@@ -120,6 +124,7 @@ contract DeployShellnetE2EBridge is Script {
         console.log("altDstChainId:", wd.altDstChainId);
         console.log("altDstHostChainId:", wd.altDstHostChainId);
         console.log("altTokenId:", wd.altTokenId);
+        console.log("predecessor:", address(bridge.predecessor()));
     }
 
     function _deployProductionVerifyBlockTriple()
@@ -160,7 +165,8 @@ contract DeployShellnetE2EBridge is Script {
                 accFr: wd.accFr,
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
-                altTokenId: wd.altTokenId
+                altTokenId: wd.altTokenId,
+                predecessor: IPredecessorBridge(PredecessorEnv.read())
             })
         );
     }

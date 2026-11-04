@@ -19,6 +19,44 @@ use crate::{
     errors::{CliError, CliResult},
 };
 
+/// Refuse to prove an event bound to an EVM bridge other than `bridge`.
+///
+/// The Acki Nacki bridge writes into every burn the EVM bridge it binds
+/// that chain to (`dstBridge`), and only that bridge pays the proof. The
+/// burn is still this withdrawal's, and the idempotency key does not carry
+/// the bridge, so a re-run with the bridge the event names resumes it. The
+/// event decodes here: `check_captured_event` ran on the same bytes first.
+pub(crate) fn check_event_bridge(
+    event_boc_b64: &str,
+    bridge: alloy::primitives::Address,
+    an_tx: &str,
+) -> CliResult<()> {
+    let event = bridge_event_witness::decode_event_boc_base64(event_boc_b64).map_err(|e| {
+        CliError::ProofFailed {
+            reason: format!(
+                "the event behind AN tx {an_tx} does not decode as WithdrawalInitiated: {e:#}."
+            ),
+            source: None,
+        }
+    })?;
+    if event
+        .dst_bridge_hex
+        .eq_ignore_ascii_case(&hex::encode(bridge.as_slice()))
+    {
+        return Ok(());
+    }
+    Err(CliError::EthSubmitFailed {
+        reason: format!(
+            "the burn behind AN tx {an_tx} is bound to the EVM bridge 0x{} — the one the Acki \
+             Nacki bridge named for this chain when it burnt — not --bridge-address {bridge}. \
+             Only that bridge pays it: withdrawByProof here would revert WrongDstBridge. Nothing \
+             was proved or submitted. Re-run with --bridge-address 0x{}.",
+            event.dst_bridge_hex, event.dst_bridge_hex,
+        ),
+        source: None,
+    })
+}
+
 /// Compare the captured event with the withdrawal this run is executing.
 ///
 /// A mismatch is exit 10: the record names a burn that is not this
@@ -142,17 +180,20 @@ fn sender_of(sender_hex: &str) -> Option<(i8, [u8; 32])> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    /// `WithdrawalInitiated` of a 1.000000 USDC shellnet withdrawal from the
-    /// multisig `0:826403c9…` to `0x400b…46B3` on Sepolia.
-    const EVENT_1_000000: &str = "te6ccgEBBAEAyQABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAuWsPGrGP3VgAQJwPIOJWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9CQAAAAAMDAgBDgBBMgHk+jlxJjmyW58sP9K4022mCUYFhcswU6JKPCAImUAAoQAu4Jcqcp93fyyXznB7Ac6kSRrM=";
+    /// `WithdrawalInitiated` of a 1.000000 USDC withdrawal from the multisig
+    /// `0:826403c9…` to `0x400b…46B3` on Sepolia, bound to [`EVM_BRIDGE`] —
+    /// emitted by the shipped `eccUSDCBridge.tvc` under `tvm-debugger`.
+    pub(crate) const EVENT_1_000000: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAAAAAAAABgAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9CQAAAAAM/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEEyAeT6OXEmObJbnyw/0rjTbaYJRgWFyzBToko8IAiZQAChAC7glypyn3d/LJfOcHsBzqRJGsw==";
     /// The same multisig and recipient, 0.999995 USDC.
-    const EVENT_0_999995: &str = "te6ccgEBBAEAyQABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAujTl2rGudtgAQJwPIOJWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9COwAAAAMDAgBDgBBMgHk+jlxJjmyW58sP9K4022mCUYFhcswU6JKPCAImUAAoQAu4Jcqcp93fyyXznB7Ac6kSRrM=";
-    /// An older event with token 2 on chain 1, the fixture
-    /// `bridge-event-witness` tests its decoder with.
-    const EVENT_TOKEN_2: &str = "te6ccgEBBAEAyQABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAIZdmoHXvdgAQJwPIOJWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAA9CQAAAAAIDAgBDgAm3yq/MUPIYsiAFU9xmlVK1j7ShCFBTfqlHoaqgQg+0MAAodC01zGY0wFMpJaO4RLxFTkQ49E4=";
+    const EVENT_0_999995: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAAAAAAAABgAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9COwAAAAM/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEEyAeT6OXEmObJbnyw/0rjTbaYJRgWFyzBToko8IAiZQAChAC7glypyn3d/LJfOcHsBzqRJGsw==";
+    /// [`EVENT_1_000000`] with its token id rewritten to 2: the contract
+    /// itself burns nothing but token 3.
+    const EVENT_TOKEN_2: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAAAAAAAABgAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9CQAAAAAI/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEEyAeT6OXEmObJbnyw/0rjTbaYJRgWFyzBToko8IAiZQAChAC7glypyn3d/LJfOcHsBzqRJGsw==";
+    /// The EVM bridge the events above are bound to.
+    const EVM_BRIDGE: &str = "0x3FB082a905a895151224F6d93bD074E816338638";
     const MULTISIG: &str = "826403c9f472e24c7364b73e587fa571a6db4c128c0b0b9660a7449478401132";
     /// Mixed case on purpose: the comparison is of the address, not of its
     /// spelling.
@@ -269,6 +310,29 @@ mod tests {
             Some((0, id))
         );
         assert_eq!(sender_of("00"), None);
+    }
+
+    #[test]
+    fn the_bridge_the_event_names_passes() {
+        check_event_bridge(EVENT_1_000000, EVM_BRIDGE.parse().unwrap(), AN_TX)
+            .expect("the event names this bridge");
+    }
+
+    #[test]
+    fn an_event_bound_to_another_bridge_names_the_one_that_pays_it() {
+        let other: alloy::primitives::Address =
+            "0x0000000000000000000000000000000000000b0b".parse().unwrap();
+        let err = check_event_bridge(EVENT_1_000000, other, AN_TX)
+            .expect_err("the event names another bridge");
+        assert_eq!(err.exit_code().as_i32(), 13, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains(AN_TX), "{msg}");
+        assert!(
+            msg.to_lowercase()
+                .contains(&format!("--bridge-address {}", EVM_BRIDGE.to_lowercase())),
+            "tells the operator which bridge to re-run against: {msg}"
+        );
+        assert!(msg.contains("Nothing was proved"), "{msg}");
     }
 
     #[test]

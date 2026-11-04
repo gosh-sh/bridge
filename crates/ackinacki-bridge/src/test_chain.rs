@@ -138,8 +138,14 @@ pub(crate) async fn deployed_multisig(ecc3: u128) -> (String, String) {
 const USDC_BRIDGE_TVC: &[u8] =
     include_bytes!("../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc");
 
+/// The EVM bridge [`deployed_usdc_bridge`] binds Sepolia withdrawals to, and
+/// the `--bridge-address` of [`fake_world`].
+pub(crate) const BOUND_EVM_BRIDGE: alloy::primitives::Address =
+    alloy::primitives::Address::repeat_byte(1);
+
 /// A deployed USDCBridge owned by [`PAIR_PUBLIC`], paused by its owner when
-/// `paused`, with empty bridged inventory.
+/// `paused`, with empty bridged inventory, binding Sepolia withdrawals to
+/// [`BOUND_EVM_BRIDGE`].
 pub(crate) async fn deployed_usdc_bridge(paused: bool) -> (String, String) {
     deployed_usdc_bridge_with(paused, 0, 0).await
 }
@@ -191,6 +197,35 @@ pub(crate) async fn deployed_usdc_bridge_with(
     .await
     .expect("the bridge deploys against an uninit account");
     let mut boc = deployed.account;
+
+    let bind = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: abi.clone(),
+        address: Some(encoded.address.clone()),
+        call_set: Some(CallSet {
+            function_name: "setEvmBridge".to_string(),
+            input: Some(json!({
+                "dstChainId": "11155111",
+                "evmBridge": BOUND_EVM_BRIDGE.to_string(),
+            })),
+            ..Default::default()
+        }),
+        signer: owner(),
+        ..Default::default()
+    })
+    .await
+    .expect("setEvmBridge encodes offline");
+    boc = run_executor(ctx.clone(), ParamsOfRunExecutor {
+        message: bind.message,
+        account: AccountForExecutor::Account {
+            boc,
+            unlimited_balance: Some(true),
+        },
+        return_updated_account: Some(true),
+        ..Default::default()
+    })
+    .await
+    .expect("the owner's setEvmBridge executes")
+    .account;
 
     if paused {
         let call = encode_message(ctx.clone(), ParamsOfEncodeMessage {
@@ -786,7 +821,7 @@ impl FakeWorld {
             &verifier,
         )
         .unwrap();
-        // 3 680 B, word 23 zero. `full_walk`'s vkDigest answer is the zero
+        // 3 712 B, word 24 zero. `full_walk`'s vkDigest answer is the zero
         // word, so step 3b matches and the run continues to the ceremony.
         std::fs::write(
             path.join("BridgeWithdrawalAggregatorVerifier_calldata.bin"),
@@ -940,7 +975,7 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
         anchor_layer: "1".to_string(),
         i_know_the_wait: false,
         rpc_url: rpc,
-        bridge_address: alloy::primitives::Address::repeat_byte(1),
+        bridge_address: BOUND_EVM_BRIDGE,
         bridge_deploy_block: None,
         get_logs_chunk_blocks: None,
         get_logs_pause_ms: None,
@@ -1045,13 +1080,13 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 build of eccUSDCBridge 1.14.0: 1.13.0 plus the Arbitrum
-        // block verifier's deploy and writer path, the refusal to deploy the
-        // recorded verifier again, and the refusal to close an Arbitrum chain
-        // to the owner while its parent chain is still open.
+        // sold 0.80.0 build of eccUSDCBridge 1.15.0: 1.14.0 plus the EVM
+        // bridge each withdrawal is bound to (`setEvmBridge`, `getEvmBridge`,
+        // `dstBridge` in `WithdrawalInitiated`), and the refusal to close an
+        // Arbitrum chain to the owner while its parent chain is still open.
         assert_eq!(
             &hash[..8],
-            "82d38aae",
+            "71074c89",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }
@@ -1194,9 +1229,9 @@ mod l2_verifier_tests {
     use super::*;
 
     const VERIFIER_TVC: &[u8] =
-        include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/ArbitrumBlockVerifier.tvc");
+        include_bytes!("../../../contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc");
     const LIGHT_CLIENT_TVC: &[u8] =
-        include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/EthBeaconLightClient.tvc");
+        include_bytes!("../../../contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc");
     const ARB_SEPOLIA: u64 = 421_614;
     const SEPOLIA: u64 = 11_155_111;
     const ROLLUP: &str = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4";
@@ -1209,7 +1244,7 @@ mod l2_verifier_tests {
     const ERR_LIGHT_CLIENT_UNSET: i64 = 226;
     const ERR_L2_VERIFIER_UNSET: i64 = 237;
     const ERR_L2_VERIFIER_DEPLOYED: i64 = 238;
-    const ERR_PARENT_OWNER_ANCHORS_ENABLED: i64 = 239;
+    const ERR_PARENT_OWNER_ANCHORS_ENABLED: i64 = 240;
 
     fn ctx() -> Arc<ClientContext> {
         Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"))

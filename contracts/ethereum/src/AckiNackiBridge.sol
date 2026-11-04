@@ -1809,7 +1809,6 @@ contract AckiNackiBridge {
     ///         user principal (`treasuryBalance`).
     /// @param amount Amount to skim (`type(uint256).max` = all excess).
     function skimExcessUsdc(uint256 amount) external onlyOwner nonReentrant {
-        if (yieldRecipient == address(0)) revert InvalidRecipient();
         uint256 excess = excessUsdc();
         uint256 toSkim = amount == type(uint256).max ? excess : amount;
         if (excess == 0 || toSkim == 0 || toSkim > excess) revert NoExcessUsdc();
@@ -2029,12 +2028,11 @@ contract AckiNackiBridge {
         return booked < poolBal ? booked : poolBal;
     }
 
-    /// @dev Pull exactly `amount` USDC from AAVE, or revert. Bounded by the
-    ///      aUSDC balance, not by the book; the book drops by at most what it
-    ///      holds, so a pull that reaches interest leaves it at zero.
+    /// @dev Pull exactly `amount` USDC from AAVE, or revert. Callers bound
+    ///      `amount` by the aUSDC balance, not by the book; the book drops by
+    ///      at most what it holds, so a pull that reaches interest leaves it
+    ///      at zero.
     function _pullFromAave(uint256 amount) internal {
-        if (amount > aUsdcBalance()) revert InsufficientTreasury();
-
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), amount, address(this));
         _bookPull(amount, usdc.balanceOf(address(this)) - before, amount);

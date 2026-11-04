@@ -669,35 +669,34 @@ is deployed on Arbitrum Sepolia only (§12).
 
 Notation: `U` = `usdc.balanceOf(this)`, `A` = `aUsdcBalance()`, `B` = `treasuryBalance`,
 `S` = `suppliedPrincipal`, `r` = `liquidReserveBps`, `M` = `supplyMultiplierBps`. The liquid
-principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1964`, `B − S` floored at 0), the target
-`T = B·r/10⁴` (`_liquidTarget`, `:1958`), the threshold `H = T·M/10⁴`.
+principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1963`, `B − S` floored at 0), the target
+`T = B·r/10⁴` (`_liquidTarget`, `:1957`), the threshold `H = T·M/10⁴`.
 
 | Function | Line | Behaviour |
 |---|---:|---|
-| `deposit` → `_supplyAboveTarget()` | 871, 1976 | After `Deposit` is emitted, while `aaveEnabled`: if `L > T` and `L ≥ H`, supplies `L − T` through `this.supplyForSelf(amount)` and adds the aUSDC credited to `S` (`SuppliedToAave(amount, S)`). Any revert of that call — `approve` false (`ApproveFailed`), a reverting `approve` or `supply`, nothing credited (`AaveSupplyFailed(amount, 0)`) — is caught, undoes the supply and its allowance, and emits `AaveSupplyRefused(amount, reason)` with the revert data. The deposit never reverts because of AAVE. |
-| `supplyForSelf(amount)` | 1996 | External only so that its revert rolls the supply back; any caller but the bridge reverts `NotSelf`. `approve`, `supply`, returns the aUSDC delta. |
-| `withdrawByProof` → `_refillFromAave(required, wanted)` | 1542, 2009 | Measured before the debit: when `L < amount`, `required = max(0, amount − U)` and `wanted = amount − L + max(0, S − B) + T'`, `T'` the target of the new book. Pulls `min(wanted, A)` in one `withdraw`; if that reverts it emits `AaveRefillFailed(pulled − required, reason)` and pulls only `required` (`_pullFromAave`). `required > A` reverts `InsufficientTreasury`; a failed required pull reverts with the pool's error and leaves the nullifier unused. While `L ≥ amount` there is no pool call. |
+| `deposit` → `_supplyAboveTarget()` | 871, 1975 | After `Deposit` is emitted, while `aaveEnabled`: if `L > T` and `L ≥ H`, supplies `L − T` through `this.supplyForSelf(amount)` and adds the aUSDC credited to `S` (`SuppliedToAave(amount, S)`). Any revert of that call — `approve` false (`ApproveFailed`), a reverting `approve` or `supply`, nothing credited (`AaveSupplyFailed(amount, 0)`) — is caught, undoes the supply and its allowance, and emits `AaveSupplyRefused(amount, reason)` with the revert data. The deposit never reverts because of AAVE. |
+| `supplyForSelf(amount)` | 1995 | External only so that its revert rolls the supply back; any caller but the bridge reverts `NotSelf`. `approve`, `supply`, returns the aUSDC delta. |
+| `withdrawByProof` → `_refillFromAave(required, wanted)` | 1542, 2008 | Measured before the debit: when `L < amount`, `required = max(0, amount − U)` and `wanted = amount − L + max(0, S − B) + T'`, `T'` the target of the new book. Pulls `min(wanted, A)` in one `withdraw`; if that reverts it emits `AaveRefillFailed(pulled − required, reason)` and pulls only `required` (`_pullFromAave`). `required > A` reverts `InsufficientTreasury`; a failed required pull reverts with the pool's error and leaves the nullifier unused. While `L ≥ amount` there is no pool call. |
 | `withdrawFromAave(amount)` | 1705 | Pull back preemptively, at most `_backedPrincipal()` = `min(S, A)`; `type(uint256).max` pulls exactly that. Zero, or an explicit amount above it, reverts `InvalidAmount`. |
 | `emergencyWithdrawAll()` | 1722 | Disables AAVE and `withdraw(max)`. Reverts `EmergencyLeftoverAToken` if aUSDC remains. If `received < principal`, keeps the shortfall on `S`; otherwise zeroes it. Yield that came back with the drain is liquid — collect with `skimExcessUsdc`, not `harvestYield` (QC-A1-3). Payouts stay available. |
 | `writeOffUnbackedPrincipal()` | — | ETH-28: sets `S = A` when the book is larger, emits `UnbackedPrincipalWrittenOff(dropped)`; otherwise reverts `NothingToWriteOff`. Moves no tokens. |
 | `harvestYield(amount)` | 1762 | `amount ≤ accruedYield()` — yield still inside AAVE. After a successful emergency this is zero and the call reverts `NoYield`. Also reverts `HarvestWouldBreakSolvency` unless `U + A ≥ B + amount`. Transfers `amount`; anything a pool pays above it stays liquid. |
 | `excessUsdc()` | 1796 | `min(U + S − B, U + A − B)`, each floored at 0, capped at `U`: USDC above the principal that a pool loss does not need. |
 | `skimExcessUsdc(amount)` | 1811 | Sends at most `excessUsdc()` to `yieldRecipient`; `type(uint256).max` sends all of it; otherwise `NoExcessUsdc`. |
-| `setAaveEnabled(bool)` | 1891 | Gate on new supplies. |
-| `setLiquidReserveBps(bps)` | 1898 | `MIN_LIQUID_RESERVE_BPS` (10 %, `ReserveBpsTooLow`) to `MAX_LIQUID_RESERVE_BPS` (50 %, `ReserveBpsTooHigh`); `bps × M ≤ 10⁸` (`ReserveBandTooWide(bps, M)`). |
-| `setSupplyMultiplierBps(bps)` | 1908 | Above `10_000` (`MultiplierTooLow`); `r × bps ≤ 10⁸` (`ReserveBandTooWide(r, bps)`). Emits `SupplyMultiplierBpsSet(bps)`. |
-| `setYieldRecipient(addr)` | 1915 | Non-zero. |
-| `fundTreasury(amount)` | 1829 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
-| `migrateTreasury(successor)` | 1848 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
-| `transferOwnership(addr)` | 1923 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
+| `setAaveEnabled(bool)` | 1890 | Gate on new supplies. |
+| `setLiquidReserveBps(bps)` | 1897 | `MIN_LIQUID_RESERVE_BPS` (10 %, `ReserveBpsTooLow`) to `MAX_LIQUID_RESERVE_BPS` (50 %, `ReserveBpsTooHigh`); `bps × M ≤ 10⁸` (`ReserveBandTooWide(bps, M)`). |
+| `setSupplyMultiplierBps(bps)` | 1907 | Above `10_000` (`MultiplierTooLow`); `r × bps ≤ 10⁸` (`ReserveBandTooWide(r, bps)`). Emits `SupplyMultiplierBpsSet(bps)`. |
+| `setYieldRecipient(addr)` | 1914 | Non-zero. |
+| `fundTreasury(amount)` | 1828 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
+| `migrateTreasury(successor)` | 1847 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
+| `transferOwnership(addr)` | 1922 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
-Helpers: `_pullFromAave(amount)` (`:2035`) reverts `InsufficientTreasury` if `amount` exceeds
-`A`, withdraws exactly `amount` and books it with `_bookPull` (`:2045`), which requires the
+Helpers: `_pullFromAave(amount)` (`:2035`), called with `amount ≤ A` only, withdraws exactly `amount` and books it with `_bookPull` (`:2043`), which requires the
 *received* delta to cover what had to arrive (`AaveWithdrawFailed`) and lowers `S` by the amount
 pulled, floored at 0. A pull may reach aUSDC above `S`: user principal is paid before yield.
 
 Views: `aUsdcBalance()`, `accruedYield()` = `A − S` floored at 0, `totalAssets()` = `U + A`
-(`:2057-2069`).
+(`:2055-2067`).
 
 ### 10.1 Access-control matrix
 
@@ -879,7 +878,7 @@ was written in, so the suite was read, not executed).
 | File | Focus |
 |---|---|
 | `AckiNackiBridgeAave.t.sol` | Constructor wiring (no bridge without AAVE), the supply in `deposit`, withdraw/harvest/emergency, the setters, ownership, `totalAssets` fuzz over `r` and `M`. |
-| `AckiNackiBridgeAaveBand.t.sol` | The band, one test per case of `aave-integration-spec.md` §9.1, named after it (TC-01..13, TC-23..26). |
+| `AckiNackiBridgeAaveBand.t.sol` | The band, one test per case of `aave-integration-spec.md` §9.1, named after it (TC-01..13, TC-23..31). |
 | `AckiNackiBridgeAaveInvariant.t.sol` | TC-14: a handler drives deposits, payouts, direct USDC, interest, a pool that refuses supplies or runs short, and every owner AAVE path; INV-1..3 hold after each call, and ST-1, ST-2, VT-1..3, HL-1, HL-2, HL-4 inside it. |
 | `AckiNackiBridgeAavePayout.t.sol` | `withdrawByProof` against a pool whose book and aToken balance disagree (ETH-28). |
 | `AckiNackiBridgeArbSepoliaAaveFork.t.sol` | Arbitrum Sepolia fork, run by `.woodpecker/solidity.yaml`: the Circle USDC market, the supply in `deposit` and the refill in `withdrawByProof`, a paused, frozen and capped reserve through the market's `PoolConfigurator`, a reserve with its liquidity borrowed out, interest, harvest, withdraw, emergency unwind, both deploy scripts (TC-15..20), and the live `0x3FB0…8638` accepted as `predecessor` (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |

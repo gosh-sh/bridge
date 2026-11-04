@@ -983,8 +983,7 @@ against the empty treasury it will submit successfully now.
 **Scaling.** Seed size to cover the burn(s) you plan to test. Default
 `test_deploy_and_withdraw_only.py` fires 1 USDC — mint 10 USDC once and
 you're good for the demo cycle. Excess USDC in the treasury is not lost:
-it stays available for future withdraws, and can optionally be swept to
-AAVE via `supplyToAave()` for yield.
+it stays available for future withdraws.
 
 ---
 

@@ -203,9 +203,13 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         _recordAnchor();
         _fillBridge();
         // U = 10, S = 90. A 20 USDC payout is short 10; the new book is 80,
-        // so the refill would pull 8 more.
+        // so the refill would pull 8 more. The aToken may credit a wei more
+        // than was supplied, which lowers `L` and raises the refill by as much.
         uint256 shortfall = 10 * UsdcTestLib.UNIT;
-        uint256 extra = 8 * UsdcTestLib.UNIT;
+        uint256 liquid = 100 * UsdcTestLib.UNIT - bridge.suppliedPrincipal();
+        if (liquid > shortfall) liquid = shortfall;
+        uint256 extra = 20 * UsdcTestLib.UNIT - liquid + 8 * UsdcTestLib.UNIT - shortfall;
+        assertApproxEqAbs(extra, 8 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "refill");
         deal(USDC, AUSDC, shortfall);
         bytes memory reason = _poolWithdrawRevertData(shortfall + extra);
 
@@ -235,7 +239,12 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
 
         _pay(20 * UsdcTestLib.UNIT, 1);
         _assertSolvent();
-        assertEq(usdc.balanceOf(address(bridge)), 8 * UsdcTestLib.UNIT, "target of the new book");
+        assertApproxEqAbs(
+            usdc.balanceOf(address(bridge)),
+            8 * UsdcTestLib.UNIT,
+            DRIFT_TOLERANCE,
+            "target of the new book"
+        );
 
         uint256 yield = bridge.accruedYield();
         uint256 take = yield / 2;
@@ -294,7 +303,9 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         assertApproxEqAbs(
             aBefore - bridge.aUsdcBalance(), payout - liquid + target, DRIFT_TOLERANCE, "pool pull"
         );
-        assertEq(usdc.balanceOf(address(bridge)), target, "target refilled");
+        assertApproxEqAbs(
+            usdc.balanceOf(address(bridge)), target, DRIFT_TOLERANCE, "target refilled"
+        );
     }
 
     /// @dev TC-20: both deploy scripts wire the market of 421614.

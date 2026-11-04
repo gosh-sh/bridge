@@ -267,8 +267,46 @@ contract AckiNackiBridgeAaveBandTest is AaveBridgeFixture {
         pool.setWithdrawLimit(2 * UNIT);
         vm.expectRevert(MockAavePool.NotEnoughAvailableLiquidity.selector);
         _pay(4 * UNIT, 1);
-        assertFalse(bridge.isNullifierUsed(1));
+        _assertUnpaid(1);
+    }
+
+    /// @dev TC-12: the pool holds less than the shortfall.
+    function test_tc12_poolHoldsLessThanTheShortfall() public {
+        _seed();
+        aUSDC.burnFrom(address(bridge), 7 * UNIT);
+        vm.expectRevert(AckiNackiBridge.InsufficientTreasury.selector);
+        _pay(4 * UNIT, 1);
+        _assertUnpaid(1);
+    }
+
+    /// @dev TC-12: the pool returns less than it was asked for, on the pull
+    ///      with a refill (want 3.6 > required 3) and on the bare pull
+    ///      (the position is exactly the shortfall).
+    function test_tc12_poolReturnsLessThanAsked() public {
+        _seed();
+        pool.setRedeemHaircut(4 * UNIT);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.AaveWithdrawFailed.selector, 36 * UNIT / 10, 0)
+        );
+        _pay(4 * UNIT, 1);
+        _assertUnpaid(1);
+
+        aUSDC.burnFrom(address(bridge), 6 * UNIT);
+        pool.setRedeemHaircut(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.AaveWithdrawFailed.selector, 3 * UNIT, 3 * UNIT - 1
+            )
+        );
+        _pay(4 * UNIT, 1);
+        _assertUnpaid(1);
+    }
+
+    function _assertUnpaid(uint256 nullifier) internal view {
+        assertFalse(bridge.isNullifierUsed(nullifier));
         assertEq(bridge.treasuryBalance(), 10 * UNIT);
+        assertEq(bridge.suppliedPrincipal(), 9 * UNIT);
+        assertEq(usdc.balanceOf(RECIPIENT), 0);
     }
 
     /// @dev WD-2 with USDC above the principal: `U` pays without a required
@@ -350,5 +388,158 @@ contract AckiNackiBridgeAaveBandTest is AaveBridgeFixture {
         assertEq(bridge.treasuryBalance(), 0);
         assertEq(successor.treasuryBalance(), 10 * UNIT);
         assertEq(usdc.balanceOf(address(successor)), 10 * UNIT);
+    }
+
+    // -----------------------------------------------------------------
+    // Branches no other test reaches (OWN-1, OWN-4, OWN-9..11)
+    // -----------------------------------------------------------------
+
+    /// @dev TC-27: harvest while the pool returns less than asked.
+    function test_tc27_harvestRevertsWhenThePoolPaysShort() public {
+        _seed();
+        aUSDC.accrueYield(address(bridge), 1 * UNIT);
+        pool.setRedeemHaircut(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.AaveWithdrawFailed.selector, 1 * UNIT, 1 * UNIT - 1
+            )
+        );
+        bridge.harvestYield(1 * UNIT);
+        assertEq(bridge.accruedYield(), 1 * UNIT);
+        assertEq(bridge.suppliedPrincipal(), 9 * UNIT);
+        assertEq(bridge.treasuryBalance(), 10 * UNIT);
+    }
+
+    /// @dev TC-28: `approve` returns false.
+    function test_tc28_migrateRevertsWhenApproveFails() public {
+        ShortSuccessor successor = _liquidCutover(0);
+        usdc.setApproveReturnsFalse(true);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.WithdrawTransferFailed.selector, address(successor), 10 * UNIT
+            )
+        );
+        bridge.migrateTreasury(address(successor));
+        assertEq(bridge.treasuryBalance(), 10 * UNIT);
+        assertEq(usdc.balanceOf(address(bridge)), 10 * UNIT);
+    }
+
+    /// @dev TC-28: the successor takes less than the book.
+    function test_tc28_migrateRevertsWhenTheSuccessorTakesLess() public {
+        ShortSuccessor successor = _liquidCutover(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.WithdrawTransferFailed.selector, address(successor), 10 * UNIT
+            )
+        );
+        bridge.migrateTreasury(address(successor));
+        assertEq(bridge.treasuryBalance(), 10 * UNIT);
+        assertEq(usdc.balanceOf(address(bridge)), 10 * UNIT);
+    }
+
+    /// @dev TC-29: the transfer to `yieldRecipient` returns false.
+    function test_tc29_collectorsRevertWhenTheTransferFails() public {
+        _seed();
+        aUSDC.accrueYield(address(bridge), 1 * UNIT);
+        usdc.mint(address(bridge), 2 * UNIT);
+        usdc.setTransferFailsTo(yieldSink);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.WithdrawTransferFailed.selector, yieldSink, 1 * UNIT
+            )
+        );
+        bridge.harvestYield(1 * UNIT);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.WithdrawTransferFailed.selector, yieldSink, 2 * UNIT
+            )
+        );
+        bridge.skimExcessUsdc(2 * UNIT);
+
+        assertEq(bridge.accruedYield(), 1 * UNIT);
+        assertEq(bridge.excessUsdc(), 2 * UNIT);
+        assertEq(bridge.suppliedPrincipal(), 9 * UNIT);
+        assertEq(bridge.treasuryBalance(), 10 * UNIT);
+    }
+
+    /// @dev TC-30: `fundTreasury(0)`, from the owner and from the predecessor.
+    function test_tc30_fundTreasuryZeroReverts() public {
+        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
+        bridge.fundTreasury(0);
+
+        AckiNackiBridge successor = new AckiNackiBridge(
+            address(new MockBlockHeaderOracle()),
+            address(usdc),
+            address(pool),
+            address(aUSDC),
+            VerifyBlockConfigLib.with(
+                bridge.primaryVerifier(),
+                bridge.fallbackVerifier(),
+                bridge.layerHashesVerifier(),
+                BK_SET,
+                0xA10C
+            ),
+            VerifyBlockConfigLib.withWithdrawAfter(
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)),
+                DAPP_FR,
+                ACC_FR,
+                address(bridge)
+            )
+        );
+        vm.prank(address(bridge));
+        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
+        successor.fundTreasury(0);
+    }
+
+    /// @dev TC-31: `withdrawFromAave(max)` pulls `S` over interest and `A`
+    ///      under a loss (A = 1 + 36 − 30 = 7).
+    function test_tc31_withdrawMaxPullsTheBackedPrincipal() public {
+        _seed();
+        aUSDC.accrueYield(address(bridge), 1 * UNIT);
+        bridge.withdrawFromAave(type(uint256).max);
+        assertEq(usdc.balanceOf(address(bridge)), 10 * UNIT, "pulled S");
+        assertEq(bridge.aUsdcBalance(), 1 * UNIT, "interest stays");
+        assertEq(bridge.suppliedPrincipal(), 0);
+
+        _deposit(user, 30 * UNIT);
+        assertEq(bridge.suppliedPrincipal(), 36 * UNIT);
+        aUSDC.burnFrom(address(bridge), 30 * UNIT);
+        bridge.withdrawFromAave(type(uint256).max);
+        assertEq(bridge.aUsdcBalance(), 0, "pulled A");
+        assertEq(bridge.suppliedPrincipal(), 29 * UNIT, "the loss stays booked for the write-off");
+    }
+
+    /// @dev `yieldRecipient` is never zero, so the collectors need no check.
+    function test_yieldRecipientCannotBeZero() public {
+        vm.expectRevert(AckiNackiBridge.InvalidRecipient.selector);
+        bridge.setYieldRecipient(address(0));
+    }
+
+    /// @dev Paused bridge with its book liquid and a successor that takes
+    ///      `shortBy` less than it is offered.
+    function _liquidCutover(uint256 shortBy) internal returns (ShortSuccessor successor) {
+        _seed();
+        bridge.pause();
+        bridge.withdrawFromAave(type(uint256).max);
+        successor = new ShortSuccessor(address(bridge), usdc, shortBy);
+    }
+}
+
+/// @notice Names the bridge as its predecessor and takes `shortBy` less than
+///         `fundTreasury` is called with.
+contract ShortSuccessor {
+    address public immutable predecessor;
+    MockERC20 internal immutable usdc;
+    uint256 internal immutable shortBy;
+
+    constructor(address _predecessor, MockERC20 _usdc, uint256 _shortBy) {
+        predecessor = _predecessor;
+        usdc = _usdc;
+        shortBy = _shortBy;
+    }
+
+    function fundTreasury(uint256 amount) external {
+        usdc.transferFrom(msg.sender, address(this), amount - shortBy);
     }
 }

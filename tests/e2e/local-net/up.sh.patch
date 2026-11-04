@@ -1,6 +1,6 @@
 --- a/tests/dexdo/up.sh
 +++ b/tests/dexdo/up.sh
-@@ -101,12 +101,38 @@
+@@ -101,12 +101,40 @@
    i=0
    until [ "$(docker compose -f "$COMPOSE" ps -q node$n 2>/dev/null | xargs -r docker inspect -f '{{.State.Running}}' 2>/dev/null)" = "true" ]; do
      i=$((i+1))
@@ -8,10 +8,12 @@
 +    # is never restarted by docker: a restart policy only covers a container that
 +    # ran for 10 s. Start it again now rather than leaving it to the full-stack
 +    # `up -d` minutes later, after which it would have to catch up with a network
-+    # that already moved on.
++    # that already moved on. Start every stopped node together: docker DNS serves
++    # only running containers, so two dead seeds (node0 needs node2, node2 needs
++    # node0) restarted one at a time each fail on the other's name.
 +    if [ $((i % 15)) -eq 0 ]; then
-+      echo "    node$n not running after ${i}s - starting it again"
-+      docker compose -f "$COMPOSE" up -d node$n >/dev/null 2>&1 || true
++      echo "    node$n not running after ${i}s - starting the stopped nodes again"
++      docker compose -f "$COMPOSE" up -d node0 node1 node2 node3 node4 >/dev/null 2>&1 || true
 +    fi
      if [ "$i" -ge 120 ]; then echo "!! node$n not running after 120s" >&2; break; fi
      sleep 1
@@ -33,13 +35,13 @@
 +    if [ "$i" -ge 120 ]; then echo "!! node$n does not listen on udp 12000 after 60s" >&2; break; fi
 +    sleep 0.5
 +  done
-+  echo "    node$n listens on udp 12000 ($(date -u +%T))"
++  [ "$i" -ge 120 ] || echo "    node$n listens on udp 12000 ($(date -u +%T))"
 +done
 +
  # block_manager now attaches to a settled network -> clean DNS sandbox, no wedge.
  echo "==> [4c/5] up block_manager on the settled network, then q_server + nginx"
  docker compose -f "$COMPOSE" up -d block_manager
-@@ -219,6 +245,25 @@
+@@ -219,6 +247,25 @@
    sleep 5
  done
  

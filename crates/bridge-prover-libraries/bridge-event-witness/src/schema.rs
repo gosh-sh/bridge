@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// On-disk schema version. Bump whenever the JSON shape changes in a
 /// non-backwards-compatible way.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Top-level export record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +96,9 @@ pub struct WithdrawalInitiated {
     pub amount_hex: String,
     /// 4 BE bytes (uint32).
     pub token_id: u32,
+    /// 20 BE bytes (uint160): the EVM bridge the AN bridge bound this
+    /// withdrawal to (`setEvmBridge`). Only that bridge pays the proof.
+    pub dst_bridge_hex: String,
     /// 20 BE bytes (Ethereum address). Variable-length recipient support
     /// (up to 64 bytes) is documented as future work in the circuit's
     /// `EVENT_LAYOUT_COMPARISON.md` §5.6.

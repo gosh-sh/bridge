@@ -133,7 +133,8 @@ contract AckiNackiBridgePauseTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: seedAnchor,
-            anchorLayer: 1
+            anchorLayer: 1,
+            dstBridge: uint256(uint160(address(bridge)))
         });
     }
 

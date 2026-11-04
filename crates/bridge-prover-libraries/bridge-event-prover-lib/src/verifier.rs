@@ -11,9 +11,10 @@ use bridge_prover_lib::transcript::TranscriptKind;
 
 /// Verify a Circuit 4 proof against its public instances (Blake2b transcript).
 ///
-/// Instances layout (length `TOTAL_PUBLIC_INPUTS = 11`):
+/// Instances layout (length `TOTAL_PUBLIC_INPUTS = 12`):
 ///   `[token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-///   sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]`
+///   sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer,
+///   dst_bridge]`
 ///
 /// The instance count is checked implicitly by `verify_proof` against the
 /// VK shape.

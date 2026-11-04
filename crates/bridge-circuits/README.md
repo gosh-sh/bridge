@@ -70,11 +70,11 @@ Block-finalization proofs feed the contract a rolling commitment to Acki Nacki h
 
 The bridge uses ZK proofs to spare the Ethereum contract from implementing Acki Nacki's crypto primitives natively — BLS-12-381 pairings on the supermajority, the dense Poseidon chain over layer hashes, SHA-256 block-ID Merkle paths — none of which are cheap (or, in BLS-12-381's case, possible without a precompile) in Solidity. There is **no anonymity goal**: every public input the circuits expose is a value the contract already needs to mirror Acki Nacki's `GlobalHistoryData`. So Circuit 4 publishes exactly what the verifier needs to recognise the event, and nothing more.
 
-Concretely, Circuit 4 publishes a single `final_root` (slot 9 of the 11 public instances) — the layer-hash it reaches by climbing the dense chain from the event's block leaf. Slot 10 carries the 1-indexed `anchor_layer` (range-checked `1..=MAX_ANCHOR_LAYER = 10`) so the on-chain verifier knows which layer window to check `final_root` against.
+Concretely, Circuit 4 publishes a single `final_root` (slot 9 of the 12 public instances) — the layer-hash it reaches by climbing the dense chain from the event's block leaf. Slot 10 carries the 1-indexed `anchor_layer` (range-checked `1..=MAX_ANCHOR_LAYER = 10`) so the on-chain verifier knows which layer window to check `final_root` against. Slot 11 carries `dst_bridge`, the EVM bridge the event body names (bytes `[58..78)`), so a proof pays out only on that bridge.
 
 Recognising `final_root` is the verifier's job, off-circuit. Any entity that mirrors Acki Nacki's `GlobalHistoryData` (the Ethereum contract via `verifyBlock` → `appendLayer`, the off-chain verifier daemon via its own state) holds the same layer-hash windows the producer emits. Verification reduces to: **does `final_root` appear among the layer hashes in that mirrored history?** Membership in that set is what proves the event was committed to a finalised block.
 
-The public-instance vector is fixed at `11` and the Circuit 4 VK is **independent of `W`** — no per-`W` feature flag, no separate test/prod shapes.
+The public-instance vector is fixed at `12` and the Circuit 4 VK is **independent of `W`** — no per-`W` feature flag, no separate test/prod shapes.
 
 ---
 
@@ -146,11 +146,12 @@ The contract:
 
 1. **`verifyBlock`** — accepts a (Circuit 1A/1B + Circuit 2) bundle per thinned key block; verifies each proof; cross-checks shared `block_id` and `bk_set_poseidon_hash`; calls `appendLayer(L, root, blockHeight)` for each layer the bundle publishes; advances `storedLastSeenBlockSeqNo`. BK-set rotations are applied separately by `applyBkSetUpdate`, which the relayer calls with a Circuit 1A/1B attestation of the rotation block, its opened L2/L3 leaves and three SHA-256 siblings — `storedBkSetCommitment` is rolled forward there, not in `verifyBlock`.
 
-2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 11 public-instance Frs. The contract verifies the SNARK, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan. On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
+2. **`withdrawByProof`** — accepts one Circuit 4 proof plus its 12 public-instance Frs. The contract verifies the SNARK, requires `pub[11]` (`dst_bridge`) to be its own address, range-checks `pub[10]` (the 1-indexed `anchorLayer`) to `1..=MAX_LAYER_HASHES`, then checks that `pub[9]` (the `final_root`) appears in **only** `layerWindows[anchorLayer].data[i]` — a single-window scan. On success: consumes `pub[8]` (the `nullifier`), pays out to `recipient`, and emits the payout event.
 
    ```solidity
-   function withdrawByProof(bytes calldata proof4, uint256[11] calldata pub4) external {
+   function withdrawByProof(bytes calldata proof4, uint256[12] calldata pub4) external {
        require(verifier.verify(vk4, proof4, pub4), "proof");
+       require(pub4[11] == uint160(address(this)), "dstBridge");
        uint8 anchorLayer = uint8(pub4[10]);
        require(anchorLayer != 0 && anchorLayer <= MAX_LAYER_HASHES, "anchorLayer");
        bytes32 finalRoot = bytes32(pub4[9]);

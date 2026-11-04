@@ -84,6 +84,7 @@ struct DirArgs {
 enum Cmd {
     /// Read-only: list confirmed Deposit events from `--start`.
     Watch {
+        /// EVM JSON-RPC. Must serve `eth_getLogs` back to `--from-block`.
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -108,6 +109,10 @@ enum Cmd {
     },
     /// Listen for one depositId, prove it, write the operands to `--out-dir`.
     ProveOne {
+        /// EVM JSON-RPC; `deposit-prover` uses it too unless `--prover-rpc-url`
+        /// is set. Must serve `eth_getLogs` and transaction receipts for at
+        /// least the last 7 days (30 preferred). One that keeps ~10 000 blocks
+        /// cannot prove an older deposit.
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -148,7 +153,9 @@ enum Cmd {
         /// Prebuilt `export_blake2b_proof` example.
         #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
         export_blake2b_proof_bin: PathBuf,
-        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`).
+        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`). Must
+        /// serve the receipts of the deposit's block under the same 7-day rule
+        /// as `--rpc-url`.
         #[arg(long)]
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
@@ -174,6 +181,11 @@ enum Cmd {
     Daemon {
         #[command(flatten)]
         dirs: DirArgs,
+        /// EVM JSON-RPC; `deposit-prover` uses it too unless `--prover-rpc-url`
+        /// is set. Must serve `eth_getLogs` and transaction receipts for at
+        /// least the last 7 days (30 preferred), and back to `--from-block` on
+        /// a start without a state file. One that keeps ~10 000 blocks cannot
+        /// catch up after a stall.
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -202,6 +214,9 @@ enum Cmd {
         /// Prebuilt `export_blake2b_proof` example.
         #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
         export_blake2b_proof_bin: PathBuf,
+        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`). Must
+        /// serve the receipts of the deposit's block under the same 7-day rule
+        /// as `--rpc-url`.
         #[arg(long)]
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]

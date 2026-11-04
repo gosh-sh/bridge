@@ -9,7 +9,8 @@ logs go to stderr.
                             deployL2Verifier unless getL2Verifier already records one for
                             that parent (the bridge refuses the same code twice, 238), then
                             VERIFIER, VERIFIER_PARENT, VERIFIER_L2/L1/ROLLUP (its getConfig)
-  trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true); TRUSTED=true|false read back
+  trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true) and setEvmBridge(421614,
+                            bridge); TRUSTED=true|false and EVM_BRIDGE (0x-hex) read back
   lightclient               deployLightClient(owner pubkey, 11155111, 0, 0): the Sepolia light
                             client, its committee unset (lc-bootstrap sets it once); LC (as
                             dapp::account), LC_L1, LC_OWNER and OWNER_PUBKEY read back
@@ -158,7 +159,11 @@ def main():
             owner_call("setTrustedL1Bridge", {"chainId": str(ARB_SEPOLIA), "l1Bridge": args[0], "allowed": True})
             trusted = until(lambda: truth(getter("isTrustedL1Bridge",
                                                  {"chainId": str(ARB_SEPOLIA), "l1Bridge": args[0]}).get("value0")))
-            answer = [f"TRUSTED={str(bool(trusted)).lower()}"]
+            owner_call("setEvmBridge", {"dstChainId": str(ARB_SEPOLIA), "evmBridge": args[0]})
+            want = int(args[0], 16)
+            bound = until(lambda: (lambda b: b if b == want else None)(
+                uint(getter("getEvmBridge", {"dstChainId": str(ARB_SEPOLIA)}).get("value0"))))
+            answer = [f"TRUSTED={str(bool(trusted)).lower()}", f"EVM_BRIDGE={bound or 0:#042x}"]
         elif cmd == "msig" and not args:
             gql = be.GqlClient(GRAPHQL_URL)
             keys = os.path.join(WORK_DIR, "msig_arbitrum_e2e.keys.json")

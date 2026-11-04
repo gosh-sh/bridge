@@ -71,16 +71,17 @@ contract ShplonkVkDigestPinDerivationTest is Test {
         );
     }
 
-    /// @dev Circuit 4 withdrawal: 11 inner PIs (tokenId, amount, recipientHi/Lo,
-    ///      dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot, anchorLayer).
+    /// @dev Circuit 4 withdrawal: 12 inner PIs (tokenId, amount, recipientHi/Lo,
+    ///      dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot, anchorLayer,
+    ///      dstBridge).
     function test_withdrawal_pinnedDigestMatchesCalldata() public view {
         bytes memory cd =
             vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
         require(cd.length > 0, "missing BridgeWithdrawalAggregatorVerifier_calldata.bin");
         assertEq(
-            _word(cd, ACC + 11),
+            _word(cd, ACC + 12),
             ShplonkDeployLib.WITHDRAWAL_VK_DIGEST,
-            "WITHDRAWAL_VK_DIGEST must equal word 23 of BridgeWithdrawalAggregatorVerifier_calldata.bin"
+            "WITHDRAWAL_VK_DIGEST must equal word 24 of BridgeWithdrawalAggregatorVerifier_calldata.bin"
         );
     }
 

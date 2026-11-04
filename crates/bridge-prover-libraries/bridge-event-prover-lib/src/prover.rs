@@ -7,10 +7,10 @@
 //! Two responsibilities:
 //!   1. **Input conversion** — deserialize the witness JSON, hex-decode cell
 //!      records, and assemble a `BridgeEventProveCircuit` instance.
-//!   2. **Public instance derivation** — build the 11-slot vector `[token_id,
+//!   2. **Public instance derivation** — build the 12-slot vector `[token_id,
 //!      amount, recipient_hi, recipient_lo, dst_chain_id, sender_acc_fr,
-//!      dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` that the
-//!      verifier checks.
+//!      dapp_fr, acc_fr, nullifier, final_root, anchor_layer, dst_bridge]`
+//!      that the verifier checks.
 //!
 //! ### Anchor binding contract
 //!
@@ -26,10 +26,10 @@ use anyhow::{bail, Context, Result};
 use bridge_event_prove_circuit::{
     boc_helper::BocFlattenData,
     bridge_event_prove_circuit::{
-        be_bytes_to_fr, BridgeEventProveCircuit, EVENT_AMOUNT_END, EVENT_AMOUNT_START,
-        EVENT_DST_CHAIN_ID_END, EVENT_DST_CHAIN_ID_START, MAX_ANCHOR_LAYER, MAX_EVENTS_TREE_DEPTH,
-        RECIPIENT_HI_END, RECIPIENT_HI_START, RECIPIENT_LO_END, RECIPIENT_LO_START,
-        TOTAL_PUBLIC_INPUTS,
+        be_bytes_to_fr, BridgeEventProveCircuit, BODY_CELL_LEN, EVENT_AMOUNT_END,
+        EVENT_AMOUNT_START, EVENT_DST_BRIDGE_END, EVENT_DST_BRIDGE_START, EVENT_DST_CHAIN_ID_END,
+        EVENT_DST_CHAIN_ID_START, MAX_ANCHOR_LAYER, MAX_EVENTS_TREE_DEPTH, RECIPIENT_HI_END,
+        RECIPIENT_HI_START, RECIPIENT_LO_END, RECIPIENT_LO_START, TOTAL_PUBLIC_INPUTS,
     },
     test_helpers::{decode_sender_account_id_from_cell, nullifier_native},
 };
@@ -276,18 +276,26 @@ pub fn build_proof_inputs(
     let anchor_layer_u8 = u8::try_from(anchor_layer).expect("checked against MAX_ANCHOR_LAYER");
     let anchor_layer_fr = Fr::from(u64::from(anchor_layer));
 
-    // 11-slot public-instance layout (see
+    // 12-slot public-instance layout (see
     // `bridge-event-prove-circuit::bridge_event_prove_circuit` PUB_* constants):
     //   [0] token_id, [1] amount, [2] recipient_hi, [3] recipient_lo,
     //   [4] dst_chain_id, [5] sender_acc_fr, [6] dapp_fr, [7] acc_fr,
-    //   [8] nullifier, [9] final_root, [10] anchor_layer.
+    //   [8] nullifier, [9] final_root, [10] anchor_layer, [11] dst_bridge.
     let body = &entries[1].cell_repr_data;
+    if body.len() != BODY_CELL_LEN {
+        bail!(
+            "entries[1] body cell is {} bytes, expected {BODY_CELL_LEN} (a WithdrawalInitiated \
+             without dstBridge was emitted by a bridge older than this prover)",
+            body.len(),
+        );
+    }
     let recipient_payload = &entries[2].cell_repr_data;
     let sender_payload = &entries[3].cell_repr_data;
 
     let token_id_fr = derive_token_id_fr(&entries[1])?;
     let amount_fr = be_bytes_to_fr(&body[EVENT_AMOUNT_START..EVENT_AMOUNT_END]);
     let dst_chain_id_fr = be_bytes_to_fr(&body[EVENT_DST_CHAIN_ID_START..EVENT_DST_CHAIN_ID_END]);
+    let dst_bridge_fr = be_bytes_to_fr(&body[EVENT_DST_BRIDGE_START..EVENT_DST_BRIDGE_END]);
     let recipient_hi_fr = be_bytes_to_fr(&recipient_payload[RECIPIENT_HI_START..RECIPIENT_HI_END]);
     let recipient_lo_fr = be_bytes_to_fr(&recipient_payload[RECIPIENT_LO_START..RECIPIENT_LO_END]);
     let sender_account_id = decode_sender_account_id_from_cell(sender_payload);
@@ -317,6 +325,7 @@ pub fn build_proof_inputs(
     public_instances.push(nullifier_fr);
     public_instances.push(final_root_fr);
     public_instances.push(anchor_layer_fr);
+    public_instances.push(dst_bridge_fr);
 
     let circuit = BridgeEventProveCircuit::new(
         entries,
@@ -362,9 +371,10 @@ fn derive_token_id_fr(body: &BocFlattenData) -> Result<Fr> {
 /// Output of a Circuit 4 proof generation pass.
 ///
 /// `proof_bytes` is the SHPLONK/Blake2b-encoded proof; `public_instances`
-/// is the 11-slot vector
+/// is the 12-slot vector
 /// `[token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-/// sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]` — what
+/// sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer,
+/// dst_bridge]` — what
 /// the verifier (or the on-chain bridge) checks against.
 #[derive(Clone)]
 pub struct EventProofOutput {

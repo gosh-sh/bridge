@@ -5,7 +5,7 @@ import "../../src/IBridgeWithdrawalVerifier.sol";
 
 /// @title MockBridgeWithdrawalVerifier
 /// @notice Configurable mock for `IBridgeWithdrawalVerifier` (Circuit 4
-///         single-final-root layout — 11 public inputs). Used by the
+///         single-final-root layout — 12 public inputs). Used by the
 ///         `AckiNackiBridge.withdrawByProof` tests to exercise the entrypoint
 ///         and the `_nullifiers` / payout plumbing without the (still
 ///         R15-stubbed) halo2 → gnark pipeline for Circuit 4.

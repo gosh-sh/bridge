@@ -138,6 +138,9 @@ impl BalanceCheck {
 ///     and `getTotalBridged(3)` has headroom for the amount (`burned` is
 ///     not above `minted`, and `amount` fits in `minted - burned`). Both
 ///     are skipped once the burn is on the wire.
+/// 6c. While the burn is still to be sent: `getEvmBridge(--to-chain)` is
+///     `--bridge-address`. The burn names that bridge and only it pays the
+///     proof; an unset one would have the burn refunded with 239.
 /// 7. Multisig ECC[3] balance ≥ amount (preflight, not guarantee — the chain
 ///    has the final word between check and send). Skipped, and only skipped,
 ///    when `balance_check` says the burn is already on the wire: see
@@ -147,6 +150,7 @@ pub async fn run(
     from: &FromAddress,
     from_keys: &Path,
     to: &ToAddress,
+    evm_bridge: alloy::primitives::Address,
     amount: &UsdcAmount,
     gql_endpoint: &str,
     usdc_bridge_account_id_hex: &str,
@@ -314,6 +318,31 @@ pub async fn run(
                      outstanding={outstanding} micro-USDC; withdrawal of {} would be refunded \
                      without a burn",
                     to.chain_id, amount.0
+                ),
+                source: None,
+            });
+        }
+        // 6c. The EVM bridge the burn will be bound to.
+        let bound =
+            call_get_evm_bridge(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id).await?;
+        if bound != evm_bridge {
+            let named = if bound == alloy::primitives::Address::ZERO {
+                format!(
+                    "names no EVM bridge for chain {} (getEvmBridge is unset): initiateWithdrawal \
+                     would refund the burn with 239",
+                    to.chain_id
+                )
+            } else {
+                format!(
+                    "binds withdrawals to chain {} to the EVM bridge {bound} \
+                     (getEvmBridge), and only that bridge pays them",
+                    to.chain_id
+                )
+            };
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} {named}, not --bridge-address \
+                     {evm_bridge}. Nothing was burnt."
                 ),
                 source: None,
             });
@@ -694,6 +723,41 @@ async fn call_get_deposit_limits(
         field("maxTransfer")?,
         field("maxTvl")?,
         field("outstanding")?,
+    ))
+}
+
+/// Read the EVM bridge the AN bridge binds withdrawals to `chain_id` to;
+/// zero when it names none.
+async fn call_get_evm_bridge(
+    ctx: &Arc<ClientContext>,
+    bridge_legacy: &str,
+    bridge_boc: &str,
+    chain_id: u64,
+) -> CliResult<alloy::primitives::Address> {
+    let out = call_bridge_getter(
+        ctx,
+        bridge_legacy,
+        bridge_boc,
+        "getEvmBridge",
+        json!({"dstChainId": chain_id.to_string()}),
+    )
+    .await?;
+    let value = out["value0"]
+        .as_str()
+        .and_then(|s| match s.strip_prefix("0x") {
+            Some(hex) => alloy::primitives::U256::from_str_radix(hex, 16).ok(),
+            None => alloy::primitives::U256::from_str_radix(s, 10).ok(),
+        })
+        .filter(|v| v.bit_len() <= 160)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "run_tvm getEvmBridge on the Acki Nacki bridge {bridge_legacy}: not a uint160: \
+                 {out}. A bridge without getEvmBridge predates this CLI."
+            ),
+            source: None,
+        })?;
+    Ok(alloy::primitives::Address::from_slice(
+        &value.to_be_bytes::<32>()[12..],
     ))
 }
 
@@ -2287,7 +2351,7 @@ fn available_bytes(path: &Path) -> Option<u64> {
 pub(crate) const WITHDRAW_VERIFIER_BIN: &str = "BridgeWithdrawalAggregatorVerifier.bin";
 
 /// The reference SHPLONK calldata blob generated alongside the verifier by
-/// `export-inner-aggregator`. Word 23 (0-indexed) is the Poseidon digest of
+/// `export-inner-aggregator`. Word 24 (0-indexed) is the Poseidon digest of
 /// the inner-circuit VK — the same value the adapter's `vkDigest()`
 /// immutable is pinned to. Preflight compares the two so a wrong pin
 /// (adapter constructed with the wrong digest for this verifier) is
@@ -2296,11 +2360,11 @@ pub(crate) const WITHDRAW_VERIFIER_CALLDATA_BIN: &str =
     "BridgeWithdrawalAggregatorVerifier_calldata.bin";
 
 /// Byte offset of the withdrawal-adapter VK digest inside
-/// `WITHDRAW_VERIFIER_CALLDATA_BIN`: 12 KZG accumulator limbs + 11
+/// `WITHDRAW_VERIFIER_CALLDATA_BIN`: 12 KZG accumulator limbs + 12
 /// re-exposed Circuit-4 public inputs, each a 32-byte field element.
 /// Matches `ShplonkAggregatorVerifierBase`'s runtime check position for
-/// the withdrawal adapter (word `12 + N` with N=11).
-const WITHDRAW_VK_DIGEST_OFFSET: usize = (12 + 11) * 32;
+/// the withdrawal adapter (word `12 + N` with N=12).
+const WITHDRAW_VK_DIGEST_OFFSET: usize = (12 + 12) * 32;
 
 /// The verifier source `aggregate-proof` self-checks its output against; it
 /// joins `{name}.sol` onto `--verifiers-dir`.
@@ -2389,13 +2453,14 @@ pub fn expected_verifier_runtime(bin: &[u8]) -> CliResult<&[u8]> {
 }
 
 /// Extract the withdrawal-adapter VK digest from the reference
-/// `_calldata.bin`. Layout is `12 KZG accumulator limbs + 11 re-exposed
+/// `_calldata.bin`. Layout is `12 KZG accumulator limbs + 12 re-exposed
 /// Circuit-4 public inputs + digest + proof`, each field element 32 bytes
-/// (big-endian, Solidity ABI); the digest lives at word 23.
+/// (big-endian, Solidity ABI); the digest lives at word 24.
 ///
-/// A file that is not exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes is a
-/// pre-binding build (3 648 B) or an unrelated blob. Word 23 of a 3 648 B
-/// file is a G1 coordinate and would compare as a digest.
+/// A file that is not exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes is an
+/// older build — 3 680 B before `dstBridge`, 3 648 B before the digest
+/// binding — or an unrelated blob. Word 24 of either older file is a
+/// proof coordinate and would compare as a digest.
 pub fn expected_withdraw_vk_digest(
     calldata: &[u8],
     path: &Path,
@@ -2404,9 +2469,10 @@ pub fn expected_withdraw_vk_digest(
         return Err(CliError::Preflight {
             reason: format!(
                 "{} is {} bytes; the withdrawal reference calldata is exactly \
-                 {WITHDRAWAL_CALLDATA_LEN} bytes, with the inner-VK digest at word 23. 3 648 \
-                 bytes is the pre-binding blob. Upgrade `--verifiers-dir` from the release \
-                 `verifiers/` directory.",
+                 {WITHDRAWAL_CALLDATA_LEN} bytes, with the inner-VK digest at word 24. 3 680 \
+                 bytes is the blob from before dstBridge, 3 648 bytes the one from before the \
+                 digest binding. Upgrade `--verifiers-dir` from the release `verifiers/` \
+                 directory.",
                 path.display(),
                 calldata.len(),
             ),
@@ -2603,7 +2669,7 @@ pub async fn check_bridge_deploy(
             //     constructor takes `(shplonkVerifier, _vkDigest)`. A pin
             //     that doesn't match this build's inner-circuit VK is a
             //     post-burn `WithdrawalProofRejected`. The reference digest
-            //     lives at word 23 of `BridgeWithdrawalAggregatorVerifier_calldata.bin`
+            //     lives at word 24 of `BridgeWithdrawalAggregatorVerifier_calldata.bin`
             //     shipped next to the verifier. The compare is one file read
             //     plus one `eth_call`. It runs in the withdrawal adapter; the
             //     base contract only stores `vkDigest`. The bridge holds the
@@ -2638,7 +2704,7 @@ pub async fn check_bridge_deploy(
                          the burn and the ~91 min anchor wait.\n\x20 Confirm the pin with `cast \
                          call {adapter} \"vkDigest()(bytes32)\"`. The bridge stores the adapter \
                          as an immutable, so a stale pin needs a new adapter and a new bridge. \
-                         The digest is word 23 of {}.",
+                         The digest is word 24 of {}.",
                         WITHDRAW_VERIFIER_CALLDATA_BIN,
                     ),
                     source: None,
@@ -2862,6 +2928,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &usdc_bridge_account_id,
@@ -2924,6 +2991,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &usdc_bridge_account_id,
@@ -2964,6 +3032,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &usdc_bridge_account_id,
@@ -2971,6 +3040,53 @@ pub(crate) mod tests {
         )
         .await
         .expect("amount == minted - burned is the last burn the cap still allows");
+    }
+
+    #[tokio::test]
+    async fn preflight_refuses_a_bridge_address_the_an_bridge_does_not_bind() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge_with(false, 1_000_000, 0).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+        let other = alloy::primitives::Address::repeat_byte(2);
+
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            other,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("a burn bound to another bridge is refused before it is sent");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("getEvmBridge"), "{msg}");
+        assert!(
+            msg.contains(&crate::test_chain::BOUND_EVM_BRIDGE.to_string()),
+            "names the bridge the AN side binds: {msg}"
+        );
+        assert!(msg.contains(&other.to_string()), "{msg}");
+        assert!(msg.contains("Nothing was burnt"), "{msg}");
     }
 
     #[tokio::test]
@@ -3000,6 +3116,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &usdc_bridge_account_id,
@@ -3057,6 +3174,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &usdc_bridge_account_id,
@@ -3131,6 +3249,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &bridge,
@@ -3155,6 +3274,7 @@ pub(crate) mod tests {
             &from,
             &keys,
             &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
             &amount,
             &node.url,
             &bridge,
@@ -3393,26 +3513,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn expected_withdraw_vk_digest_reads_word_23() {
-        // The offset is `(12 + 11) * 32`. The file must be the production
-        // 3 680 B blob; a 3 648 B pre-binding blob is refused even though
-        // word 23 is inside it.
+    fn expected_withdraw_vk_digest_reads_word_24() {
+        // The offset is `(12 + 12) * 32`. The file must be the production
+        // 3 712 B blob; the 3 680 B one from before dstBridge is refused even
+        // though word 24 is inside it.
+        assert_eq!(WITHDRAW_VK_DIGEST_OFFSET, 24 * 32);
         let mut ok = vec![0u8; WITHDRAWAL_CALLDATA_LEN];
-        // Distinguishable byte pattern at word 23.
+        // Distinguishable byte pattern at word 24.
         let want = [0xCDu8; 32];
         ok[WITHDRAW_VK_DIGEST_OFFSET..WITHDRAW_VK_DIGEST_OFFSET + 32].copy_from_slice(&want);
         let got =
-            expected_withdraw_vk_digest(&ok, Path::new("test.bin")).expect("word 23 is present");
+            expected_withdraw_vk_digest(&ok, Path::new("test.bin")).expect("word 24 is present");
         assert_eq!(got.as_slice(), &want[..]);
 
-        // Pre-binding length: word 23 exists as a proof coordinate, and must
+        // Older lengths: word 24 exists as a proof coordinate, and must
         // still be refused.
-        let stale = vec![0u8; 3_648];
-        let err = expected_withdraw_vk_digest(&stale, Path::new("stale.bin"))
-            .expect_err("a 3648-byte pre-binding calldata must be refused");
-        let msg = format!("{err}");
-        assert!(msg.contains("stale.bin"), "must name the artefact: {msg}");
-        assert!(msg.contains("word 23"), "must say which word: {msg}");
+        for stale_len in [3_680, 3_648] {
+            let stale = vec![0u8; stale_len];
+            let err = expected_withdraw_vk_digest(&stale, Path::new("stale.bin"))
+                .expect_err("an older withdrawal calldata must be refused");
+            let msg = format!("{err}");
+            assert!(msg.contains("stale.bin"), "must name the artefact: {msg}");
+            assert!(msg.contains("word 24"), "must say which word: {msg}");
+        }
     }
 
     #[test]
@@ -4848,7 +4971,7 @@ pub(crate) mod tests {
             &UsdcAmount(1_000_000),
         )
         .await
-        .expect("a non-zero pin that matches word 23 must pass");
+        .expect("a non-zero pin that matches word 24 must pass");
     }
 
     #[tokio::test]
@@ -4862,7 +4985,7 @@ pub(crate) mod tests {
         let mut bin = vec![0u8; 32];
         bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
-        // Reference calldata carries a non-zero digest at word 23; the
+        // Reference calldata carries a non-zero digest at word 24; the
         // mock's default vkDigest answer is ZERO_WORD, so they diverge.
         let mut calldata = vec![0u8; WITHDRAWAL_CALLDATA_LEN];
         calldata[WITHDRAW_VK_DIGEST_OFFSET..WITHDRAW_VK_DIGEST_OFFSET + 32]
@@ -4893,19 +5016,17 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_short_calldata_file_is_refused() {
-        // A 3 648 B pre-binding `_calldata.bin` is refused. That file is
-        // long enough for word 23, and the word is a proof coordinate.
-        // Treating it as a digest would let a pre-binding build compare
-        // against the adapter.
+        // A 3 680 B `_calldata.bin` from before dstBridge is refused. That
+        // file is long enough for word 24, and the word is a proof
+        // coordinate. Treating it as a digest would let an older build
+        // compare against the adapter.
         let dir = tempfile::TempDir::new().unwrap();
         let mut bin = vec![0u8; 32];
         bin.extend_from_slice(&[0x60, 0x80, 0x60, 0x40]);
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_BIN), &bin).unwrap();
-        // 3 648 B is the pre-binding withdrawal blob. It is long enough for
-        // word 23, and that word is a proof coordinate, not a digest.
         std::fs::write(dir.path().join(WITHDRAW_VERIFIER_CALLDATA_BIN), vec![
             0u8;
-            3_648
+            3_680
         ])
         .unwrap();
 
@@ -4918,15 +5039,15 @@ pub(crate) mod tests {
             &UsdcAmount(1_000_000),
         )
         .await
-        .expect_err("a 3648-byte pre-binding `_calldata.bin` must be refused");
+        .expect_err("a 3680-byte `_calldata.bin` from before dstBridge must be refused");
         let msg = format!("{err}");
         assert!(
             msg.contains(WITHDRAW_VERIFIER_CALLDATA_BIN),
             "must name the artefact: {msg}"
         );
         assert!(
-            msg.contains("3 648"),
-            "must name the pre-binding size: {msg}"
+            msg.contains("3 680"),
+            "must name the size of the previous build: {msg}"
         );
     }
 

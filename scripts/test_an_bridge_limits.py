@@ -25,6 +25,7 @@ BRIDGE = "0:" + "1a" * 32
 SENDER = "0:" + "ab" * 32
 TRANSFER = 50_000_000
 TVL = 10_000_000_000
+EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
 
 
@@ -110,6 +111,8 @@ class BridgeLimits(unittest.TestCase):
         self.call("constructor", {"pubkey": "0x" + self.keys["public"],
                                   "usdcWallet": "0:" + "00" * 32})
         self.seed(TVL - TRANSFER)
+        self.bind(1)
+        self.bind(2)
 
     def call(self, function, args=None, *, source=None, signed=False, expect=0,
              ecc=None, shell=1_000_000_000, header=None):
@@ -133,6 +136,13 @@ class BridgeLimits(unittest.TestCase):
     def seed(self, first, second=0):
         self.call("testSeed", {"voucherCode": self.voucher_code,
                                "first": str(first), "second": str(second)})
+
+    def bind(self, chain, bridge=EVM_BRIDGE):
+        self.call("setEvmBridge", {"dstChainId": str(chain), "evmBridge": str(bridge)},
+                  signed=True)
+
+    def evm_bridge(self, chain):
+        return int(self.call("getEvmBridge", {"dstChainId": str(chain)})["response"]["value0"], 0)
 
     def limits(self, chain=1):
         return self.call("getDepositLimits", {"chainId": str(chain)})["response"]
@@ -198,6 +208,19 @@ class BridgeLimits(unittest.TestCase):
         self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000, 236)
         self.assertEqual(int(self.limits(1)["outstanding"]), 0)
         self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
+
+    def test_a_chain_without_an_evm_bridge_refuses_before_any_limit(self):
+        self.assertEqual(self.evm_bridge(1), EVM_BRIDGE)
+        self.bind(1, 0)
+        self.assertEqual(self.evm_bridge(1), 0)
+        self.assertEqual(self.evm_bridge(2), EVM_BRIDGE)
+        self.refund(self.withdraw(TRANSFER + 1, chain=1), TRANSFER + 1, 1_000_000_000, 239)
+        self.refund(self.withdraw(1_000_000, chain=1), 1_000_000, 1_000_000_000, 239)
+        self.refund(self.withdraw(1_000_000, chain=7), 1_000_000, 1_000_000_000, 239)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL - TRANSFER)
+        self.bind(1)
+        self.assertTrue(self.withdraw(1_000_000, chain=1)["vm_success"])
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL - TRANSFER - 1_000_000)
 
     def test_owner_recovery_credits_only_the_source_chain_and_enforces_limits(self):
         self.seed(0, TVL)

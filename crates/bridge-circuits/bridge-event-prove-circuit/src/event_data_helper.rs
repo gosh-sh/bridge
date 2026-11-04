@@ -1,6 +1,6 @@
 //! Reader for the captured `WithdrawalInitiated` events fixture
 //! (`withdrawals.txt`), produced by
-//! `acki-nacki/tests/exchange/generate_withdrawals.py`.
+//! `crates/bridge-prover-libraries/python/capture_withdrawal_fixtures.py`.
 //!
 //! File format: repeating groups of 7 lines + 1 blank separator:
 //!   line 1: dst_chain_id   (decimal u256, fits in u128 for fixtures)

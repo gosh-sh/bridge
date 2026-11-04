@@ -20,8 +20,9 @@ that tree. When code and this text disagree, the code wins.
 The ETH → AN deposit path proves that a `Deposit` receipt sits in an Ethereum block with a given
 hash, but a proof cannot say whether that block is on Ethereum's canonical, finalized chain.
 `USDCBridge.finalizeDeposit` therefore only accepts deposits whose block hash is already in its
-`_acceptedBlockHash` map. Today that map is written by a trusted key (the owner) or an attester
-quorum. The light client replaces that writer with a proof of Ethereum finality.
+`_acceptedBlockHash` map. Today that map has three writers: a trusted key (the owner,
+`setAcceptedBlockHash`), the light client for Ethereum, and the Arbitrum block verifier for an
+Arbitrum chain. The light client replaces the owner for Ethereum with a proof of Ethereum finality.
 
 "Light client" is three things, and none of them lives on Ethereum:
 
@@ -42,9 +43,9 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client lets the replaced committee advance the head for the period it served, so an early `/updates` hand-off does not freeze it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is no longer a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale, so `EthKeccak_sold_fixes.patch` and `EthBeaconLightClient_encoding_and_gas_notes.patch` edit files the placing overwrites and no longer apply to anything. `scripts/check_eth_beacon_lc_sources.sh` does not look at the placed sources at all: it reads the two patch files and `contracts/an/EthKeccak.sol`, and asserts the patches touch only `contracts/exchange/` paths. Nothing checks the files `place.json` places. The whole-file `EthBeaconLightClient_rotate_decider.patch` was removed: it recreated their file from this one and would have unwired the sink and broken `onCodeUpgrade` decoding. |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client lets the replaced committee advance the head for the period it served, so an early `/updates` hand-off does not freeze it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the KZG accumulation decider of tvm-sdk PR #284, released in tvm-sdk tag `v3.1.0.an` (the tag `acki-nacki` `dev` pins). A node built against an older tvm-sdk accepts a rotate proof without checking the inner proofs it aggregates. |
-| `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`). After `disableOwnerAnchors` the bridge refuses `setAcceptedBlockHash` only for the light client's L1; L2s keep the owner writer. |
+| `USDCBridge` | `contracts/an/exchange/eccUSDCBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers besides the owner's `setAcceptedBlockHash`: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`), and `acceptBlockHashFromL2Verifier` (`eccUSDCBridge.sol:943`) from the `ArbitrumBlockVerifier` deployed for an Arbitrum chain (`deployL2Verifier`), which admits a block only once its parent-chain block is accepted. `disableOwnerAnchorsOn(chainId)` refuses `setAcceptedBlockHash` for one chain that has a light client or an L2 verifier (`:801-809`); every other chain keeps the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
 | Step prover | `eth-light-client-prover/examples/export_step_vk_blob.rs` | relayer host, child process of the daemon | The binary `--step-prover-bin` names (`LIGHT_CLIENT_STEP_PROVER_BIN`, prebuilt with `cargo build --release --example export_step_vk_blob`), started with the witness passed through environment variables (`generate_step` in `crates/eth-light-client-relayer/src/prover.rs`). |
 | Rotate prover | `eth-light-client-prover/examples/export_shard_snark.rs`, `export_step_snark.rs`, `rotate_tree_n8.rs` | relayer host, child processes of the daemon | Three stages, one binary each: `--shard-prover-bin` (`LIGHT_CLIENT_SHARD_PROVER_BIN`), `--step-snark-prover-bin` (`LIGHT_CLIENT_STEP_SNARK_PROVER_BIN`), `--rotate-prover-bin` (`LIGHT_CLIENT_ROTATE_PROVER_BIN`), all prebuilt with `cargo build --release --features aggregation --example <name>`. The shard stage proves the next committee in 8 shards, the step stage proves the hand-off update signed by the current committee, the tree stage aggregates the nine and writes the bundle `submitRotate` takes (`src/rotate.rs`). |
@@ -325,10 +326,10 @@ Slot table in §4.5.
 stateDiagram-v2
   direction LR
   state "USDCBridge anchors" as UBA {
-    OwnerAnchors: owner or attesters write _acceptedBlockHash
-    LightClientAnchors: LC writes L1; owner still writes L2
-    OwnerAnchors --> LightClientAnchors: disableOwnerAnchorsOn(chainId)
-    LightClientAnchors --> OwnerAnchors: bridge updateCode resets flags
+    OwnerAnchors: owner and proofs write _acceptedBlockHash
+    ProofAnchors: only proofs write that chain, LC on L1, verifier on Arbitrum
+    OwnerAnchors --> ProofAnchors: disableOwnerAnchorsOn(chainId)
+    ProofAnchors --> OwnerAnchors: bridge updateCode resets flags
   }
   state "EthBeaconLightClient committee" as LCC {
     OwnerRotation: owner may setCommitteeCommitment
@@ -340,7 +341,7 @@ stateDiagram-v2
 Before the flip the bridge owner can admit hashes directly. Afterwards,
 `setAcceptedBlockHash` rejects writes for the flipped chain with 225, while
 other chains keep their own settings. Routine writes then come from that
-chain's recorded light client, under the proof checks of its current code.
+chain's recorded light client or L2 verifier, under the proof checks of its current code.
 
 **Both owners remain trusted after the flip.** The bridge owner can still call
 `updateCode`, which clears the owner-anchor flags and recorded clients. The owner
@@ -358,12 +359,12 @@ After a bridge upgrade, restore configuration and repeat the flips intended for
 each chain, then check `isOwnerAnchorsEnabled(chainId)`.
 
 **Do not flip yet.** The flip is per chain: `disableOwnerAnchorsOn(chainId)` turns the
-owner writer off for one chain and needs a light client deployed for it (226 otherwise,
+owner writer off for one chain and needs a light client or an L2 verifier deployed for it (226 otherwise,
 227 for chain id 0), while the no-argument `disableOwnerAnchors` does the same for the
 chain deployed last. After an upgrade, `onCodeUpgrade` clears the installed code and
 every recorded client: `setLightClientCode` has to run first, then `deployLightClient`
 for each chain — it derives the address from the code salted with that chain id and
-records it, so pass the chain the existing client was initialized with. L2 source chains on the deposit allowlist keep `setAcceptedBlockHash`. The remaining
+records it, so pass the chain the existing client was initialized with. An Arbitrum chain with an `ArbitrumBlockVerifier` (`deployL2Verifier`, fed by `eth-lc-relayer arbitrum-anchors`) gets anchors from it and can be flipped; every other L2 source chain on the deposit allowlist keeps `setAcceptedBlockHash`. The remaining
 hole is L1 itself: the light client writes checkpoints of its `l1ChainId` and the spans
 ancestry fills between them (§3.4). Ancestry already fits the gas limit; the blocker is
 that accepted checkpoints sit two or more epochs apart, beyond the reach of one span, and
@@ -530,7 +531,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 | Submit cadence | one `submitUpdate` per Ethereum epoch (6.4 min); head lags Ethereum finality by about one epoch |
 | Period hop | every 8192 slots, about 27.3 h |
 | Contract gas | about 0.57 shell per accepted update on shellnet; fund ahead of that burn |
-| Proven-hash window | one year of Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). Hashes older than `head - 1y` are not `isProven`, are deleted from the FIFO (128/tx), and the sink is told `forgetBlockHashFromLightClient` (`USDCBridge_forget_block_hash_from_light_client.patch`). |
+| Proven-hash window | one year of Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). Hashes older than `head - 1y` are not `isProven`, are deleted from the FIFO (128/tx), and the sink is told `forgetBlockHashFromLightClient` (`contracts/an/exchange/eccUSDCBridge.sol:877`, called from `exchange/EthBeaconLightClient.sol:686`). |
 | Daemon memory at rest | about 14 GB of page cache, the proof is the peak |
 
 ## 6. Verifying a deployment
@@ -563,8 +564,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 - Any change to the step circuit changes `VK_BLOB`; the contract is upgraded in place with
   `updateCode` (`EthBeaconLightClient.sol`), which carries head, committee and the one-year
   proven FIFO across the upgrade (this encoding is not compatible with the old
-  `mapping(uint256 => bool)`). The tvm-sdk opcode fixtures and the acki-nacki patch must be re-emitted
-  with the same blob (`scripts/check_rotate_vkblob_accumulator.sh`,
-  `scripts/check_eth_beacon_lc_sources.sh`).
+  `mapping(uint256 => bool)`). The tvm-sdk opcode fixtures must be re-emitted with the same blob
+  (`scripts/check_rotate_vkblob_accumulator.sh`).
 - Public beacon providers differ in what they serve; a production deployment wants its own
   beacon node with light-client data enabled.

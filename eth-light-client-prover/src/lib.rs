@@ -13,6 +13,7 @@ pub mod committee;
 pub mod decode;
 pub mod execution;
 pub mod fork;
+pub mod key_cache;
 pub mod live_witness;
 pub mod mainnet;
 pub mod poseidon_transcript;

@@ -16,6 +16,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The daemons' own logs go to `--log-dir` as well as stdout (bridge-audit#132).
 tracing-appender = "0.2"
 hex = "0.4"
+# sha256 of the rotate VK blob, checked against the pin before `submitRotate`.
+sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 fs2 = "0.4"

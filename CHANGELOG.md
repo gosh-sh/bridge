@@ -120,9 +120,62 @@ assigns it when the release is tagged.
   and `EXPECTED_BRIDGE_COMMIT` is the commit of the image. `EXPECTED_RELAYER_SHA256` and
   `EXPECTED_AGGREGATE_PROOF_SHA256` are optional. The layout and the migration are in
   `docker/README.md`.
+- `eth-lc-relayer daemon` proves the committee rotate itself (bridge-audit#145). With rotate on
+  (the default) it needs two more prover binaries beside `--rotate-prover-bin`:
+  `--shard-prover-bin` / `LIGHT_CLIENT_SHARD_PROVER_BIN` (`export_shard_snark`) and
+  `--step-snark-prover-bin` / `LIGHT_CLIENT_STEP_SNARK_PROVER_BIN` (`export_step_snark`), all three
+  built from `eth-light-client-prover` with `--features aggregation`, and two SRS files in
+  `--prover-dir`: `kzg_bn254_21.srs` (the release asset of that name) and `kzg_bn254_20.srs`,
+  cut from it once with `downsize_srs --input kzg_bn254_21.srs --output kzg_bn254_20.srs --k 20`
+  (`eth-light-client-prover`'s, shipped in the `bridge-eth-lc-relayer` image). Without them it
+  refuses to start and names what is missing; `--no-rotate` starts it without.
+  `scripts/ursus/eth-light-client-relayer.service` and its env example carry the new binaries
+  and the `--state-dir` / `--work-dir` / `--log-dir` flags (`ETH_LC_RELAYER_*_DIR` in the env
+  file) in place of `--state`: update an installed unit before restarting it. In Docker the
+  `bridge-eth-lc-relayer` image ships the binaries; put `kzg_bn254_21.srs` into
+  `$BRIDGE_DATA/params/lc-prover/` and cut `kzg_bn254_20.srs` beside it (`docker/README.md`,
+  Install, item 2). The daemon no longer auto-rotates the one committed fixture period.
+  Verification keys are unchanged.
+- `export_shard_snark`, `export_step_snark` and `rotate_tree_n8` no longer fall back to an SRS
+  under `data/`: `SHARD_SRS_PATH`, `STEP_SRS_PATH` and `OUTER_SRS` are required, and `STEP_SRS`
+  with a step snark. `rotate_tree_n8` fails when `STEP_DIR` is set and holds no
+  `step_proof.bin`, instead of building the tree without the step snark, which is a different
+  circuit than the one the light client pins.
 
 ### New / Improvements
 
+- `eth-lc-relayer daemon` starts the rotate of period P as soon as the contract holds P and the
+  beacon serves `light_client/updates?start_period=P`, in the background while the steps of P go
+  on. Its stages run as child processes and keep their inputs and outputs in
+  `<work-dir>/rotate-<P>/`: a restart re-runs only the stage that had not finished, and the
+  directory goes once the contract is past P. The stages' proving keys are written to
+  `<prover-dir>/rotate-keys/` on the first rotate after an install or a binary upgrade and
+  reused after that. Before `submitRotate` the daemon checks the bundle: a bundle for a period the
+  contract has left is dropped, and one whose verification key is not the pinned
+  `rotate_vk_blob.bin` or whose current committee is not the contract's is logged and not sent.
+  Each stage is killed after `--rotate-timeout-secs` (default 10800) and on daemon shutdown;
+  transcripts are `rotate-<P>-<stage>-<time>-{stdout,stderr}.log` in `--log-dir`. A failed
+  stage is started again after 10, then 20 minutes, from the beacon node's answers fetched anew;
+  after the third failure in a period the daemon leaves that period alone. A `submitRotate`
+  whose outcome stays unknown no longer holds up the steps: it is sent again on the next ticks
+  until it lands or the contract moves past it. A bundle proven for another Gloas fork slot than the contract's
+  is proven again instead of sent. To prove a period again by hand, stop the daemon, remove
+  `<work-dir>/rotate-<P>/` and start it. The prove takes about 1.5 h; the tree stage peaks at
+  about 50 GB RSS and the step prover keeps running beside it, so plan for about 75 GB (a
+  container memory limit has to sit above that). `rotate-keys/` takes about 40 GB of disk. The
+  nodes need the tvm-sdk#284 decider (tvm-sdk `v3.1.0.an`).
+- `--owner-hop` works with rotate on: at the first update of a new period without a sent rotate,
+  the daemon logs an error naming why (still proving, failed, refused) and falls back to the owner
+  hop; a rotate sent and not yet confirmed gets five sends first. Once the contract refuses
+  the hop (after `disableOwnerRotation`) the daemon stops hopping and proves the rotate past the
+  boundary instead; take `--owner-hop` off when disabling owner rotation. It no longer requires
+  `--no-rotate`. `docker/compose.yaml` runs `eth-lc-relayer` that way
+  (`--owner-hop --rotate-timeout-secs 10800`, no `--no-rotate`).
+- `export_shard_snark`, `export_step_snark` and `rotate_tree_n8` prove a live hand-off:
+  `ROTATE_UPDATE_PATH` names the beacon update of period P (`/updates?start_period=P`) and, for
+  `export_step_snark`, `COMMITTEE_JSON_PATH` the update of P−1, whose next committee signed it.
+  `ROTATE_KEY_DIR` keeps their proving keys between runs; a key written by another build is
+  regenerated, not used.
 - `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused only) sends the whole
   `treasuryBalance` to a contract whose `predecessor()` returns this bridge; emits
   `TreasuryMigrated`. The bridge cannot tell a real successor from any contract giving that answer:

@@ -175,6 +175,50 @@ pub fn synthetic_committee() -> CommitteeSource {
     }
 }
 
+/// Names the `LightClientUpdate` of period P (the answer of
+/// `/eth/v1/beacon/light_client/updates?start_period=P&count=1`) that a live
+/// rotate P→P+1 proves.
+pub const ENV_ROTATE_UPDATE_PATH: &str = "ROTATE_UPDATE_PATH";
+
+/// The update [`ENV_ROTATE_UPDATE_PATH`] names, or `None` when it is unset or
+/// empty. A path that is set but cannot be read or parsed is an error: a live
+/// run never falls back to a fixture or a synthetic committee.
+pub fn rotate_update_from_env() -> anyhow::Result<Option<(PathBuf, RotateFixture)>> {
+    let Some(path) = std::env::var_os(ENV_ROTATE_UPDATE_PATH).filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let update = load_live_rotate_update(&path)?;
+    Ok(Some((path, update)))
+}
+
+/// [`load_rotate_update`] with the path in the error.
+pub fn load_live_rotate_update(path: &Path) -> anyhow::Result<RotateFixture> {
+    load_rotate_update(path)
+        .map_err(|e| anyhow::anyhow!("{ENV_ROTATE_UPDATE_PATH}={}: {e:#}", path.display()))
+}
+
+/// The committee a live rotate proves: the `next_sync_committee` of the update
+/// at `path`.
+pub fn committee_source_at(path: &Path) -> anyhow::Result<CommitteeSource> {
+    let update = load_live_rotate_update(path)?;
+    Ok(CommitteeSource {
+        shards: update.pubkeys.chunks(PUBKEYS_PER_SHARD).map(|c| c.to_vec()).collect(),
+        aggregate: update.aggregate,
+        label: format!("live {} (period {})", path.display(), update.period()),
+        update: Some(update),
+    })
+}
+
+/// [`committee_source_at`] the path [`ENV_ROTATE_UPDATE_PATH`] names; without
+/// that variable, [`committee_source`].
+pub fn committee_source_from_env() -> anyhow::Result<CommitteeSource> {
+    match std::env::var_os(ENV_ROTATE_UPDATE_PATH).filter(|p| !p.is_empty()) {
+        Some(path) => committee_source_at(Path::new(&path)),
+        None => Ok(committee_source()),
+    }
+}
+
 /// Prefer the real mainnet `next_sync_committee` (split into `COMMITTEE_SHARDS`
 /// 64-pubkey slices); fall back to [`synthetic_committee`].
 pub fn committee_source() -> CommitteeSource {

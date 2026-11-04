@@ -13,19 +13,25 @@ checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
 parent chain, which is necessary for a span to carry it, not sufficient.
-Committee rotate: the daemon only auto-`submitRotate`s the committed
-fixture period. A live period jump returns `RotateRequired` — prove
-`rotate_tree_n8` on the prover host and run `eth-lc-relayer submit-rotate --state-dir`.
-`--no-rotate` opts out of even that. tvm-sdk#284 co-deploys with this
-contract.
+Committee rotate: once the contract holds period P and the beacon serves
+`updates?start_period=P`, the daemon proves the rotate P→P+1 in the
+background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
+`--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
+and sends `submitRotate` when the bundle passes its checks against the
+contract (`docs/eth-light-client.md` §3.3). `--no-rotate` turns it off;
+`--owner-hop` is the fallback at the boundary when no rotate was sent.
+The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).
 
 Every long-running command writes only into the three directories it is
 given (bridge-audit#132): `--state-dir` (the state file, its lock and the
-temporary file of its atomic write), `--work-dir` (one subdirectory per prove,
-gone once the bundle is read back) and `--log-dir` (the command's own log, a
+temporary file of its atomic write), `--work-dir` (one subdirectory per step
+prove, gone once the bundle is read back, and `rotate-<P>/` per rotate, kept
+until the contract has moved past P) and `--log-dir` (the command's own log, a
 file per day beside stdout, and every prover's transcript). `daemon` reads
 them from `ETH_LC_RELAYER_{STATE,WORK,LOG}_DIR`, `arbitrum-anchors` from
-`ARBITRUM_ANCHORS_{STATE,WORK,LOG}_DIR`. Nothing goes to the system temp
+`ARBITRUM_ANCHORS_{STATE,WORK,LOG}_DIR`. The one exception is the rotate: its
+stages write their proving keys to `<prover-dir>/rotate-keys/` (about 40 GB)
+on the first rotate after a binary upgrade. Nothing goes to the system temp
 directory or `$HOME`. The contract ABIs are built in; no `*_ABI_PATH` is read.
 
 ## How it runs
@@ -102,10 +108,25 @@ eth-lc-relayer arbitrum-anchors --parent-rpc-url … --arbitrum-rpc-url … \
 eth-lc-relayer arbitrum-vector --parent-rpc-url … --arbitrum-rpc-url … --out ./vector.json
 ```
 
-`--no-rotate` opts out of even the fixture auto-rotate. A live period
-is never proved in-process: prove on the prover host and `submit-rotate --state-dir`
-(tvm-sdk#284; the rotate tree is ~40 GB). The next daemon tick reads
-`getCommitteeState` and continues.
+`--no-rotate` turns the background rotate off; `submit-rotate --state-dir`
+still sends a bundle proved elsewhere, and the next daemon tick reads
+`getCommitteeState` and continues. The rotate stages need
+`kzg_bn254_21.srs` and `kzg_bn254_20.srs` in `--prover-dir` (the second cut
+from the first: `downsize_srs --input kzg_bn254_21.srs --output
+kzg_bn254_20.srs --k 20`, built from `eth-light-client-prover`), keep their
+proving keys in `<prover-dir>/rotate-keys/`, and each stage is killed after
+`--rotate-timeout-secs` (default 10800).
+
+A failed stage is started again after 10, then 20 minutes, from the beacon
+node's answers fetched anew; after the third failure in a period the daemon
+leaves that period's rotate alone and says so in the log. A `submitRotate`
+whose outcome stays unknown is sent again on every tick until it lands or the
+contract moves past it. Once the cause
+is fixed, remove `<work-dir>/rotate-<P>/` and restart the daemon to prove
+period P again. `--owner-hop` takes the period at the boundary only after five
+such sends; once the contract refuses the hop (`disableOwnerRotation`),
+the daemon stops hopping and waits for the rotate. Take `--owner-hop` off when
+the owner rotation is disabled.
 `--flip-owner` opts in to the owner flip after the first accepted update. It is
 **off** by default: after it, L1 deposits outside checkpoint blocks have no
 anchor writer; L2s keep the owner path

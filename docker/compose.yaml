@@ -154,7 +154,10 @@ services:
     <<: *service
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
     pull_policy: ${BRIDGE_PULL_POLICY:-missing}
-    command: ["daemon", "--no-rotate", "--no-flip-owner", "--owner-hop", "--poll-secs", "64", "--prove-timeout-secs", "7200"]
+    # Rotates are proven here: the stages peak at ~50 GB RSS (the tree), and
+    # the step prover (~25 GB) keeps running beside them, so a memory limit,
+    # if one is set, has to sit above ~75 GB.
+    command: ["daemon", "--no-flip-owner", "--owner-hop", "--poll-secs", "64", "--prove-timeout-secs", "7200", "--rotate-timeout-secs", "10800"]
     env_file:
       - path: ${BRIDGE_OPT}/env/eth-lc-relayer.env
         required: true
@@ -179,12 +182,15 @@ services:
         target: /data/logs
         bind: { create_host_path: false }
       # Writable: the step key is generated here once per prover build
-      # (`docker compose run --rm lc-keygen`).
+      # (`docker compose run --rm lc-keygen`), the rotate keys
+      # (`rotate-keys/`) by the daemon at its first rotate after an upgrade.
       - type: bind
         source: ${BRIDGE_DATA}/params/lc-prover
         target: /data/params
         bind: { create_host_path: false }
-    # A tick may be inside a step proof (up to --prove-timeout-secs).
+    # A tick may be inside a step proof (up to --prove-timeout-secs). A rotate
+    # stage is not waited for: it is killed, and the stages it finished stay
+    # in /data/work/rotate-<P>/.
     stop_grace_period: 2h
 
   # Arbitrum -> Acki Nacki: proves the Arbitrum blocks that hold deposits to

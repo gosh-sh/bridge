@@ -46,8 +46,11 @@
 //!   https://trusted-setup-halo2kzg.s3.eu-central-1.amazonaws.com/hermez-raw-20
 //! cargo run --release --example export_shard_snark
 //! ```
-//! Env: `SHARD_SRS_PATH` (default `data/kzg_params_20.srs`), `SHARD_OUT_DIR`
-//! (default `out/shard_snark`).
+//! Env: `SHARD_SRS_PATH` (required, Hermez k=20 or larger), `SHARD_OUT_DIR`
+//! (default `out/shard_snark`). `ROTATE_UPDATE_PATH` names the live update of
+//! period P whose `next_sync_committee` is proved; without it the committed
+//! mainnet fixture, else a synthetic committee. `ROTATE_KEY_DIR` keeps the
+//! proving key between runs (`key_cache`).
 
 use std::fs;
 use std::path::Path;
@@ -56,14 +59,15 @@ use std::time::Instant;
 use eth_light_client_prover::committee::{
     native_committee_subtree_root, COMMITTEE_SHARDS, PUBKEYS_PER_SHARD,
 };
-use eth_light_client_prover::mainnet::committee_source;
+use eth_light_client_prover::key_cache::KeyCache;
+use eth_light_client_prover::mainnet::committee_source_from_env;
 use eth_light_client_prover::poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite};
 use eth_light_client_prover::rotate::{new_committee_hasher, verify_shard, SHARD_INSTANCE_LEN};
 use eth_light_client_prover::ssz::load_bytes;
 
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
-use halo2_base::gates::circuit::CircuitBuilderStage;
+use halo2_base::gates::circuit::{BaseCircuitParams, CircuitBuilderStage};
 use halo2_base::gates::{RangeChip, RangeInstructions};
 use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, Fr, G1Affine};
 use halo2_base::halo2_proofs::halo2curves::serde::SerdeObject;
@@ -78,6 +82,8 @@ use halo2_base::halo2_proofs::SerdeFormat;
 use rand::rngs::OsRng;
 
 const K: u32 = 20;
+/// Name of the shard proving key in `ROTATE_KEY_DIR`.
+const KEY_NAME: &str = "shard-k20";
 const LOOKUP_BITS: usize = 19;
 /// Hermez `[s]·G2` raw-bytes head — the ceremony `export_poseidon_snark` requires.
 const HERMEZ_SG2_HEAD: [u8; 4] = [0x92, 0x8f, 0xaf, 0xb3];
@@ -131,8 +137,8 @@ fn build_shard(
 fn main() -> anyhow::Result<()> {
     println!("=== M6: export committee-shard Poseidon SHPLONK snark (Hermez k={K}) ===\n");
 
-    let srs_path =
-        std::env::var("SHARD_SRS_PATH").unwrap_or_else(|_| "data/kzg_params_20.srs".to_string());
+    let srs_path = std::env::var("SHARD_SRS_PATH")
+        .map_err(|_| anyhow::anyhow!("SHARD_SRS_PATH is not set (Hermez kzg_bn254_20.srs)"))?;
     let out_dir = std::env::var("SHARD_OUT_DIR").unwrap_or_else(|_| "out/shard_snark".to_string());
     fs::create_dir_all(&out_dir)?;
 
@@ -161,7 +167,7 @@ fn main() -> anyhow::Result<()> {
     println!("  OK: Hermez ceremony, k={K}\n");
 
     // ---- Source the COMMITTEE_SHARDS shards (real fixture or synthetic) -----
-    let source = committee_source();
+    let source = committee_source_from_env()?;
     let shards = source.shards;
     anyhow::ensure!(shards.len() == COMMITTEE_SHARDS, "expected {COMMITTEE_SHARDS} shards");
     anyhow::ensure!(
@@ -175,18 +181,37 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ---- Keygen ONCE (all shards share the circuit shape) ------------------
-    let (mut kb, _) = build_shard(&shards[0], None);
-    let config = kb.calculate_params(Some(9));
-    println!("Shard circuit config: {config:?}\n");
-
-    let t = Instant::now();
-    let vk = keygen_vk(&params, &kb).map_err(|e| anyhow::anyhow!("keygen_vk: {e:?}"))?;
-    println!("keygen_vk {:?}", t.elapsed());
-    let t = Instant::now();
-    let pk = keygen_pk(&params, vk, &kb).map_err(|e| anyhow::anyhow!("keygen_pk: {e:?}"))?;
-    println!("keygen_pk {:?}", t.elapsed());
-    let break_points = kb.break_points();
-    drop(kb);
+    let cache = KeyCache::from_env()?;
+    let stored = match &cache {
+        Some(cache) => cache.load::<BaseCircuitBuilder<Fr>, _>(KEY_NAME, |c: &BaseCircuitParams| {
+            c.clone()
+        })?,
+        None => None,
+    };
+    let (config, break_points, pk) = match stored {
+        Some(key) => {
+            println!("proving key {KEY_NAME} from {}", cache.as_ref().unwrap().dir().display());
+            (key.params, key.break_points, key.pk)
+        }
+        None => {
+            let (mut kb, _) = build_shard(&shards[0], None);
+            let config = kb.calculate_params(Some(9));
+            println!("Shard circuit config: {config:?}\n");
+            let t = Instant::now();
+            let vk = keygen_vk(&params, &kb).map_err(|e| anyhow::anyhow!("keygen_vk: {e:?}"))?;
+            println!("keygen_vk {:?}", t.elapsed());
+            let t = Instant::now();
+            let pk = keygen_pk(&params, vk, &kb).map_err(|e| anyhow::anyhow!("keygen_pk: {e:?}"))?;
+            println!("keygen_pk {:?}", t.elapsed());
+            let break_points = kb.break_points();
+            drop(kb);
+            if let Some(cache) = &cache {
+                cache.store(KEY_NAME, &config, &break_points, &pk)?;
+                println!("stored proving key {KEY_NAME} in {}", cache.dir().display());
+            }
+            (config, break_points, pk)
+        }
+    };
 
     // ---- Write the shared VK + config once ---------------------------------
     let mut vk_bytes = Vec::new();

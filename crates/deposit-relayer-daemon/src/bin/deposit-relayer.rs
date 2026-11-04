@@ -18,10 +18,15 @@
 //!   (`dapp_id::account_id` addresses); pass `--dry-run` to mock the AN side.
 //!
 //! - `status` — print the state file path.
+//!
+//! `daemon` and `prove-one` write only into the directories they are given
+//! (`--state-dir`, `--work-dir`, `--log-dir`; bridge-audit#132): never the
+//! system temp directory, `$HOME` or the current directory. The bridge ABI is
+//! built in; no ABI file is read.
 
 use std::{
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -31,11 +36,12 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    fetch_deposit_from_receipt, parse_and_validate_dapp_id, resolve_from_block, AnConfig,
-    AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, BackoffConfig, DeploymentIdentity,
-    DepositProofBundle, DepositProverBins, DepositSource, EthLogSource, MockAnSubmitter,
-    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, RelayerState, StateLock, SubmitOutcome,
-    SubprocessProofGenerator, SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV,
+    bridge_abi, fetch_deposit_from_receipt, parse_and_validate_dapp_id, prepare_dir,
+    refuse_unrecognised_state, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
+    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle, DepositProverBins,
+    DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig,
+    RelayerMetrics, RelayerState, ServiceDirs, StateLock, SubmitOutcome, SubprocessProofGenerator,
+    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
@@ -47,25 +53,41 @@ use tvm_client::crypto::KeyPair;
              finalize on AN."
 )]
 struct Args {
-    /// Where to persist `state.json` (used by `daemon`).
-    #[arg(
-        long,
-        env = "DEPOSIT_RELAYER_STATE",
-        default_value = "./deposit-relayer-state.json"
-    )]
-    state: PathBuf,
+    /// Removed: the state is a directory now. Kept hidden so an old command
+    /// line or `DEPOSIT_RELAYER_STATE` in the environment fails with the
+    /// migration hint instead of a bare "unexpected argument".
+    #[arg(long, env = "DEPOSIT_RELAYER_STATE", hide = true, global = true)]
+    state: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// The three directories of `daemon` (bridge-audit#132).
+#[derive(clap::Args, Debug)]
+struct DirArgs {
+    /// Directory for `deposit-relayer-state.json`, its lock and the
+    /// temporary file of its atomic write. Created when missing.
+    #[arg(long, env = "DEPOSIT_RELAYER_STATE_DIR")]
+    state_dir: PathBuf,
+    /// Directory for the provers' inputs and outputs: one subdirectory per
+    /// proof, removed when the proof is read back. Created when missing.
+    #[arg(long, env = "DEPOSIT_RELAYER_WORK_DIR")]
+    work_dir: PathBuf,
+    /// Directory for the daemon's own log (one file per day, beside stdout)
+    /// and the output of every prover run. Created when missing.
+    #[arg(long, env = "DEPOSIT_RELAYER_LOG_DIR")]
+    log_dir: PathBuf,
 }
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Read-only: list confirmed Deposit events from `--start`.
     Watch {
-        #[arg(long)]
+        /// EVM JSON-RPC. Must serve `eth_getLogs` back to `--from-block`.
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         /// Lower bound for the log scan (bridge deploy block). When `0`, falls
         /// back to `BRIDGE_DEPLOY_BLOCK`.
@@ -82,14 +104,18 @@ enum Cmd {
         count: u64,
         /// Optional expected `eth_chainId` (must be a supported deposit chain).
         /// When set, the CLI aborts if the RPC chain does not match.
-        #[arg(long)]
+        #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
     },
     /// Listen for one depositId, prove it, write the operands to `--out-dir`.
     ProveOne {
-        #[arg(long)]
+        /// EVM JSON-RPC; `deposit-prover` uses it too unless `--prover-rpc-url`
+        /// is set. Must serve `eth_getLogs` and transaction receipts for at
+        /// least the last 7 days (30 preferred). One that keeps ~10 000 blocks
+        /// cannot prove an older deposit.
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         #[arg(long)]
         deposit_id: u64,
@@ -106,6 +132,12 @@ enum Cmd {
         /// with `--tx-hash`.
         #[arg(long, requires = "tx_hash")]
         log_index: Option<u64>,
+        /// Directory for the provers' inputs and outputs (bridge-audit#132).
+        #[arg(long, env = "DEPOSIT_RELAYER_WORK_DIR")]
+        work_dir: PathBuf,
+        /// Directory for the output of every prover run.
+        #[arg(long, env = "DEPOSIT_RELAYER_LOG_DIR")]
+        log_dir: PathBuf,
         /// Working directory of the `deposit-prover` examples: the proving
         /// key under `data/` and `data/kzg_params_18.srs` are read there.
         #[arg(long, env = "DEPOSIT_PROVER_DIR")]
@@ -121,7 +153,9 @@ enum Cmd {
         /// Prebuilt `export_blake2b_proof` example.
         #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
         export_blake2b_proof_bin: PathBuf,
-        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`).
+        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`). Must
+        /// serve the receipts of the deposit's block under the same 7-day rule
+        /// as `--rpc-url`.
         #[arg(long)]
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
@@ -140,14 +174,21 @@ enum Cmd {
         #[arg(long)]
         out_dir: PathBuf,
         /// Optional expected `eth_chainId` (must be a supported deposit chain).
-        #[arg(long)]
+        #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
     },
     /// Long-running listen→prove→submit loop.
     Daemon {
-        #[arg(long)]
+        #[command(flatten)]
+        dirs: DirArgs,
+        /// EVM JSON-RPC; `deposit-prover` uses it too unless `--prover-rpc-url`
+        /// is set. Must serve `eth_getLogs` and transaction receipts for at
+        /// least the last 7 days (30 preferred), and back to `--from-block` on
+        /// a start without a state file. One that keeps ~10 000 blocks cannot
+        /// catch up after a stall.
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
-        #[arg(long)]
+        #[arg(long, env = "BRIDGE_ADDRESS")]
         bridge_address: Address,
         /// Lower bound for the log scan (bridge deploy block). When `0`, falls
         /// back to `BRIDGE_DEPLOY_BLOCK`.
@@ -173,6 +214,9 @@ enum Cmd {
         /// Prebuilt `export_blake2b_proof` example.
         #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
         export_blake2b_proof_bin: PathBuf,
+        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`). Must
+        /// serve the receipts of the deposit's block under the same 7-day rule
+        /// as `--rpc-url`.
         #[arg(long)]
         prover_rpc_url: Option<String>,
         #[arg(long, default_value_t = 18)]
@@ -196,9 +240,6 @@ enum Cmd {
         /// Path to tvm-cli keys JSON (signer for `finalizeDeposit`).
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: Option<String>,
-        /// Path to `USDCBridge.abi.json` on the AN side.
-        #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
-        an_bridge_abi_path: Option<String>,
         /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
         #[arg(long, env = "AN_TOKEN_BRIDGE")]
         an_token_bridge: Option<String>,
@@ -244,7 +285,7 @@ enum Cmd {
         allow_insecure_graphql: bool,
         /// Optional expected `eth_chainId`. The RPC's chain is checked against
         /// the deposit allowlist either way.
-        #[arg(long)]
+        #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
         /// Bind address of the Prometheus text exporter (`GET /metrics`), e.g.
         /// `127.0.0.1:9467`. Unset = no exporter. Metric names are listed in
@@ -275,9 +316,6 @@ enum Cmd {
         /// Path to tvm-cli keys JSON (signer for `finalizeDeposit`).
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
-        /// Path to the deployed `USDCBridge.abi.json`.
-        #[arg(long, env = "AN_BRIDGE_ABI_PATH")]
-        an_bridge_abi_path: String,
         /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
         #[arg(long, env = "AN_TOKEN_BRIDGE")]
         an_token_bridge: String,
@@ -286,17 +324,65 @@ enum Cmd {
         an_sender: String,
     },
     /// Print the state file path and exit.
-    Status,
+    Status {
+        /// The daemon's state directory.
+        #[arg(long, env = "DEPOSIT_RELAYER_STATE_DIR")]
+        state_dir: PathBuf,
+    },
 }
 
+/// Rust's default for an error out of `main` is `Error: {e:?}` on stderr,
+/// unredacted: a transport error quotes the RPC URL, key included, and
+/// under compose that line lands in the container log on every restart.
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    init_tracing();
+async fn main() -> std::process::ExitCode {
+    match real_main().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", redact_urls(&format!("{e:?}")));
+            std::process::ExitCode::FAILURE
+        },
+    }
+}
+
+async fn real_main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(old) = args.state {
+        // Before bridge-audit#132 the state was a file path. The lock and
+        // the temporary file were derived from it; now they live in the
+        // directory with it.
+        anyhow::bail!(
+            "--state / DEPOSIT_RELAYER_STATE ({}) is gone: the state is a directory now. Move the \
+             file into a directory as {} and pass that directory as --state-dir / \
+             DEPOSIT_RELAYER_STATE_DIR; see CHANGELOG.md.",
+            old.display(),
+            deposit_relayer_daemon::STATE_FILE_NAME,
+        );
+    }
+    let log_dir = match &args.cmd {
+        Cmd::Daemon {
+            dirs, ..
+        } => Some(dirs.log_dir.clone()),
+        Cmd::ProveOne {
+            log_dir, ..
+        } => Some(log_dir.clone()),
+        _ => None,
+    };
+    if let Some(dir) = &log_dir {
+        prepare_dir("log", dir).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    init_tracing(log_dir.as_deref()).map_err(|e| anyhow::anyhow!("log file: {e}"))?;
 
     match args.cmd {
-        Cmd::Status => {
-            info!("deposit-relayer state file = {}", args.state.display());
+        Cmd::Status {
+            state_dir,
+        } => {
+            info!(
+                "deposit-relayer state file = {}",
+                state_dir
+                    .join(deposit_relayer_daemon::STATE_FILE_NAME)
+                    .display()
+            );
             Ok(())
         },
         Cmd::Watch {
@@ -326,6 +412,8 @@ async fn main() -> anyhow::Result<()> {
             confirmations,
             tx_hash,
             log_index,
+            work_dir,
+            log_dir,
             deposit_prover_dir,
             fetch_deposit_data_bin,
             export_vk_blob_bin,
@@ -351,6 +439,8 @@ async fn main() -> anyhow::Result<()> {
                 max_data_byte_len,
                 max_log_num,
                 dapp_id,
+                work_dir,
+                log_dir,
             )?;
             prove_one(
                 rpc_url,
@@ -371,20 +461,19 @@ async fn main() -> anyhow::Result<()> {
             bundle_dir,
             an_graphql_url,
             an_keys_path,
-            an_bridge_abi_path,
             an_token_bridge,
             an_sender,
         } => finalize_one(
             bundle_dir,
             an_graphql_url,
             an_keys_path,
-            an_bridge_abi_path,
             an_token_bridge,
             an_sender,
         )
         .await
         .map_err(log_err("finalize-one")),
         Cmd::Daemon {
+            dirs,
             rpc_url,
             bridge_address,
             from_block,
@@ -401,7 +490,6 @@ async fn main() -> anyhow::Result<()> {
             dapp_id,
             an_graphql_url,
             an_keys_path,
-            an_bridge_abi_path,
             an_token_bridge,
             an_sender,
             dry_run,
@@ -419,6 +507,18 @@ async fn main() -> anyhow::Result<()> {
             if let Some(addr) = metrics_addr {
                 install_metrics_exporter(addr)?;
             }
+            let service_dirs = ServiceDirs {
+                state: dirs.state_dir,
+                work: dirs.work_dir,
+                log: dirs.log_dir,
+            };
+            service_dirs.prepare().map_err(|e| anyhow::anyhow!(e))?;
+            info!(
+                state_dir = %service_dirs.state.display(),
+                work_dir = %service_dirs.work.display(),
+                log_dir = %service_dirs.log.display(),
+                "service directories",
+            );
             let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
             info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
             let prover_cfg = build_prover_cfg(
@@ -433,6 +533,8 @@ async fn main() -> anyhow::Result<()> {
                 max_data_byte_len,
                 max_log_num,
                 dapp_id,
+                service_dirs.work.clone(),
+                service_dirs.log.clone(),
             )?;
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
@@ -447,9 +549,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(path) = an_keys_path {
                 an_cfg.keys_path = path;
             }
-            if let Some(path) = an_bridge_abi_path {
-                an_cfg.bridge_abi_path = path;
-            }
             if let Some(addr) = an_token_bridge {
                 an_cfg.token_bridge = addr;
             }
@@ -457,7 +556,7 @@ async fn main() -> anyhow::Result<()> {
                 an_cfg.sender = addr;
             }
             run_daemon(
-                args.state,
+                service_dirs.state_file(),
                 rpc_url,
                 bridge_address,
                 resolve_from_block(from_block),
@@ -484,7 +583,6 @@ async fn finalize_one(
     bundle_dir: PathBuf,
     an_graphql_url: String,
     an_keys_path: String,
-    an_bridge_abi_path: String,
     an_token_bridge: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
@@ -512,12 +610,10 @@ async fn finalize_one(
 
     let keys_json = std::fs::read_to_string(&an_keys_path)?;
     let keys: KeyPair = serde_json::from_str(&keys_json)?;
-    let bridge_abi = TvmAckiNacki::load_abi(&an_bridge_abi_path)
-        .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
         graphql_endpoints: vec![an_graphql_url],
         keys,
-        bridge_abi,
+        bridge_abi: bridge_abi(),
     })
     .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
 
@@ -563,13 +659,23 @@ fn build_prover_cfg(
     max_data_byte_len: usize,
     max_log_num: usize,
     dapp_id: String,
+    work_dir: PathBuf,
+    log_dir: PathBuf,
 ) -> anyhow::Result<SubprocessProverConfig> {
     anyhow::ensure!(
         deposit_prover_dir.is_dir(),
         "--deposit-prover-dir {} is not a directory",
         deposit_prover_dir.display()
     );
-    let mut cfg = SubprocessProverConfig::new(deposit_prover_dir, bins.validated()?, rpc_url);
+    prepare_dir("work", &work_dir).map_err(|e| anyhow::anyhow!(e))?;
+    prepare_dir("log", &log_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let mut cfg = SubprocessProverConfig::new(
+        deposit_prover_dir,
+        bins.validated()?,
+        rpc_url,
+        work_dir,
+        log_dir,
+    );
     cfg.degree = degree;
     cfg.max_data_byte_len = max_data_byte_len;
     cfg.max_log_num = max_log_num;
@@ -742,6 +848,7 @@ async fn run_daemon(
     allow_insecure_graphql: bool,
     expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
+    refuse_unrecognised_state(&state_path, STATE_FILE_NAME)?;
     let _state_lock = StateLock::acquire(&state_path)
         .map_err(|e| anyhow::anyhow!("failed to acquire state lock: {e}"))?;
 
@@ -797,9 +904,9 @@ async fn run_daemon(
     } else {
         if !an_cfg.is_live_submit_ready() {
             anyhow::bail!(
-                "live submit requires --an-graphql-url, --an-keys-path, --an-bridge-abi-path, \
-                 --an-token-bridge, and --an-sender (all in dapp_id::account_id form). Or pass \
-                 --dry-run to exercise listen→prove only."
+                "live submit requires --an-graphql-url, --an-keys-path, --an-token-bridge and \
+                 --an-sender (addresses in dapp_id::account_id form). Or pass --dry-run to \
+                 exercise listen→prove only."
             );
         }
         an_cfg
@@ -813,19 +920,15 @@ async fn run_daemon(
         }
         let keys_json = std::fs::read_to_string(&an_cfg.keys_path)?;
         let keys: KeyPair = serde_json::from_str(&keys_json)?;
-        let bridge_abi = TvmAckiNacki::load_abi(&an_cfg.bridge_abi_path)
-            .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
         let tvm = TvmAckiNacki::connect(TvmClientConfig {
             graphql_endpoints: vec![an_cfg.graphql_url.clone()],
             keys,
-            bridge_abi,
+            bridge_abi: bridge_abi(),
         })
         .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
         let submit_cfg = an_cfg.to_submit_config();
-        let voucher_abi = TvmAckiNacki::load_abi(&an_cfg.bridge_abi_path)
-            .map_err(|e| anyhow::anyhow!("load bridge ABI: {e}"))?;
         let submitter =
-            AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg).with_voucher_check(voucher_abi)?;
+            AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg).with_voucher_check(bridge_abi())?;
         run_daemon_loop(
             state_path,
             start_deposit_id,
@@ -962,11 +1065,43 @@ fn log_err(stage: &'static str) -> impl Fn(anyhow::Error) -> anyhow::Error {
     }
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+use deposit_relayer_daemon::redact::{redact_urls, Redacting};
+
+/// Daily files kept in the log directory before the oldest is deleted.
+const LOG_KEEP_FILES: usize = 14;
+
+/// stdout always; with a log directory also one file per day there
+/// (`LOG_FILE_PREFIX.<date>`), written synchronously so nothing is lost when
+/// the process exits through `std::process::exit`.
+fn init_tracing(log_dir: Option<&Path>) -> std::io::Result<()> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Both sinks redact URLs: transport errors quote the RPC URL, key included.
+    let stdout = fmt::layer().with_writer(Redacting(std::io::stdout));
+    match log_dir {
+        Some(dir) => {
+            let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix(LOG_FILE_PREFIX)
+                .max_log_files(LOG_KEEP_FILES)
+                .build(dir)
+                .map_err(std::io::Error::other)?;
+            let file = fmt::layer()
+                .with_ansi(false)
+                .with_writer(Redacting(file_appender));
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .with(file)
+                .try_init();
+        },
+        None => {
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout)
+                .try_init();
+        },
+    }
+    Ok(())
 }

@@ -24,6 +24,7 @@ use std::{
 use alloy::primitives::U256;
 use async_trait::async_trait;
 use metrics::{counter, histogram};
+use tracing::{info, warn};
 
 use crate::{
     error::RelayerError,
@@ -233,6 +234,13 @@ pub struct SubprocessProverConfig {
     /// Hard timeout for the whole three-step pipeline. Halo2 proving for a
     /// fresh proving key can take minutes, so default generously.
     pub timeout: Duration,
+    /// Where the examples' inputs and outputs go: one subdirectory per
+    /// proof, removed once the operands are read back. Never the system
+    /// temp directory (bridge-audit#132).
+    pub work_dir: PathBuf,
+    /// Where each example's stdout and stderr are written, one file per
+    /// invocation, named after the deposit and the example.
+    pub log_dir: PathBuf,
 }
 
 impl SubprocessProverConfig {
@@ -240,6 +248,8 @@ impl SubprocessProverConfig {
         deposit_prover_dir: impl Into<PathBuf>,
         bins: DepositProverBins,
         rpc_url: impl Into<String>,
+        work_dir: impl Into<PathBuf>,
+        log_dir: impl Into<PathBuf>,
     ) -> Self {
         Self {
             deposit_prover_dir: deposit_prover_dir.into(),
@@ -250,6 +260,8 @@ impl SubprocessProverConfig {
             max_log_num: 20,
             dapp_id: "0".to_string(),
             timeout: Duration::from_secs(900),
+            work_dir: work_dir.into(),
+            log_dir: log_dir.into(),
         }
     }
 }
@@ -282,13 +294,65 @@ impl SubprocessProofGenerator {
         }
     }
 
-    async fn run_example(&self, args: &[String]) -> Result<(), RelayerError> {
+    /// Written where the transcript of a run would be when the run was
+    /// killed on timeout and left no output.
+    fn write_timeout_note(&self, tag: &str, example: &str) {
+        let path = self.config.log_dir.join(format!(
+            "{tag}-{example}-{}-timeout.log",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ));
+        let note = format!(
+            "{example} killed after {:?} (timeout); no output was kept\n",
+            self.config.timeout
+        );
+        if let Err(e) =
+            std::fs::create_dir_all(&self.config.log_dir).and_then(|()| std::fs::write(&path, note))
+        {
+            warn!(example, log = %path.display(), error = %e, "timeout note not written");
+        }
+    }
+
+    /// `<prover dir>/data/.prove.lock`, the lock the CLI takes around its
+    /// proofs: key generation in `data/` is not atomic, so proofs on one
+    /// prover directory run one at a time whoever starts them. Waits for
+    /// the lock up to the prover timeout, then fails like a prove would.
+    async fn take_prove_lock(&self) -> Result<std::fs::File, RelayerError> {
+        let data = self.config.deposit_prover_dir.join("data");
+        let lock = data.join(".prove.lock");
+        let shown = lock.display().to_string();
+        let wait = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+            std::fs::create_dir_all(&data)?;
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock)?;
+            fs2::FileExt::lock_exclusive(&f)?;
+            Ok(f)
+        });
+        tokio::time::timeout(self.config.timeout, wait)
+            .await
+            .map_err(|_| {
+                RelayerError::ProofGeneration(format!(
+                    "prove lock {shown}: not free after {:?}",
+                    self.config.timeout
+                ))
+            })?
+            .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))?
+            .map_err(|e| RelayerError::ProofGeneration(format!("prove lock {shown}: {e}")))
+    }
+
+    /// Run one example. `tag` names the deposit in the example's log file.
+    async fn run_example(&self, tag: &str, args: &[String]) -> Result<(), RelayerError> {
         let example = args
             .first()
             .ok_or_else(|| RelayerError::ProofGeneration("empty example args".into()))?
             .clone();
         let started = Instant::now();
-        let result = self.run_example_inner(&example, args).await;
+        let result = self.run_example_inner(tag, &example, args).await;
         histogram!(prom::PROVER_STAGE_DURATION_SECONDS, "example" => example.clone())
             .record(started.elapsed().as_secs_f64());
         if result.is_err() {
@@ -297,7 +361,12 @@ impl SubprocessProofGenerator {
         result
     }
 
-    async fn run_example_inner(&self, example: &str, args: &[String]) -> Result<(), RelayerError> {
+    async fn run_example_inner(
+        &self,
+        tag: &str,
+        example: &str,
+        args: &[String],
+    ) -> Result<(), RelayerError> {
         use tokio::process::Command;
 
         let passthrough: &[String] = match args.get(1).map(String::as_str) {
@@ -310,8 +379,14 @@ impl SubprocessProofGenerator {
                 "no binary configured for deposit-prover example {example:?}"
             ))
         })?;
+        let _prove_lock = if example == "export_blake2b_proof" {
+            Some(self.take_prove_lock().await?)
+        } else {
+            None
+        };
         let mut cmd = Command::new(bin);
         cmd.current_dir(&self.config.deposit_prover_dir)
+            .env("ETH_RPC_URL", &self.config.rpc_url)
             .args(passthrough)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -323,6 +398,9 @@ impl SubprocessProofGenerator {
         let output = tokio::time::timeout(self.config.timeout, cmd.output())
             .await
             .map_err(|_| {
+                // The killed process leaves no output to keep; the note says
+                // why the transcript is missing.
+                self.write_timeout_note(tag, example);
                 RelayerError::ProofGeneration(format!(
                     "deposit-prover example timed out after {:?}",
                     self.config.timeout
@@ -332,8 +410,37 @@ impl SubprocessProofGenerator {
                 RelayerError::ProofGeneration(format!("failed to spawn deposit-prover: {e}"))
             })?;
 
+        // The example's output is kept, success or not: a failed proof is
+        // diagnosed from this file, a successful one from its timings.
+        let log_path = self.config.log_dir.join(format!(
+            "{tag}-{example}-{}.log",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ));
+        // Both streams and the command line, with every URL cut to its host:
+        // the tools print the RPC URL they were given.
+        let transcript = crate::redact::redact_urls(&format!(
+            "$ {} {}\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- exit: {} ---\n",
+            bin.display(),
+            passthrough.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            output.status,
+        ));
+        match std::fs::create_dir_all(&self.config.log_dir)
+            .and_then(|()| std::fs::write(&log_path, transcript))
+        {
+            Ok(()) => info!(example, log = %log_path.display(), "deposit-prover output written"),
+            Err(e) => {
+                warn!(example, log = %log_path.display(), error = %e, "deposit-prover output not written")
+            },
+        }
+
+        // The tools' stderr quotes the RPC URL on a transport failure.
+        let stderr = crate::redact::redact_urls(&String::from_utf8_lossy(&output.stderr));
         if output.status.code() == Some(UNPROVABLE_EXIT_CODE) {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let reason = stderr
                 .lines()
                 .rev()
@@ -343,10 +450,9 @@ impl SubprocessProofGenerator {
         }
         if !output.status.success() {
             return Err(RelayerError::ProofGeneration(format!(
-                "deposit-prover example {:?} exited with {}: {}",
+                "deposit-prover example {:?} exited with {}: {stderr}",
                 args.first(),
                 output.status,
-                String::from_utf8_lossy(&output.stderr)
             )));
         }
         Ok(())
@@ -356,8 +462,20 @@ impl SubprocessProofGenerator {
 #[async_trait]
 impl ProofGenerator for SubprocessProofGenerator {
     async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError> {
-        let workdir = tempfile::tempdir()
-            .map_err(|e| RelayerError::ProofGeneration(format!("tempdir failed: {e}")))?;
+        // One directory per proof inside the work directory, gone when the
+        // operands are read back; never the system temp directory.
+        let tag = format!("deposit-{}", event.deposit_id);
+        let work_failed = |e: std::io::Error| {
+            RelayerError::ProofGeneration(format!(
+                "work directory {}: {e}",
+                self.config.work_dir.display()
+            ))
+        };
+        std::fs::create_dir_all(&self.config.work_dir).map_err(work_failed)?;
+        let workdir = tempfile::Builder::new()
+            .prefix(&format!("{tag}-"))
+            .tempdir_in(&self.config.work_dir)
+            .map_err(work_failed)?;
         let input_json = workdir.path().join("deposit_proof_input.json");
         let vk_blob_path = workdir.path().join("deposit_vk_blob.bin");
         let proof_path = workdir.path().join("deposit_proof_blake2b.bin");
@@ -376,11 +494,11 @@ impl ProofGenerator for SubprocessProofGenerator {
         let chain_id = event.source_chain_id.to_string();
 
         // 1. Fetch witness.
-        self.run_example(&[
+        // The RPC URL reaches the tool as ETH_RPC_URL (set on every tool
+        // run), never on a command line `ps` could show.
+        self.run_example(&tag, &[
             "fetch_deposit_data".into(),
             "--".into(),
-            "--rpc-url".into(),
-            self.config.rpc_url.clone(),
             "--tx-hash".into(),
             tx_hash,
             "--contract".into(),
@@ -395,7 +513,7 @@ impl ProofGenerator for SubprocessProofGenerator {
         .await?;
 
         // 2. Export the VkBlob.
-        self.run_example(&[
+        self.run_example(&tag, &[
             "export_vk_blob".into(),
             "--".into(),
             "--chain-id".into(),
@@ -410,11 +528,20 @@ impl ProofGenerator for SubprocessProofGenerator {
             max_data.clone(),
             "--max-log-num".into(),
             max_log.clone(),
+            // Without it the tool writes its default `deposit_eth_circuit_params.json`
+            // into its working directory, the prover directory, which is
+            // read-only in the image.
+            "--config-out".into(),
+            workdir
+                .path()
+                .join("deposit_eth_circuit_params.json")
+                .display()
+                .to_string(),
         ])
         .await?;
 
         // 3. Export the Blake2b proof + public inputs.
-        self.run_example(&[
+        self.run_example(&tag, &[
             "export_blake2b_proof".into(),
             "--".into(),
             "--chain-id".into(),
@@ -546,9 +673,14 @@ mod tests {
                 args = dir.path().join("args").display(),
             ),
         );
-        let gen =
-            SubprocessProofGenerator::new(SubprocessProverConfig::new(&work, bins, "http://rpc"));
-        gen.run_example(&[
+        let gen = SubprocessProofGenerator::new(SubprocessProverConfig::new(
+            &work,
+            bins,
+            "http://rpc",
+            dir.path().join("work-files"),
+            dir.path().join("logs"),
+        ));
+        gen.run_example("test", &[
             "fetch_deposit_data".into(),
             "--".into(),
             "--tx-hash".into(),
@@ -584,11 +716,17 @@ mod tests {
                 p = pidfile.display()
             ),
         );
-        let mut cfg = SubprocessProverConfig::new(dir.path(), bins, "http://rpc");
+        let mut cfg = SubprocessProverConfig::new(
+            dir.path(),
+            bins,
+            "http://rpc",
+            dir.path().join("work-files"),
+            dir.path().join("logs"),
+        );
         cfg.timeout = Duration::from_secs(1);
         let gen = SubprocessProofGenerator::new(cfg);
         let err = gen
-            .run_example(&["export_blake2b_proof".into()])
+            .run_example("test", &["export_blake2b_proof".into()])
             .await
             .unwrap_err()
             .to_string();
@@ -643,9 +781,11 @@ mod tests {
             dir.path(),
             bins_in(dir.path()),
             "http://rpc",
+            dir.path().join("work-files"),
+            dir.path().join("logs"),
         ));
         let err = gen
-            .run_example(&["export_something".into()])
+            .run_example("test", &["export_something".into()])
             .await
             .unwrap_err()
             .to_string();

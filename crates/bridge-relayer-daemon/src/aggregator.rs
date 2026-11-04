@@ -21,10 +21,10 @@
 //!
 //! [`Circuit4ShplonkPipeline`] composes the two and returns a
 //! [`PartnerWithdrawalProof`] whose `proof_hex` is the aggregator calldata and
-//! whose `public_instances_hex` are the eleven Circuit-4 public inputs (LE Fr)
+//! whose `public_instances_hex` are the twelve Circuit-4 public inputs (LE Fr)
 //! — exactly the shape `submit-withdraw` / `daemon-withdraw` / `daemon-bridge`
 //! already consume. A cross-check ([`calldata_binds_instances`]) proves the
-//! calldata's re-exposed instances match the eleven public inputs before the
+//! calldata's re-exposed instances match the twelve public inputs before the
 //! proof is surfaced, so a passing pipeline cannot forward mismatched bytes.
 
 use std::{
@@ -49,7 +49,7 @@ use crate::{
 pub const NUM_ACCUMULATOR_INSTANCES: usize = 12;
 
 /// BN254 scalar field modulus `r`. Fr encodings must be strictly less. A
-/// Poseidon digest emitted by the aggregator (word 23 of the calldata) is
+/// Poseidon digest emitted by the aggregator (word 24 of the calldata) is
 /// always a valid Fr, so any word we read there that is `>= r` cannot have
 /// come from the aggregator and is rejected before we forward the proof.
 pub const BN254_FR_MODULUS: U256 = U256::from_limbs([
@@ -75,8 +75,8 @@ pub const AGGREGATE_BIN: &str = "aggregate-proof";
 pub struct SnarkArtefacts {
     /// The bincode-serialized snark-verifier `Snark` (aggregator inner input).
     pub snark_path: PathBuf,
-    /// The eleven Circuit-4 public instances, 32-byte **little-endian** Fr each
-    /// (`save_instances_binary` layout), i.e. 352 bytes total.
+    /// The twelve Circuit-4 public instances, 32-byte **little-endian** Fr each
+    /// (`save_instances_binary` layout), i.e. 384 bytes total.
     pub instances_path: PathBuf,
 }
 
@@ -107,7 +107,7 @@ pub trait Circuit4SnarkProver: Send + Sync {
 ///   3. Load event PK.
 ///   4. `generate_event_proof_with_transcript(&km, &witness, Poseidon)`.
 ///   5. Native `verify_event_proof_with_transcript` self-check.
-///   6. Save 11-field-element instances (10 + `anchorLayer`) as flat LE-Fr
+///   6. Save the 12 field-element instances (`WITHDRAWAL_PUBLIC_INPUTS`) as flat LE-Fr
 ///      bytes (`.instances.bin`).
 ///   7. `bridge_snark_wrap::wrap_poseidon_snark_in_memory` → serialise
 ///      snark-verifier `Snark` bincode → write `.snark`.
@@ -340,6 +340,10 @@ pub struct SubprocessAggregatorConfig {
     /// later ones load the key from disk. Without this, every run re-keygens
     /// from scratch — see `aggregator_cache.rs`.
     pub pk_cache_dir: Option<PathBuf>,
+    /// Where the calldata file lives while a run lasts (removed once read
+    /// back). `None` is the system temp directory; the daemons pass their
+    /// work directory (bridge-audit#132).
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl SubprocessAggregatorConfig {
@@ -357,12 +361,23 @@ impl SubprocessAggregatorConfig {
             timeout_flag: None,
             slot_report: None,
             pk_cache_dir: None,
+            scratch_dir: None,
         }
     }
 
     /// Enable persistent outer-PK caching across `aggregate-proof` invocations.
     pub fn with_pk_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.pk_cache_dir = Some(dir.into());
+        self
+    }
+
+    /// Keep the calldata file under `dir` instead of the system temp
+    /// directory.
+    pub fn with_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        // Absolute, whatever the caller gave: the aggregator subprocess runs
+        // in its own directory, and the file is read back from this one.
+        let dir = dir.into();
+        self.scratch_dir = Some(std::path::absolute(&dir).unwrap_or(dir));
         self
     }
 }
@@ -648,9 +663,23 @@ impl ProofAggregator for SubprocessAggregator {
         inner_snark: &Path,
         verifier_name: &str,
     ) -> Result<Vec<u8>, RelayerError> {
-        let out_path = std::env::temp_dir().join(format!(
-            "agg_calldata_{verifier_name}_{}.bin",
-            std::process::id()
+        let out_dir = self
+            .config
+            .scratch_dir
+            .clone()
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&out_dir).map_err(|e| {
+            RelayerError::other(format!("scratch directory {}: {e}", out_dir.display()))
+        })?;
+        // The pid alone collides between containers that share the scratch
+        // directory; the time of the run tells them apart.
+        let out_path = out_dir.join(format!(
+            "agg_calldata_{verifier_name}_{}_{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         // The subprocess is spawned in its own directory, so a
         // relative `inner_snark` (e.g. the CLI's `--snark-dir=./shplonk-snark`
@@ -738,7 +767,7 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
     }
 
     /// Prove `witness_path` → Poseidon snark → aggregate → calldata, and return
-    /// a [`PartnerWithdrawalProof`] carrying the calldata + eleven public
+    /// a [`PartnerWithdrawalProof`] carrying the calldata + twelve public
     /// inputs. `snark_dir` receives the intermediate `<name>.snark` /
     /// `.instances.bin`.
     pub async fn prove(
@@ -759,12 +788,12 @@ impl<S: Circuit4SnarkProver, A: ProofAggregator> Circuit4ShplonkPipeline<S, A> {
 
         let instances_hex = read_instances_le(&artefacts.instances_path)?;
 
-        // The calldata's re-exposed inner instances (words 12..22 inclusive,
-        // big-endian) must equal the eleven public inputs, and the trailing
-        // digest slot (word 23) must be a non-zero, in-field Fr, and the
-        // blob must be exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes. A
-        // pre-binding blob is 3 648 B and its word 23 is a G1 coordinate,
-        // which still passes a zero / `< r` check. `None` skips the pin
+        // The calldata's re-exposed inner instances (words 12..23 inclusive,
+        // big-endian) must equal the twelve public inputs, and the trailing
+        // digest slot (word 24) must be a non-zero, in-field Fr, and the
+        // blob must be exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes. A blob from
+        // the circuit before `dstBridge` is 3 680 B and its word 24 is a G1
+        // coordinate, which still passes a zero / `< r` check. `None` skips the pin
         // compare: the only `Some` callers are tests, and that hex is a
         // little-endian Fr, not the big-endian `bytes32` `vkDigest()`
         // returns. The CLI compares those bytes itself before the dry-run.
@@ -799,20 +828,20 @@ pub fn read_instances_le(path: &Path) -> Result<Vec<String>, RelayerError> {
     Ok(chunks.iter().map(hex::encode).collect())
 }
 
-/// Assert that the aggregator calldata re-exposes exactly the eleven Circuit-4
+/// Assert that the aggregator calldata re-exposes exactly the twelve Circuit-4
 /// public inputs: `calldata[(12+i)*32 .. (13+i)*32]` (big-endian EVM word)
 /// numerically equals `instances_hex[i]` (little-endian Fr repr), for all i.
 ///
-/// Also validates the trailing inner-VK digest slot (word 23, i.e.
+/// Also validates the trailing inner-VK digest slot (word 24, i.e.
 /// `12 + WITHDRAWAL_PUBLIC_INPUTS`):
 ///   * the blob must be exactly [`WITHDRAWAL_CALLDATA_LEN`] bytes. A
-///     pre-binding withdrawal blob is 3 648 B; its word 23 is the first word of
-///     the outer proof (a G1 coordinate, below `r`), so a zero / `< r` check
-///     does not tell it from this build;
+///     withdrawal blob from the circuit before `dstBridge` is 3 680 B; its
+///     word 24 is the first word of the outer proof (a G1 coordinate, below
+///     `r`), so a zero / `< r` check does not tell it from this build;
 ///   * the word must be non-zero and strictly less than the BN254 scalar-field
 ///     modulus `r`.
 ///
-/// If `expected_vk_digest_hex` is `Some(hex)`, word 23 must equal that
+/// If `expected_vk_digest_hex` is `Some(hex)`, word 24 must equal that
 /// little-endian Fr. Tests are the only callers of `Some`. An on-chain
 /// `vkDigest()` is a big-endian `bytes32`; do not pass it here without
 /// reversing the limbs.
@@ -824,11 +853,11 @@ pub fn calldata_binds_instances(
     if calldata.len() != WITHDRAWAL_CALLDATA_LEN {
         return Err(RelayerError::other(format!(
             "aggregator calldata is {} bytes; this build's withdrawal artefact is exactly {} \
-             bytes (24 instance words + the outer proof). {} bytes is the pre-binding blob, whose \
-             word 23 is a proof coordinate rather than the inner-VK digest",
+             bytes (25 instance words + the outer proof). {} bytes is a blob from the circuit \
+             before dstBridge, whose word 24 is a proof coordinate rather than the inner-VK digest",
             calldata.len(),
             WITHDRAWAL_CALLDATA_LEN,
-            3_648
+            3_680
         )));
     }
     if instances_hex.len() != WITHDRAWAL_PUBLIC_INPUTS {
@@ -851,20 +880,20 @@ pub fn calldata_binds_instances(
         }
     }
 
-    // Word 23: inner-VK digest slot. Sanity-check even without an expected
+    // Word 24: inner-VK digest slot. Sanity-check even without an expected
     // pin, so a stale-Yul or corrupted payload never reaches submit.
     let digest_off = (NUM_ACCUMULATOR_INSTANCES + WITHDRAWAL_PUBLIC_INPUTS) * 32;
     let digest_word = &calldata[digest_off..digest_off + 32];
     let digest = U256::from_be_slice(digest_word);
     if digest == U256::ZERO {
         return Err(RelayerError::other(
-            "calldata vk_digest slot (word 23) is zero — aggregator did not emit an inner-VK \
+            "calldata vk_digest slot (word 24) is zero — aggregator did not emit an inner-VK \
              digest; regenerate the aggregator Yul + calldata",
         ));
     }
     if digest >= BN254_FR_MODULUS {
         return Err(RelayerError::other(format!(
-            "calldata vk_digest slot (word 23) = {digest} is >= BN254 field modulus r — not a \
+            "calldata vk_digest slot (word 24) = {digest} is >= BN254 field modulus r — not a \
              valid Fr; the aggregator cannot have produced this word"
         )));
     }
@@ -872,7 +901,7 @@ pub fn calldata_binds_instances(
         let expected = fr_hex_to_u256(expected_hex)?;
         if digest != expected {
             return Err(RelayerError::other(format!(
-                "calldata vk_digest slot (word 23) = {digest} != expected on-chain vkDigest = \
+                "calldata vk_digest slot (word 24) = {digest} != expected on-chain vkDigest = \
                  {expected} — the aggregator was built against a different inner VK than the \
                  deployed adapter pins"
             )));
@@ -886,7 +915,7 @@ pub fn calldata_binds_instances(
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic snark prover for tests: writes an empty `<name>.snark` and a
-/// 352-byte instances file (eleven ascending LE Fr) into `snark_dir`.
+/// 384-byte instances file (twelve ascending LE Fr) into `snark_dir`.
 #[derive(Clone, Debug, Default)]
 pub struct MockCircuit4SnarkProver {
     pub fail: bool,
@@ -925,11 +954,11 @@ impl Circuit4SnarkProver for MockCircuit4SnarkProver {
 }
 
 /// Deterministic aggregator for tests: returns a [`WITHDRAWAL_CALLDATA_LEN`]
-/// byte blob whose re-exposed instance words (12..=22 inclusive) match
-/// [`MockCircuit4SnarkProver`]'s eleven ascending LE instances, so
+/// byte blob whose re-exposed instance words (12..=23 inclusive) match
+/// [`MockCircuit4SnarkProver`]'s twelve ascending LE instances, so
 /// [`calldata_binds_instances`] passes. The length is the production
-/// Circuit-4 size, not a shorter stand-in: a 3 648 B pre-binding blob
-/// must fail the exact-length check.
+/// Circuit-4 size, not a shorter stand-in: a 3 680 B blob from the circuit
+/// before `dstBridge` must fail the exact-length check.
 #[derive(Clone, Debug, Default)]
 pub struct MockAggregator {
     pub fail: bool,
@@ -1065,13 +1094,28 @@ pub trait SnarkWrapper: Send + Sync {
 /// (see `bridge_snark_wrap::wrap_poseidon_snark_in_memory` docs).
 pub struct PoseidonSnarkWrapper {
     pub params_dir: PathBuf,
+    /// Where the wrapped snark lives while the aggregator reads it. `None`
+    /// is the system temp directory; the daemons pass their work directory
+    /// (bridge-audit#132).
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl PoseidonSnarkWrapper {
     pub fn new(params_dir: impl Into<PathBuf>) -> Self {
         Self {
             params_dir: params_dir.into(),
+            scratch_dir: None,
         }
+    }
+
+    /// Keep the wrapped snark files under `dir` instead of the system temp
+    /// directory.
+    pub fn with_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        // Absolute, whatever the caller gave: the aggregator subprocess runs
+        // in its own directory, and the file is read back from this one.
+        let dir = dir.into();
+        self.scratch_dir = Some(std::path::absolute(&dir).unwrap_or(dir));
+        self
     }
 
     /// Reconstruct the 4-element Circuit 1A/1B public-instance vector.
@@ -1181,11 +1225,19 @@ impl PoseidonSnarkWrapper {
             wrap_ms,
             bytes.len()
         );
-        let file = tempfile::Builder::new()
-            .prefix(&format!("{key_prefix}_snark_"))
-            .suffix(".snark")
-            .tempfile()
-            .map_err(|e| RelayerError::other(format!("tempfile: {e}")))?;
+        let prefix = format!("{key_prefix}_snark_");
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix).suffix(".snark");
+        let file = match &self.scratch_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    RelayerError::other(format!("scratch directory {}: {e}", dir.display()))
+                })?;
+                builder.tempfile_in(dir)
+            },
+            None => builder.tempfile(),
+        }
+        .map_err(|e| RelayerError::other(format!("snark tempfile: {e}")))?;
         std::fs::write(file.path(), &bytes).map_err(|e| {
             RelayerError::other(format!(
                 "write snark tempfile {}: {e}",
@@ -1465,6 +1517,57 @@ mod tests {
         ]);
     }
 
+    /// bridge-audit#132: with a scratch directory the calldata file is
+    /// created there and nowhere else, and is gone once read back. The
+    /// fake aggregator records where it was told to write.
+    #[test]
+    fn a_relative_scratch_dir_is_made_absolute() {
+        let cfg =
+            SubprocessAggregatorConfig::new("agg", "verifiers", "params").with_scratch_dir("work");
+        let dir = cfg.scratch_dir.expect("set");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with("work"), "{}", dir.display());
+        let wrapper = PoseidonSnarkWrapper::new("params").with_scratch_dir("work");
+        assert!(wrapper.scratch_dir.expect("set").is_absolute());
+    }
+
+    #[tokio::test]
+    async fn the_calldata_file_lives_in_the_scratch_dir_while_the_run_lasts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join("work");
+        let record = dir.path().join("out-path");
+        let bin = dir.path().join("aggregate-proof");
+        let script = format!(
+            "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"--out\" ]; then \
+             out=$2; shift; fi\n  shift\ndone\nprintf '%s' \"$out\" > {record}\nprintf calldata > \
+             \"$out\"\n",
+            record = record.display()
+        );
+        let source = dir.path().join("aggregate-proof.src");
+        std::fs::write(&source, script).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(std::process::Command::new("cp")
+            .arg(&source)
+            .arg(&bin)
+            .status()
+            .unwrap()
+            .success());
+        let cfg = SubprocessAggregatorConfig::new(&bin, dir.path(), dir.path())
+            .with_scratch_dir(&scratch);
+        let agg = SubprocessAggregator::new(cfg);
+        let snark = dir.path().join("inner.snark");
+        std::fs::write(&snark, b"snark").unwrap();
+        let calldata = agg.aggregate(&snark, "primary").await.unwrap();
+        assert_eq!(calldata, b"calldata");
+        let written = PathBuf::from(std::fs::read_to_string(&record).unwrap());
+        assert_eq!(written.parent(), Some(scratch.as_path()), "{written:?}");
+        assert!(
+            std::fs::read_dir(&scratch).unwrap().next().is_none(),
+            "the calldata file is removed once read back"
+        );
+    }
+
     #[test]
     fn read_instances_le_roundtrip_and_length_check() {
         let dir = std::env::temp_dir().join(format!("agg_inst_{}", std::process::id()));
@@ -1505,13 +1608,14 @@ mod tests {
         bad[off + 31] ^= 0xFF;
         assert!(calldata_binds_instances(&bad, &instances, None).is_err());
 
-        // Too-short calldata → error. 3 648 B is the pre-binding withdrawal
-        // blob: longer than the instance prefix, still not this build.
+        // Too-short calldata → error. 3 680 B is the withdrawal blob of the
+        // circuit before `dstBridge`: longer than the instance prefix, still
+        // not this build.
         assert!(calldata_binds_instances(&[0u8; 100], &instances, None).is_err());
-        assert!(calldata_binds_instances(&[0u8; 3_648], &instances, None).is_err());
+        assert!(calldata_binds_instances(&[0u8; 3_680], &instances, None).is_err());
     }
 
-    /// Word 23 (the inner-VK digest slot) must be non-zero and in-field, and
+    /// Word 24 (the inner-VK digest slot) must be non-zero and in-field, and
     /// — when an expected digest is supplied — must match it exactly. Guards
     /// against a stale-Yul aggregator that forgot to emit the digest, a
     /// corrupted payload that landed a non-Fr word there, and a same-shape
@@ -1966,15 +2070,15 @@ mod tests {
         // proof_hex is the aggregator calldata (>= SHPLONK min).
         let bytes = proof.proof_bytes().unwrap();
         assert_eq!(bytes.len(), WITHDRAWAL_CALLDATA_LEN);
-        // The eleven public inputs decode into a well-formed struct.
-        // MockCircuit4SnarkProver writes byte `i` for slot `i` (see :636-640),
-        // so slot 0 (`token_id`) decodes as 0 and slot 10 (`anchor_layer`) as 10.
-        // Slot 10 is the newest addition; guarding it here means a slot-swap
-        // that reordered the last two instances trips this pipeline test, not
-        // just downstream JSON consumers.
+        // The twelve public inputs decode into a well-formed struct.
+        // MockCircuit4SnarkProver writes byte `i` for slot `i`, so slot 0
+        // (`token_id`) decodes as 0, slot 10 (`anchor_layer`) as 10 and slot
+        // 11 (`dst_bridge`) as 11. Guarding the last two means a slot-swap
+        // trips this pipeline test, not just downstream JSON consumers.
         let pi = proof.public_inputs().unwrap();
         assert_eq!(pi.token_id, U256::ZERO);
         assert_eq!(pi.anchor_layer, U256::from(10u64));
+        assert_eq!(pi.dst_bridge, U256::from(11u64));
         std::fs::remove_dir_all(&dir).ok();
     }
 

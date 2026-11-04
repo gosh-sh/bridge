@@ -24,31 +24,102 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **A withdrawal proof names the one EVM bridge that may pay it** (bridge-audit#140). A second
+  `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
+  first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
+  made before the switch below are paid by the bridge they named. Upgrade in this order:
+  `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
+  then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. Replacing an
+  existing bridge closes withdrawals to its chain (`setEvmBridge(<chainId>, 0)`) until the old
+  bridge has paid the burns bound to it and its principal has moved; deposits stay open. The
+  order is in `docs/aave-yield.md`, "Replacing a bridge on the same chain".
+- **Circuit 4 verification key rotated.** Withdrawal proofs built for the previous key do not
+  verify against the new `BridgeWithdrawalAggregatorVerifier`, and new proofs do not verify
+  against the old one. `BridgeWithdrawalAggregatorVerifier.{bin,sol}` and its
+  `_calldata.bin` are regenerated; the `vkDigest` pinned in `ShplonkDeployLib`
+  (`WITHDRAWAL_VK_DIGEST`) and the Yul code hash (`WITHDRAWAL_YUL_CODEHASH`) change with them.
+  The verifier is immutable in `AckiNackiBridge`, so a bridge needs a new deployment. Circuit 4
+  has twelve public inputs, the twelfth being `dstBridge`; `proof_event_*.json` carries twelve
+  `public_instances_hex`, the aggregated calldata is 3 712 bytes with the inner-VK digest at
+  word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
+  revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
+  before the upgrade are proven with the release their bridge was deployed for.
+- **`eccUSDCBridge` 1.15.0** (code hash `24adf1c630247edd5e397cecb5f0c5290a9081cfef4d137224cd1a80b76a9d07`):
+  `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
+  `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
+  evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
+  EVM bridge set is refused with reason 239 (`ERR_NO_EVM_BRIDGE`) and burns nothing. The binding
+  is not carried through `updateCode`: call `setEvmBridge` for every chain right after the
+  upgrade, before withdrawals reopen. The zerostate binds `BRIDGE_ZS_L1_BRIDGE` for
+  `BRIDGE_ZS_L1_CHAIN_ID`.
+- **`AckiNackiBridge.withdrawByProof`**: `WithdrawalPublicInputs` gains `dstBridge` as its last
+  field, so the selector is `0xc7d38069` (was `0xa9753d18`) and
+  `IBridgeWithdrawalVerifier.verifyWithdrawal` is `0xbcd3e6c9`. A proof whose `dstBridge` is not
+  the bridge's own address reverts `WrongDstBridge(uint256)`. Tooling that encodes the call by
+  hand needs the twelve-field tuple.
+- **`ackinacki-bridge withdraw`** needs `eccUSDCBridge` 1.15.0. Before burning it requires
+  `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
+  the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
+  names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
+  bridge the message names and `--allow-retry` — the idempotency key does not include the
+  bridge, so the run resumes without a second burn; without the flag it stops with exit 3. Deposits still work against 1.14.0.
+- **`relayer daemon-withdraw` and `relayer daemon-bridge`** park a `proof_event_*.json` whose
+  `dstBridge` is another bridge without sending it, and treat `WrongDstBridge` as permanent;
+  `relayer submit-withdraw` and `relayer withdraw-e2e` refuse such a proof. `bridge-verifier-daemon`
+  accepts twelve public instances and refuses eleven.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
-  flags, environment variables and the `ARBITRUM_ANCHOR_STATE` file carry over unchanged.
+  flags and environment variables carry over; the `ARBITRUM_ANCHOR_STATE` file gives way to the
+  state directory of the next entry.
 - `EthBeaconLightClient` and `ArbitrumBlockVerifier` are built with the `sold` 0.81.1 release and
   move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
-  are unchanged. Point `AN_ARBITRUM_VERIFIER_ABI_PATH` and the light-client ABI path at the new
-  folder; rebuild with `make SOLD_0_81_1=<sold 0.81.1>`.
-- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains two last fields** —
-  `predecessor`, the bridge this one replaces on the same chain or zero for the first, and
-  `legacyPredecessors`, every other earlier bridge for the same identity that `predecessor` does
-  not answer for (bridges deployed before this release answer only for themselves). Nullifiers
-  any of them paid count as used (`NullifierAlreadyUsed`); an entry that is not a bridge for the
-  same `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR` reverts `InvalidPredecessor`. Update tooling that
-  encodes the constructor; deployed bridges are unchanged.
-- **`AckiNackiBridge.isNullifierUsed(uint256)` also answers for earlier bridges**: it returns true
-  for a nullifier `predecessor`, its own line or a `legacyPredecessors` entry paid, and reverts when
-  one of them reverts. New views: `predecessor()` and `legacyPredecessors()`.
-- Every bridge deploy script (`DeployRealBridge`, `DeployShellnetE2EBridge`,
-  `DeployGenesisCursorBridge`, `DeployReuseVerifiersBridge`) and `deploy_bridge_bundle.sh` require
-  `PREDECESSOR_BRIDGE` — zero for the first bridge on a chain — and refuse a predecessor that is not
-  paused. When `PREDECESSOR_BRIDGE` is a bridge from before this release they also require
-  `LEGACY_PREDECESSOR_BRIDGES`: comma-separated, paused, every earlier bridge for the same
-  `WITHDRAW_ACC_FR`, empty if there is none. Keep a replaced bridge paused for good; the cutover is in `docs/aave-yield.md`,
-  "Replacing a bridge on the same chain".
+  are unchanged, and the relayers build them in from the new folder. Rebuild with
+  `make SOLD_0_81_1=<sold 0.81.1>`.
+- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains a last field, `predecessor`** —
+  the bridge on the same chain whose treasury this one may take over with `migrateTreasury` /
+  `fundTreasury`, or zero. A non-zero one must have code on this chain and the same
+  `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`, else the deploy reverts `InvalidPredecessor`; it need not
+  be paused. New view: `predecessor()`. Update tooling that encodes the constructor; deployed
+  bridges are unchanged. The bridge deploy scripts read it from `PREDECESSOR_BRIDGE` (optional,
+  zero by default); `deploy_bridge_bundle.sh` requires `PREDECESSOR_BRIDGE` to be set, to the zero
+  address if there is none.
+- Every long-running service takes three directories and writes nowhere else
+  (bridge-audit#132): `--state-dir`, `--work-dir`, `--log-dir`, each with an environment
+  variable (`DEPOSIT_RELAYER_*_DIR`, `ETH_LC_RELAYER_*_DIR`, `ARBITRUM_ANCHORS_*_DIR`,
+  `BRIDGE_WORK_DIR` and `BRIDGE_LOG_DIR` beside `BRIDGE_STATE_DIR` for `relayer daemon-live`).
+  The state is a directory now: `deposit-relayer daemon --state` / `DEPOSIT_RELAYER_STATE`,
+  `eth-lc-relayer daemon --state`, `eth-lc-relayer arbitrum-anchors --anchor-state` /
+  `ARBITRUM_ANCHOR_STATE` and `relayer --state` / `RELAYER_STATE_PATH` are gone. An old
+  command line stops: without the directory flags clap names the missing ones, and an old
+  `--state` flag or `*_STATE` variable beside them fails with the migration hint. Move each
+  state file into
+  its service's state directory (`deposit-relayer-state.json`, `eth-lc-relayer-state.json`,
+  `arbitrum-anchors-state.json`, `relayer-state.json` next to `prover_state.json`); the
+  daemons name the files; `deposit-relayer`, `eth-lc-relayer daemon` and `arbitrum-anchors`
+  refuse to start when they find other JSON files in their state directory but not their own
+  (`relayer daemon-live` re-reads the bridge's on-chain state at start, so its cursor file is
+  rebuilt). `deposit-relayer status` and `prove-one`, `eth-lc-relayer prove-one`,
+  `set-committee`, `submit-rotate` and the other `relayer` daemon modes take the directory flags
+  too; `set-committee` and `submit-rotate` take the daemon's state lock, so the daemon is
+  stopped while they run. The provers' files go under the work directory instead of the system
+  temp directory, their transcripts and each daemon's own log (a file per day, the newest 14
+  kept, beside stdout) into the log directory.
+- The contract ABIs are built into the binaries: `AN_BRIDGE_ABI_PATH`,
+  `AN_ARBITRUM_VERIFIER_ABI_PATH`, `AN_LC_ABI_PATH`, `AN_USDC_ABI_PATH` and their flags are
+  removed from `deposit-relayer` and `eth-lc-relayer`; `crates/eth-light-client-relayer/abi/`
+  is gone. Remove the variables from the unit files.
+- The Docker Compose kit moved from `crates/bridge-relayer-daemon/deploy/shellnet-l2` to
+  `docker/` and covers every service (bridge-audit#135): `docker/compose.yaml` runs
+  `daemon-live`, `deposit-relayer`, `eth-lc-relayer` and `arbitrum-anchors` from the images
+  `docker/Dockerfile` builds, with the one-shot commands `preflight`, `lc-keygen`,
+  `fold-bk-set` and `cli` under `--profile ops`. The old `compose.yaml`, `compose.env.example`
+  and `Dockerfile` are deleted; the scripts are `docker/relayer/`, the runtime env template is
+  `docker/env/daemon-live.env.example`, the compose service `relayer` is `daemon-live`. The
+  BK set file is no longer baked into the image: it is mounted from `$BRIDGE_OPT/keys/bk_set.json`,
+  and `EXPECTED_BRIDGE_COMMIT` is the commit of the image. `EXPECTED_RELAYER_SHA256` and
+  `EXPECTED_AGGREGATE_PROOF_SHA256` are optional. The layout and the migration are in
+  `docker/README.md`.
 
 ### New / Improvements
 
@@ -58,6 +129,23 @@ assigns it when the release is tagged.
   the owner key decides where the book goes. Pull AAVE principal back first (`TreasuryNotLiquid`).
 - `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
   `treasuryBalance` with no `Deposit` event and no `MAX_BRIDGE_TVL` check; emits `TreasuryFunded`.
+- `deposit-relayer` needs an EVM RPC that serves `eth_getLogs` and transaction receipts for at
+  least the last 7 days (30 preferred); one that keeps ~10 000 blocks cannot prove a deposit
+  older than that. Check `RPC_URL` before the next restart.
+- Images for every service, built from the sources of one commit by `docker/Dockerfile`:
+  `docker.gosh.sh/bridge-relayer`, `bridge-deposit-relayer`, `bridge-eth-lc-relayer` and
+  `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and
+  on a version tag, tagged `sha-<12>`, `latest` and the release). `--target tools` gives
+  every binary as plain files.
+- `deposit-relayer` reads `RPC_URL`, `BRIDGE_ADDRESS` and `EXPECT_CHAIN_ID` from the
+  environment, `eth-lc-relayer arbitrum-anchors` reads `BRIDGE_ADDRESS`, `PARENT_LOG_SPAN` and
+  `ARBITRUM_LOG_SPAN`: a service is configured from an env file alone.
+- `deposit-relayer` and `eth-lc-relayer` cut every URL in their logs and prover transcripts to
+  `scheme://host`: RPC URLs carry API keys, and transport errors quote them.
+- `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
+  stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
+- The five `*.patch` files in the repository root and `scripts/check_eth_beacon_lc_sources.sh`
+  are removed: acki-nacki takes the AN contracts through `contracts/an/place.json`. Nothing to do.
 - `DeployRealBridge` accepts Arbitrum Sepolia (421614) and wires its AAVE V3 USDC market only with
   `USE_AAVE=true`: pool `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, Circle USDC
   `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, aToken `0x460b97BD498E1157530AEb3086301d5225b91216`.
@@ -68,6 +156,12 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
+  no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
+  verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.
+- `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe
+  holds: both streams are read to the end, and its transcript is written like the step
+  prover's.
 - Version tags publish their release assets again (`ackinacki-bridge-linux-x86_64.tar.gz`,
   `kzg_bn254_21.srs`, `kzg_params_18.srs`, `SHA256SUMS`). v0.3.0 to v0.7.0 have none;
   `install.sh` needs a tag cut after this change.

@@ -46,8 +46,7 @@ contract DeployTestBridge is Script {
             altDstChainId: 0,
             altDstHostChainId: 0,
             altTokenId: 0,
-            predecessor: IPredecessorBridge(address(0)),
-            legacyPredecessors: new IPredecessorBridge[](0)
+            predecessor: IPredecessorBridge(address(0))
         });
         AckiNackiBridge bridge = new AckiNackiBridge(
             address(oracle), usdc, address(0), address(0), vbDisabled, bwDisabled

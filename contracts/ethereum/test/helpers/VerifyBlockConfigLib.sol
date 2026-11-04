@@ -94,8 +94,7 @@ library VerifyBlockConfigLib {
             altDstChainId: 0,
             altDstHostChainId: 0,
             altTokenId: 0,
-            predecessor: IPredecessorBridge(address(0)),
-            legacyPredecessors: new IPredecessorBridge[](0)
+            predecessor: IPredecessorBridge(address(0))
         });
     }
 
@@ -115,8 +114,7 @@ library VerifyBlockConfigLib {
             altDstChainId: 0,
             altDstHostChainId: 0,
             altTokenId: 0,
-            predecessor: IPredecessorBridge(address(0)),
-            legacyPredecessors: new IPredecessorBridge[](0)
+            predecessor: IPredecessorBridge(address(0))
         });
     }
 
@@ -149,8 +147,7 @@ library VerifyBlockConfigLib {
                 altDstChainId: altDstChainId,
                 altDstHostChainId: altDstHostChainId,
                 altTokenId: altTokenId,
-                predecessor: IPredecessorBridge(address(0)),
-                legacyPredecessors: new IPredecessorBridge[](0)
+                predecessor: IPredecessorBridge(address(0))
             });
     }
 }

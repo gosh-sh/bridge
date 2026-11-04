@@ -66,7 +66,8 @@ or `BRIDGE_PK_CACHE_DIR=<path>` in the env. The daemon forwards it to the
 cd bridge/crates/bridge-prover-libraries
 # BRIDGE_CONFIG_DIR must already be exported (./L1_config or ./L2_config)
 set -a && source "$BRIDGE_CONFIG_DIR/env" && set +a
-./target/release/relayer --state "$BRIDGE_CONFIG_DIR/relayer-state.json" daemon-live \
+export BRIDGE_STATE_DIR="$BRIDGE_CONFIG_DIR/state"
+./target/release/relayer daemon-live --work-dir ./work --log-dir ./logs \
   2>&1 | tee logs/perf_baseline_${BRIDGE_CONFIG_DIR##*/}.log
 ```
 

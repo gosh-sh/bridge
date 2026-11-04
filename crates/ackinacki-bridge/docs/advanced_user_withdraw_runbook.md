@@ -268,9 +268,18 @@ cd crates/bridge-prover-libraries
 set -a && source shellnet.common && set +a
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS PRIVATE_KEY=$BURNER_PRIVATE_KEY LEVEL=2 \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
-PREDECESSOR_BRIDGE=<the paused bridge this one replaces, or 0x0000000000000000000000000000000000000000> \
+PREDECESSOR_BRIDGE=<the bridge whose treasury this one takes over, or 0x0000000000000000000000000000000000000000> \
   ./scripts/deploy_bridge_bundle.sh
 ```
+
+Then bind the new bridge on Acki Nacki: the owner of `eccUSDCBridge` calls
+`setTrustedL1Bridge(<chain id>, <new bridge>, true)` and
+`setEvmBridge(<chain id>, <new bridge>)`. Every burn names the bridge
+`getEvmBridge(<chain id>)` returns at that moment, and only that bridge pays it
+(`WrongDstBridge` otherwise). Until the binding is set, `ackinacki-bridge withdraw
+--bridge-address <new bridge>` stops before the burn. If another bridge already
+serves the chain, follow `docs/aave-yield.md`, "Replacing a bridge on the same
+chain", instead.
 
 **Post-deploy sanity — verify W²-alignment:**
 
@@ -349,7 +358,7 @@ establish them:
    ```
 
    Empty diff, or stop here. This is the same comparison
-   `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   `docker/relayer/preflight.sh`
    runs (`verify_verifier_lane`), and the CLI's own
    `check_bridge_deploy` runs it for you on every withdraw — the flag
    does **not** turn that off.
@@ -1002,6 +1011,7 @@ unchanged by the CLI)
 | implicit | `WithdrawalAlreadyExecuted(msg_id)` | Same `msg_id` reused. Fire fresh burn. |
 | implicit | `AnchorNotFound(key_seq_no)` | Covering bundle's `layer_hashes[1]` not on-chain. → [Case 3a](#case-3a--capture-timeout--advanced-diagnostics). |
 | `0xbb651fce` | `WithdrawTreasuryShortfall(uint256,uint256)` | `pub.amount > treasuryBalance`. → [Case 3e](#case-3e--withdrawtreasuryshortfall). |
+| `0x5ccdadb4` | `WrongDstBridge(uint256)` | The burn named another EVM bridge (the argument). The CLI refuses this before proving; seen only when calling `withdrawByProof` by hand. Re-run against the bridge the error names. |
 
 **Decode a revert:**
 
@@ -1018,21 +1028,23 @@ up, so all three are spelled out here:
    `DIR/proof_event_NNNNNN.json` (`NNNNNN` = the zero-padded anchor
    seq_no). A re-run without it re-proves, deterministically.
 2. **Its keys are `proof_hex` and `public_instances_hex`** — an array of
-   eleven 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
-3. **Those eleven are little-endian Fr**, and `uint256` on the wire is
+   twelve 32-byte hex strings, not a `calldata_hex` / `public_inputs` pair.
+3. **Those twelve are little-endian Fr**, and `uint256` on the wire is
    big-endian, so each one must be byte-reversed before `cast` sees it.
 
 `pub` is a struct — `WithdrawalPublicInputs` in `AckiNackiBridge.sol`,
-eleven `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
+twelve `uint256` in the order `(tokenId, amount, recipientHi, recipientLo,
 dstChainId, senderAccFr, dappFr, accFr, nullifier, finalRoot,
-anchorLayer)` — so the signature is a parenthesised tuple, not
-`uint256[11]`. The selector for the eleven-slot signature is
-`0xa9753d18`, computed with `cast sig` from the fully-expanded
-signature below (`cast` will not parse `×11` shorthand — it needs
-eleven comma-separated `uint256`s inside the tuple, exactly as the
+anchorLayer, dstBridge)` — so the signature is a parenthesised tuple, not
+`uint256[12]`. The selector for the twelve-slot signature is
+`0xc7d38069`, computed with `cast sig` from the fully-expanded
+signature below (`cast` will not parse `×12` shorthand — it needs
+twelve comma-separated `uint256`s inside the tuple, exactly as the
 `cast call` invocation further down spells out); the
-previous ten-slot form was `0x6e6f66ad` and will not decode against the
-current bridge:
+eleven-slot form `0xa9753d18` and the ten-slot form `0x6e6f66ad` will
+not decode against the current bridge. `dstBridge` is the EVM bridge the
+burn named; a proof called on any other bridge reverts
+`WrongDstBridge(uint256)`:
 
 ```bash
 # $PROVER_OUT_DIR is yours to set — the CLI reads the directory from
@@ -1041,14 +1053,14 @@ P="$PROVER_OUT_DIR/proof_event_$(printf '%06d' "$SEQ").json"
 
 PROOF=0x$(jq -r '.proof_hex' "$P" | sed 's/^0[xX]//')
 # ltrimstr + scan/reverse turns each LE Fr into the BE uint256 the ABI
-# expects; join wraps the eleven into the tuple literal cast wants.
+# expects; join wraps the twelve into the tuple literal cast wants.
 PI=$(jq -r '
   def be: sub("^0[xX]";"") | [scan("..")] | reverse | add;
   "(" + ([.public_instances_hex[] | "0x" + be] | join(",")) + ")"
 ' "$P")
 
 cast call "$BRIDGE_ADDRESS" \
-  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
+  'withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))' \
   "$PROOF" "$PI" \
   --rpc-url "$RPC_URL" --trace
 ```

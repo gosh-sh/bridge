@@ -34,6 +34,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
 
     uint256 internal constant ACC = 12;
     uint256 internal constant WD_NULLIFIER_WORD = ACC + 8;
+    address internal constant MOCK_BRIDGE = address(0xB41D6E);
 
     string internal constant WD_BIN = "verifiers/BridgeWithdrawalAggregatorVerifier.bin";
     string internal constant WD_CD = "verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin";
@@ -91,6 +92,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.dstBridge = _word(cd, ACC + 11);
     }
 
     function _reconstruct(uint256 hi, uint256 lo) internal pure returns (address) {
@@ -160,6 +162,40 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             MockERC20(address(bridge.usdc())).balanceOf(recipient), pub.amount, "no second payout"
         );
         assertEq(bridge.treasuryBalance(), treasuryBefore - pub.amount);
+    }
+
+    /// @dev A real proof for one bridge, submitted to a second bridge on the
+    ///      same chain with the same AN identity and the same anchor, does not
+    ///      pay: as is (`WrongDstBridge`) or re-labelled to name the second
+    ///      bridge (the circuit rejects it).
+    function test_withdrawByProof_realProofForOneBridgeFailsOnAnother() public {
+        _requireWithdrawalArtefacts();
+        bytes memory cd = vm.readFileBinary(WD_CD);
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFromWithdrawalCalldata(cd);
+        vm.chainId(pub.dstChainId);
+
+        IBridgeWithdrawalVerifier verifier = ShplonkDeployLib.deployWithdrawalAdapter(WD_BIN);
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory otherPub =
+            _pubFromWithdrawalCalldata(cd);
+        otherPub.dstBridge = uint256(uint160(address(0xB0B)));
+        AckiNackiBridge other = _deployWithdrawBridge(verifier, otherPub);
+        UsdcTestLib.depositUsdc(vm, MockERC20(address(other.usdc())), other, funder, pub.amount);
+        _seedAnchor(other, pub.finalRoot);
+        uint256 treasuryBefore = other.treasuryBalance();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.WrongDstBridge.selector, pub.dstBridge)
+        );
+        other.withdrawByProof(cd, pub);
+
+        // The pairing fails: `ShplonkHalo2Verifier` turns the Yul revert into
+        // `false` (staticcall) and the bridge reverts `WithdrawalProofRejected`.
+        _setWord(cd, ACC + 11, otherPub.dstBridge);
+        vm.expectRevert(AckiNackiBridge.WithdrawalProofRejected.selector);
+        other.withdrawByProof(cd, otherPub);
+
+        assertFalse(other.isNullifierUsed(pub.nullifier));
+        assertEq(other.treasuryBalance(), treasuryBefore);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -308,7 +344,8 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             accFr: 0xAC0F4CEDEADBEEF1,
             nullifier: nullifier,
             finalRoot: finalRoot,
-            anchorLayer: 1
+            anchorLayer: 1,
+            dstBridge: uint256(uint160(MOCK_BRIDGE))
         });
     }
 
@@ -316,16 +353,23 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
         IBridgeWithdrawalVerifier verifier,
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub
     ) internal returns (AckiNackiBridge bridge) {
-        bridge = new AckiNackiBridge(
-            address(new MockBlockHeaderOracle()),
-            address(new MockERC20("Mock USDC", "mUSDC", 6)),
-            address(0),
-            address(0),
-            _acceptingVerifyBlockConfig(),
-            VerifyBlockConfigLib.withWithdrawShellnet(
-                verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
-            )
+        // The proof pays only the bridge it names, so deploy at that address.
+        address at = address(uint160(pub.dstBridge));
+        deployCodeTo(
+            "AckiNackiBridge.sol:AckiNackiBridge",
+            abi.encode(
+                address(new MockBlockHeaderOracle()),
+                address(new MockERC20("Mock USDC", "mUSDC", 6)),
+                address(0),
+                address(0),
+                _acceptingVerifyBlockConfig(),
+                VerifyBlockConfigLib.withWithdrawShellnet(
+                    verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
+                )
+            ),
+            at
         );
+        bridge = AckiNackiBridge(at);
     }
 
     function _acceptingVerifyBlockConfig()

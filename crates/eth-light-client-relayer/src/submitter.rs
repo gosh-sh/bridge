@@ -826,7 +826,7 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         // still admits anchors, so both contracts are required.
         let Some((usdc_addr, usdc_client)) = &self.usdc else {
             return Ok(SubmitOutcome::Rejected {
-                reason: "flip-owner needs USDCBridge (AN_USDC_BRIDGE + AN_USDC_ABI_PATH)".into(),
+                reason: "flip-owner needs USDCBridge (AN_USDC_BRIDGE)".into(),
             });
         };
         let expected =
@@ -1237,13 +1237,12 @@ mod flip_owner_tests {
             }
         }
 
-        /// The trimmed ABIs the daemon ships: a call this mock accepts but
-        /// `AN_LC_ABI_PATH` / the bundled bridge ABI cannot encode would fail
-        /// only against a live chain, which is how a missing `getConfig`
-        /// reached review.
+        /// The ABIs built into the daemon: a call this mock accepts but the
+        /// built-in ABI cannot encode would fail only against a live chain,
+        /// which is how a missing `getConfig` reached review.
         fn in_abi(account: &str, function: &str) -> bool {
-            const LC: &str = include_str!("../abi/EthBeaconLightClient.abi.json");
-            const BRIDGE: &str = include_str!("../abi/USDCBridge.abi.json");
+            const LC: &str = crate::abi::LIGHT_CLIENT_ABI_JSON;
+            const BRIDGE: &str = crate::abi::BRIDGE_ABI_JSON;
             // Everything that is not the bridge is a light client: tests
             // use other accounts for it, including the zero one.
             let abi = if account == bridge() { BRIDGE } else { LC };

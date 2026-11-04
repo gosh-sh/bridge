@@ -87,7 +87,7 @@ waited for and the tail of the log.
 | Tests | Step |
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 4 hours |
-| `test_10`–`12` | The zerostate bridge is Active at 1.14.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_10`–`12` | The zerostate bridge is Active at 1.15.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the zerostate's keepers); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
 | `test_40`–`44` | `deposit`: sent, Deposit event — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
@@ -116,10 +116,15 @@ whose `authorized_keys` entry allows only the dispatcher (a copy of
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
 socket and capped memory and CPU (40 GB / 12 cores for the build and the deposit prover, 64 GB /
 32 cores for the provers that have to keep pace: the light client's step prover, which has an
-epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once in a `rust:1-bookworm` container
-(`prover-host/build.sh`; `ackinacki-bridge` with `dev-unfixed-bridge`, since no release has
-set `MIN_BRIDGE_VERSION` yet), and runs `prover-host/jobs/*.sh` on a docker network of its own
-where `nginx0` and `node0..4` are proxies to the runner's tunnels.
+epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once with `docker/Dockerfile`:
+the `tools` target gives every binary as plain files (`/bin-ci` in the jobs; `ackinacki-bridge`
+with `dev-unfixed-bridge`, since no release has set `MIN_BRIDGE_VERSION` yet), and the
+`bridge-relayer`, `bridge-eth-lc-relayer` and `bridge-deposit-relayer` targets give the
+service images, so the service jobs (`relayer`, `lc-relayer`, `anchors`, `deposit-relayer`,
+`lc-keygen`, `lc-prove`) run from the images a host deploys. `prover-host/build.sh` then
+builds the EVM contracts for `deploy.sh`. The jobs run on a docker network of its own where
+`nginx0` and `node0..4` are proxies to the runner's tunnels. The dispatcher's copy on the host
+must be updated by hand when `ci-entry` changes.
 
 A run is named `arbitrum-e2e-<UTC timestamp>`. Its work directory is `runs/<run>/` and its
 logs `run-logs/<run>/<job>.log` in the CI directory, an external volume every job mounts as

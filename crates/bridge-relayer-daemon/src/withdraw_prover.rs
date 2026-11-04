@@ -55,9 +55,8 @@ pub trait WithdrawalProver: Send + Sync {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Deterministic withdrawal prover for tests. Returns a canned, self-verified
-/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + eleven 32-byte LE
-/// public inputs, matching the post-anchorLayer `WITHDRAWAL_PUBLIC_INPUTS = 11`
-/// layout) so the submit path is exercised end-to-end without running halo2.
+/// [`PartnerWithdrawalProof`] (SHPLONK-shaped proof bytes + twelve 32-byte LE
+/// public inputs, the `dstBridge` layout) so the submit path is exercised end-to-end without running halo2.
 #[derive(Clone, Debug)]
 pub struct MockWithdrawalProver {
     canned: PartnerWithdrawalProof,
@@ -66,12 +65,12 @@ pub struct MockWithdrawalProver {
 }
 
 impl MockWithdrawalProver {
-    /// A valid canned proof: eleven ascending public inputs (matching the
-    /// post-anchorLayer `WITHDRAWAL_PUBLIC_INPUTS = 11` layout) and a
+    /// A valid canned proof: twelve ascending public inputs (matching the
+    /// `WITHDRAWAL_PUBLIC_INPUTS = 12` layout, `dstBridge` last) and a
     /// SHPLONK-shaped proof blob long enough to pass
     /// [`PartnerWithdrawalProof::proof_bytes`].
     pub fn valid() -> Self {
-        let public_instances_hex = (0u8..11)
+        let public_instances_hex = (0u8..12)
             .map(|i| {
                 let mut le = [0u8; 32];
                 le[0] = i;
@@ -277,7 +276,7 @@ mod tests {
             .await
             .unwrap();
         assert!(proof.self_verified);
-        assert_eq!(proof.public_instances_hex.len(), 11);
+        assert_eq!(proof.public_instances_hex.len(), 12);
         // Canned proof is submit-shaped (SHPLONK aggregator calldata).
         assert!(proof.proof_bytes().is_ok());
         let pi = proof.public_inputs().unwrap();

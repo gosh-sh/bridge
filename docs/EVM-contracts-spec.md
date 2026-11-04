@@ -35,23 +35,23 @@ note here calling out the drift.
 > have not been re-anchored by this change. Locate symbols in current source
 > before relying on their line offsets.
 >
-> **Drift note, 2026-10-30 (Arbitrum Sepolia AAVE).** §10, §12.1, §12.2, §12.3 and §13
+> **Drift note, 2026-11-02 (withdrawal proofs name their EVM bridge, gosh-sh/bridge-audit#140).**
+> §4.1's `treasuryBalance`, `_nullifiers` and `_layerWindows` rows, §4.2's `predecessor` row, §5's
+> `BridgeWithdrawConfig`, predecessor and `genesisBkSetCommitment` rows, all of §7.2, §7.4's
+> `isNullifierUsed` row, §10's `fundTreasury` / `migrateTreasury` rows, §12.1's `DeployRealBridge`
+> row, §12.2's `WIRE_VERIFY_BLOCK` and `PREDECESSOR_BRIDGE` rows and §15's invariant 2 cite
+> `src/AckiNackiBridge.sol`, `src/IBridgeWithdrawalVerifier.sol`, `script/DeployRealBridge.s.sol`
+> and `script/PredecessorEnv.sol` as of this change. Other citations were not re-anchored.
+>
+> **Drift note, 2026-11-04 (Arbitrum Sepolia AAVE).** §10, §12.1, §12.2, §12.3 and §13
 > now include chain id 421614. `DeployRealBridge._resolveTokenAddresses` accepts it.
 > `USE_AAVE` defaults false, and `USE_AXIOM_ORACLE=true` reverts on this chain. The
-> `DeployRealBridge.s.sol` citations in the constructor table (`:161`) and in §12
-> (`:156`, `:166-167`, `:172`) were re-anchored to this script. The constructor table's
-> `genesisBkSetCommitment` row cites `src/AckiNackiBridge.sol` as of this note (`:763`).
-> The verifier-triple row was wrong: the constructor reverts `PartialVerifyBlockWiring` on a
-> partial triple (`:743`); it and its `VerifyBlockDisabled` citation (`:940`) are re-anchored.
-> §7.2's *Replay scope* now covers a second deployment on the same chain through `predecessor` (next note). Other
-> citations were not re-anchored.
->
-> **Drift note, 2026-10-30 (predecessor bridge, gosh-sh/bridge-audit#140).** §4.2's `predecessor`
-> row, §5's `BridgeWithdrawConfig`, predecessor and `genesisBkSetCommitment` rows, §7.2's check 7
-> and *Replay scope*, §7.4's `isNullifierUsed` row, §10's `fundTreasury` / `migrateTreasury` rows,
-> §12.1's `DeployRealBridge` row and §12.2's `WIRE_VERIFY_BLOCK` and `PREDECESSOR_BRIDGE` rows cite
-> `src/AckiNackiBridge.sol`, `script/DeployRealBridge.s.sol` and `script/PredecessorEnv.sol` as of
-> this change. Other citations were not re-anchored.
+> `DeployRealBridge.s.sol` citations in the constructor table (`:160`) and in §12
+> (`:152`, `:155`, `:165-166`, `:171`, `:283`) are re-anchored to this script. The constructor
+> table's `genesisBkSetCommitment` and verifier-triple rows were wrong: the constructor reverts
+> `ZeroBkSetCommitment` (`src/AckiNackiBridge.sol:763`) and `PartialVerifyBlockWiring` (`:743`);
+> with no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` (`:934`). Other citations were
+> not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -85,12 +85,12 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/IPrimaryVerifier.sol` | 36 | Circuit 1A (primary attestation) verifier interface — 4 PIs. |
 | `src/IFallbackVerifier.sol` | 33 | Circuit 1B (fallback attestation) verifier interface — 4 PIs. |
 | `src/ILayerHashesMovementVerifier.sol` | 45 | Circuit 2 (layer-hash movement) interface — 14 PIs. |
-| `src/IBridgeWithdrawalVerifier.sol` | 77 | Circuit 4 (bridge withdrawal event) interface — 11 PIs. |
+| `src/IBridgeWithdrawalVerifier.sol` | 83 | Circuit 4 (bridge withdrawal event) interface — 12 PIs. |
 | `src/ShplonkAggregatorVerifierBase.sol` | 32 | Shared adapter base: instance reader + SHPLONK dispatch. |
 | `src/PrimaryAggregatorVerifier.sol` | 30 | 1A adapter (instances[12..15] ↔ args). |
 | `src/FallbackAggregatorVerifier.sol` | 30 | 1B adapter (instances[12..15] ↔ args). |
 | `src/LayerHashesAggregatorVerifier.sol` | 34 | Circuit-2 adapter (instances[12..25] ↔ args). |
-| `src/BridgeWithdrawalAggregatorVerifier.sol` | 44 | Circuit-4 adapter (instances[12..=22] ↔ `pub`, eleven slots). |
+| `src/BridgeWithdrawalAggregatorVerifier.sol` | 44 | Circuit-4 adapter (instances[12..=23] ↔ `pub`, twelve slots; `vkDigest` at 24). |
 | `src/ShplonkHalo2Verifier.sol` | 31 | `staticcall` shim onto CREATE-deployed Yul verifier bytecode. |
 | `src/IShplonkHalo2Verifier.sol` | 7 | `verify(bytes) → bool`. |
 | `src/IBlockHeaderOracle.sol` | 27 | Block-hash oracle interface. |
@@ -129,7 +129,7 @@ flowchart TB
     LOG -->|"MPT receipt proof"| DP["deposit-prover (off-chain Halo2)"]
     DP -->|"SHPLONK proof + 12 PIs"| AN["AN USDCBridge.finalizeDeposit"]
     AN -.->|"WithdrawalInitiated event"| C4P["AN-side prover (Circuit 4)"]
-    C4P -.->|"proof + 11 PIs"| R
+    C4P -.->|"proof + 12 PIs"| R
 ```
 
 Two independent directions:
@@ -192,9 +192,8 @@ relying on them for a storage-level migration.
 | 10 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 189 | `applyBkSetUpdate` |
 | 10 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 193 | constructor, `verifyBlock` |
 | 11 | 0 | `storedPrevBkSetCommitment` | `uint256` | 200 | `applyBkSetUpdate` |
-| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 284 | `withdrawByProof` |
-| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 303 | `_appendLayer` |
-| 14 | — | `_legacyPredecessors` | `IPredecessorBridge[]` | 325 | constructor only (`BridgeWithdrawConfig.legacyPredecessors`); read by `isNullifierUsed` and `withdrawByProof` (§7.2) |
+| 12 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 296 | `withdrawByProof` |
+| 13 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 315 | `_appendLayer` |
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -211,7 +210,7 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 | `bridgeWithdrawalVerifier` | `IBridgeWithdrawalVerifier` | 218 | Zero ⇒ `withdrawByProof` disabled. |
 | `bridgeWithdrawalDappFr`, `bridgeWithdrawalAccFr` | `uint256` | 226, 229 | AN-side bridge identity the C4 proof must bind to. |
 | `bridgeWithdrawalAltDstChainId`, `bridgeWithdrawalAltDstHostChainId`, `bridgeWithdrawalAltTokenId` | `uint256` | 232, 236, 239 | Shellnet/testnet aliases (§7.2). |
-| `predecessor` | `IPredecessorBridge` | 285 | The bridge this deployment replaces on the same chain, or zero. Its paid nullifiers count as used here (§7.2). Immutable, so no storage slot changes. |
+| `predecessor` | `IPredecessorBridge` | 281 | The bridge this deployment replaces on the same chain, or zero. It only authorizes the treasury handover: it may call `fundTreasury`, and its `migrateTreasury` accepts only a bridge that names it here (§10). Replay needs nothing from it (§7.2). Immutable, so no storage slot changes. |
 
 ### 4.3 `HistoryWindow` (`:259-271`)
 
@@ -256,11 +255,9 @@ wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); whe
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:662-693`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
-`altDstHostChainId`, `altTokenId`, `predecessor`, `legacyPredecessors`. `predecessor` is the
-`AckiNackiBridge` this deployment replaces on the same chain (zero for the first one there).
-`legacyPredecessors` lists the other earlier bridges for the same identity that `predecessor` does
-not answer for — those deployed before the field existed answer only for themselves. Both are the
-last fields, so the constructor's ABI signature changed when they were added.
+`altDstHostChainId`, `altTokenId`, `predecessor`. `predecessor` is the `AckiNackiBridge` on the same
+chain whose treasury this deployment may take over, or zero. It is the last field, so the
+constructor's ABI signature changed when it was added.
 
 Validation performed (and *not* performed):
 
@@ -271,9 +268,9 @@ Validation performed (and *not* performed):
 | AAVE pair is all-or-nothing | 584-586 | else `InvalidAaveAddress` |
 | C4 verifier set ⇒ `accFr != 0` | 600-608 | else `InvalidBridgeWithdrawalIdentity`. **`dappFr == 0` is legal** (shellnet zero-`dapp_id` deployments), despite the NatSpec at `:568-569` saying both must be non-zero. Test `test_constructor_withdrawEnabledWithZeroDappFr_succeeds` pins the code behaviour. |
 | C4 verifier set ⇒ `dappFr`, `accFr`, `altTokenId` canonical Fr | | else `FieldElementOutOfRange`. Zero remains legal for `dappFr` and `altTokenId`. |
-| `genesisBkSetCommitment != 0` when the verifier triple is wired | 763 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:161` checks it before the deploy too. |
-| `predecessor != 0`, and every `legacyPredecessors` entry, ⇒ C4 verifier set, the address has code, answers `isNullifierUsed(0)`, and returns this deployment's `dappFr` and `accFr` from `bridgeWithdrawalDappFr()` / `bridgeWithdrawalAccFr()` | 806-814, 830-851 | else `InvalidPredecessor(address)`. Code at the address on this chain is what ties the predecessor to this chain; the identity check ties it to the same AN-side bridge. A probe that reverts gives `InvalidPredecessor`; one whose return data does not decode reverts the deployment without a reason. |
-| verifier triple is all-or-nothing | 743 | else `PartialVerifyBlockWiring`. Test `test/AckiNackiBridgeWithdrawByProof.t.sol:305` pins it. With no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` at call time (`:940`). |
+| `genesisBkSetCommitment != 0` when the verifier triple is wired | 763 | else `ZeroBkSetCommitment`. Checked only when all three verifiers are set; `script/DeployRealBridge.s.sol:160` checks it before the deploy too. |
+| `predecessor != 0` ⇒ C4 verifier set, the address has code, and returns this deployment's `dappFr` and `accFr` from `bridgeWithdrawalDappFr()` / `bridgeWithdrawalAccFr()` | 793-795, 811-826 | else `InvalidPredecessor(address)`. Code at the address on this chain is what ties the predecessor to this chain; the identity check ties it to the same AN-side bridge. A probe that reverts gives `InvalidPredecessor`; one whose return data does not decode reverts the deployment without a reason. Whether the predecessor is paused is not checked. |
+| verifier triple is all-or-nothing | 743 | else `PartialVerifyBlockWiring`. Test `test/AckiNackiBridgeWithdrawByProof.t.sol:305` pins it. With no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` at call time (`:934`). |
 
 Post-conditions: `owner = yieldRecipient = msg.sender`, `aaveEnabled = (both AAVE addresses set)`,
 `liquidReserveBps = 1_000` (10 %), reentrancy guard armed, `OwnershipTransferred(0, msg.sender)`
@@ -423,38 +420,41 @@ separate gap.
 function withdrawByProof(
     bytes calldata proof,
     IBridgeWithdrawalVerifier.WithdrawalPublicInputs calldata pub
-) external nonReentrant whenNotPaused returns (bool success)  // :1295-1383
+) external nonReentrant whenNotPaused returns (bool success)  // :1513-1605
 ```
 
-`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:547-550`).
+`whenNotPaused`: reverts `BridgePaused()` while `paused` is true (`:586-589`).
 
 Permissionless; gas is paid by the caller (typically a relayer) while funds go to `recipient`.
 
-Public inputs (`src/IBridgeWithdrawalVerifier.sol:33-65`), slots `[0..10]` in circuit order:
+Public inputs (`src/IBridgeWithdrawalVerifier.sol:35-72`), slots `[0..11]` in circuit order:
 `tokenId, amount, recipientHi, recipientLo, dstChainId, senderAccFr, dappFr, accFr, nullifier,
-finalRoot, anchorLayer`.
+finalRoot, anchorLayer, dstBridge`.
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | C4 verifier wired | 1299 | `WithdrawByProofDisabled` |
-| 2 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1304 | `WithdrawIdentityMismatch` |
-| 3 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1307-1314 | `DstChainIdMismatch` |
-| 4 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1315-1319 | `UnsupportedTokenId` |
-| 5 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1320-1325 | `RecipientHalfOutOfRange` |
-| 6 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1328 | `InvalidRecipient` |
-| 7 | `!_nullifiers[bytes32(pub.nullifier)]`, `predecessor == 0 \|\| !predecessor.isNullifierUsed(pub.nullifier)`, and no `legacyPredecessors` entry reports it used | 1581, 1635-1650 | `NullifierAlreadyUsed`. A predecessor or entry that reverts makes the call revert with its reason. |
-| 8 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1341-1345 | `LayerOutOfRange` |
-| 9 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1346-1348 | `UnknownAnchor` |
-| 10 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1354 | `WithdrawalProofRejected` |
-| 11 | `pub.amount ≤ treasuryBalance` | 1358 | `WithdrawTreasuryShortfall` |
+| 1 | C4 verifier wired | 1517-1519 | `WithdrawByProofDisabled` |
+| 2 | `pub.amount ≤ MAX_TRANSFER_AMOUNT` | 1521 | `TransferTooLarge` |
+| 3 | `pub.dstBridge == uint160(address(this))` | 1524-1526 | `WrongDstBridge(dstBridge)` |
+| 4 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1527-1529 | `WithdrawIdentityMismatch` |
+| 5 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1530-1537 | `DstChainIdMismatch` |
+| 6 | `pub.tokenId == 0`, **or** `altTokenId != 0 && pub.tokenId == altTokenId` | 1538-1542 | `UnsupportedTokenId` |
+| 7 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1543-1548 | `RecipientHalfOutOfRange` |
+| 8 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1551-1553 | `InvalidRecipient` |
+| 9 | `nullifier`, `finalRoot`, `anchorLayer` are canonical Fr | 1557-1559 | `FieldElementOutOfRange` |
+| 10 | `!_nullifiers[bytes32(pub.nullifier)]` | 1561-1563 | `NullifierAlreadyUsed` |
+| 11 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1564-1568 | `LayerOutOfRange` |
+| 12 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1569-1571 | `UnknownAnchor` |
+| 13 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1577-1578 | `WithdrawalProofRejected` |
+| 14 | `pub.amount ≤ treasuryBalance` | 1581-1583 | `WithdrawTreasuryShortfall` |
 
-Effects then interactions (`:1363-1381`): mark the nullifier used, `treasuryBalance -= amount`;
+Effects then interactions (`:1586-1603`): mark the nullifier used, `treasuryBalance -= amount`;
 then, if liquid USDC < `amount`, pull exactly the shortfall back from AAVE through `_pullFromAave`
 — bounded by `aUsdcBalance()`, not by `suppliedPrincipal`, so interest above the book can fund a
 payout; an aToken balance below the shortfall reverts `InsufficientTreasury`; then `usdc.transfer(recipient, amount)` (`false` ⇒ `WithdrawTransferFailed`); then
 `emit WithdrawalByProofExecuted(nullifier, recipient, amount, tokenId, msg.sender)`. Returns `true`.
 
-Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1430-1434`).
+Recipient reconstruction is split-α: `address(uint160((hi << 80) | lo))` (`:1652-1656`).
 
 **Anchor semantics.** `_isKnownLayerAnchor` (`src/AckiNackiBridge.sol`) scans
 only the window named by Circuit 4's 1-indexed `anchorLayer` public input
@@ -463,17 +463,12 @@ only the window named by Circuit 4's 1-indexed `anchorLayer` public input
 even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
-**Replay scope.** `dstChainId` must match the executing chain (or its scoped alias), so a proof
-cannot be paid on a deployment on another chain. The public inputs name no EVM bridge and the
-nullifier map is per-contract, so on one chain the guard is `predecessor`: a bridge deployed with
-`predecessor` set refuses the nullifiers that bridge reports as used, and since the predecessor's
-own `isNullifierUsed` answers for *its* predecessor and `legacyPredecessors`, a line of bridges from
-this release on is covered through one address. A bridge deployed before this release answers only
-for itself, so the bridges before it go into `legacyPredecessors`, each consulted directly. Each
-hop or entry costs one `STATICCALL` (a cold account and a cold slot, about 5k gas). The predecessor does not see nullifiers its successor pays, so it must stay paused once the
-successor is live; two unpaused bridges for the same AN-side identity on one chain are not
-protected against each other. The cutover order is in
-[`aave-yield.md`](aave-yield.md#replacing-a-bridge-on-the-same-chain). The
+**Replay scope.** A proof names the one EVM bridge that may pay it. `eccUSDCBridge` writes the
+bridge its owner set for the destination chain (`setEvmBridge`) into `WithdrawalInitiated`;
+Circuit 4 publishes those event-body bytes as `dstBridge` (slot 11); check 3 refuses any other
+address. A second bridge on the same chain — earlier or later, paused or not — therefore cannot pay
+a burn that names the first, and the nullifier map can stay per-contract with no cross-bridge
+lookup. `dstChainId` keeps a proof off deployments on other chains. The
 `altDstHostChainId` field exists precisely so a shellnet proof for logical chain `1` cannot execute
 on a deployment whose host chain is not the configured one. The rotated
 Circuit 4 key binds `events_pos` (the events-tree leaf index) into the
@@ -563,7 +558,7 @@ boundary at or below it — usually just that one bundle.
 | `getLatestPerLayer()` | 1156 | `uint256[10]`, entry `[L-1]` = head of window `L` (0 if empty). Replaces the removed `getStoredLayerHashes()`. |
 | `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
 | `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
-| `isNullifierUsed(uint256)` | 1635 | Replay pre-check for relayers: `true` when this bridge, its `predecessor` line or a `legacyPredecessors` entry paid the nullifier, which is exactly when `withdrawByProof` reverts `NullifierAlreadyUsed`. |
+| `isNullifierUsed(uint256)` | 1610 | Replay pre-check for relayers: `true` when this bridge paid the nullifier, which is exactly when `withdrawByProof` reverts `NullifierAlreadyUsed`. |
 
 ---
 
@@ -599,7 +594,7 @@ adapter:
 |---|---:|---|
 | `PrimaryAggregatorVerifier` / `FallbackAggregatorVerifier` | 4 | 12 `blockId`, 13 `bkSetCommitment`, 14 `blockSeqNo`, 15 `lastSeenBlockSeqNo` |
 | `LayerHashesAggregatorVerifier` | 14 | 12 `blockId`, 13 `bkSetCommitment`, 14 `numLayers`, 15–24 `layerHashes[0..9]`, 25 `prevMaxLevelLayerHash` |
-| `BridgeWithdrawalAggregatorVerifier` | 11 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer` |
+| `BridgeWithdrawalAggregatorVerifier` | 12 | 12 `tokenId`, 13 `amount`, 14 `recipientHi`, 15 `recipientLo`, 16 `dstChainId`, 17 `senderAccFr`, 18 `dappFr`, 19 `accFr`, 20 `nullifier`, 21 `finalRoot`, 22 `anchorLayer`, 23 `dstBridge` |
 
 All four are `view` and return `bool` — reverts inside the Yul verifier surface as `false`
 because `ShplonkHalo2Verifier.verify` captures only the `staticcall` success flag (`:37`).
@@ -618,7 +613,7 @@ contract's fallback entrypoint via `staticcall`.
 | `PrimaryAggregatorVerifier.bin` | 1A | 4 | 21 655 | 3 872 |
 | `FallbackAggregatorVerifier.bin` | 1B (inner K=21) | 4 | 21 655 | 3 872 |
 | `LayerHashesAggregatorVerifier.bin` | 2 (k_outer=22) | 14 | 19 263 | 3 104 |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 | 11 | 21 314 | 3 680 |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 | 12 | 21 475 | 3 712 |
 
 Sizes measured on disk at this commit; all are under the EIP-170 24 576-byte limit, which
 `scripts/check_eip170_verifier_bins.sh` enforces in CI. Circuit 1B is keygen'd at inner `K=21`
@@ -676,8 +671,8 @@ wire (Ethereum, Ethereum Sepolia, Arbitrum Sepolia), and that the pool is filled
 | `setAaveEnabled(bool)` | 1544 | Enabling with `aavePool == 0` reverts `InvalidAaveAddress`. |
 | `setLiquidReserveBps(bps)` | 1551 | Capped at `MAX_LIQUID_RESERVE_BPS` (50 %). |
 | `setYieldRecipient(addr)` | 1557 | Non-zero. |
-| `fundTreasury(amount)` | 1845 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
-| `migrateTreasury(successor)` | 1864 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid (`TreasuryNotLiquid`); zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
+| `fundTreasury(amount)` | 1802 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
+| `migrateTreasury(successor)` | 1821 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid (`TreasuryNotLiquid`); zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
 | `transferOwnership(addr)` | 1565 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_amountSupplyable()` = `balanceOf(this) − treasuryBalance * liquidReserveBps / 10_000`,
@@ -735,14 +730,13 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0xc9630cb0` | `deposit(uint256,bytes32)` |
 | `0x0b932e1b` | `verifyBlock(uint8,bytes,bytes,uint256,uint256,uint64,uint8,uint256[10],uint256)` |
 | `0xdcb4c795` | `applyBkSetUpdate(uint8,bytes,uint256,uint64,uint64,uint256,uint256,bytes32,bytes32,bytes32)` |
-| `0xa9753d18` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
+| `0xc7d38069` | `withdrawByProof(bytes,(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256))` |
 | `0x6e55e4eb` | `expectedPrevAnchor(uint8)` |
 | `0x22c341e9` | `getLatestPerLayer()` |
 | `0xe57869a8` | `isKnownAnchor(uint256)` |
 | `0xa7744702` | `isKnownLayerAnchor(uint8,uint256)` |
 | `0xc6c0572d` | `isNullifierUsed(uint256)` |
 | `0xb719d032` | `predecessor()` |
-| `0x802a410e` | `legacyPredecessors()` |
 | `0xf6471f4b` | `fundTreasury(uint256)` |
 | `0x46756f19` | `migrateTreasury(address)` |
 | `0xecb3dc88` | `depositCounter()` |
@@ -764,7 +758,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `HarvestWouldBreakSolvency`, `NoYield`, `NoExcessUsdc`.
 
 Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `NothingToMigrate`,
-`TreasuryNotLiquid`.
+`TreasuryNotLiquid`, and `InvalidPredecessor` from the constructor.
 
 `verifyBlock`: `VerifyBlockDisabled`, `AttestationProofRejected`, `LayerHashesProofRejected`,
 `BkSetCommitmentMismatch`, `BlockSeqNoNotMonotonic`, `PrevAnchorMismatch`, `InvalidNumLayers`,
@@ -775,8 +769,8 @@ Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `Nothin
 
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
-`LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `InvalidPredecessor`, `UnsupportedTokenId`, `WithdrawTransferFailed`,
-`WithdrawTreasuryShortfall`.
+`LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `WrongDstBridge`, `UnsupportedTokenId`,
+`WithdrawTransferFailed`, `WithdrawTreasuryShortfall`.
 
 Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` while
 `paused`), `AlreadyInThatPauseState` (`pause`, `unpause` that would not change the state).
@@ -789,7 +783,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 
 | Script | Purpose |
 |---|---|
-| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:156`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:166-167`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. Requires `PREDECESSOR_BRIDGE` (`:172`) and refuses a non-zero one that is not paused (`script/PredecessorEnv.sol:20-26`). |
+| `DeployRealBridge.s.sol` | Production. Oracle (Axiom or mock), optional AAVE, **mandatory** `verifyBlock` triple (`WIRE_VERIFY_BLOCK=true`, `:155`), **mandatory** C4 withdrawal wiring (NB-Q8 — `WITHDRAW_ACC_FR` is required, `:165-166`, because shipping `address(0)` bricks user withdrawals). Writes `deployment_real.json`. Accepts chains 1, 11155111 and 421614; reverts on any other (`_resolveTokenAddresses`, `:283`). On 421614, `USE_AAVE=true` wires the market and `USE_AXIOM_ORACLE=true` reverts. Reads the optional `PREDECESSOR_BRIDGE` (`:171`). |
 | `DeployShellnetE2EBridge.s.sol` | Sepolia shellnet E2E. Mock oracle, no AAVE, SHPLONK triple + C4. `WIRE_WITHDRAW_BY_PROOF=false` is only tolerated on anvil (`:59-63`). Alias defaults: `altDstChainId=1`, `altDstHostChainId=11155111`, `altTokenId=3`. |
 | `DeployReuseVerifiersBridge.s.sol` | Fresh bridge reusing already-deployed verifier addresses (verifiers are VK-bound and segment-agnostic); gives an empty nullifier map for a new E2E run. |
 | `DeployGenesisCursorBridge.s.sol` | Defines `GenesisCursorBridge`, a subclass that sets `storedLastSeenBlockSeqNo` to a non-zero value post-construction for mid-chain replay E2E. **Not for production.** |
@@ -804,7 +798,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `PRIVATE_KEY` | all | Broadcaster. |
 | `USE_AXIOM_ORACLE` | RealBridge | `true` ⇒ `AxiomBlockHeaderOracle` on chain ids 1 and 11155111. On 421614 `true` reverts; leave it unset for `MockBlockHeaderOracle`. |
 | `USE_AAVE` | RealBridge | Wire AAVE pool + aUSDC for the current chain. |
-| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:156`, unconditional). On mainnet the value is `envBool` with no default (`:153`); on other nets it used to default false and no longer may. |
+| `WIRE_VERIFY_BLOCK` | RealBridge | **Required `true` on every chain** (`DeployRealBridge.s.sol:155`, unconditional). On mainnet the value is `envBool` with no default (`:152`); on other nets it used to default false and no longer may. |
 | `GENESIS_BK_SET_COMMITMENT` | RealBridge, Shellnet, Reuse, GenesisCursor | Initial BK-set Poseidon commitment (numeric `Fr`; the runbook byte-reverses the prover's LE hex). |
 | `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` | same | Immutable genesis anchor seed. |
 | `GENESIS_LAST_SEEN_BLOCK_SEQNO` | same | Must equal the `last_seen` baked into the first proof, else the first `verifyBlock` reverts `AttestationProofRejected`. Off-chain it must sit on a key-block boundary: `W·P` with `W = 128` (`bridge-prover-lib/src/poseidon_dense.rs:15`) and `P = 8` (`bridge-prover-lib/src/lib.rs:46`, bumped 4 → 8 in `a69ba36`) ⇒ **1024-aligned** at L1; under L2 anchoring it must be a multiple of `BUNDLE_STRIDE` = 16384. Deploys made against the old `P = 4` (512-aligned) stride need a fresh genesis seed. |
@@ -813,8 +807,7 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `GENESIS_LAST_SEEN_BLOCK_SEQ_NO` | GenesisCursor only | Post-construction cursor override (note the different spelling). |
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID`, `WITHDRAW_ALT_TOKEN_ID` | same | Shellnet aliases (§7.2). `DeployRealBridge` on mainnet requires all three 0. |
-| `PREDECESSOR_BRIDGE` | RealBridge, Shellnet, Reuse, GenesisCursor (required, no default) | Immutable `predecessor`: the bridge this deploy replaces on the same chain, or the zero address for the first bridge there. A non-zero one must already be paused. All four read it through `script/PredecessorEnv.sol`. |
-| `LEGACY_PREDECESSOR_BRIDGES` | same four (required, possibly empty, when `PREDECESSOR_BRIDGE` has no `predecessor()` view; optional otherwise) | `legacyPredecessors`: comma-separated earlier bridges for the same identity that `PREDECESSOR_BRIDGE` does not answer for. Each must already be paused. |
+| `PREDECESSOR_BRIDGE` | RealBridge, Shellnet, Reuse, GenesisCursor (optional, zero by default) | Immutable `predecessor`: the bridge on this chain whose treasury the new one may take over (`migrateTreasury` / `fundTreasury`), or zero. It need not be paused, and it plays no part in replay protection (§7.2). All four read it through `script/PredecessorEnv.sol:15-17`. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
 | `USDC_ADDRESS` | TestBridge | Override token. |
@@ -866,16 +859,15 @@ was written in, so the suite was read, not executed).
 |---|---|
 | `AckiNackiBridgeAave.t.sol` (21) | Constructor wiring, supply/withdraw/harvest/emergency, reserve cap, ownership, `totalAssets` fuzz. |
 | `AckiNackiBridgeAaveFork.t.sol` (4) | Ethereum Sepolia fork against real AAVE (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 11155111. |
-| `AckiNackiBridgeArbSepoliaAaveFork.t.sol` (7) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, a `withdrawByProof` top-up, and the live `0x3FB0…8638` accepted as `predecessor` with its paid nullifier refused and its treasury covered by `fundTreasury` (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
+| `AckiNackiBridgeArbSepoliaAaveFork.t.sol` (7) | Arbitrum Sepolia fork: the Circle USDC market, supply, harvest, withdraw, emergency unwind, a `withdrawByProof` top-up, and the live `0x3FB0…8638` accepted as `predecessor` with its treasury covered by `fundTreasury` (`FOUNDRY_PROFILE=fork`). Skips when `FORK_URL` is unset or the fork is not chain id 421614. |
 | `AckiNackiBridgeApplyBkSetUpdate.t.sol` (11) | Depth-4 fold, off-chain vector match, rejection of the legacy depth-3 root and of unreduced roots, replay/monotonicity, two chained rotations. |
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
 | `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
-| `AckiNackiBridgePredecessor.t.sol` (25) | A successor refuses what its predecessor, the predecessor's predecessor, or a `legacyPredecessors` entry (directly or through the next bridge in the line) paid and pays the rest; a bridge naming a pre-release predecessor without the list does not see the bridge before it; zero predecessor unchanged; a reverting predecessor blocks payouts; the constructor rejects an address without code, a non-bridge, a bridge for another AN identity, a reverting probe and a predecessor without withdraw wiring. `migrateTreasury` moves the book only when paused, only to a bridge naming it, only once, and leaves the old bridge unable to pay; `fundTreasury` accepts only the owner or predecessor. |
-| `PredecessorEnv.t.sol` (1) | `LEGACY_PREDECESSOR_BRIDGES`: optional for a zero or current predecessor, required (possibly empty) for a pre-release one, every entry paused. |
+| `AckiNackiBridgePredecessor.t.sol` (17) | Two live bridges for one AN identity on one chain each pay only the proofs that name them; a successor refuses a proof its unpaused predecessor paid, and the predecessor refuses one bound to the successor; every other `dstBridge` is refused (fuzz); constructor checks on `predecessor`; `migrateTreasury` / `fundTreasury`. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
-| `AckiNackiBridgeProductionWithdrawByProof.t.sol` (3) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`. |
+| `AckiNackiBridgeProductionWithdrawByProof.t.sol` (5) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`, a `pub.dstBridge` other than the proof's, and the `dstBridge` instance rewritten in the calldata. |
 | `AckiNackiBridgeRelayerLoop.t.sol` (6) | 10-block mixed-finType walk, restart, replay, fast-forward, verifier-reject leaves state untouched, anchor mismatch. |
 | `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
@@ -925,15 +917,14 @@ Read off the code, without a formal audit claim.
 
 1. Reentrancy: every state-mutating external entrypoint is `nonReentrant` (`:479-484`).
 2. CEI: `withdrawByProof` marks the nullifier and decrements `treasuryBalance` *before* the AAVE pull
-   and the USDC transfer (`:1363-1381`); `verifyBlock` commits state only after both verifiers pass.
+   and the USDC transfer (`:1586-1599`); `verifyBlock` commits state only after both verifiers pass.
 3. Monotonicity: `blockSeqNo` strictly increases per `verifyBlock`; the BK-update cursor increases
    strictly and independently; per-layer window heights are non-decreasing.
 4. Cross-circuit binding: shared `blockId` / `bkSetCommitment` are compared instance-by-instance
    inside each adapter, so a mismatched proof pair cannot pass.
-5. Payout uniqueness: nullifier map + `dstChainId == block.chainid` (or scoped alias) confine a proof
-   to one execution on one deployment; on one chain, `predecessor` and `legacyPredecessors` extend
-   that to the deployments this one replaces, provided each replaced bridge stays paused and every
-   bridge from before this release is listed.
+5. Payout uniqueness: nullifier map + `dstBridge == address(this)` confine a proof to one execution
+   on one deployment, whatever other bridges for the same AN identity exist on the chain;
+   `dstChainId == block.chainid` (or scoped alias) keeps it off other chains.
 6. User principal is owner-reachable only as a whole: owner functions move funds only between the
    contract and AAVE, skim strictly above `treasuryBalance`, or — paused — hand all of it to a
    contract whose `predecessor()` returns this bridge (`migrateTreasury`). Any contract can
@@ -969,7 +960,7 @@ Read off the code, without a formal audit claim.
    *Deploy mode.* The 12-hour L1 figure and the ×16 step are those of an L1 deploy
    (`bundleStride = W·P`, `:234`): the relayer submits `verifyBlock` at every W·P boundary, and
    only the W²-aligned blocks among them carry an L2 hash. On an L2 deploy (`bundleStride = W²`;
-   the shellnet kit's `crates/bridge-relayer-daemon/deploy/shellnet-l2/scripts/preflight.sh`
+   the shellnet kit's `docker/relayer/preflight.sh`
    accepts no other `BRIDGE_ANCHOR_LEVEL`) every submitted block is W²-aligned and carries at
    least the L1 and L2 hashes, so `_appendLayerHashes` (`:1170-1181`) advances the L1 and L2
    windows together, one slot per bundle. The L1 window then lasts as long as L2 (≈ 8 days) — it

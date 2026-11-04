@@ -31,9 +31,8 @@ BUNDLE_STRIDE=16384
 # --- Withdraw (Phase 2) ---
 # WITHDRAW_ACC_FR=0x...
 # WITHDRAW_DAPP_FR=0x...
-# Required, no default: the bridge this deploy replaces on the same chain,
-# already paused, or 0x0000000000000000000000000000000000000000 for the first
-# bridge there. Left unset, the deploy stops.
+# Optional, zero by default: the bridge on this chain whose treasury this
+# deploy may take over (migrateTreasury / fundTreasury). It need not be paused.
 # PREDECESSOR_BRIDGE=0x...
 
 # --- Oracle ---

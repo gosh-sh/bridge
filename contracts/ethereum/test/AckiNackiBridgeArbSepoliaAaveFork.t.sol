@@ -45,11 +45,8 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
     address constant AAVE_V3_POOL = 0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff;
     address constant USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
     address constant AUSDC = 0x460b97BD498E1157530AEb3086301d5225b91216;
-    /// @dev The 421614 bridge without a pool, and the withdrawal it paid at
-    ///      block 324163888.
+    /// @dev The 421614 bridge without a pool.
     address constant LIVE_BRIDGE = 0x3FB082a905a895151224F6d93bD074E816338638;
-    uint256 constant LIVE_PAID_NULLIFIER =
-        0x2b9017c241a2ee4235c3379761156d8b2606895d65271bd32c76f5e361ff72df;
 
     uint256 internal constant BK_SET = 0xBE5E7;
     uint256 internal constant DAPP_FR = 0xD499F4CEC0FFEE01;
@@ -244,20 +241,13 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         );
     }
 
-    /// @dev The cutover `docs/aave-yield.md` describes, against the live
-    ///      bridge this one replaces: the constructor accepts it as
-    ///      `predecessor`, the withdrawal it already paid is refused, and
-    ///      the owner covers its stranded treasury with `fundTreasury`.
+    /// @dev The 421614 cutover `docs/aave-yield.md` describes, against the
+    ///      live bridge this one replaces: the constructor accepts it as
+    ///      `predecessor`, and since it predates `migrateTreasury` the owner
+    ///      covers its stranded treasury with `fundTreasury`.
     function test_fork_replacesLiveBridgeAsPredecessor() public {
         IPredecessorBridge old = IPredecessorBridge(LIVE_BRIDGE);
-        // A fork from before the live bridge paid this nullifier has nothing to refuse.
-        if (!old.isNullifierUsed(LIVE_PAID_NULLIFIER)) vm.skip(true);
         uint256 oldTreasury = AckiNackiBridge(LIVE_BRIDGE).treasuryBalance();
-        // Step 1 of the cutover pauses it for good; a fork after that finds it paused.
-        if (!AckiNackiBridge(LIVE_BRIDGE).paused()) {
-            vm.prank(AckiNackiBridge(LIVE_BRIDGE).owner());
-            AckiNackiBridge(LIVE_BRIDGE).pause();
-        }
 
         AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.withWithdrawAfter(
             IBridgeWithdrawalVerifier(address(new MockBridgeWithdrawalVerifier())),
@@ -279,9 +269,7 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
             ),
             bw
         );
-        assertTrue(old.isNullifierUsed(LIVE_PAID_NULLIFIER), "old bridge paid it");
-        assertTrue(successor.isNullifierUsed(LIVE_PAID_NULLIFIER), "successor refuses it");
-        assertFalse(successor.isNullifierUsed(LIVE_PAID_NULLIFIER + 1), "unpaid stays open");
+        assertEq(address(successor.predecessor()), LIVE_BRIDGE, "predecessor recorded");
 
         deal(USDC, address(this), oldTreasury);
         usdc.approve(address(successor), oldTreasury);
@@ -305,7 +293,8 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
                 accFr: ACC_FR,
                 nullifier: nullifier,
                 finalRoot: anchor,
-                anchorLayer: 1
+                anchorLayer: 1,
+                dstBridge: uint256(uint160(address(bridge)))
             })
         );
     }

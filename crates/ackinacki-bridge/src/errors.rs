@@ -80,7 +80,10 @@ pub enum ExitCode {
     /// Proof produced but the on-chain `withdrawByProof` failed (dry-run
     /// revert, tx revert, `WithdrawTreasuryShortfall`, etc.). Fix the
     /// on-chain side (unpause, seed treasury) and re-run — the proof is
-    /// deterministic and cache-warm.
+    /// deterministic and cache-warm. Also raised before proving when the
+    /// captured event is bound to another EVM bridge than
+    /// `--bridge-address`: nothing was proved, and the re-run names the
+    /// bridge the event does.
     EthSubmitFailed = 13,
     /// Deposit: the wallet did not pair, the user cancelled, the pairing
     /// expired, or the account is a smart-contract account whose deposit

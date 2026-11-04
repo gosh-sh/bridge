@@ -1,13 +1,13 @@
 //! Circuit 4 (`withdrawByProof`) artefacts from the partner prover daemon.
 //!
 //! The shellnet orchestrator writes `proofs/proof_event_NNN.json` with a raw
-//! Halo2 proof (`proof_hex`) and eleven public-instance field elements
+//! Halo2 proof (`proof_hex`) and twelve public-instance field elements
 //! (`public_instances_hex`).
 //!
 //! The production on-chain verifier is the R15 SHPLONK aggregator
 //! (`BridgeWithdrawalAggregatorVerifier`, Yul): it consumes aggregator calldata
 //! `instances ‖ proof` where the instance prefix is 12 KZG accumulator limbs +
-//! the 11 re-exposed Circuit-4 public inputs + a Poseidon digest of the inner
+//! the 12 re-exposed Circuit-4 public inputs + a Poseidon digest of the inner
 //! VK witnesses (≥ `SHPLONK_MIN_WITHDRAWAL_INSTANCES` bytes). This mirrors the
 //! 1A/1B/2 shape checks in [`crate::proof_validation`].
 
@@ -30,20 +30,21 @@ use crate::error::RelayerError;
 // success on the actual `withdrawByProof` transaction (or its `eth_call`
 // dry-run) — nothing else.
 
-/// Eleven public inputs for Circuit 4 (single-final-root + `anchorLayer`).
-pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 11;
+/// Twelve public inputs for Circuit 4 (single-final-root + `anchorLayer` +
+/// `dstBridge`).
+pub const WITHDRAWAL_PUBLIC_INPUTS: usize = 12;
 
 /// Minimum length of a Circuit 4 SHPLONK aggregator calldata blob: the instance
-/// prefix is 12 KZG accumulator limbs + the 11 re-exposed Circuit-4 public
+/// prefix is 12 KZG accumulator limbs + the 12 re-exposed Circuit-4 public
 /// inputs + 1 inner-VK Poseidon digest slot, each a 32-byte field element
 /// (the outer proof bytes follow). Matches
-/// `BridgeWithdrawalAggregatorVerifier`'s 24-instance layout.
+/// `BridgeWithdrawalAggregatorVerifier`'s 25-instance layout.
 pub const SHPLONK_MIN_WITHDRAWAL_INSTANCES: usize = (12 + WITHDRAWAL_PUBLIC_INPUTS + 1) * 32;
 
-/// Byte length of a Circuit-4 SHPLONK calldata blob after the inner-VK
-/// binding: 24 instance words plus the outer proof. The pre-binding blob
-/// was 3 648 B; anything else is not this build's withdrawal artefact.
-pub const WITHDRAWAL_CALLDATA_LEN: usize = 3_680;
+/// Byte length of a Circuit-4 SHPLONK calldata blob: 25 instance words plus
+/// the outer proof. A blob from the circuit before `dstBridge` was 3 680 B;
+/// anything else is not this build's withdrawal artefact.
+pub const WITHDRAWAL_CALLDATA_LEN: usize = 3_712;
 
 /// Parsed `proof_event_*.json` from
 #[derive(Clone, Debug, Deserialize)]
@@ -70,6 +71,15 @@ pub struct WithdrawalPublicInputs {
     pub nullifier: U256,
     pub final_root: U256,
     pub anchor_layer: U256,
+    pub dst_bridge: U256,
+}
+
+impl WithdrawalPublicInputs {
+    /// `true` when the proof names `bridge` as the EVM bridge that pays it;
+    /// any other bridge reverts with `WrongDstBridge`.
+    pub fn names_bridge(&self, bridge: alloy::primitives::Address) -> bool {
+        self.dst_bridge == U256::from_be_slice(bridge.as_slice())
+    }
 }
 
 impl PartnerWithdrawalProof {
@@ -117,6 +127,7 @@ impl PartnerWithdrawalProof {
             nullifier: field(8)?,
             final_root: field(9)?,
             anchor_layer: field(10)?,
+            dst_bridge: field(11)?,
         })
     }
 }
@@ -258,7 +269,8 @@ mod tests {
                 "0700000000000000000000000000000000000000000000000000000000000000",
                 "0800000000000000000000000000000000000000000000000000000000000000",
                 "0900000000000000000000000000000000000000000000000000000000000000",
-                "0100000000000000000000000000000000000000000000000000000000000000"
+                "0100000000000000000000000000000000000000000000000000000000000000",
+                "38863316e874d03bd9f624121595a805a982b03f000000000000000000000000"
             ]
         }"#;
         let p = PartnerWithdrawalProof::from_json_bytes(json.as_bytes()).unwrap();
@@ -275,6 +287,11 @@ mod tests {
         // fall through to `UnknownAnchor` at :1342-1343 — either way
         // masking the real bug as a chain-side error.
         assert_eq!(pi.anchor_layer, U256::from(1u64));
+        // Slot 11 is the 160-bit bridge address, little-endian like every
+        // other instance.
+        let bridge = alloy::primitives::address!("3FB082a905a895151224F6d93bD074E816338638");
+        assert!(pi.names_bridge(bridge));
+        assert!(!pi.names_bridge(alloy::primitives::Address::ZERO));
     }
 
     /// Negative: a `proof_event_*.json` carrying

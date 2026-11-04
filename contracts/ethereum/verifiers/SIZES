@@ -1,8 +1,8 @@
 # Byte size of every committed SHPLONK artefact. EIP-170 limit is
 # 24576 B for the runtime .bin; scripts/check_shplonk_artefacts.sh fails when
 # these figures drift, so a regeneration shows its growth in the diff.
-21314  BridgeWithdrawalAggregatorVerifier.bin
-3680  BridgeWithdrawalAggregatorVerifier_calldata.bin
+21475  BridgeWithdrawalAggregatorVerifier.bin
+3712  BridgeWithdrawalAggregatorVerifier_calldata.bin
 21655  FallbackAggregatorVerifier.bin
 3872  FallbackAggregatorVerifier_calldata.bin
 19263  LayerHashesAggregatorVerifier.bin

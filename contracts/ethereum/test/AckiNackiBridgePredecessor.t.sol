@@ -19,9 +19,9 @@ import "./mocks/MockERC20.sol";
 import "./mocks/MockPredecessorBridge.sol";
 
 /// @title AckiNackiBridgePredecessorTest
-/// @notice A bridge that replaces another on the same chain refuses the
-///         withdrawals its predecessor line already paid, and only accepts a
-///         predecessor that is a bridge for the same AN-side identity.
+/// @notice Two bridges on one chain for the same AN-side identity: a
+///         withdrawal pays only on the bridge its proof names (`dstBridge`),
+///         and a successor takes over its predecessor's treasury.
 contract AckiNackiBridgePredecessorTest is Test {
     MockBlockHeaderOracle internal oracle;
     MockERC20 internal usdc;
@@ -89,11 +89,8 @@ contract AckiNackiBridgePredecessorTest is Test {
     }
 
     /// @dev A funded bridge with one anchored block, ready to pay.
-    function _liveBridge(address predecessor) internal returns (AckiNackiBridge) {
-        return _fund(_newBridge(_withdrawConfig(predecessor, DAPP_FR, ACC_FR)));
-    }
-
-    function _fund(AckiNackiBridge b) internal returns (AckiNackiBridge) {
+    function _liveBridge(address predecessor) internal returns (AckiNackiBridge b) {
+        b = _newBridge(_withdrawConfig(predecessor, DAPP_FR, ACC_FR));
         UsdcTestLib.depositUsdc(vm, usdc, b, funder, 40 * UsdcTestLib.UNIT);
         uint256[10] memory layers;
         layers[0] = anchor;
@@ -108,10 +105,9 @@ contract AckiNackiBridgePredecessorTest is Test {
             layers,
             b.expectedPrevAnchor(1)
         );
-        return b;
     }
 
-    function _pub(uint256 nullifier)
+    function _pubFor(address dstBridge, uint256 nullifier)
         internal
         view
         returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory)
@@ -128,12 +124,14 @@ contract AckiNackiBridgePredecessorTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: anchor,
-            anchorLayer: 1
+            anchorLayer: 1,
+            dstBridge: uint256(uint160(dstBridge))
         });
     }
 
+    /// @dev Pays on `b` a proof that names `b`.
     function _pay(AckiNackiBridge b, uint256 nullifier) internal {
-        b.withdrawByProof(hex"c4", _pub(nullifier));
+        b.withdrawByProof(hex"c4", _pubFor(address(b), nullifier));
     }
 
     function _expectRefused(AckiNackiBridge b, uint256 nullifier) internal {
@@ -143,11 +141,19 @@ contract AckiNackiBridgePredecessorTest is Test {
         _pay(b, nullifier);
     }
 
+    /// @dev Submits to `b` a proof that names `named`; expects `WrongDstBridge`.
+    function _expectWrongBridge(AckiNackiBridge b, address named, uint256 nullifier) internal {
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.WrongDstBridge.selector, uint256(uint160(named)))
+        );
+        b.withdrawByProof(hex"c4", _pubFor(named, nullifier));
+    }
+
     // ─────────────────────────────────────────────────────────────────────
-    // No predecessor
+    // A proof pays on the bridge it names, and nowhere else
     // ─────────────────────────────────────────────────────────────────────
 
-    function test_zeroPredecessor_paysAndRefusesOnlyItsOwnReplay() public {
+    function test_paysAndRefusesItsOwnReplay() public {
         AckiNackiBridge b = _liveBridge(address(0));
         assertEq(address(b.predecessor()), address(0));
         assertFalse(b.isNullifierUsed(11));
@@ -158,178 +164,50 @@ contract AckiNackiBridgePredecessorTest is Test {
         _expectRefused(b, 11);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // One predecessor
-    // ─────────────────────────────────────────────────────────────────────
+    /// @dev Two live bridges for one AN identity on one chain, neither paused:
+    ///      each pays only the proofs that name it.
+    function test_proofForOneBridgeDoesNotPayOnAnother() public {
+        AckiNackiBridge first = _liveBridge(address(0));
+        AckiNackiBridge second = _liveBridge(address(0));
 
-    function test_successorRefusesWithdrawalPaidByPredecessor() public {
-        AckiNackiBridge oldBridge = _liveBridge(address(0));
-        _pay(oldBridge, 21);
-        vm.prank(oldBridge.owner());
-        oldBridge.pause();
+        _pay(first, 21);
+        _expectWrongBridge(second, address(first), 21);
+        assertFalse(second.isNullifierUsed(21));
 
-        AckiNackiBridge newBridge = _liveBridge(address(oldBridge));
-        assertEq(address(newBridge.predecessor()), address(oldBridge));
-        assertTrue(newBridge.isNullifierUsed(21));
-
-        uint256 treasuryBefore = newBridge.treasuryBalance();
-        _expectRefused(newBridge, 21);
-        assertEq(newBridge.treasuryBalance(), treasuryBefore);
-        assertEq(usdc.balanceOf(RECIPIENT), AMOUNT);
+        _pay(second, 22);
+        _expectWrongBridge(first, address(second), 22);
+        assertEq(usdc.balanceOf(RECIPIENT), 2 * AMOUNT);
     }
 
-    function test_successorPaysWithdrawalPredecessorNeverPaid() public {
+    /// @dev The case bridge-audit#140 is about: a successor deployed next to a
+    ///      bridge that already paid. The old proof names the old bridge, so
+    ///      the successor refuses it without consulting the old bridge and
+    ///      without the old bridge being paused.
+    function test_successorRefusesWhatPredecessorPaid() public {
         AckiNackiBridge oldBridge = _liveBridge(address(0));
         _pay(oldBridge, 31);
-        vm.prank(oldBridge.owner());
-        oldBridge.pause();
         AckiNackiBridge newBridge = _liveBridge(address(oldBridge));
+        assertFalse(oldBridge.paused());
 
+        uint256 treasuryBefore = newBridge.treasuryBalance();
+        _expectWrongBridge(newBridge, address(oldBridge), 31);
+        assertEq(newBridge.treasuryBalance(), treasuryBefore);
+        assertEq(usdc.balanceOf(RECIPIENT), AMOUNT);
+
+        // And the other way: a burn bound to the successor does not pay on the
+        // old bridge, paused or not.
+        _expectWrongBridge(oldBridge, address(newBridge), 32);
         _pay(newBridge, 32);
         assertEq(usdc.balanceOf(RECIPIENT), 2 * AMOUNT);
-        assertTrue(newBridge.isNullifierUsed(32));
-        _expectRefused(newBridge, 32);
-        // The predecessor does not consult its successor; it has to stay paused.
-        assertFalse(oldBridge.isNullifierUsed(32));
     }
 
-    /// @dev A predecessor that stops answering blocks payouts instead of
-    ///      letting them through unchecked.
-    function test_revertingPredecessorBlocksPayout() public {
-        MockPredecessorBridge p = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        AckiNackiBridge b = _liveBridge(address(p));
-        p.setReverts(true);
-        vm.expectRevert(bytes("predecessor down"));
-        _pay(b, 41);
-        vm.expectRevert(bytes("predecessor down"));
-        b.isNullifierUsed(41);
-
-        p.setReverts(false);
-        _pay(b, 41);
-        assertEq(usdc.balanceOf(RECIPIENT), AMOUNT);
-    }
-
-    /// @dev The successor reads only the three views, so a bridge that has no
-    ///      `predecessor()` of its own (every deployment before this field)
-    ///      is a valid predecessor.
-    function test_predecessorWithoutOwnPredecessorView() public {
-        MockPredecessorBridge p = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        p.setUsed(51);
-        AckiNackiBridge b = _liveBridge(address(p));
-        _expectRefused(b, 51);
-        _pay(b, 52);
-    }
-
-    function testFuzz_successorRefusesEveryPredecessorNullifier(uint256 nullifier) public {
-        nullifier = bound(nullifier, 0, Bn254FrLib.R - 1);
-        MockPredecessorBridge p = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        p.setUsed(nullifier);
-        AckiNackiBridge b = _liveBridge(address(p));
-        assertTrue(b.isNullifierUsed(nullifier));
-        _expectRefused(b, nullifier);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // A line of predecessors
-    // ─────────────────────────────────────────────────────────────────────
-
-    function test_thirdBridgeRefusesWhatEitherEarlierBridgePaid() public {
-        AckiNackiBridge first = _liveBridge(address(0));
-        _pay(first, 61);
-        vm.prank(first.owner());
-        first.pause();
-
-        AckiNackiBridge second = _liveBridge(address(first));
-        _pay(second, 62);
-        vm.prank(second.owner());
-        second.pause();
-
-        AckiNackiBridge third = _liveBridge(address(second));
-        assertTrue(third.isNullifierUsed(61));
-        assertTrue(third.isNullifierUsed(62));
-        _expectRefused(third, 61);
-        _expectRefused(third, 62);
-
-        _pay(third, 63);
-        assertEq(usdc.balanceOf(RECIPIENT), 3 * AMOUNT);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Bridges from before the `predecessor` field
-    // ─────────────────────────────────────────────────────────────────────
-
-    function _withLegacy(address predecessor, address[] memory legacy)
-        internal
-        view
-        returns (AckiNackiBridge.BridgeWithdrawConfig memory bw)
-    {
-        bw = _withdrawConfig(predecessor, DAPP_FR, ACC_FR);
-        bw.legacyPredecessors = new IPredecessorBridge[](legacy.length);
-        for (uint256 i = 0; i < legacy.length; ++i) {
-            bw.legacyPredecessors[i] = IPredecessorBridge(legacy[i]);
-        }
-    }
-
-    /// @dev Two older bridges: the one named as `predecessor` answers only for
-    ///      itself, so the one before it has to be listed.
-    function test_legacyPredecessors_coverOlderBridgesThePredecessorDoesNotReach() public {
-        MockPredecessorBridge older = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        MockPredecessorBridge old = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        older.setUsed(71);
-        old.setUsed(72);
-
-        AckiNackiBridge withoutList = _liveBridge(address(old));
-        assertFalse(withoutList.isNullifierUsed(71));
-
-        address[] memory legacy = new address[](1);
-        legacy[0] = address(older);
-        AckiNackiBridge b = _fund(_newBridge(_withLegacy(address(old), legacy)));
-        assertEq(address(b.legacyPredecessors()[0]), address(older));
-        assertTrue(b.isNullifierUsed(71));
-        _expectRefused(b, 71);
-        _expectRefused(b, 72);
-        _pay(b, 73);
-        assertEq(usdc.balanceOf(RECIPIENT), AMOUNT);
-    }
-
-    function test_legacyPredecessors_answeredForByTheNextBridgeInTheLine() public {
-        MockPredecessorBridge older = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        MockPredecessorBridge old = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        older.setUsed(81);
-        address[] memory legacy = new address[](1);
-        legacy[0] = address(older);
-        AckiNackiBridge second = _newBridge(_withLegacy(address(old), legacy));
-        vm.prank(second.owner());
-        second.pause();
-
-        AckiNackiBridge third = _liveBridge(address(second));
-        assertTrue(third.isNullifierUsed(81));
-        _expectRefused(third, 81);
-    }
-
-    function test_revertingLegacyPredecessorBlocksPayout() public {
-        MockPredecessorBridge older = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        address[] memory legacy = new address[](1);
-        legacy[0] = address(older);
-        AckiNackiBridge b = _fund(_newBridge(_withLegacy(address(0), legacy)));
-        older.setReverts(true);
-        vm.expectRevert(bytes("predecessor down"));
-        _pay(b, 91);
-    }
-
-    function test_constructor_rejectsInvalidLegacyPredecessor() public {
-        MockPredecessorBridge good = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        MockPredecessorBridge otherIdentity = new MockPredecessorBridge(DAPP_FR, ACC_FR + 1);
-        address[] memory legacy = new address[](2);
-        legacy[0] = address(good);
-
-        legacy[1] = address(usdc);
-        _expectInvalid(address(usdc));
-        _newBridge(_withLegacy(address(good), legacy));
-
-        legacy[1] = address(otherIdentity);
-        _expectInvalid(address(otherIdentity));
-        _newBridge(_withLegacy(address(good), legacy));
+    function testFuzz_refusesEveryOtherDstBridge(uint256 dstBridge) public {
+        AckiNackiBridge b = _liveBridge(address(0));
+        vm.assume(dstBridge != uint256(uint160(address(b))));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFor(address(b), 41);
+        pub.dstBridge = dstBridge;
+        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.WrongDstBridge.selector, dstBridge));
+        b.withdrawByProof(hex"c4", pub);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -353,17 +231,10 @@ contract AckiNackiBridgePredecessorTest is Test {
         _newBridge(_withdrawConfig(address(usdc), DAPP_FR, ACC_FR));
     }
 
-    function test_constructor_rejectsContractWithoutIdentityViews() public {
-        NullifierOnlyContract c = new NullifierOnlyContract();
+    function test_constructor_rejectsContractWithoutAccFrView() public {
+        DappFrOnlyContract c = new DappFrOnlyContract(DAPP_FR);
         _expectInvalid(address(c));
         _newBridge(_withdrawConfig(address(c), DAPP_FR, ACC_FR));
-    }
-
-    function test_constructor_rejectsRevertingPredecessor() public {
-        MockPredecessorBridge p = new MockPredecessorBridge(DAPP_FR, ACC_FR);
-        p.setReverts(true);
-        _expectInvalid(address(p));
-        _newBridge(_withdrawConfig(address(p), DAPP_FR, ACC_FR));
     }
 
     function test_constructor_rejectsPredecessorOfAnotherAnBridge() public {
@@ -401,7 +272,7 @@ contract AckiNackiBridgePredecessorTest is Test {
     // Treasury handover
     // ─────────────────────────────────────────────────────────────────────
 
-    /// @dev Old bridge paid one withdrawal and is paused; successor is live.
+    /// @dev Old bridge paid one withdrawal and is paused; successor is deployed.
     function _cutover() internal returns (AckiNackiBridge oldBridge, AckiNackiBridge newBridge) {
         oldBridge = _liveBridge(address(0));
         _pay(oldBridge, 71);
@@ -410,7 +281,7 @@ contract AckiNackiBridgePredecessorTest is Test {
         newBridge = _newBridge(_withdrawConfig(address(oldBridge), DAPP_FR, ACC_FR));
     }
 
-    function test_migrateTreasury_movesBookAndPaysOldBurnsFromIt() public {
+    function test_migrateTreasury_movesBookToSuccessor() public {
         (AckiNackiBridge oldBridge, AckiNackiBridge newBridge) = _cutover();
         uint256 owed = oldBridge.treasuryBalance();
         assertEq(owed, 40 * UsdcTestLib.UNIT - AMOUNT);
@@ -440,7 +311,7 @@ contract AckiNackiBridgePredecessorTest is Test {
             layers,
             newBridge.expectedPrevAnchor(1)
         );
-        _expectRefused(newBridge, 71);
+        _expectWrongBridge(newBridge, address(oldBridge), 71);
         _pay(newBridge, 72);
         assertEq(newBridge.treasuryBalance(), owed - AMOUNT);
 

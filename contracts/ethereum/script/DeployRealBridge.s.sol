@@ -42,13 +42,9 @@ import "./PredecessorEnv.sol";
  *     DeployShellnetE2EBridge on local anvil.
  *
  * Predecessor:
- *   - PREDECESSOR_BRIDGE is required: the bridge this deploy replaces on the
- *     same chain, or the zero address for the first bridge there. A non-zero
- *     predecessor must already be paused; the new bridge refuses the
- *     withdrawals it paid.
- *   - LEGACY_PREDECESSOR_BRIDGES (comma-separated, paused): earlier bridges
- *     PREDECESSOR_BRIDGE does not answer for. Required, possibly empty, when
- *     PREDECESSOR_BRIDGE predates the `predecessor` field.
+ *   - PREDECESSOR_BRIDGE (optional, zero by default): the bridge on this
+ *     chain whose treasury this one may take over (`migrateTreasury` /
+ *     `fundTreasury`).
  */
 contract DeployRealBridge is Script {
     struct WireInputs {
@@ -355,8 +351,7 @@ contract DeployRealBridge is Script {
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
             altTokenId: altTokenId,
-            predecessor: IPredecessorBridge(predecessor),
-            legacyPredecessors: PredecessorEnv.readLegacy()
+            predecessor: IPredecessorBridge(predecessor)
         });
     }
 

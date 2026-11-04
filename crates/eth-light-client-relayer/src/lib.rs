@@ -2,8 +2,9 @@
 //!
 //! Polls `finality_update` + `light_client/updates`, proves a step (real
 //! 512-committee via `COMMITTEE_JSON_PATH`), and calls
-//! `EthBeaconLightClient.submitUpdate`. Period jump → `submitRotate` by
-//! default (`--no-rotate` opts out). tvm-sdk#284 co-deploys with this contract.
+//! `EthBeaconLightClient.submitUpdate`. The committee hand-off is proven in
+//! the background during the period it rotates from and sent with
+//! `submitRotate` ([`rotate`]); `--no-rotate` opts out.
 //! Epoch ancestry: [`ancestry`]
 //! (off-chain) + [`header_rlp`] + `submitAncestry` (on-chain writer).
 //! `finalizeDeposit` flip, only with `--flip-owner`. After the first
@@ -32,6 +33,7 @@ pub mod header_rlp;
 pub mod prover;
 pub mod redact;
 pub mod relayer;
+pub mod rotate;
 pub mod source;
 pub mod state;
 pub mod submitter;
@@ -49,9 +51,12 @@ pub use prover::{
     MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,
 };
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
+pub use rotate::{
+    MockRotateRunner, RotateStageRunner, SubprocessRotateConfig, SubprocessRotateRunner,
+};
 pub use source::{
     BeaconSource, ChainSpec, EthExecutionRpc, ExecutionSource, HttpBeaconSource,
-    InMemoryBeaconSource, InMemoryExecution,
+    InMemoryBeaconSource, InMemoryExecution, PeriodUpdate,
 };
 pub use state::{RelayerState, StateLock};
 pub use submitter::{

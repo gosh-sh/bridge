@@ -27,21 +27,34 @@
 //! STEP_SRS_PATH=$HOME/srs/hermez-raw-21 \
 //!   cargo run --release --features aggregation --example export_step_snark
 //! ```
-//! Env: `STEP_SRS_PATH` (default `data/kzg_params_21.srs`), `STEP_OUT_DIR`
-//! (default `out/step_snark`).
+//! Env: `STEP_SRS_PATH` (required, Hermez k=21 or larger), `STEP_OUT_DIR`
+//! (default `out/step_snark`), `ROTATE_KEY_DIR` (keeps the proving key between
+//! runs, `key_cache`).
+//!
+//! Live: `ROTATE_UPDATE_PATH` names the update of period P and
+//! `COMMITTEE_JSON_PATH` the update of period P−1, whose
+//! `next_sync_committee` signed it. The witness is the chain's
+//! (`step_witness_from_beacon_with_params`, signing domain from
+//! `BEACON_FORK_VERSION` / `BEACON_GENESIS_VALIDATORS_ROOT` /
+//! `BEACON_GLOAS_FORK_SLOT`), and the rotate tree proves the same update.
+//! Without `ROTATE_UPDATE_PATH`: real headers with a synthetic committee,
+//! which only yields the VK.
 
 use std::{fs, path::Path, time::Instant};
 
 use eth_light_client_prover::{
-    live_witness::{synthetic_step_witness, update_headers, ChainParams},
-    mainnet::find_update_fixture,
+    key_cache::KeyCache,
+    live_witness::{
+        step_witness_from_beacon_with_params, synthetic_step_witness, update_headers, ChainParams,
+    },
+    mainnet::{find_update_fixture, ENV_ROTATE_UPDATE_PATH},
     poseidon_transcript::{PoseidonChallenge, PoseidonRead, PoseidonWrite},
     step::{verify_step, StepWitness, STEP_INSTANCE_LEN},
 };
 use gosh_sha256_chip::Sha256Chip;
 use halo2_base::{
     gates::{
-        circuit::{builder::BaseCircuitBuilder, CircuitBuilderStage},
+        circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, CircuitBuilderStage},
         RangeChip,
     },
     halo2_proofs::{
@@ -71,6 +84,9 @@ const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
 /// drops to ~33 — comparable to one L2 node, so the 3-input root (2×L2 + step)
 /// fits k=21.
 const K: u32 = 21;
+/// Name of the step-snark proving key in `ROTATE_KEY_DIR`.
+const KEY_NAME: &str = "step-snark-k21";
+const ENV_COMMITTEE_JSON_PATH: &str = "COMMITTEE_JSON_PATH";
 const LOOKUP_BITS: usize = 18;
 /// Hermez `[s]·G2` raw-bytes head — the ceremony snark-verifier's decider
 /// needs.
@@ -104,6 +120,36 @@ fn build_witness() -> (StepWitness, [u8; 32], String) {
     let headers = update_headers(&raw, params.gloas_fork_slot).expect("update fixture headers");
     let attested_state_root = headers.attested.state_root;
     (synthetic_step_witness(headers, &params), attested_state_root, label)
+}
+
+/// The live step witness: the update `ROTATE_UPDATE_PATH` names, signed by the
+/// committee `COMMITTEE_JSON_PATH` names. `None` without `ROTATE_UPDATE_PATH`.
+fn live_witness() -> anyhow::Result<Option<(StepWitness, [u8; 32], String)>> {
+    let Some(update_path) = std::env::var_os(ENV_ROTATE_UPDATE_PATH).filter(|p| !p.is_empty())
+    else {
+        return Ok(None);
+    };
+    let committee_path = std::env::var_os(ENV_COMMITTEE_JSON_PATH)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{ENV_ROTATE_UPDATE_PATH} is set but {ENV_COMMITTEE_JSON_PATH} is not: the step \
+                 needs the committee that signed the update (the update of the period before)"
+            )
+        })?;
+    let read = |var: &str, path: &std::ffi::OsStr| {
+        std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("{var}={}: {e}", Path::new(path).display()))
+    };
+    let update = read(ENV_ROTATE_UPDATE_PATH, &update_path)?;
+    let committee = read(ENV_COMMITTEE_JSON_PATH, &committee_path)?;
+    let params = ChainParams::from_env()?;
+    let headers = update_headers(&update, params.gloas_fork_slot)
+        .map_err(|e| anyhow::anyhow!("{ENV_ROTATE_UPDATE_PATH}: {e:#}"))?;
+    let witness = step_witness_from_beacon_with_params(&update, &committee, &params)
+        .map_err(|e| anyhow::anyhow!("live step witness: {e:#}"))?;
+    let label = format!("live {}", Path::new(&update_path).display());
+    Ok(Some((witness, headers.attested.state_root, label)))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -142,8 +188,8 @@ fn build_step(
 fn main() -> anyhow::Result<()> {
     println!("=== M6 bls-bind: export step Poseidon SHPLONK snark (Hermez k={K}) ===\n");
 
-    let srs_path =
-        std::env::var("STEP_SRS_PATH").unwrap_or_else(|_| "data/kzg_params_21.srs".to_string());
+    let srs_path = std::env::var("STEP_SRS_PATH")
+        .map_err(|_| anyhow::anyhow!("STEP_SRS_PATH is not set (Hermez kzg_bn254_21.srs)"))?;
     let out_dir = std::env::var("STEP_OUT_DIR").unwrap_or_else(|_| "out/step_snark".to_string());
     fs::create_dir_all(&out_dir)?;
 
@@ -169,7 +215,10 @@ fn main() -> anyhow::Result<()> {
     );
     println!("  OK: Hermez ceremony, k={K}\n");
 
-    let (w, attested_state_root, fixture_label) = build_witness();
+    let (w, attested_state_root, fixture_label) = match live_witness()? {
+        Some(live) => live,
+        None => build_witness(),
+    };
     println!(
         "step update fixture: {fixture_label}\n  attested state_root = 0x{} (rotate branch \
          anchor)\n",
@@ -177,18 +226,38 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ---- Keygen -------------------------------------------------------------
-    let (mut kb, _) = build_step(&w, None);
-    let config = kb.calculate_params(Some(9));
-    println!("Step circuit config: {config:?}\n");
-
-    let t = Instant::now();
-    let vk = keygen_vk(&params, &kb).map_err(|e| anyhow::anyhow!("keygen_vk: {e:?}"))?;
-    println!("keygen_vk {:?}", t.elapsed());
-    let t = Instant::now();
-    let pk = keygen_pk(&params, vk, &kb).map_err(|e| anyhow::anyhow!("keygen_pk: {e:?}"))?;
-    println!("keygen_pk {:?}", t.elapsed());
-    let break_points = kb.break_points();
-    drop(kb);
+    let cache = KeyCache::from_env()?;
+    let stored = match &cache {
+        Some(cache) => cache.load::<BaseCircuitBuilder<Fr>, _>(KEY_NAME, |c: &BaseCircuitParams| {
+            c.clone()
+        })?,
+        None => None,
+    };
+    let (config, break_points, pk) = match stored {
+        Some(key) => {
+            println!("proving key {KEY_NAME} from {}", cache.as_ref().unwrap().dir().display());
+            (key.params, key.break_points, key.pk)
+        },
+        None => {
+            let (mut kb, _) = build_step(&w, None);
+            let config = kb.calculate_params(Some(9));
+            println!("Step circuit config: {config:?}\n");
+            let t = Instant::now();
+            let vk = keygen_vk(&params, &kb).map_err(|e| anyhow::anyhow!("keygen_vk: {e:?}"))?;
+            println!("keygen_vk {:?}", t.elapsed());
+            let t = Instant::now();
+            let pk =
+                keygen_pk(&params, vk, &kb).map_err(|e| anyhow::anyhow!("keygen_pk: {e:?}"))?;
+            println!("keygen_pk {:?}", t.elapsed());
+            let break_points = kb.break_points();
+            drop(kb);
+            if let Some(cache) = &cache {
+                cache.store(KEY_NAME, &config, &break_points, &pk)?;
+                println!("stored proving key {KEY_NAME} in {}", cache.dir().display());
+            }
+            (config, break_points, pk)
+        },
+    };
 
     // ---- Prove (Poseidon transcript) ---------------------------------------
     let (pb, inst) = build_step(&w, Some((config.clone(), break_points)));

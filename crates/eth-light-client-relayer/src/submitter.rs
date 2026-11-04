@@ -9,6 +9,7 @@ use serde_json::json;
 
 use crate::{
     error::RelayerError,
+    rotate::CommitteeState,
     types::{RotateProofBundle, StepProofBundle},
 };
 
@@ -84,6 +85,10 @@ pub trait AnSubmitter: Send + Sync {
     /// step instead of staying in `RotateRequired`.
     async fn get_committee_period(&self) -> Result<u64, RelayerError>;
 
+    /// `currentCommittee` and `committeePeriod` from `getCommitteeState`:
+    /// what a rotate proof is checked against before it is sent.
+    async fn get_committee_state(&self) -> Result<CommitteeState, RelayerError>;
+
     /// `getHead().finalizedSlot`.
     async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError>;
 }
@@ -118,6 +123,7 @@ struct MockInner {
     head_slot: Option<u64>,
     proven: HashSet<[u8; 32]>,
     period: Option<u64>,
+    current_committee: [u8; 32],
     reject: bool,
     reject_ancestry: bool,
     not_send_ancestry: bool,
@@ -137,10 +143,16 @@ struct MockInner {
     /// Answers for the next `submit_rotate` calls, oldest first. Empty means
     /// the default behaviour.
     rotate_script: std::collections::VecDeque<SubmitOutcome>,
+    rotate_submits: u32,
     gloas_fork_slot: u64,
     gloas_fork_slot_set: bool,
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
+    committee_period_read_fails: bool,
+    /// `--dry-run`: the first accepted step bootstraps the committee period,
+    /// and every accepted step sets the current committee to its own, as
+    /// the contract's would be.
+    follow_steps: bool,
 }
 
 impl MockAnSubmitter {
@@ -150,6 +162,7 @@ impl MockAnSubmitter {
                 head_slot: None,
                 proven: HashSet::new(),
                 period: None,
+                current_committee: [0xC0; 32],
                 reject: false,
                 reject_ancestry: false,
                 not_send_ancestry: false,
@@ -163,12 +176,23 @@ impl MockAnSubmitter {
                 watch_state: None,
                 state_at_re_push: None,
                 rotate_script: std::collections::VecDeque::new(),
+                rotate_submits: 0,
                 gloas_fork_slot: crate::types::GLOAS_NOT_SCHEDULED,
                 gloas_fork_slot_set: true,
                 gloas_gets: 0,
                 gloas_get_fails_from: None,
+                committee_period_read_fails: false,
+                follow_steps: false,
             }),
         }
+    }
+
+    /// The submitter of `--dry-run`: a contract bootstrapped by the first
+    /// step it accepts, whose committee follows the steps.
+    pub fn dry_run() -> Self {
+        let mock = Self::accepting();
+        mock.inner.lock().expect("poisoned").follow_steps = true;
+        mock
     }
 
     /// What `getGloasForkSlot` returns. Default is set / `GLOAS_NOT_SCHEDULED`.
@@ -184,10 +208,33 @@ impl MockAnSubmitter {
         self.inner.lock().expect("poisoned").period = Some(period);
     }
 
+    /// What `getCommitteeState.currentCommittee` returns, as a public-input
+    /// word. Default `[0xC0; 32]`, the mock prover's step commitment.
+    pub fn set_current_committee(&self, commitment: [u8; 32]) {
+        self.inner.lock().expect("poisoned").current_committee = commitment;
+    }
+
+    pub fn current_committee(&self) -> [u8; 32] {
+        self.inner.lock().expect("poisoned").current_committee
+    }
+
+    /// `submitRotate` calls so far, refused ones included.
+    pub fn rotate_submits(&self) -> u32 {
+        self.inner.lock().expect("poisoned").rotate_submits
+    }
+
     /// `getGloasForkSlot` errors from the `n`-th call on (1-based). A tick
     /// reads it once to pin the proof and once more before the owner flip.
     pub fn fail_gloas_gets_from(&self, n: u32) {
         self.inner.lock().expect("poisoned").gloas_get_fails_from = Some(n);
+    }
+
+    /// `get_committee_period` errors, as a node that does not answer.
+    pub fn fail_committee_period_reads(&self) {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .committee_period_read_fails = true;
     }
 
     pub fn gloas_gets(&self) -> u32 {
@@ -326,6 +373,12 @@ impl AnSubmitter for MockAnSubmitter {
         if advance {
             inner.head_slot = Some(slot);
         }
+        if inner.follow_steps {
+            if inner.period.is_none() {
+                inner.period = Some(slot / crate::types::SLOTS_PER_SYNC_PERIOD);
+            }
+            inner.current_committee = bundle.parsed.committee_commitment;
+        }
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
@@ -336,6 +389,7 @@ impl AnSubmitter for MockAnSubmitter {
         bundle: &RotateProofBundle,
     ) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        inner.rotate_submits += 1;
         if let Some(scripted) = inner.rotate_script.pop_front() {
             return Ok(scripted);
         }
@@ -350,6 +404,12 @@ impl AnSubmitter for MockAnSubmitter {
             });
         }
         inner.period = Some(bundle.period);
+        let next = crate::rotate::ROTATE_NEXT_COMMIT_INDEX * 32;
+        if bundle.public_inputs.len() >= next + 32 {
+            inner
+                .current_committee
+                .copy_from_slice(&bundle.public_inputs[next..next + 32]);
+        }
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
@@ -456,7 +516,21 @@ impl AnSubmitter for MockAnSubmitter {
     }
 
     async fn get_committee_period(&self) -> Result<u64, RelayerError> {
-        Ok(self.inner.lock().expect("poisoned").period.unwrap_or(0))
+        let inner = self.inner.lock().expect("poisoned");
+        if inner.committee_period_read_fails {
+            return Err(RelayerError::AckiNacki(
+                "getCommitteeState: transport error".into(),
+            ));
+        }
+        Ok(inner.period.unwrap_or(0))
+    }
+
+    async fn get_committee_state(&self) -> Result<CommitteeState, RelayerError> {
+        let inner = self.inner.lock().expect("poisoned");
+        Ok(CommitteeState {
+            current_committee: inner.current_committee,
+            period: inner.period.unwrap_or(0),
+        })
     }
 
     async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
@@ -465,7 +539,7 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn set_committee_commitment(
         &self,
-        _commitment: [u8; 32],
+        commitment: [u8; 32],
         period: u64,
     ) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
@@ -480,6 +554,7 @@ impl AnSubmitter for MockAnSubmitter {
             });
         }
         inner.period = Some(period);
+        inner.current_committee = commitment;
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
         })
@@ -503,6 +578,21 @@ mod set_committee_tests {
         assert!(!same_tvm_account(&format!("{acc}::{dapp}"), &acc));
         assert!(!same_tvm_account(&format!("-1:{acc}"), &acc));
         assert!(!same_tvm_account("", &acc));
+    }
+
+    #[test]
+    fn a_uint256_getter_output_reads_back_as_its_public_input_word() {
+        let mut word = [0u8; 32];
+        word[0] = 0x01;
+        word[31] = 0x80;
+        let hex_form = serde_json::Value::String(le_word_to_uint256_hex(&word));
+        assert_eq!(json_uint256_le_word(Some(&hex_form)), Some(word));
+        let decimal = serde_json::Value::String("258".into());
+        let mut expected = [0u8; 32];
+        expected[0] = 2;
+        expected[1] = 1;
+        assert_eq!(json_uint256_le_word(Some(&decimal)), Some(expected));
+        assert_eq!(json_uint256_le_word(Some(&serde_json::Value::Null)), None);
     }
 
     #[test]
@@ -961,6 +1051,22 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))
     }
 
+    async fn get_committee_state(&self) -> Result<CommitteeState, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getCommitteeState", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        let period = json_u64(v.get("committeePeriod"))
+            .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))?;
+        let current_committee = json_uint256_le_word(v.get("currentCommittee"))
+            .ok_or_else(|| RelayerError::other("getCommitteeState: missing currentCommittee"))?;
+        Ok(CommitteeState {
+            current_committee,
+            period,
+        })
+    }
+
     async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
         let v = self
             .client
@@ -976,6 +1082,15 @@ fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
     let v = v?;
     v.as_u64()
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// A `uint256` getter output (decimal or `0x` hex) as the 32-byte
+/// little-endian word of the public inputs; the inverse of
+/// [`le_word_to_uint256_hex`].
+fn json_uint256_le_word(v: Option<&serde_json::Value>) -> Option<[u8; 32]> {
+    let s = v?.as_str()?;
+    let n: alloy::primitives::U256 = s.parse().ok()?;
+    Some(n.to_le_bytes::<32>())
 }
 
 fn json_bool(v: Option<&serde_json::Value>) -> Option<bool> {

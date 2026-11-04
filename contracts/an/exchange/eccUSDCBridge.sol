@@ -819,15 +819,17 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///      retains `updateCode`, which resets these flags, and can replace
     ///      the recorded client through `setLightClientCode` followed by
     ///      `deployLightClient`. This call does not revoke owner trust or
-    ///      upgrade authority. Requires a recorded client for the chain;
-    ///      it does not check that the account is Active. Idempotent.
+    ///      upgrade authority. Requires a recorded light client or L2
+    ///      verifier for the chain; it does not check that the account is
+    ///      Active. Idempotent.
     function disableOwnerAnchors() public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         _disableOwnerAnchors(_lightClientL1ChainId);
     }
 
     /// @notice Same as `disableOwnerAnchors()`, for an explicit chain id.
-    ///         Any chain with a light client in `_lightClients` is accepted;
-    ///         a chain without one reverts `ERR_LIGHT_CLIENT_UNSET` (226),
+    ///         Any chain with a light client in `_lightClients` or an L2
+    ///         verifier in `_l2Verifiers` is accepted; a chain with neither
+    ///         reverts `ERR_LIGHT_CLIENT_UNSET` (226),
     ///         and chain id 0 reverts `ERR_NOT_LIGHT_CLIENT_CHAIN` (227).
     ///         Sold does not allow a public overload of
     ///         `disableOwnerAnchors`.

@@ -129,6 +129,9 @@ assigns it when the release is tagged.
   the owner key decides where the book goes. Pull AAVE principal back first (`TreasuryNotLiquid`).
 - `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
   `treasuryBalance` with no `Deposit` event and no `MAX_BRIDGE_TVL` check; emits `TreasuryFunded`.
+- `deposit-relayer` needs an EVM RPC that serves `eth_getLogs` and transaction receipts for at
+  least the last 7 days (30 preferred); one that keeps ~10 000 blocks cannot prove a deposit
+  older than that. Check `RPC_URL` before the next restart.
 - Images for every service, built from the sources of one commit by `docker/Dockerfile`:
   `docker.gosh.sh/bridge-relayer`, `bridge-deposit-relayer`, `bridge-eth-lc-relayer` and
   `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and
@@ -141,9 +144,14 @@ assigns it when the release is tagged.
   `scheme://host`: RPC URLs carry API keys, and transport errors quote them.
 - `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
+- The five `*.patch` files in the repository root and `scripts/check_eth_beacon_lc_sources.sh`
+  are removed: acki-nacki takes the AN contracts through `contracts/an/place.json`. Nothing to do.
 
 ### Fixes
 
+- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
+  no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
+  verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.
 - `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe
   holds: both streams are read to the end, and its transcript is written like the step
   prover's.

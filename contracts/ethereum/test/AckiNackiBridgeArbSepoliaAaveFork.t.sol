@@ -204,14 +204,20 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         _fillBridge();
         // U = 10, S = 90. A 20 USDC payout is short 10; the new book is 80,
         // so the refill would pull 8 more. The aToken may credit a wei more
-        // than was supplied, which lowers `L` and raises the refill by as much.
+        // than was supplied: `L` is then a wei lower and the USDC on hand a
+        // wei above it (`_fillBridge`). The bridge must pull what the USDC on
+        // hand cannot pay, and wants the payout less `L` plus the new target.
         uint256 shortfall = 10 * UsdcTestLib.UNIT;
-        uint256 liquid = 100 * UsdcTestLib.UNIT - bridge.suppliedPrincipal();
-        if (liquid > shortfall) liquid = shortfall;
-        uint256 extra = 20 * UsdcTestLib.UNIT - liquid + 8 * UsdcTestLib.UNIT - shortfall;
+        uint256 onHand = usdc.balanceOf(address(bridge));
+        uint256 owed = 100 * UsdcTestLib.UNIT - bridge.suppliedPrincipal();
+        uint256 liquid = onHand < owed ? onHand : owed;
+        uint256 required = 20 * UsdcTestLib.UNIT - onHand;
+        uint256 wanted = 20 * UsdcTestLib.UNIT - liquid + 8 * UsdcTestLib.UNIT;
+        uint256 extra = wanted - required;
         assertApproxEqAbs(extra, 8 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "refill");
+        // The reserve holds the shortfall, enough for `required` but not for `wanted`.
         deal(USDC, AUSDC, shortfall);
-        bytes memory reason = _poolWithdrawRevertData(shortfall + extra);
+        bytes memory reason = _poolWithdrawRevertData(wanted);
 
         vm.expectEmit(false, false, false, true, address(bridge));
         emit AaveRefillFailed(extra, reason);
@@ -351,7 +357,12 @@ contract AckiNackiBridgeArbSepoliaAaveForkTest is Test {
         assertApproxEqAbs(
             bridge.suppliedPrincipal(), 90 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "principal"
         );
-        assertEq(usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT, "target");
+        // The aToken may credit a wei more than the first deposit supplied. That wei is
+        // principal in `suppliedPrincipal`, so the second deposit supplies a wei less and
+        // leaves it here above the target, depending on the reserve's index at the block.
+        assertApproxEqAbs(
+            usdc.balanceOf(address(bridge)), 10 * UsdcTestLib.UNIT, DRIFT_TOLERANCE, "target"
+        );
     }
 
     function _assertSolvent() internal view {

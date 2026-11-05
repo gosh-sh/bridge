@@ -8,7 +8,9 @@
 # The Arbitrum Sepolia fork suite runs here against the public RPC: the
 # supply in `deposit`, the refill in `withdrawByProof`, the reserve paused,
 # frozen and capped through the market's own configurator, and both deploy
-# scripts. An outage of that RPC fails the step.
+# scripts. scripts/forge_fork_suite.sh runs the suite again, up to three times,
+# only when the RPC failed during the attempt; an outage of that RPC fails the
+# step.
 
 when:
   - event: pull_request
@@ -39,4 +41,4 @@ steps:
       - forge build
       - forge fmt --check
       - forge test --no-match-contract Fork
-      - FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc forge test --match-contract AckiNackiBridgeArbSepoliaAaveForkTest
+      - FORK_URL=https://sepolia-rollup.arbitrum.io/rpc ../../scripts/forge_fork_suite.sh

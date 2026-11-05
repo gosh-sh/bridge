@@ -16,7 +16,7 @@
 //!   → `bridge_prover_lib::bootstrap::fetch_from_node_verified`
 //!
 //! Sibling of `bootstrap_hermez_srs.rs` (per the "add a sibling, don't mutate"
-//! rule). Prints env-var lines consumed by `scripts/deploy_bridge_bundle.sh`
+//! rule). Prints env-var lines consumed by `DeployShellnetE2EBridge`
 //! (source into the forge deploy env), including the level's
 //! `BUNDLE_STRIDE`, so the contract gets the stride the daemon runs at.
 //!
@@ -344,7 +344,7 @@ async fn main() -> Result<()> {
         eprintln!("  layer {} root = 0x{}", layer, hex::encode(root));
     }
 
-    // 5. Emit env-var lines consumed by `scripts/deploy_bridge_bundle.sh`.
+    // 5. Emit env-var lines consumed by `DeployShellnetE2EBridge`.
     //
     // BE-hex is required: Foundry's `vm.envUint` parses hex as a big-endian
     // `uint256` literal, while the daemon submits

@@ -5,7 +5,10 @@
 # rejects; both GitHub PR checks stayed green. This pipeline is the gate
 # that would have caught it.
 #
-# Fork tests need a mainnet RPC and stay on GitLab (`FOUNDRY_PROFILE=fork`).
+# The Arbitrum Sepolia fork suite runs here against the public RPC: the
+# supply in `deposit`, the refill in `withdrawByProof`, the reserve paused,
+# frozen and capped through the market's own configurator, and both deploy
+# scripts. An outage of that RPC fails the step.
 
 when:
   - event: pull_request
@@ -36,3 +39,4 @@ steps:
       - forge build
       - forge fmt --check
       - forge test --no-match-contract Fork
+      - FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc forge test --match-contract AckiNackiBridgeArbSepoliaAaveForkTest

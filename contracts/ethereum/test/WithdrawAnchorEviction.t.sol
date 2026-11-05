@@ -18,6 +18,7 @@ import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title WithdrawAnchorEvictionTest
 /// @notice Phase C / A3 — WD-Q1 / WD-6: L1 anchor evicted after 128 newer verifyBlocks.
@@ -60,8 +61,8 @@ contract WithdrawAnchorEvictionTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),

@@ -28,8 +28,8 @@ import re
 import time
 from datetime import datetime, timezone
 
-from conftest import (ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOLIA_BEACON_GENESIS,
-                      SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, kv, tail, wait_for)
+from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOLIA_BEACON_GENESIS,
+                      SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
@@ -255,10 +255,17 @@ def test_40_deposit_sent(run, ctx):
     print(f"  deposit https://sepolia.arbiscan.io/tx/{state[1]}")
 
 
-def test_41_deposit_event_received(run, ctx):
-    """The deposit is mined, confirmed, and its Deposit event is found."""
+def test_41_deposit_event_received(run, arb, ctx):
+    """TC-21. The deposit is mined, confirmed, and its Deposit event is found. The bridge is on the
+    AAVE market of 421614, and the deposit put part of its 2 USDC into the pool."""
     state = step_done(run, "evm_confirm", "the Deposit event is received", 900)
     assert state[1].startswith("depositId"), state
+    bridge = ctx["bridge"]
+    assert arb.call(bridge, "aavePool()") == int(ARB_AAVE_POOL, 16), "the bridge is not on the AAVE pool of 421614"
+    assert arb.call(bridge, "aUSDC()") == int(ARB_AUSDC, 16), "the bridge does not hold the aUSDC of 421614"
+    supplied = arb.call(bridge, "suppliedPrincipal()")
+    assert supplied > 0, "the deposit supplied nothing to AAVE"
+    ctx.update(supplied=supplied)
 
 
 # ── 4b · withdrawal: ackinacki-bridge withdraw, alongside the deposit ──────
@@ -435,11 +442,27 @@ def test_71_withdrawal_proof_generated(run):
     log_line(run, r"capture \+ prove complete", "the withdrawal proof is generated", 3600)
 
 
-def test_72_withdrawal_paid(run):
+def test_72_withdrawal_paid(run, ctx):
     """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
     m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
     run.finish("cli-withdraw", 300)
+    ctx.update(withdraw_tx=m.group(1))
+
+
+WITHDRAWN_FROM_AAVE = "0x" + keccak256(b"WithdrawnFromAave(uint256,uint256)").hex()
+
+
+def test_72a_withdrawal_pulled_from_aave(arb, ctx):
+    """TC-22. The payout needed more than the USDC the bridge kept liquid: withdrawByProof pulled
+    it back from the pool, and nothing the users are owed is booked as supplied any more."""
+    bridge = ctx["bridge"].lower()
+    logs = arb.receipt(ctx["withdraw_tx"])["logs"]
+    pulls = [l for l in logs if l["address"].lower() == bridge and l["topics"][0] == WITHDRAWN_FROM_AAVE]
+    assert pulls, "withdrawByProof did not pull from AAVE"
+    assert arb.call(ctx["bridge"], "treasuryBalance()") == 0, "the bridge still owes USDC"
+    assert arb.call(ctx["bridge"], "suppliedPrincipal()") == 0, \
+        f"{ctx['supplied'] / 1e6} USDC were supplied; the payout left some booked"
 
 
 def test_73_usdc_delivered(arb, an, ctx):

@@ -138,10 +138,13 @@ What it means:
 
 ## AAVE routing never moves the book
 
-`supplyToAave`, `withdrawFromAave` and `emergencyWithdrawAll` move tokens between the bridge and the
-pool and adjust `suppliedPrincipal` only; `writeOffUnbackedPrincipal` adjusts `suppliedPrincipal`
+The supply in `deposit`, the pull in `withdrawByProof`, `withdrawFromAave` and
+`emergencyWithdrawAll` move tokens between the bridge and the pool and adjust `suppliedPrincipal`
+only — `deposit` and `withdrawByProof` change the book by the deposit or the payout, never by what
+they move to or from the pool; `writeOffUnbackedPrincipal` adjusts `suppliedPrincipal`
 and moves nothing. `harvestYield` and `skimExcessUsdc` send surplus to `yieldRecipient` and are
-each bounded by `treasuryBalance`: `skimExcessUsdc` takes only liquid USDC above it, and
+each bounded by `treasuryBalance`: `skimExcessUsdc` takes at most `excessUsdc()`, the liquid USDC
+above the principal that a pool loss does not need, and
 `harvestYield` reverts if liquid USDC + aUSDC would drop below it. That bound, not the
 `suppliedPrincipal` book, is what keeps them from reaching user principal. Operating detail:
 [`aave-yield.md`](aave-yield.md).

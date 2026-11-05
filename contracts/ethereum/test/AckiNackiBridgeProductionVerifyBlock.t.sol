@@ -13,6 +13,7 @@ import "../script/ShplonkDeployLib.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeProductionVerifyBlockTest
 /// @notice Production-path E2E: SHPLONK aggregator adapters for 1A, 1B, and 2 + real
@@ -112,8 +113,8 @@ contract AckiNackiBridgeProductionVerifyBlockTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             vb,
             VerifyBlockConfigLib.disabledWithdraw()
         );

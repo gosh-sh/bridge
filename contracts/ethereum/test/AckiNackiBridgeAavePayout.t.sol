@@ -88,8 +88,7 @@ contract AckiNackiBridgeAavePayoutTest is Test {
             bridge.expectedPrevAnchor(ACTIVE_LAYERS)
         );
 
-        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 10 * UNIT);
-        bridge.supplyToAave(type(uint256).max); // 1 liquid, 9 in AAVE
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 10 * UNIT); // 1 liquid, 9 in AAVE
         bridge.setYieldRecipient(yieldSink);
     }
 
@@ -161,13 +160,13 @@ contract AckiNackiBridgeAavePayoutTest is Test {
         assertEq(usdc.balanceOf(RECIPIENT), 10 * UNIT);
     }
 
-    /// @dev Under-booked position, no write-off: the payout pulls the exact
-    ///      shortfall and the book drops by the same amount.
-    function test_payoutPullsExactShortfall() public {
-        _pay(4 * UNIT, 1);
+    /// @dev WD-5 / ST-2: the payout pulls the shortfall plus the target of
+    ///      the new book, and the book drops by the same amount.
+    function test_payoutRefillsTargetOfNewBook() public {
+        _pay(4 * UNIT, 1); // short 3, new book 6, target 0.6
         assertEq(usdc.balanceOf(RECIPIENT), 4 * UNIT);
-        assertEq(bridge.suppliedPrincipal(), 6 * UNIT);
-        assertEq(bridge.aUsdcBalance(), 6 * UNIT);
-        assertEq(usdc.balanceOf(address(bridge)), 0);
+        assertEq(bridge.suppliedPrincipal(), 54 * UNIT / 10);
+        assertEq(bridge.aUsdcBalance(), 54 * UNIT / 10);
+        assertEq(usdc.balanceOf(address(bridge)), 6 * UNIT / 10);
     }
 }

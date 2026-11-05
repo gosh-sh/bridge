@@ -14,6 +14,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeApplyBkSetUpdateOrderingTest
 /// @notice After `applyBkSetUpdate(N)`, `verifyBlock` accepts the previous
@@ -71,8 +72,8 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             vb,
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -278,8 +279,8 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             vb,
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -340,8 +341,16 @@ contract AckiNackiBridgeApplyBkSetUpdateOrderingTest is Test {
             0
         );
         AckiNackiBridge.BridgeWithdrawConfig memory wd = VerifyBlockConfigLib.disabledWithdraw();
+        MockAaveLib.pool(address(usdc));
         vm.expectRevert(AckiNackiBridge.InvalidBundleStride.selector);
-        new AckiNackiBridge(address(oracle), address(usdc), address(0), address(0), vb, wd);
+        new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
+            vb,
+            wd
+        );
     }
 
     /// @notice A rotation crossing an unverified bundle boundary is

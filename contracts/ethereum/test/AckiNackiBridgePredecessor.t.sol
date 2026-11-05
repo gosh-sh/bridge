@@ -17,6 +17,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockPredecessorBridge.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgePredecessorTest
 /// @notice Two bridges on one chain for the same AN-side identity: a
@@ -43,6 +44,7 @@ contract AckiNackiBridgePredecessorTest is Test {
     function setUp() public {
         oracle = new MockBlockHeaderOracle();
         usdc = new MockERC20("Mock USDC", "mUSDC", 6);
+        MockAaveLib.pool(address(usdc));
         primaryVerifier = new MockPrimaryVerifier();
         fallbackVerifier = new MockFallbackVerifier();
         layerHashesVerifier = new MockLayerHashesMovementVerifier();
@@ -75,8 +77,8 @@ contract AckiNackiBridgePredecessorTest is Test {
         return new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -255,8 +257,8 @@ contract AckiNackiBridgePredecessorTest is Test {
         new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             bw
         );
@@ -276,8 +278,11 @@ contract AckiNackiBridgePredecessorTest is Test {
     function _cutover() internal returns (AckiNackiBridge oldBridge, AckiNackiBridge newBridge) {
         oldBridge = _liveBridge(address(0));
         _pay(oldBridge, 71);
-        vm.prank(oldBridge.owner());
+        vm.startPrank(oldBridge.owner());
         oldBridge.pause();
+        // OWN-8: the book has to be liquid before it can move.
+        oldBridge.withdrawFromAave(type(uint256).max);
+        vm.stopPrank();
         newBridge = _newBridge(_withdrawConfig(address(oldBridge), DAPP_FR, ACC_FR));
     }
 

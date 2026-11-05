@@ -96,7 +96,6 @@ contract EthAuditQcHardeningTest is Test {
         address user = makeAddr("user");
         UsdcTestLib.depositUsdc(vm, usdc, bridge, user, 10 * UsdcTestLib.UNIT);
 
-        bridge.supplyToAave(type(uint256).max);
         aUSDC.accrueYield(address(bridge), 500_000);
         usdc.mint(address(pool), 500_000);
 
@@ -119,7 +118,6 @@ contract EthAuditQcHardeningTest is Test {
         address user = makeAddr("user");
         UsdcTestLib.depositUsdc(vm, usdc, bridge, user, 10 * UsdcTestLib.UNIT);
 
-        bridge.supplyToAave(type(uint256).max);
         aUSDC.accrueYield(address(bridge), 500_000);
         usdc.mint(address(pool), 500_000);
 

@@ -17,7 +17,7 @@ WITHDRAW_LOG="logs/withdraw_dry_${TS}.log"
 BURN_LOG="logs/withdrawal_burn_${TS}.log"
 
 if [ ! -f L1_config/env ]; then
-  echo "!!! L1_config/env not found — it is written by scripts/deploy_bridge_bundle.sh with LEVEL=1; see crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3"
+  echo "!!! L1_config/env not found — write it for the bridge you deployed with DeployShellnetE2EBridge (LEVEL=1 anchors from compute_bridge_anchors); see crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md"
   echo "    (per-mode config layout: L{1,2}_config/{env,state,proofs})"
   exit 1
 fi

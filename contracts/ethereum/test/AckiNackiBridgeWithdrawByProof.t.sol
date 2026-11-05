@@ -18,6 +18,7 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./helpers/Bn254FrLib.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofTest
 /// @notice Circuit 4 (single-final-root) tests — the unified AN→ETH payout
@@ -127,8 +128,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -230,8 +231,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         AckiNackiBridge plain = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -244,8 +245,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         AckiNackiBridge vbOnly = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -271,8 +272,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         AckiNackiBridge shellnet = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -293,8 +294,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.withWithdraw(
                 IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
@@ -307,8 +308,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(0)),
@@ -325,8 +326,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.withWithdraw(
                 IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, 0
@@ -346,8 +347,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -424,8 +425,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         AckiNackiBridge bareA = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -601,8 +602,8 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
         AckiNackiBridge shellnetBridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),

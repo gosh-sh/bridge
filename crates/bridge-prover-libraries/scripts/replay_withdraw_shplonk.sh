@@ -47,7 +47,7 @@ TS=$(date +%Y%m%d_%H%M%S)
 mkdir -p logs L1_config/proofs L1_config/work_dir/shplonk-snark-replay
 
 if [ ! -f L1_config/env ]; then
-  echo "!!! L1_config/env not found — it is written by scripts/deploy_bridge_bundle.sh with LEVEL=1; see crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md §3"
+  echo "!!! L1_config/env not found — write it for the bridge you deployed with DeployShellnetE2EBridge (LEVEL=1 anchors from compute_bridge_anchors); see crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md"
   exit 1
 fi
 set -a && source L1_config/env && set +a

@@ -10,10 +10,12 @@ import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 import "./PredecessorEnv.sol";
 import "./ShplonkDeployLib.sol";
+import "./ArbitrumSepoliaAave.sol";
+import "../test/mocks/MockAave.sol";
 
 /// @title DeployShellnetE2EBridge
-/// @notice Sepolia deploy for shellnet AN→ETH E2E: SHPLONK aggregators for 1A/1B/2,
-///         SHPLONK for C4 when wired.
+/// @notice Arbitrum Sepolia deploy for shellnet AN→ETH E2E: SHPLONK aggregators
+///         for 1A/1B/2, SHPLONK for C4 when wired.
 /// @dev Requires `verifiers/PrimaryAggregatorVerifier.bin` +
 ///      `verifiers/FallbackAggregatorVerifier.bin` + `verifiers/LayerHashesAggregatorVerifier.bin`
 ///      (or `SHPLONK_BIN_*` overrides).
@@ -27,23 +29,27 @@ import "./ShplonkDeployLib.sol";
 ///
 ///      `PREDECESSOR_BRIDGE` is optional: the bridge on this chain whose
 ///      treasury this one may take over (`PredecessorEnv`).
+///
+///      AAVE: on 421614 the bridge gets Circle's USDC and the market of
+///      `ArbitrumSepoliaAave`, with no override; `USDC_ADDRESS`, if set, must
+///      be that USDC. On local anvil (31337) `USDC_ADDRESS` is required and a
+///      mock market is deployed for it. Any other chain reverts.
 contract DeployShellnetE2EBridge is Script {
-    // Circle canonical Sepolia USDC (public faucet at https://faucet.circle.com).
-    // The previous constant (0x94a9D9AC...) was a Pruvendo-owned mock with
-    // owner-only mint, so third-party devs couldn't fund the burner via any
-    // public faucet. Wiring against Circle canonical means the same USDC that
-    // Circle's faucet dispenses is the one the bridge's deposit() consumes.
-    address constant USDC_SEPOLIA = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
-    // Circle canonical USDC on Arbitrum Sepolia (the same faucet, network "Arbitrum Sepolia").
-    address constant USDC_ARBITRUM_SEPOLIA = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
-
-    /// `USDC_ADDRESS` when set; otherwise Circle's USDC on Sepolia or Arbitrum Sepolia.
-    function _usdc() internal view returns (address) {
+    /// USDC and the AAVE market the bridge is deployed against.
+    function _market() internal returns (address usdc, address pool, address aUsdc) {
         address fromEnv = vm.envOr("USDC_ADDRESS", address(0));
-        if (fromEnv != address(0)) return fromEnv;
-        if (block.chainid == 11_155_111) return USDC_SEPOLIA;
-        if (block.chainid == 421_614) return USDC_ARBITRUM_SEPOLIA;
-        revert("USDC_ADDRESS required on this chain");
+        if (block.chainid == ArbitrumSepoliaAave.CHAIN_ID) {
+            require(
+                fromEnv == address(0) || fromEnv == ArbitrumSepoliaAave.USDC,
+                "USDC_ADDRESS on 421614 must be the AAVE market's USDC"
+            );
+            return (ArbitrumSepoliaAave.USDC, ArbitrumSepoliaAave.POOL, ArbitrumSepoliaAave.AUSDC);
+        }
+        require(block.chainid == 31337, "DeployShellnetE2EBridge: Arbitrum Sepolia or anvil only");
+        require(fromEnv != address(0), "USDC_ADDRESS required on anvil");
+        MockAUSDC aToken = new MockAUSDC();
+        MockAavePool mockPool = new MockAavePool(fromEnv, address(aToken));
+        return (fromEnv, address(mockPool), address(aToken));
     }
 
     struct VerifyBlockWiring {
@@ -64,6 +70,10 @@ contract DeployShellnetE2EBridge is Script {
     }
 
     function run() external {
+        deploy();
+    }
+
+    function deploy() public returns (AckiNackiBridge bridge) {
         VerifyBlockWiring memory vb = VerifyBlockWiring({
             primary: IPrimaryVerifier(address(0)),
             fallback_: IFallbackVerifier(address(0)),
@@ -112,12 +122,14 @@ contract DeployShellnetE2EBridge is Script {
             console.log("withdrawByProof DISABLED - set WIRE_WITHDRAW_BY_PROOF=true + C4 .bin (M4)");
         }
 
-        AckiNackiBridge bridge = _deployBridge(address(oracle), vb, wd);
+        bridge = _deployBridge(address(oracle), vb, wd);
 
         vm.stopBroadcast();
 
         console.log("AckiNackiBridge (shellnet E2E):", address(bridge));
-        console.log("USDC:", _usdc());
+        console.log("USDC:", address(bridge.usdc()));
+        console.log("AAVE pool:", address(bridge.aavePool()));
+        console.log("aUSDC:", address(bridge.aUSDC()));
         console.log("withdrawWired:", wireWithdraw);
         console.log("withdraw dappFr:", wd.dappFr);
         console.log("withdraw accFr:", wd.accFr);
@@ -140,11 +152,12 @@ contract DeployShellnetE2EBridge is Script {
         internal
         returns (AckiNackiBridge)
     {
+        (address usdc, address pool, address aUsdc) = _market();
         return new AckiNackiBridge(
             oracle,
-            _usdc(),
-            address(0),
-            address(0),
+            usdc,
+            pool,
+            aUsdc,
             AckiNackiBridge.VerifyBlockConfig({
                 primaryVerifier: vb.primary,
                 fallbackVerifier: vb.fallback_,

@@ -14,6 +14,8 @@ contract MockERC20 is IERC20 {
     mapping(address => mapping(address => uint256)) internal _allowances;
     uint256 public totalSupply;
     bool public approveReturnsFalse;
+    /// @notice `transfer` to this address returns false and moves nothing.
+    address public transferFailsTo;
 
     constructor(string memory _name, string memory _symbol, uint8 _decimals) {
         name = _name;
@@ -33,6 +35,10 @@ contract MockERC20 is IERC20 {
         approveReturnsFalse = v;
     }
 
+    function setTransferFailsTo(address to) external {
+        transferFailsTo = to;
+    }
+
     function approve(address spender, uint256 amount) external override returns (bool) {
         _allowances[msg.sender][spender] = amount;
         if (approveReturnsFalse) return false;
@@ -40,6 +46,7 @@ contract MockERC20 is IERC20 {
     }
 
     function transfer(address to, uint256 amount) external override returns (bool) {
+        if (to == transferFailsTo && to != address(0)) return false;
         _transfer(msg.sender, to, amount);
         return true;
     }

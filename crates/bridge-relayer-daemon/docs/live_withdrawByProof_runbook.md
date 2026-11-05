@@ -1,5 +1,11 @@
 # Live `withdrawByProof` E2E Runbook — shellnet → Sepolia (Circuit 4)
 
+> **`deploy_bridge_bundle.sh` is gone.** The bridge is deployed on Arbitrum Sepolia (421614)
+> only, against the AAVE market there, with `DeployShellnetE2EBridge`;
+> [`tests/e2e/local-net/prover-host/jobs/deploy.sh`](../../../tests/e2e/local-net/prover-host/jobs/deploy.sh)
+> is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
+> the script describe bridges already deployed and no longer apply to a new one.
+
 Operational guide for driving a full AN→ETH withdrawal E2E through the
 in-process `relayer withdraw-e2e` orchestrator against a deployed
 `AckiNackiBridge` on Sepolia. Covers first-time end-to-end demo from a
@@ -226,7 +232,7 @@ If `expectedWithdrawAcc()` returns anything other than the palindromic
 value above, the deploy used a non-canonical `WITHDRAW_ACC_FR`. Every C4
 submit will revert on the equality check — **stop and redeploy** with the
 correct `WITHDRAW_ACC_FR` exported before invoking
-[`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`](../../bridge-prover-libraries/scripts/deploy_bridge_bundle.sh).
+`deploy_bridge_bundle.sh`.
 
 ---
 
@@ -308,7 +314,7 @@ cargo run --release --bin compute_bridge_anchors -- \
 ```
 
 The printed anchors do not need to be pasted anywhere by hand —
-[`crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`](../../bridge-prover-libraries/scripts/deploy_bridge_bundle.sh)
+`deploy_bridge_bundle.sh`
 re-derives them internally and writes the corresponding
 `L{1,2}_config/env`. The manual `compute_bridge_anchors` call above is
 only useful for a freshness sanity-check before triggering the script.
@@ -977,8 +983,7 @@ against the empty treasury it will submit successfully now.
 **Scaling.** Seed size to cover the burn(s) you plan to test. Default
 `test_deploy_and_withdraw_only.py` fires 1 USDC — mint 10 USDC once and
 you're good for the demo cycle. Excess USDC in the treasury is not lost:
-it stays available for future withdraws, and can optionally be swept to
-AAVE via `supplyToAave()` for yield.
+it stays available for future withdraws.
 
 ---
 

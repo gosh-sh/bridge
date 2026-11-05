@@ -2,8 +2,9 @@
 
 > **Verified against `b651b093`** (PR 139); the executables and state files against `f86d251e`
 > (PR 148); the `eth-lc-relayer daemon` rows, its rotate directory and the rotate key cache against
-> `d7a14b19` (PR 153). Every connection and every state file below is drawn from the code that makes
-> or names it, not from prose; the tables give each one's `file:line` at that commit.
+> `d7a14b19` (PR 153); the AAVE V3 pool, aUSDC and the bridge's `approve` against `a61d1e75`
+> (PR 142). Every connection and every state file below is drawn from the code that makes or names
+> it, not from prose; the tables give each one's `file:line` at that commit.
 
 A UML component diagram of the whole bridge as deployed on Arbitrum Sepolia: the contracts on the
 three chains, the relayers and the end-user CLI between them, and the interfaces that connect them.
@@ -27,7 +28,11 @@ three chains, the relayers and the end-user CLI between them, and the interfaces
   downloads the account over `REST /v2/account` and runs locally; it does not go through GraphQL.
 - `verify*` — the four verifiers `AckiNackiBridge` calls: `verifyPrimaryAttestation`,
   `verifyFallbackAttestation` and `verifyLayerHashesMovement` for `verifyBlock`, `verifyWithdrawal`
-  for `withdrawByProof`. `transfer*` — `transferFrom` on deposit, `transfer` on payout.
+  for `withdrawByProof`. `transfer*` — `transferFrom` on deposit, `transfer` on payout. The bridge
+  also calls USDC's `approve`: for the AAVE pool before `supply`, for the successor bridge in
+  `migrateTreasury`.
+- **test market** — the AAVE V3 deployment on Arbitrum Sepolia. The bridge is deployed with its
+  pool and aUSDC (`contracts/ethereum/script/ArbitrumSepoliaAave.sol:12`, `:13`), never a mock.
 
 ## Connections
 
@@ -58,6 +63,9 @@ Paths are relative to the repository root.
 | `eth-lc-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: light-client getters, `submitUpdate`, `submitAncestry`, `submitRotate` | `crates/eth-light-client-relayer/src/submitter.rs:931`, `:1034`, `:1047`, `:879`, `:902`, `:890`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
 | `eth-lc-relayer daemon` | `eth-light-client-prover` | process: step (`export_step_vk_blob`); the rotate in three stages, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `crates/eth-light-client-relayer/src/prover.rs:207`; `crates/eth-light-client-relayer/src/rotate.rs:537`, `:543`, `:550` |
 | `AckiNackiBridge` | verifiers | `verify*` | `contracts/ethereum/src/AckiNackiBridge.sol:931`, `:939`, `:951`, `:1503` |
+| `AckiNackiBridge` | USDC | `approve` | `contracts/ethereum/src/AckiNackiBridge.sol:1997` (the AAVE pool), `:1863` (the successor bridge) |
+| `AckiNackiBridge` | Pool (AAVE V3) | `supply`, `withdraw` | `supply`: `contracts/ethereum/src/AckiNackiBridge.sol:1999`, from `deposit` at `:885`. `withdraw`: `:2014`, `:2037`, from `withdrawByProof` at `:1632`; and from the owner's `withdrawFromAave` (`:1712` → `:2037`), `harvestYield` (`:1779`) and `emergencyWithdrawAll` (`:1724`) |
+| `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2056` |
 | `ArbitrumBlockVerifier` | `eccUSDCBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
 | `EthBeaconLightClient` | `eccUSDCBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
 | `DepositVoucher` | `eccUSDCBridge` | `confirmDeposit` | `contracts/an/exchange/DepositVoucher.sol:44` |
@@ -117,5 +125,8 @@ container layout is in [`docker/README.md`](../docker/README.md).
 
 - The user's wallet itself (a WalletConnect app or a local key); only the WalletConnect relay the CLI
   talks to is drawn.
-- `BlockHeaderOracle`, the Aave module, and the prover's helper daemons.
+- `BlockHeaderOracle` and the prover's helper daemons.
+- What the AAVE pool calls itself: it takes the USDC with `transferFrom` on `supply`, pays it out
+  with `transfer` on `withdraw`, and mints and burns aUSDC. That is AAVE's code, not this
+  repository's.
 - `finalizeDeposit` deploying the `DepositVoucher`: the creation arrow is left out.

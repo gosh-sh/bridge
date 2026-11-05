@@ -442,7 +442,7 @@ def test_71_withdrawal_proof_generated(run):
     log_line(run, r"capture \+ prove complete", "the withdrawal proof is generated", 3600)
 
 
-def test_72_withdrawal_paid(run):
+def test_72_withdrawal_paid(run, ctx):
     """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
     m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")

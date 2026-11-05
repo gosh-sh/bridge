@@ -304,7 +304,9 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
    `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccBridge`, so that deposits into the new
    bridge are finalized. Deposits into the old bridge still are too.
-2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
+2. **Close withdrawals to the chain**: first move the funds of every listed token other than USDC
+   (`contracts/an/README.md`, "Which EVM bridge pays a withdrawal"), then
+   `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
    message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
    (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
    because `getEvmBridge` is unset. The burns made before this message are bound to the old bridge,

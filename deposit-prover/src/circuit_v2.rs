@@ -1242,11 +1242,11 @@ impl CircuitMetadata for DepositEventCircuitV2 {
 
     /// Number of public instance columns.
     ///
-    /// We expose 12 public inputs (11 user values + promise_commit, which is
+    /// We expose 13 public inputs (12 user values + promise_commit, which is
     /// appended automatically by EthCircuitImpl at the end of Phase 0):
     /// [depositId, sender, amount, contractAddress, chainId,
     ///  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-    ///  blockHashHigh, blockHashLow, promiseCommit]
+    ///  blockHashHigh, blockHashLow, token, promiseCommit]
     ///
     /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559)
     /// extracted from the enclosing tx (MPT-bound under `transactionsRoot`).

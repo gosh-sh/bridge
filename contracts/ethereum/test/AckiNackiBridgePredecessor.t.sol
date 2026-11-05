@@ -469,6 +469,47 @@ contract AckiNackiBridgePredecessorTest is Test {
         oldBridge.delistToken(SECOND_ID);
     }
 
+    function test_migrateToken_movesSeveralTokensAndUsdcInOneCutover() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        oldBridge.unpause();
+        MockERC20 third = new MockERC20("Third", "THIRD", 8);
+        uint32 thirdId = 5;
+        oldBridge.listToken(address(third), thirdId, 8, 2e8, 20e8);
+        oldBridge.setTokenDepositsEnabled(thirdId, true);
+        third.mint(address(this), 2e8);
+        third.approve(address(oldBridge), 2e8);
+        oldBridge.deposit(address(third), 2e8, bytes32(uint256(2)));
+        oldBridge.pause();
+        oldBridge.withdrawFromAave(type(uint256).max);
+
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        next.listToken(address(third), thirdId, 8, 2e8, 20e8);
+        uint256 oldBook = oldBridge.treasuryBalance();
+        uint256 newBook = next.treasuryBalance();
+
+        oldBridge.migrateTreasury(address(next));
+        oldBridge.migrateToken(SECOND_ID, address(next));
+        oldBridge.migrateToken(thirdId, address(next));
+
+        assertEq(oldBridge.treasuryBalance(), 0);
+        assertEq(oldBridge.liabilitiesOf(SECOND_ID), 0);
+        assertEq(oldBridge.liabilitiesOf(thirdId), 0);
+        assertEq(next.treasuryBalance(), newBook + oldBook);
+        assertEq(next.liabilitiesOf(SECOND_ID), SECOND_AMOUNT);
+        assertEq(next.liabilitiesOf(thirdId), 2e8);
+        assertEq(second.balanceOf(address(next)), SECOND_AMOUNT);
+        assertEq(third.balanceOf(address(next)), 2e8);
+
+        next.withdrawByProof(hex"c4", _secondPub(address(next), 993));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFor(address(next), 994);
+        pub.tokenId = thirdId;
+        pub.amount = 2e8;
+        next.withdrawByProof(hex"c4", pub);
+        assertEq(second.balanceOf(RECIPIENT), SECOND_AMOUNT);
+        assertEq(third.balanceOf(RECIPIENT), 2e8);
+    }
+
     function test_migrateToken_leavesTheUsdcBookAlone() public {
         (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
         AckiNackiBridge next = _liveBridge(address(oldBridge));

@@ -421,13 +421,9 @@ pub async fn run_for_token(
         BalanceCheck::Require if ecc3_balance < amount.0 => {
             return Err(CliError::Preflight {
                 reason: format!(
-                    "--from account {}: ECC[3] balance {} µUSDC ({}) < requested {} µUSDC ({}). \
-                     (ECC[3] is USDC; ECC[2] is Shell — do not confuse them.)",
+                    "--from account {}: {}",
                     from.extended(),
-                    ecc3_balance,
-                    UsdcAmount(ecc3_balance).display(),
-                    amount.0,
-                    amount.display(),
+                    balance_refusal(token_id, ecc3_balance, amount.0),
                 ),
                 source: None,
             });
@@ -686,6 +682,29 @@ fn held_label(token_id: u32, held: U256) -> String {
         format!("treasuryBalance is {held} µUSDC")
     } else {
         format!("liabilitiesOf({token_id}) is {held} base units")
+    }
+}
+
+/// The requested amount in a shortfall refusal, in units this token can show.
+fn requested_label(token_id: u32, amount: UsdcAmount) -> String {
+    if token_id == BRIDGED_USDC_TOKEN_ID {
+        amount.display()
+    } else {
+        "base units".to_string()
+    }
+}
+
+/// What a too-small ECC balance refusal says about this currency.
+fn balance_refusal(token_id: u32, balance: u128, requested: u128) -> String {
+    if token_id == BRIDGED_USDC_TOKEN_ID {
+        format!(
+            "ECC[3] balance {balance} µUSDC ({}) < requested {requested} µUSDC ({}). (ECC[3] is \
+             USDC; ECC[2] is Shell — do not confuse them.)",
+            UsdcAmount(balance).display(),
+            UsdcAmount(requested).display(),
+        )
+    } else {
+        format!("ECC[{token_id}] balance {balance} base units < requested {requested} base units.")
     }
 }
 
@@ -3019,7 +3038,7 @@ pub async fn check_bridge_deploy_for_token(
                  preflight, not a guarantee — the amount is shared, and it can be drained again \
                  while this withdrawal waits for its anchor bundle.",
                 held_label(token_id, treasury),
-                amount.display(),
+                requested_label(token_id, *amount),
                 shortfall_advice(token_id),
             ),
             source: None,
@@ -3132,6 +3151,12 @@ pub(crate) mod tests {
         assert_eq!(held_label(4, amount), "liabilitiesOf(4) is 7 base units");
         assert!(shortfall_advice(3).contains("Top the treasury up"));
         assert!(!shortfall_advice(4).contains("treasury"));
+        assert_eq!(requested_label(4, UsdcAmount(7)), "base units");
+        assert_eq!(
+            balance_refusal(4, 1, 2),
+            "ECC[4] balance 1 base units < requested 2 base units."
+        );
+        assert!(balance_refusal(3, 1, 2).contains("ECC[3] is USDC"));
     }
 
     use serde_json::json;

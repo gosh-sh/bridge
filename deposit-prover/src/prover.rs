@@ -725,7 +725,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
 
     // Layout: [depositId, sender, amount, contractAddress, chainId,
     //          dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-    //          blockHashHigh, blockHashLow, promiseCommit]
+    //          blockHashHigh, blockHashLow, token, promiseCommit]
     if snark.instances[0].len() != NUM_PUBLIC_INPUTS {
         return Err(format!(
             "Expected {NUM_PUBLIC_INPUTS} public inputs, got {}",
@@ -788,7 +788,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     println!("  chain_id: {}", proof.chain_id);
     println!(
         "  promise_commit: 0x{}",
-        hex::encode(snark.instances[0][11].to_bytes())
+        hex::encode(snark.instances[0][12].to_bytes())
     );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");

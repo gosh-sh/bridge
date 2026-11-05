@@ -39,7 +39,7 @@ import urllib.request
 USER_AGENT = "curl/8"  # matches deposit-prover/scripts/recanonicalize_fixture_headers.py
 
 FR_BYTES = 32
-NUM_PI = 12
+NUM_PI = 13
 PI_CHAIN_ID = 4
 PI_BLOCK_HASH_HI = 9
 PI_BLOCK_HASH_LO = 10

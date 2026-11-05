@@ -7,6 +7,7 @@
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -188,6 +189,15 @@ class InitializeTest(unittest.TestCase):
         self.assertEqual(
             params["depositVoucherCode"],
             ctx["get_code"](ctx["artefact"](zerostate_init.VOUCHER_TVC)),
+        )
+
+    def test_compiled_encoder_abi_lists_every_function_in_its_source(self):
+        here = pathlib.Path(__file__).resolve().parent
+        source = (here / "BridgeZerostateData.sol").read_text()
+        abi = json.loads((here / "BridgeZerostateData.abi.json").read_text())
+        self.assertEqual(
+            sorted(re.findall(r"^\s*function (\w+)\(", source, re.M)),
+            sorted(f["name"] for f in abi["functions"]),
         )
 
     def test_update_code_carries_the_encoded_cell_and_the_bridge_code(self):

@@ -25,7 +25,7 @@ assigns it when the release is tagged.
 
 - The Acki Nacki bridge contract `eccUSDCBridge` is now `eccBridge`, since it carries any
   registered ERC-20. Its source, `.tvc` and `.abi.json` are renamed, including their placed paths
-  in `contracts/an/place.json`, and `getVersion` returns `eccBridge`. The ABI is unchanged. Anything
+  in `contracts/an/place.json`, and `getVersion` returns `eccBridge`. The rename changes nothing in the ABI. Anything
   that reads these files by path must follow. `USDC_BRIDGE_*` settings and `USDCBridge.keys.json`
   keep their names.
 - `deposit` is now `deposit(address token,uint256 amount,bytes32 anAccount)`; `Deposit` adds
@@ -314,13 +314,12 @@ assigns it when the release is tagged.
   registry administration can return `InvalidTokenAddress`, `TokenAlreadyListed`,
   `TokenIdAlreadyUsed`, `TokenLimitsInvalid`, `TokenLimitExceedsMintCeiling`,
   `TokenStillHasLiabilities`, `CannotDelistUsdc` or `CannotListAToken`.
-
-### Fixes
-
 - AN `setBridgeToken` refuses a lower `maxTvl`. `finalizeDeposit` does not reserve capacity, so two
   deposits finalized against the same headroom can still leave the later confirmation refused with
   `ERR_TVL_CAP`. Close deposits on EVM or lower the EVM TVL cap to throttle intake. Closing the AN
   switch or lowering AN `maxTransfer` also holds back deposits already locked on EVM.
+
+### Fixes
 
 - Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
   False and malformed returns still revert, and exact custody-delta checks remain in force.

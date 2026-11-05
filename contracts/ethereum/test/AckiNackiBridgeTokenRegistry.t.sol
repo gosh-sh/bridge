@@ -729,6 +729,104 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(bridge.treasuryBalance(), 10 * UsdcTestLib.UNIT, "USDC book untouched");
     }
 
+    function _listAndDeposit(MockERC20 token, uint32 id, uint8 decimals, uint256 amount) internal {
+        bridge.listToken(address(token), id, decimals, amount, amount * 10);
+        bridge.setTokenDepositsEnabled(id, true);
+        token.mint(funder, amount);
+        vm.startPrank(funder);
+        token.approve(address(bridge), amount);
+        bridge.deposit(address(token), amount, bytes32(uint256(0xABC)));
+        vm.stopPrank();
+    }
+
+    function test_severalTokens_keepSeparateBooksThroughDepositAndWithdrawal() public {
+        MockERC20 wbtc = new MockERC20("Mock WBTC", "mWBTC", 8);
+        uint32 wbtcId = 5;
+        uint256 usdcAmount = 10 * UsdcTestLib.UNIT;
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, usdcAmount);
+        _listAndDeposit(dai, DAI_TOKEN_ID, 18, 3e18);
+        _listAndDeposit(wbtc, wbtcId, 8, 2e8);
+
+        assertEq(bridge.treasuryBalance(), usdcAmount);
+        assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), 3e18);
+        assertEq(bridge.liabilitiesOf(wbtcId), 2e8);
+        assertEq(bridge.listedTokenIds().length, 3);
+        assertEq(bridge.depositCounter(), 3);
+
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(DAI_TOKEN_ID, 1e18, Bn254FrLib.toFr(uint256(keccak256("d1"))))
+        );
+        assertEq(dai.balanceOf(RECIPIENT), 1e18);
+        assertEq(wbtc.balanceOf(RECIPIENT), 0);
+        assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), 2e18);
+        assertEq(bridge.liabilitiesOf(wbtcId), 2e8);
+        assertEq(bridge.treasuryBalance(), usdcAmount);
+
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(wbtcId, 2e8, Bn254FrLib.toFr(uint256(keccak256("w1"))))
+        );
+        assertEq(wbtc.balanceOf(RECIPIENT), 2e8);
+        assertEq(bridge.liabilitiesOf(wbtcId), 0);
+        assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), 2e18);
+
+        uint256 usdcId = bridge.usdcTokenId();
+        bridge.withdrawByProof(
+            _dummyProof(),
+            _pubFor(usdcId, UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("u1"))))
+        );
+        assertEq(usdc.balanceOf(RECIPIENT), UsdcTestLib.UNIT);
+        assertEq(bridge.treasuryBalance(), usdcAmount - UsdcTestLib.UNIT);
+        assertEq(dai.balanceOf(RECIPIENT), 1e18);
+        assertEq(wbtc.balanceOf(RECIPIENT), 2e8);
+    }
+
+    function test_severalTokens_oneTokensLiabilitiesCannotPayAnother() public {
+        MockERC20 wbtc = new MockERC20("Mock WBTC", "mWBTC", 8);
+        _listAndDeposit(dai, DAI_TOKEN_ID, 18, 3e18);
+        bridge.listToken(address(wbtc), 5, 8, 2e8, 20e8);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.WithdrawTreasuryShortfall.selector, 1e8, 0)
+        );
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(5, 1e8, Bn254FrLib.toFr(uint256(keccak256("w2"))))
+        );
+        assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), 3e18);
+    }
+
+    function test_severalTokens_closingOrDelistingOneLeavesTheOthers() public {
+        MockERC20 wbtc = new MockERC20("Mock WBTC", "mWBTC", 8);
+        MockERC20 gone = new MockERC20("Gone", "GONE", 18);
+        _listAndDeposit(dai, DAI_TOKEN_ID, 18, 1e18);
+        _listAndDeposit(wbtc, 5, 8, 1e8);
+        bridge.listToken(address(gone), 6, 18, 1e18, 10e18);
+
+        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, false);
+        bridge.delistToken(6);
+
+        dai.mint(funder, 1e18);
+        vm.startPrank(funder);
+        dai.approve(address(bridge), 1e18);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.TokenDepositsDisabled.selector, DAI_TOKEN_ID)
+        );
+        bridge.deposit(address(dai), 1e18, bytes32(uint256(0xABC)));
+        vm.stopPrank();
+
+        wbtc.mint(funder, 1e8);
+        vm.startPrank(funder);
+        wbtc.approve(address(bridge), 1e8);
+        bridge.deposit(address(wbtc), 1e8, bytes32(uint256(0xABC)));
+        vm.stopPrank();
+        assertEq(bridge.liabilitiesOf(5), 2e8);
+        assertEq(bridge.listedTokenIds().length, 3);
+
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(DAI_TOKEN_ID, 1e18, Bn254FrLib.toFr(uint256(keccak256("d3"))))
+        );
+        assertEq(dai.balanceOf(RECIPIENT), 1e18);
+    }
+
     function test_withdrawByProof_unlistedIdReverts() public {
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.UnsupportedTokenId.selector, uint256(99))

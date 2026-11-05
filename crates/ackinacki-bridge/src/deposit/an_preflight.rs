@@ -591,7 +591,7 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         // A 1.16.0 bridge answers getL2Verifier; this chain is not a rollup,
         // so it names none. Without the answer the read falls into
@@ -657,7 +657,7 @@ mod tests {
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -703,7 +703,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -833,11 +833,11 @@ mod tests {
     fn the_deposit_key_floor_matches_the_contract_this_build_ships() {
         const FLOOR_KEY_SHA256: &str =
             "f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9";
-        let src = include_str!("../../../../contracts/an/exchange/eccUSDCBridge.sol");
+        let src = include_str!("../../../../contracts/an/exchange/eccBridge.sol");
         let line = src
             .lines()
             .find(|l| l.trim_start().starts_with("string constant version"))
-            .expect("eccUSDCBridge.sol declares a version constant");
+            .expect("eccBridge.sol declares a version constant");
         let shipped = line
             .split('"')
             .nth(1)
@@ -845,18 +845,18 @@ mod tests {
         let key = src
             .lines()
             .find(|l| l.trim_start().starts_with("// sha256 = "))
-            .expect("eccUSDCBridge.sol records the embedded deposit key's sha256");
+            .expect("eccBridge.sol records the embedded deposit key's sha256");
 
         assert!(
             key.contains(FLOOR_KEY_SHA256),
-            "the eccUSDCBridge this build ships embeds another deposit key ({}). Bump \
+            "the eccBridge this build ships embeds another deposit key ({}). Bump \
              DEPOSIT_KEY_BRIDGE_VERSION to {shipped} and FLOOR_KEY_SHA256 to that key's sha256.",
             key.trim(),
         );
         assert!(
             DEPOSIT_KEY_BRIDGE_VERSION
                 <= BridgeVersion::parse(shipped).expect("the version constant parses"),
-            "DEPOSIT_KEY_BRIDGE_VERSION is {}, above the eccUSDCBridge this build ships \
+            "DEPOSIT_KEY_BRIDGE_VERSION is {}, above the eccBridge this build ships \
              ({shipped})",
             DEPOSIT_KEY_BRIDGE_VERSION,
         );
@@ -917,7 +917,7 @@ mod tests {
     async fn a_bridge_with_verifiers_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -937,7 +937,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),

@@ -260,10 +260,10 @@ BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   for the same `WITHDRAW_ACC_FR` whose treasury this one should take over with
   `migrateTreasury`, or the zero address. It need not be paused and does not
   protect against replay: each withdrawal proof names the one EVM bridge that
-  may pay it, the one `eccUSDCBridge.getEvmBridge(11155111)` returned when it
+  may pay it, the one `eccBridge.getEvmBridge(11155111)` returned when it
   was burnt. The cutover is in `docs/aave-yield.md`, "Replacing a bridge on
   the same chain".
-- Once the bridge is deployed, the owner of `eccUSDCBridge` on Acki Nacki
+- Once the bridge is deployed, the owner of `eccBridge` on Acki Nacki
   calls `setTrustedL1Bridge(11155111, <new bridge>, true)` and
   `setEvmBridge(11155111, <new bridge>)`. Until `getEvmBridge(11155111)`
   returns the new address, `ackinacki-bridge withdraw --bridge-address <new

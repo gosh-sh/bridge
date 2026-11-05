@@ -67,7 +67,7 @@ BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 # have the value for this line.
 #
 # NODE-4011 briefly moved this to `20f9338d…d7c3c5b8` over a new
-# eccUSDCBridge and was rolled back the same day. Both deploys exist and
+# eccBridge and was rolled back the same day. Both deploys exist and
 # both answer; only the one the relayer advances is usable, and the
 # check below is what tells them apart.
 USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
@@ -126,7 +126,7 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
 # Set both values for your fresh deployment. This build uses
-# deposit(address,uint256,bytes32) and requires eccUSDCBridge 1.16.0 for deposits;
+# deposit(address,uint256,bytes32) and requires eccBridge 1.16.0 for deposits;
 # earlier workchain-bearing EVM deployments cannot accept its deposit calls.
 # Keep USDC_BRIDGE_ACCOUNT_ID above paired with this EVM contract.
 # BRIDGE_ADDRESS=0x<new-AckiNackiBridge-address>

@@ -13,13 +13,13 @@
 //!    chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
 //!    blockHashHigh, blockHashLow, token, promiseCommit]` — the Acki Nacki
 //!    account is bound in-circuit so the AN side credits a proven account,
-//!    proven `chainId` is allowlisted by `eccUSDCBridge` as a per-chain set of
+//!    proven `chainId` is allowlisted by `eccBridge` as a per-chain set of
 //!    bridges (`_trustedL1Bridge[chainId][bridge]`), and `dappId` (a config
 //!    tag, replaced `anWorkchain` on 2026-06-02) is pinned to 0 by the AN-side
 //!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
 //!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
 //! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
-//!    `proof`) to the AN-side `eccUSDCBridge.finalizeDeposit(...)`, which
+//!    `proof`) to the AN-side `eccBridge.finalizeDeposit(...)`, which
 //!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and deploys a
 //!    per-deposit `DepositVoucher` ([`submitter::AnInterfaceSubmitter`]).
 //!
@@ -53,7 +53,7 @@
 //!   [`acki_nacki_interface::TvmAckiNacki`]. A second `finalizeDeposit` for the
 //!   same deposit fails in the voucher constructor (exit 51), so re-submission
 //!   is safe.
-//! - The AN-side `eccUSDCBridge.finalizeDeposit` entry point is in
+//! - The AN-side `eccBridge.finalizeDeposit` entry point is in
 //!   `contracts/an/exchange/`; the `ZKHALO2VERIFYWITHVK` opcode lives in
 //!   `tvm-sdk` and is authoritative for its semantics.
 

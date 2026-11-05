@@ -11,7 +11,7 @@ cannot succeed either — this is the cheap fast-fail signal.
 The driver reads `getTotalBridged(3)` before the burn and stops when the
 inventory cannot cover the amount (the contract would otherwise hand the
 ECC back without a burn event). In `local` mode the mint goes through
-`mintAndSendBridged` (eccUSDCBridge 1.13.0), which books the amount as
+`mintAndSendBridged` (eccBridge 1.13.0), which books the amount as
 bridged inventory for `DST_CHAIN_ID`, so a fresh network (zerostate
 minted=0) can withdraw. In `shellnet` mode the mint is `mintAndSend`, which
 adds no inventory: the withdrawal needs a deposit finalized for at least

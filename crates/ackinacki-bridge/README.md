@@ -226,7 +226,7 @@ command itself:
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(address,uint256,bytes32)`
-   on EVM and `eccUSDCBridge` >= 1.16.0 with this build's deposit key on AN.
+   on EVM and `eccBridge` >= 1.16.0 with this build's deposit key on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 

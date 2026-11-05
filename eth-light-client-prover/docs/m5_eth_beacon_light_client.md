@@ -11,7 +11,7 @@ own comments ("or eventually an Ethereum light client — means adding a writer 
 this mapping").
 
 The `USDCBridge` wiring below — a `_lightClient` slot set with `setLightClient` —
-is how M5 patched the bridge in `acki-nacki`. `eccUSDCBridge` 1.5.0
+is how M5 patched the bridge in `acki-nacki`. `eccBridge` 1.5.0
 (`contracts/an/exchange/`) has no `setLightClient`: the zerostate installs the
 light-client code with `setLightClientCode`, the bridge derives the light-client
 address from it, and the owner deploys the light client with `deployLightClient`.
@@ -69,7 +69,7 @@ gates on) via the new authorized writer. The write is authorized solely by being
 the configured `_lightClient` — no human asserts canonicality, the proof does.
 This is independent of the per-chain owner-anchor map
 (`_ownerAnchorsDisabled` / `isOwnerAnchorsEnabled`); the
-owner's one remaining action is granting trust once, which on `eccUSDCBridge` is
+owner's one remaining action is granting trust once, which on `eccBridge` is
 installing the light-client code (`setLightClientCode`).
 
 `_lightClient` follows the `_expectedBridgeFr` convention: it is **not** threaded

@@ -82,8 +82,8 @@ def test_02_no_sepolia_committee_change_during_the_run():
 def test_10_local_network_bridge_active(an):
     """The zerostate bridge is up at the version this commit ships."""
     got = an("bridge")
-    assert got.get("BRIDGE_ACTIVE") == "true", f"eccUSDCBridge is not Active: {got}"
-    assert got.get("BRIDGE_VERSION") == "1.16.0", f"eccUSDCBridge is {got.get('BRIDGE_VERSION')}, not 1.16.0"
+    assert got.get("BRIDGE_ACTIVE") == "true", f"eccBridge is not Active: {got}"
+    assert got.get("BRIDGE_VERSION") == "1.16.0", f"eccBridge is {got.get('BRIDGE_VERSION')}, not 1.16.0"
 
 
 def test_11_build_on_prover_host(ph, sha):

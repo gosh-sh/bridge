@@ -225,7 +225,7 @@ exported as `PUB_*` constants.
 [10]  anchorLayer    1-indexed layer number (range-checked
                      `1..=MAX_ANCHOR_LAYER`)
 [11]  dstBridge      BE u160 from body[58..78) — the EVM bridge
-                     `eccUSDCBridge` bound `dstChainId` to when it burnt;
+                     `eccBridge` bound `dstChainId` to when it burnt;
                      `withdrawByProof` pays only if it is `address(this)`
 ```
 

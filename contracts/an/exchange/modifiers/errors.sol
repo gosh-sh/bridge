@@ -1,6 +1,6 @@
 pragma gosh-solidity >=0.80;
 
-abstract contract eccUSDCBridgeErrors {
+abstract contract eccBridgeErrors {
     uint16 constant ERR_ZERO_AMOUNT = 204;
     uint16 constant ERR_INVALID_SENDER = 207;
     uint16 constant ERR_NOT_OWNER = 209;

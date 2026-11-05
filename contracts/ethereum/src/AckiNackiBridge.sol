@@ -323,7 +323,7 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` pair via its public inputs — pinning these
     ///         on Ethereum at deploy time prevents a caller from substituting
     ///         an event emitted by a different AN contract (e.g. a malicious
-    ///         lookalike `eccUSDCBridge`).
+    ///         lookalike `eccBridge`).
     uint256 public immutable bridgeWithdrawalDappFr;
 
     /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeWithdrawalDappFr`).
@@ -820,7 +820,7 @@ contract AckiNackiBridge {
         /// @notice The Acki Nacki ECC currency id that carries bridged USDC,
         ///         i.e. the id the constructor lists `_usdc` under and the id
         ///         Circuit 4 must report in `pub.tokenId` to be paid in USDC.
-        ///         AN's `eccUSDCBridge` emits its `USDC_ECC_ID` (`3`), so a
+        ///         AN's `eccBridge` emits its `USDC_ECC_ID` (`3`), so a
         ///         deployment against that AN side passes `3`; a deployment
         ///         whose AN side reports `0` passes `0`.
         /// @dev Replaces the former `altTokenId` alias, which accepted `0`

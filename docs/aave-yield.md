@@ -282,7 +282,7 @@ available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec
 
 ## Replacing a bridge on the same chain
 
-A withdrawal proof names the one EVM bridge that may pay it. `eccUSDCBridge` on Acki Nacki writes
+A withdrawal proof names the one EVM bridge that may pay it. `eccBridge` on Acki Nacki writes
 the bridge its owner set for the destination chain (`setEvmBridge(dstChainId, evmBridge)`, read back
 with `getEvmBridge`) into every `WithdrawalInitiated` event; Circuit 4 publishes it as `dstBridge`;
 `withdrawByProof` refuses any other address with `WrongDstBridge`. A new bridge on a chain that
@@ -302,9 +302,9 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    protection. Leave the new bridge unpaused: a paused bridge reverts `verifyBlock`, so it would
    anchor nothing. Start its `verifyBlock` relayer, its withdrawal relayer and a
    `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
-   `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccUSDCBridge`, so that deposits into the new
+   `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccBridge`, so that deposits into the new
    bridge are finalized. Deposits into the old bridge still are too.
-2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccUSDCBridge`. From that
+2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
    message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
    (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
    because `getEvmBridge` is unset. The burns made before this message are bound to the old bridge,
@@ -338,10 +338,10 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    Acki Nacki. Only the owner and `predecessor` may call it. A deposit the old bridge took before
    its pause is in the `treasuryBalance` that moves, and Acki Nacki still finalizes it: the old
    bridge stays trusted until step 6.
-5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccUSDCBridge`.
+5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccBridge`.
    Point `ackinacki-bridge withdraw --bridge-address` at the new bridge.
 6. **Stop trusting the old bridge** (`setTrustedL1Bridge(<chainId>, <old>, false)`) and stop its
    relayers, only after every deposit it took has been finalized: every deposit id below its
-   `depositCounter`, which the pause froze. `eccUSDCBridge` refuses a deposit from an untrusted
+   `depositCounter`, which the pause froze. `eccBridge` refuses a deposit from an untrusted
    bridge (`ERR_UNSUPPORTED_SRC_CHAIN`), and step 4 moved that deposit's USDC to the new bridge, so
    a deposit refused here has no way back.

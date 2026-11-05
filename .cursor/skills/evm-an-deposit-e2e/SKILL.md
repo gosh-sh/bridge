@@ -83,7 +83,7 @@ cargo run --release --example export_vk_blob -- \
 Then regenerate the matching proof + public inputs (`export_blake2b_proof`) and
 re-verify the triple (`verify_opcode_triple`). The degree / max-data-byte-len /
 max-log-num MUST match across keygen, prove, and verify. After regeneration, run
-`scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol`
+`scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccBridge.sol`
 from the repository root to update the embedded key and its checksum.
 
 **Witness-independence (2026-06-25):** the VK no longer depends on the deposit's
@@ -128,10 +128,10 @@ then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to
 NB: `get_or_create_proving_key` now writes a **shape-fingerprinted** PK filename so a
 circuit-shape change can never silently load a stale PK.
 
-## Recompile eccUSDCBridge
+## Recompile eccBridge
 
 Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.0 for
-`eccUSDCBridge`, sold 0.81.0 for the voucher, sold 0.81.1 for the light client and the
+`eccBridge`, sold 0.81.0 for the voucher, sold 0.81.1 for the light client and the
 Arbitrum block verifier.
 
 ```bash
@@ -140,9 +140,9 @@ make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/
 ```
 
 The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
-`contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` and check the ABI before
+`contracts/an/0.80.0_compiled/exchange/eccBridge.tvc` and check the ABI before
 deployment. This build's bridge version is 1.16.0 and its code hash starts with
-`d7b876af`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
+`9fad87b9`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
 them apart.
 
 ## Build gotchas

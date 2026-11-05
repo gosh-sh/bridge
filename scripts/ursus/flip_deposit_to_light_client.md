@@ -22,7 +22,7 @@ not flip unless started with `--flip-owner`. See §3.5.
 The **relayer** issues the owner calls. Relayer keys (`AN_KEYS_PATH`) must be
 the owner pubkey of both contracts. tvm-sdk#284 co-deploys with this contract.
 
-1. The bridge is `eccUSDCBridge` from the zerostate. The zerostate installs the
+1. The bridge is `eccBridge` from the zerostate. The zerostate installs the
    light-client code (`setLightClientCode`); the address of a chain's client
    follows from that code salted with the chain id and exists only after
    `deployLightClient` (`getLightClient(l1ChainId)`, 0 until then).

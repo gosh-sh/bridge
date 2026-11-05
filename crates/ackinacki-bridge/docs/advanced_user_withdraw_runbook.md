@@ -278,7 +278,7 @@ PREDECESSOR_BRIDGE=<the bridge whose treasury this one takes over, or 0x00000000
   ./scripts/deploy_bridge_bundle.sh
 ```
 
-Then bind the new bridge on Acki Nacki: the owner of `eccUSDCBridge` calls
+Then bind the new bridge on Acki Nacki: the owner of `eccBridge` calls
 `setTrustedL1Bridge(<chain id>, <new bridge>, true)` and
 `setEvmBridge(<chain id>, <new bridge>)`. Every burn names the bridge
 `getEvmBridge(<chain id>)` returns at that moment, and only that bridge pays it

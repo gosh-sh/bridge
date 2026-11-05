@@ -9,7 +9,7 @@ page exists because those three are easy to conflate, and the labelled rules bel
 and operators quote at each other during an incident.
 
 **Scope: the EVM side only** — `AckiNackiBridge.sol` and the AAVE position it holds. The
-Acki Nacki side keeps per-chain accounting in `contracts/an/exchange/eccUSDCBridge.sol`;
+Acki Nacki side keeps per-chain accounting in `contracts/an/exchange/eccBridge.sol`;
 its limits and deployment requirements are described in `contracts/an/README.md`. Where the two meet is the deposit
 proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 
@@ -105,7 +105,7 @@ debit before paying.
 
 `AckiNackiBridge.pause()` stops the Ethereum user entry points (`deposit`,
 `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`). It does not call
-`eccUSDCBridge.setPaused`, and `setPaused` does not call `pause()`. Circle can
+`eccBridge.setPaused`, and `setPaused` does not call `pause()`. Circle can
 also freeze the USDC contract on Ethereum; that is a third control, not wired
 to either bridge.
 

@@ -23,11 +23,16 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- The Acki Nacki bridge contract `eccUSDCBridge` is now `eccBridge`, since it carries any
+  registered ERC-20. Its source, `.tvc` and `.abi.json` are renamed, including their placed paths
+  in `contracts/an/place.json`, and `getVersion` returns `eccBridge`. The ABI is unchanged. Anything
+  that reads these files by path must follow. `USDC_BRIDGE_*` settings and `USDCBridge.keys.json`
+  keep their names.
 - `deposit` is now `deposit(address token,uint256 amount,bytes32 anAccount)`; `Deposit` adds
   the token as its sixth field. Redeploy the EVM bridge and update clients and indexers together.
 - The deposit circuit has 13 public inputs (`token` at slot 11, `promiseCommit` at 12) and a new
   VK (SHA-256 `f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9`).
-  Deploy `eccUSDCBridge` 1.16.0 and the matching prover/CLI together. Old-event receipts cannot
+  Deploy `eccBridge` 1.16.0 and the matching prover/CLI together. Old-event receipts cannot
   be re-proven with this key: finalize pending deposits on the old pair before switching.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
@@ -73,7 +78,7 @@ assigns it when the release is tagged.
   `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
   first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
   made before the switch below are paid by the bridge they named. Upgrade in this order:
-  `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
+  `eccBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
   then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. Replacing an
   existing bridge closes withdrawals to its chain (`setEvmBridge(<chainId>, 0)`) until the old
   bridge has paid the burns bound to it and its principal has moved; deposits stay open. The
@@ -89,7 +94,7 @@ assigns it when the release is tagged.
   word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
   revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
   before the upgrade are proven with the release their bridge was deployed for.
-- **`eccUSDCBridge` 1.15.0** (code hash `71074c89af517458c73566d3e84937279547622e01e827eb9bf7161e156135a3`):
+- **`eccBridge` 1.15.0** (code hash `71074c89af517458c73566d3e84937279547622e01e827eb9bf7161e156135a3`):
   `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
   `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
   evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
@@ -102,7 +107,7 @@ assigns it when the release is tagged.
   `IBridgeWithdrawalVerifier.verifyWithdrawal` is `0xbcd3e6c9`. A proof whose `dstBridge` is not
   the bridge's own address reverts `WrongDstBridge(uint256)`. Tooling that encodes the call by
   hand needs the twelve-field tuple.
-- **`ackinacki-bridge withdraw`** needs `eccUSDCBridge` 1.16.0. Before burning it requires
+- **`ackinacki-bridge withdraw`** needs `eccBridge` 1.16.0. Before burning it requires
   `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
   the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
   names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
@@ -261,7 +266,7 @@ assigns it when the release is tagged.
   (`AckiNackiBridgeArbSepoliaAaveForkTest`) against `https://sepolia-rollup.arbitrum.io/rpc` on
   every pull request; an outage of that RPC fails the check.
 
-- After the upgrade to `eccUSDCBridge` 1.16.0, and on a fresh zerostate, the AN token registry
+- After the upgrade to `eccBridge` 1.16.0, and on a fresh zerostate, the AN token registry
   is empty: every deposit, USDC included, is refused with 241 until `setBridgeToken` registers
   USDC as ECC `3` for each source chain. Pause the AN bridge and let pending vouchers confirm
   before `updateCode`; register, then unpause.
@@ -275,7 +280,7 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
-- `eccUSDCBridge` 1.16.0 (code hash `d7b876af…`) credits the proven ERC-20 to its registered
+- `eccBridge` 1.16.0 (code hash `9fad87b9…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register the same token and ECC id on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
@@ -323,7 +328,7 @@ assigns it when the release is tagged.
 - The web UI checks USDC's current `tokenInfo` transfer limit, TVL capacity and deposit switch
   before approval and again before deposit. A closed, absent or unreadable listing refuses the request.
 - `eth-lc-relayer arbitrum-anchors` discovers the new token-bearing `Deposit` event.
-- `eccUSDCBridge` 1.15.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `71074c89…`):
+- `eccBridge` 1.15.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `71074c89…`):
   `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240) until the owner's anchors are off for the verifier's
   parent chain, and `deployL2Verifier` throws 240 on a closed chain for a parent chain the owner
@@ -331,7 +336,7 @@ assigns it when the release is tagged.
   parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
   (or Ethereum) first, then the Arbitrum chain. `updateCode` drops the verifier code and the
   verifiers: install and deploy them again after the upgrade.
-- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
+- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccBridge` has
   no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
   verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.
 - `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe

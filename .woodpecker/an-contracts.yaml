@@ -1,13 +1,13 @@
 # The Acki Nacki contracts under contracts/an/ carry four invariants the
 # compiler does not check:
 #
-#   * eccUSDCBridge embeds DepositVoucher's code, and the voucher calls back
+#   * eccBridge embeds DepositVoucher's code, and the voucher calls back
 #     into confirmDeposit. If the sources or the two compiled ABIs disagree on
 #     that argument list, deposits abort in the voucher constructor.
-#   * The deposit verifying key is a hex literal in eccUSDCBridge.sol and must
+#   * The deposit verifying key is a hex literal in eccBridge.sol and must
 #     match deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin.
 #   * BridgeZerostateData.getBridgeData must encode the same tuple that
-#     eccUSDCBridge.onCodeUpgrade decodes.
+#     eccBridge.onCodeUpgrade decodes.
 #   * The ABIs built into eth-lc-relayer and the CLI's USDCBridge.abi.json
 #     copy must hold every function the relayers call and agree with the
 #     compiled contracts (scripts/check_lc_relayer_abis.py).
@@ -29,7 +29,7 @@ steps:
     image: python:3-alpine
     depends_on: [ ]
     commands:
-      - python3 scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
+      - python3 scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccBridge.sol
   zerostate-encoder:
     image: python:3-alpine
     depends_on: [ ]

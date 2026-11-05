@@ -46,7 +46,7 @@ class BridgeLimits(unittest.TestCase):
         cls.root = Path(cls.temp.name)
         src = cls.root / "an"
         shutil.copytree(REPO / "contracts/an", src)
-        bridge = src / "exchange/eccUSDCBridge.sol"
+        bridge = src / "exchange/eccBridge.sol"
         source = bridge.read_text()
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
@@ -98,9 +98,9 @@ class BridgeLimits(unittest.TestCase):
         sold = os.environ["SOLD_0_80"]
         command([sold, "--tvm-version", "gosh", "--base-path", str(src),
                  str(bridge), "-o", str(cls.root)])
-        cls.abi = cls.root / "eccUSDCBridge.abi.json"
+        cls.abi = cls.root / "eccBridge.abi.json"
         cls.bridge_code = json.loads(command([
-            DEBUGGER, "state-decode", "-s", str(cls.root / "eccUSDCBridge.tvc")
+            DEBUGGER, "state-decode", "-s", str(cls.root / "eccBridge.tvc")
         ]))["code"]
         keys = (REPO / "crates/ackinacki-bridge/src/test_keys.rs").read_text()
         cls.keys = {n: re.search(rf'PAIR_{n.upper()}: &str = "([0-9a-f]+)"', keys)[1]
@@ -123,7 +123,7 @@ class BridgeLimits(unittest.TestCase):
 
     def setUp(self):
         self.tvc = self.root / "case.tvc"
-        shutil.copyfile(self.root / "eccUSDCBridge.tvc", self.tvc)
+        shutil.copyfile(self.root / "eccBridge.tvc", self.tvc)
         self.call("constructor", {"pubkey": "0x" + self.keys["public"],
                                   "usdcWallet": "0:" + "00" * 32})
         self.seed(TVL - TRANSFER)

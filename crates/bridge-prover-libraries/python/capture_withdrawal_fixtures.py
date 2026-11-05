@@ -3,7 +3,7 @@ Capture the `WithdrawalInitiated` events Circuit 4 is keyed and tested on.
 
 Writes `crates/bridge-circuits/bridge-event-prove-circuit/withdrawals.txt` (the
 7-line records `event_data_helper.rs` reads) from a local network whose
-zerostate carries this tree's `eccUSDCBridge` — `tests/e2e/local-net/`
+zerostate carries this tree's `eccBridge` — `tests/e2e/local-net/`
 brings one up. The events come from the deployed contract, not from a
 builder: the circuit fixes the body length and the field offsets at keygen,
 so the fixture has to be what the contract emits.

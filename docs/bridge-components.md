@@ -43,7 +43,7 @@ Paths are relative to the repository root.
 | `ackinacki-bridge` (CLI) | USDC | `approve` | `crates/ackinacki-bridge/src/deposit/evm.rs:220` |
 | `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `deposit` | `crates/ackinacki-bridge/src/deposit/evm.rs:210` |
 | `ackinacki-bridge` (CLI) | `deposit-prover` | process | `crates/ackinacki-bridge/src/deposit/prover.rs:206` |
-| `ackinacki-bridge` (CLI) | `eccUSDCBridge` | `finalizeDeposit` | `crates/ackinacki-bridge/src/deposit/an.rs:754` |
+| `ackinacki-bridge` (CLI) | `eccBridge` | `finalizeDeposit` | `crates/ackinacki-bridge/src/deposit/an.rs:754` |
 | `ackinacki-bridge` (CLI) | user multisig | `sendTransaction` carrying `initiateWithdrawal` | `crates/ackinacki-bridge/src/burn.rs:267`, payload `burn.rs:497` |
 | `ackinacki-bridge` (CLI) | Block Manager | `REST /v2/account`, `/v2/messages`: getters, `finalizeDeposit`, `sendTransaction` | getters `crates/ackinacki-bridge/src/deposit/an.rs:484`, `deposit/an_preflight.rs:69`, `:297`, `:349`; messages `deposit/an.rs:837`, `burn.rs:359` |
 | `ackinacki-bridge` (CLI) | Block Manager | GraphQL: `account`, its `messages` and `transactions`, `transaction`, `block`, `blockByHeight` | deposit `crates/ackinacki-bridge/src/deposit/an.rs:510`, `:573`, `:593`, `:618`; withdrawal `crates/bridge-relayer-daemon/src/withdraw_e2e/capture.rs:73`, `:142`, `:236`, `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs:541`, client at `crates/ackinacki-bridge/src/orchestrator.rs:864` |
@@ -52,7 +52,7 @@ Paths are relative to the repository root.
 | `ackinacki-bridge` (CLI), `relayer daemon-live` | `aggregate-proof` | process | started at `crates/bridge-relayer-daemon/src/aggregator.rs:606`; the CLI hands it the binary at `crates/ackinacki-bridge/src/orchestrator.rs:973`, the daemon at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2525` |
 | `deposit-relayer daemon` | `deposit-prover` | process | `crates/deposit-relayer-daemon/src/prover.rs:313` |
 | `deposit-prover` | Arbitrum RPC node | JSON-RPC | `deposit-prover/src/ethereum_fetcher.rs:32`; the URL from `crates/deposit-relayer-daemon/src/prover.rs:382` and `crates/ackinacki-bridge/src/deposit/prover.rs:450` |
-| `deposit-relayer daemon` | `eccUSDCBridge` | `finalizeDeposit` | `crates/acki-nacki-interface/src/tvm_client.rs:130` |
+| `deposit-relayer daemon` | `eccBridge` | `finalizeDeposit` | `crates/acki-nacki-interface/src/tvm_client.rs:130` |
 | `deposit-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: `isAcceptedBlockHash`, voucher state, `finalizeDeposit` | `crates/deposit-relayer-daemon/src/submitter.rs:713`, `submitter.rs:725`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
 | `relayer daemon-live` | `AckiNackiBridge` | `verifyBlock` | `crates/bridge-relayer-daemon/src/bridge.rs:1350` |
 | `relayer daemon-live` | `AckiNackiBridge` | `applyBkSetUpdate` | `crates/bridge-relayer-daemon/src/bridge.rs:1490` |
@@ -66,13 +66,13 @@ Paths are relative to the repository root.
 | `AckiNackiBridge` | USDC | `approve` | `contracts/ethereum/src/AckiNackiBridge.sol:1997` (the AAVE pool), `:1863` (the successor bridge) |
 | `AckiNackiBridge` | Pool (AAVE V3) | `supply`, `withdraw` | `supply`: `contracts/ethereum/src/AckiNackiBridge.sol:1999`, from `deposit` at `:885`. `withdraw`: `:2014`, `:2037`, from `withdrawByProof` at `:1632`; and from the owner's `withdrawFromAave` (`:1712` → `:2037`), `harvestYield` (`:1779`) and `emergencyWithdrawAll` (`:1724`) |
 | `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2056` |
-| `ArbitrumBlockVerifier` | `eccUSDCBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
-| `EthBeaconLightClient` | `eccUSDCBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
-| `DepositVoucher` | `eccUSDCBridge` | `confirmDeposit` | `contracts/an/exchange/DepositVoucher.sol:44` |
+| `ArbitrumBlockVerifier` | `eccBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
+| `EthBeaconLightClient` | `eccBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
+| `DepositVoucher` | `eccBridge` | `confirmDeposit` | `contracts/an/exchange/DepositVoucher.sol:44` |
 
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
 a no-op, because the `DepositVoucher` address is derived from the deposit's identity
-(`contracts/an/exchange/eccUSDCBridge.sol:1048`) and a voucher is deployed once.
+(`contracts/an/exchange/eccBridge.sol:1048`) and a voucher is deployed once.
 
 ## Executables and state files
 

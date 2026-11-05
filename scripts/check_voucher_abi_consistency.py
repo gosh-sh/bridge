@@ -28,7 +28,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPO / "contracts/an/exchange"
-DEFAULT_COMPILED_BRIDGE = REPO / "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
+DEFAULT_COMPILED_BRIDGE = REPO / "contracts/an/0.80.0_compiled/exchange/eccBridge.abi.json"
 DEFAULT_COMPILED_VOUCHER = REPO / "contracts/an/0.81.0_compiled/exchange/DepositVoucher.abi.json"
 
 # The voucher constructor's leading parameters are the deposit identity plus the
@@ -97,7 +97,7 @@ def main() -> int:
         "--compiled-bridge",
         type=pathlib.Path,
         default=DEFAULT_COMPILED_BRIDGE,
-        help="compiled eccUSDCBridge.abi.json",
+        help="compiled eccBridge.abi.json",
     )
     ap.add_argument(
         "--compiled-voucher",
@@ -112,7 +112,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    bridge_src = args.source / "eccUSDCBridge.sol"
+    bridge_src = args.source / "eccBridge.sol"
     voucher_src = args.source / "DepositVoucher.sol"
     for path in (bridge_src, voucher_src):
         if not path.is_file():
@@ -129,7 +129,7 @@ def main() -> int:
     problems: list[str] = []
     print(f"source {args.source}")
     print(f"  DepositVoucher.constructor  {render(src_ctor)}")
-    print(f"  eccUSDCBridge.{callback}   {render(src_confirm)}")
+    print(f"  eccBridge.{callback}   {render(src_confirm)}")
     print(f"  new DepositVoucher(...)     {deploy_arity} args")
 
     compare(
@@ -158,7 +158,7 @@ def main() -> int:
         print(f"compiled {bridge_abi}")
         print(f"         {voucher_abi}")
         print(f"  DepositVoucher.constructor  {render(abi_ctor)}")
-        print(f"  eccUSDCBridge.{callback}   {render(abi_confirm)}")
+        print(f"  eccBridge.{callback}   {render(abi_confirm)}")
 
         # The pairwise check is what would have caught 2026-07-02 on its own.
         compare(

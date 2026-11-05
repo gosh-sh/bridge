@@ -19,7 +19,7 @@ cargo run --release --example export_deposit_proof_set -- \
 The exporter checks every generated proof against one shared verification key.
 `public_inputs.bin` contains thirteen little-endian BN254 scalars: `token` is
 appended at slot 11, ahead of `promiseCommit`.
-The same key is embedded in `contracts/an/exchange/eccUSDCBridge.sol` using
+The same key is embedded in `contracts/an/exchange/eccBridge.sol` using
 `scripts/embed_deposit_vk_blob.py` from the repository root.
 
 Check that keygen does not depend on the witness it is run from — the key is

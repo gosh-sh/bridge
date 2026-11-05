@@ -668,7 +668,7 @@ async fn call_is_paused(
         })
 }
 
-/// ECC token id the bridge withdraws (`USDC_ECC_ID` in `eccUSDCBridge`).
+/// ECC token id the bridge withdraws (`USDC_ECC_ID` in `eccBridge`).
 const BRIDGED_USDC_TOKEN_ID: u32 = 3;
 
 /// Execute an ABI getter against the fetched bridge account, without a network

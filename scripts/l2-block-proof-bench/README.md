@@ -2,7 +2,7 @@
 
 Runs `ArbitrumBlockVerifier` on a real TVM instead of reasoning about it. `run.sh` takes the tracked
 `contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc` and gives it the code salt that
-`eccUSDCBridge.deployL2Verifier` gives it. It then sends the constructor and `initialize` as internal
+`eccBridge.deployL2Verifier` gives it. It then sends the constructor and `initialize` as internal
 messages from the bridge address, calls `proveBlock` and decodes the message the verifier sends to
 the bridge. It does this once per vector: a synthetic one, and one the relayer wrote from live
 Arbitrum Sepolia. Separately, it runs the two proofs inside `proveBlock` on live Arbitrum One data,

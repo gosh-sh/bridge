@@ -152,7 +152,7 @@ def mint_usdc(tracer, gql, msig_address_legacy: str, amount: int, *,
     devnet, zerostate minted=0) the later `initiateWithdrawal` has nothing to
     burn against: the driver's headroom check stops before sending, and the
     contract itself would hand the ECC back without a burn event.
-    `mintAndSendBridged(recipient, value, nonce, chainId)` (eccUSDCBridge
+    `mintAndSendBridged(recipient, value, nonce, chainId)` (eccBridge
     1.13.0) books the amount as bridged for `DST_CHAIN_ID`, which is what a
     finalized deposit would have done. The contract reserves it for that
     case, so it is opt-in and never the default: shellnet's inventory comes

@@ -1,8 +1,8 @@
-# Builds eccUSDCBridge, DepositVoucher, EthBeaconLightClient and
+# Builds eccBridge, DepositVoucher, EthBeaconLightClient and
 # ArbitrumBlockVerifier next to their sources.
 #
 # Each contract is built with the compiler its tracked artefact was built with,
-# because any other one changes the code hash: eccUSDCBridge with sold 0.80.0
+# because any other one changes the code hash: eccBridge with sold 0.80.0
 # (../0.80.0_compiled), DepositVoucher with sold 0.81.0 (../0.81.0_compiled),
 # EthBeaconLightClient and ArbitrumBlockVerifier with sold 0.81.1
 # (../0.81.1_compiled). The light client and the verifier call gosh.keccak256,
@@ -17,17 +17,17 @@ SOLD_0_80 ?=
 SOLD_0_81 ?=
 SOLD_0_81_1 ?=
 TVM_VERSION ?= gosh
-TVCS := eccUSDCBridge DepositVoucher EthBeaconLightClient ArbitrumBlockVerifier
+TVCS := eccBridge DepositVoucher EthBeaconLightClient ArbitrumBlockVerifier
 
-SOLD_VAR_eccUSDCBridge := SOLD_0_80
-SOLD_VERSION_eccUSDCBridge := 0.80.0
+SOLD_VAR_eccBridge := SOLD_0_80
+SOLD_VERSION_eccBridge := 0.80.0
 SOLD_VAR_DepositVoucher := SOLD_0_81
 SOLD_VERSION_DepositVoucher := 0.81.0
 SOLD_VAR_EthBeaconLightClient := SOLD_0_81_1
 SOLD_VERSION_EthBeaconLightClient := 0.81.1
 SOLD_VAR_ArbitrumBlockVerifier := SOLD_0_81_1
 SOLD_VERSION_ArbitrumBlockVerifier := 0.81.1
-SOLD_eccUSDCBridge := $(SOLD_0_80)
+SOLD_eccBridge := $(SOLD_0_80)
 SOLD_DepositVoucher := $(SOLD_0_81)
 SOLD_EthBeaconLightClient := $(SOLD_0_81_1)
 SOLD_ArbitrumBlockVerifier := $(SOLD_0_81_1)

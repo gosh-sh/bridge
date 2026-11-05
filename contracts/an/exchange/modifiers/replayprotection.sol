@@ -2,7 +2,7 @@ pragma gosh-solidity >=0.80;
 
 import "./errors.sol";
 
-abstract contract BridgeReplayProtection is eccUSDCBridgeErrors {
+abstract contract BridgeReplayProtection is eccBridgeErrors {
     mapping(uint32 => mapping(uint256 => bool)) _messages;
     uint256 _messageHash;
     uint32 _messageExpire;

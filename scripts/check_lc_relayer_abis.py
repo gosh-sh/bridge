@@ -3,13 +3,13 @@
 
 The relayer reads no ABI file at runtime (bridge-audit#132): it builds in the
 compiled ABIs of `EthBeaconLightClient` and `ArbitrumBlockVerifier`
-(`contracts/an/0.81.1_compiled/exchange/`) and the full `eccUSDCBridge` ABI the
+(`contracts/an/0.81.1_compiled/exchange/`) and the full `eccBridge` ABI the
 CLI ships (`crates/ackinacki-bridge/abi/USDCBridge.abi.json`, kept in sync with
 the deployed contract by `scripts/check_bridge_abi_in_sync.sh`). The TVM
 function id is a hash of the name and the input and output types, so a function
 the relayer calls that is missing from, or renamed in, the built-in ABI only
 fails against a live chain. The flip once called `setLightClient`, which
-`eccUSDCBridge` 1.5.0 no longer had, and nothing noticed until an operator ran
+`eccBridge` 1.5.0 no longer had, and nothing noticed until an operator ran
 it.
 
     scripts/check_lc_relayer_abis.py
@@ -17,7 +17,7 @@ it.
 For each built-in ABI this requires every function the relayer calls to be
 present; for the CLI's `USDCBridge.abi.json`, a copy, it also requires each
 such function to be identical (name, inputs, outputs) to the compiled
-`eccUSDCBridge` ABI, since a changed type changes the function id. The
+`eccBridge` ABI, since a changed type changes the function id. The
 `include_str!` paths in `crates/eth-light-client-relayer/src/abi.rs` must name
 exactly these files. Exits non-zero listing every disagreement.
 """
@@ -52,7 +52,7 @@ BUILT_IN = [
     ),
     (
         REPO / "crates/ackinacki-bridge/abi/USDCBridge.abi.json",
-        REPO / "contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json",
+        REPO / "contracts/an/0.80.0_compiled/exchange/eccBridge.abi.json",
         [
             "getLightClient",
             "isOwnerAnchorsEnabled",

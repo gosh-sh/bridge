@@ -1,10 +1,10 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccUSDCBridge` at version 1.16.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.16.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
-- `eccUSDCBridge` — premined into the zerostate. Mints USDC on a proven
+- `eccBridge` — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
   USDC on `initiateWithdrawal`. A withdrawal without enough bridged or destination-chain inventory
@@ -79,8 +79,8 @@ flags. Both owner keys therefore remain trusted after a flip.
 | Path | Contents |
 |------|----------|
 | `exchange/` | Sources and a `Makefile` that builds them in place |
-| `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccUSDCBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
-| `0.80.0_compiled/exchange/` | `eccUSDCBridge.tvc`, `eccUSDCBridge.abi.json` |
+| `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
+| `0.80.0_compiled/exchange/` | `eccBridge.tvc`, `eccBridge.abi.json` |
 | `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json` |
 | `0.81.1_compiled/exchange/` | `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
@@ -427,14 +427,14 @@ AN identity/history. That migration is not implemented. Amounts above
         SOLD_0_81_1=/path/to/sold-0.81.1
 
 The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
-`eccUSDCBridge.tvc`, 0.81.0 for `DepositVoucher.tvc` and 0.81.1 for
+`eccBridge.tvc`, 0.81.0 for `DepositVoucher.tvc` and 0.81.1 for
 `EthBeaconLightClient.tvc` and `ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
 Any other compiler changes the code hash, so the `Makefile` builds each contract
 with its own compiler, `SOLD_0_80`, `SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is
 unset or the binary reports a different version.
 
 `sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
-but not `eccUSDCBridge.tvc`. `EthBeaconLightClient.tvc` and
+but not `eccBridge.tvc`. `EthBeaconLightClient.tvc` and
 `ArbitrumBlockVerifier.tvc` call `gosh.keccak256`, which release
 [`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1) is the first to
 assemble. The bridge does not import the verifier,
@@ -456,7 +456,7 @@ and its rebuilt `.tvc` / `.abi.json` are committed too.
 Before committing new artefacts:
 
     scripts/check_voucher_abi_consistency.py
-    scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccUSDCBridge.sol
+    scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccBridge.sol
     scripts/check_zerostate_data_encoder.py
 
 ## Two pause domains
@@ -469,7 +469,7 @@ neither reaches the other:
   `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert
   `BridgePaused`. Owner AAVE management stays available so funds can be moved
   out of the pool.
-- Acki Nacki: `eccUSDCBridge.setPaused(true)`, read back with `isPaused()`.
+- Acki Nacki: `eccBridge.setPaused(true)`, read back with `isPaused()`.
   `finalizeDeposit` and `initiateWithdrawal` throw 231 until it is lifted.
 - Circle can freeze the USDC contract itself. That is a third control, not
   wired to either bridge.
@@ -505,7 +505,7 @@ it against the tracked artefact before and after an upgrade.
 
 ## The zerostate module
 
-`zerostate_init.py` brings a premined `eccUSDCBridge` to the state a fresh chain
+`zerostate_init.py` brings a premined `eccBridge` to the state a fresh chain
 needs: it builds the data cell with `BridgeZerostateData`, upgrades the premine
 stub to the bridge's code, seeds the trusted L1 bridge and binds withdrawals to that chain to it, installs the
 light-client and Arbitrum block verifier code, and writes the account into the

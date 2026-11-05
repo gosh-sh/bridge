@@ -40,7 +40,7 @@ use crate::error::RelayerError;
 /// `anWorkchain` on 2026-06-02) is a config-supplied tag — it is not bound to
 /// event data in-circuit. The AN bridge pins `dappId` to 0 and does not
 /// check the proven halves. AN always credits workchain 0.
-/// `eccUSDCBridge` allowlists trusted L1 bridges per chain
+/// `eccBridge` allowlists trusted L1 bridges per chain
 /// (`_trustedL1Bridge[chainId][bridge]`).
 pub const NUM_PUBLIC_INPUTS: usize = 13;
 
@@ -199,7 +199,7 @@ impl DepositPublicInputs {
 /// Rejects empty / non-hex / >32-byte values. Returns the canonical lowercase
 /// `0x`-prefixed hex form used in proofs and `state.json`.
 ///
-/// Zero is valid: `eccUSDCBridge._parsePublicInputs` pins the deposit's
+/// Zero is valid: `eccBridge._parsePublicInputs` pins the deposit's
 /// dappId to 0 and does not read the proof's dappId halves (QC-OFF-09).
 pub fn parse_and_validate_dapp_id(raw: &str) -> Result<String, RelayerError> {
     let s = raw.trim();

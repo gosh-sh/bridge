@@ -512,7 +512,7 @@ only the window named by Circuit 4's 1-indexed `anchorLayer` public input
 even if that root is a genuine `verifyBlock` anchor. A miss costs at most
 128 cold SLOADs, paid by the caller whose call then reverts.
 
-**Replay scope.** A proof names the one EVM bridge that may pay it. `eccUSDCBridge` writes the
+**Replay scope.** A proof names the one EVM bridge that may pay it. `eccBridge` writes the
 bridge its owner set for the destination chain (`setEvmBridge`) into `WithdrawalInitiated`;
 Circuit 4 publishes those event-body bytes as `dstBridge` (slot 11); check 3 refuses any other
 address. A second bridge on the same chain — earlier or later, paused or not — therefore cannot pay

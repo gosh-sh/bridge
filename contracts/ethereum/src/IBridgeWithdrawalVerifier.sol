@@ -4,7 +4,7 @@ pragma solidity ^0.8.19;
 /// @title IBridgeWithdrawalVerifier
 /// @notice Bridge-side interface for verifying Acki Nacki **Bridge Withdrawal**
 ///         proofs (Circuit 4 — `bridge-event-prove-circuit`). A passing
-///         proof witnesses that the AN-side `eccUSDCBridge` identified by
+///         proof witnesses that the AN-side `eccBridge` identified by
 ///         `(dappFr, accFr)` emitted a `WithdrawalInitiated` event with the
 ///         specified `amount` payable to `recipient` (an EVM address), submitted
 ///         by the AN-side actor identified by `senderAccFr`, targeting
@@ -15,7 +15,7 @@ pragma solidity ^0.8.19;
 ///         (this adapter, on-chain) checks that `finalRoot` is in the
 ///         window named by `anchorLayer` (populated by `verifyBlock`).
 ///
-///         The AN-side `eccUSDCBridge` emits:
+///         The AN-side `eccBridge` emits:
 ///             event WithdrawalInitiated(
 ///                 uint256 dstChainId,
 ///                 bytes   recipient,

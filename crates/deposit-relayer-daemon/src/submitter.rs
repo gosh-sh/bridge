@@ -501,7 +501,7 @@ const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
 /// whose `_depositVoucherCode` predates the voucher's constructor ABI.
 const EXIT_CELL_UNDERFLOW: i32 = 9;
 
-// eccUSDCBridge `modifiers/errors.sol`.
+// eccBridge `modifiers/errors.sol`.
 const EXIT_ZERO_AMOUNT: i32 = 204;
 const EXIT_INVALID_SENDER: i32 = 207;
 const EXIT_HASH_MISMATCH: i32 = 219;

@@ -91,13 +91,13 @@ dependency graph as it is.
 
 ## 4. Gas amounts in the deposit path are literals
 
-**Where:** `contracts/an/exchange/eccUSDCBridge.sol:695,875` (`value: 2 vmshell`
+**Where:** `contracts/an/exchange/eccBridge.sol:695,875` (`value: 2 vmshell`
 on the `DepositVoucher` deploy) and
 `contracts/an/exchange/DepositVoucher.sol:44` (`value: 0.5 vmshell` on the
 `confirmDeposit` callback).
 
 The bridge itself cannot run out: `ensureBalance()` mints vmshell when its
-balance falls below `MIN_BALANCE` (`eccUSDCBridge.sol:406-409`). The voucher has
+balance falls below `MIN_BALANCE` (`eccBridge.sol:406-409`). The voucher has
 no such floor — it executes on the 2 vmshell it was deployed with.
 
 These numbers do not adapt. A deposit whose mint leg runs out of gas leaves the
@@ -130,7 +130,7 @@ reachable from a pipeline or a `Makefile` target, and fails when one is not.
 
 ## 6. Owner mint has no ceiling and no expiry
 
-**Where:** `contracts/an/exchange/eccUSDCBridge.sol` — `mintAndSend` and
+**Where:** `contracts/an/exchange/eccBridge.sol` — `mintAndSend` and
 `mintAndSendBridged` (added in #119).
 
 Both let the owner key create eccUSDC with nothing behind it. They exist to

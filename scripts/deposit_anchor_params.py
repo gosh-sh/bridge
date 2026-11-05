@@ -23,7 +23,7 @@ relayer does not control; verifying against the same endpoint that produced the
 witness proves nothing.
 
 The arguments printed are for the owner's `setAcceptedBlockHash`, the one anchor
-writer a person calls; `eccUSDCBridge` has no attester path. `--call` stays for
+writer a person calls; `eccBridge` has no attester path. `--call` stays for
 scripts that pass it and takes only `setAcceptedBlockHash`. Run this yourself
 rather than copying a peer's output.
 """

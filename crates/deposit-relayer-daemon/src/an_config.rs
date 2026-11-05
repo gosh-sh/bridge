@@ -17,7 +17,7 @@ use tvm_client::abi::Abi;
 
 use crate::{error::RelayerError, submitter::AnSubmitConfig};
 
-/// The ABI of the AN-side bridge (`eccUSDCBridge`, `USDCBridge.abi.json`),
+/// The ABI of the AN-side bridge (`eccBridge`, `USDCBridge.abi.json`),
 /// built in: the same copy the CLI uses, kept in sync with the contract by
 /// `scripts/check_bridge_abi_in_sync.sh`. No ABI is read from a file at
 /// runtime (bridge-audit#132).

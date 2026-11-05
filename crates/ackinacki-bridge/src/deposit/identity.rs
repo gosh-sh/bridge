@@ -32,7 +32,7 @@ pub const VOUCHER_ABI: &str =
 /// The `EthBeaconLightClient` ABI.
 pub const LIGHT_CLIENT_ABI: &str =
     include_str!("../../../../contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json");
-/// The `eccUSDCBridge` ABI, a copy of the deployed one.
+/// The `eccBridge` ABI, a copy of the deployed one.
 pub const BRIDGE_ABI: &str = include_str!("../../abi/USDCBridge.abi.json");
 
 /// `getDepositVoucherCodeHash()` of a bridge this build can compute
@@ -298,7 +298,7 @@ mod tests {
     fn the_bundled_bridge_abi_matches_the_deployed_one() {
         let bundled: serde_json::Value = serde_json::from_str(BRIDGE_ABI).unwrap();
         let deployed: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json"
+            "../../../../contracts/an/0.80.0_compiled/exchange/eccBridge.abi.json"
         ))
         .unwrap();
         let sig = |abi: &serde_json::Value, name: &str| {

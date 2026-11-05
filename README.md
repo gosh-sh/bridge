@@ -32,7 +32,7 @@ for deposits. The deployment addresses below describe the existing shellnet pair
 
 | | |
 |---|---|
-| `eccUSDCBridge` | `0:1a1a…1a1a` |
+| `eccBridge` | `0:1a1a…1a1a` |
 | version | `1.14.0`, code hash `5cada5db…` |
 | Arbitrum block verifier (421614, parent chain Sepolia) | `0:f1def367fa6bc245589bfa7bcf54937f5c926624d29e59e19826ee9033f14108` |
 | Sepolia beacon light client | `0:9121fc37c8ac55a4fc42a73bccaf725cb0d87b9a8c7dfbc6dd2be7d1690d8462` |

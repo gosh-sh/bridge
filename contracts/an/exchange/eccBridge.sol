@@ -13,7 +13,7 @@ interface IShellAccumulator {
     function buyShellFor(address buyer) external;
 }
 
-/// @title eccUSDCBridge
+/// @title eccBridge
 /// @notice The name covers three distinct flows that share storage / owner key
 ///         but are otherwise independent:
 ///
@@ -50,7 +50,7 @@ interface IShellAccumulator {
 ///            the bridged counters; `mintAndSendBridged` does.
 ///
 ///         Deployed at fixed address in zerostate.
-contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
+contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     string constant version = "1.16.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
@@ -205,7 +205,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // sha256 = f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9.
     // To rotate: regenerate the fixture above, then rewrite the constant
     // below and the sha256 above with
-    //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol
+    //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccBridge.sol
     // — never by hand; CI runs the same script with --check. The fixtures
     // under tests/exchange/fixtures follow the new blob.
     bytes constant VK_BLOB =
@@ -434,7 +434,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///       `updateCode` upgrade) the voucher code arrives via the
     ///       `onCodeUpgrade` payload. There is no standalone setter (B2 fix),
     ///       so the only way to populate / rotate `_depositVoucherCode` is a
-    ///       full `updateCode` upgrade of eccUSDCBridge.
+    ///       full `updateCode` upgrade of eccBridge.
     /// @param pubkey — owner public key for admin operations
     /// @param usdcWallet — address of the Exchange's TIP-3 USDC TokenWallet (subscriber target)
     constructor(
@@ -1286,7 +1286,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     // DepositVoucher code rotation is intentionally not exposed as a
     // standalone setter. The only way to change `_depositVoucherCode` is via
-    // a full `updateCode` upgrade of eccUSDCBridge (the new code+layout pass
+    // a full `updateCode` upgrade of eccBridge (the new code+layout pass
     // through `onCodeUpgrade`). This removes the "owner can swap voucher
     // logic in one tx and free-mint" backdoor flagged in PR2112 review (B2).
 
@@ -1454,7 +1454,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     /// @notice Returns contract version and name.
     function getVersion() external pure returns (string, string) {
-        return (version, "eccUSDCBridge");
+        return (version, "eccBridge");
     }
 
     // ========================================================

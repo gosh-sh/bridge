@@ -684,7 +684,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         let contract_address_field = bytes_to_field(ctx, gate, &contract_address_bytes_32);
 
         // 5. chainId - extracted typed-tx RLP field 0 (EIP-2930 / EIP-1559, already
-        //    computed above). Exposed as a public input so `eccUSDCBridge` can
+        //    computed above). Exposed as a public input so `eccBridge` can
         //    allowlist the proven bridge in `_trustedL1Bridge[chainId][bridge]`. Not
         //    constrained to a constant.
 
@@ -992,7 +992,7 @@ impl EthCircuitInstructions<Fr> for DepositEventCircuitV2 {
         // the RLP-extracted address (`address_bytes` -> `contract_address_field`,
         // below) is constrained equal to the Phase-0 PUBLIC INSTANCE
         // `contract_address_phase0` (public input #3), and the AN-side
-        // `eccUSDCBridge.finalizeDeposit` checks that public input against the
+        // `eccBridge.finalizeDeposit` checks that public input against the
         // trusted L1-bridge allowlist. Keeping the address out of the fixed
         // column makes the VK witness-independent (see
         // the VK's witness-independence requirement).
@@ -1250,7 +1250,7 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     ///
     /// `chainId` is the typed-tx RLP field-0 value (EIP-2930 / EIP-1559)
     /// extracted from the enclosing tx (MPT-bound under `transactionsRoot`).
-    /// It is **not** VK-baked — the AN-side `eccUSDCBridge` allowlists the
+    /// It is **not** VK-baked — the AN-side `eccBridge` allowlists the
     /// proven bridge in `_trustedL1Bridge[chainId][bridge]`.
     /// `dappIdHigh`/`dappIdLow` (the UInt256 Acki Nacki dApp identifier)
     /// replaced the single `anWorkchain` slot on 2026-06-02. dappId is a
@@ -1259,7 +1259,7 @@ impl CircuitMetadata for DepositEventCircuitV2 {
     /// halves. `anAccountHigh`/`anAccountLow` remain the
     /// event-bound AN recipient account. The `ZKHALO2VERIFYWITHVK` consumer
     /// is VK-driven (it reads this count from the VkBlob), and
-    /// `eccUSDCBridge.finalizeDeposit` takes the 12-scalar blob as `bytes
+    /// `eccBridge.finalizeDeposit` takes the 12-scalar blob as `bytes
     /// publicInputs`.
     fn num_instance(&self) -> Vec<usize> {
         vec![DEPOSIT_NUM_PUBLIC_INPUTS] // 12 user values + 1 promise_commit

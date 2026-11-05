@@ -3,7 +3,7 @@ pragma AbiHeader expire;
 pragma AbiHeader pubkey;
 
 import "./EthTrie.sol";
-import "./eccUSDCBridge.sol";
+import "./eccBridge.sol";
 
 /// @title ArbitrumBlockVerifier
 /// @notice Admits blocks of one Arbitrum chain into the bridge's
@@ -133,7 +133,7 @@ contract ArbitrumBlockVerifier {
         // bounce: true so a refusal (the parent-chain block is not accepted
         // yet) returns the value; nothing is stored here, so a retry is the
         // same call once the light client has caught up.
-        eccUSDCBridge(USDC_BRIDGE_ADDRESS).acceptBlockHashFromL2Verifier{
+        eccBridge(USDC_BRIDGE_ADDRESS).acceptBlockHashFromL2Verifier{
             value: SINK_VALUE,
             bounce: true,
             flag: 1

@@ -2,7 +2,7 @@ pragma gosh-solidity >=0.80;
 
 import "./errors.sol";
 
-abstract contract eccUSDCBridgeModifiers is eccUSDCBridgeErrors {
+abstract contract eccBridgeModifiers is eccBridgeErrors {
     struct BridgeTokenConfig {
         uint256 evmToken;
         uint128 maxTransfer;

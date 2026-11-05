@@ -290,6 +290,9 @@ already has one therefore cannot pay a burn bound to the old one, and the old on
 bound to the new one, whether either is paused or not. Burns made before the switch are paid by the
 old bridge, and only by it.
 
+This order covers USDC only. There is no procedure for replacing a bridge that holds another listed
+token: see `contracts/an/README.md`, "Which EVM bridge pays a withdrawal".
+
 The old bridge's user principal (`treasuryBalance`) has to follow the eccUSDC it backs once the old
 bridge has paid what it owes, and the new bridge cannot pay anyone until it has that principal. So
 withdrawals to the chain close for the time the old bridge needs to pay the burns already made, and
@@ -304,9 +307,7 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
    `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccBridge`, so that deposits into the new
    bridge are finalized. Deposits into the old bridge still are too.
-2. **Close withdrawals to the chain**: first move the funds of every listed token other than USDC
-   (`contracts/an/README.md`, "Which EVM bridge pays a withdrawal"), then
-   `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
+2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
    message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
    (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
    because `getEvmBridge` is unset. The burns made before this message are bound to the old bridge,

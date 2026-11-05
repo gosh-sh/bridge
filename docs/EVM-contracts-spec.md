@@ -58,6 +58,10 @@ note here calling out the drift.
 > `ZeroBkSetCommitment` (`src/AckiNackiBridge.sol:763`) and `PartialVerifyBlockWiring` (`:743`);
 > with no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` (`:934`). Other citations were
 > not re-anchored.
+>
+> **Drift note, 2026-11-05 (`migrateToken`, gosh-sh/bridge-audit#128).** §7.2's check table and the
+> §10 `fundToken` / `migrateToken` rows cite `src/AckiNackiBridge.sol` as of this change. Other
+> citations were not re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -471,27 +475,27 @@ finalRoot, anchorLayer, dstBridge`.
 
 | # | Check | Line | Revert |
 |---:|---|---:|---|
-| 1 | C4 verifier wired | 1913-1914 | `WithdrawByProofDisabled` |
-| 2 | `pub.tokenId ≤ type(uint32).max` **and** that id is listed (`_tokens[id].token != 0`) | 1921-1924 | `UnsupportedTokenId` |
-| 3 | `pub.amount ≤ maxWithdrawalAmount(tokenId)` | 1926 | `TransferTooLarge` |
-| 4 | `pub.dstBridge == uint160(address(this))` | 1929-1931 | `WrongDstBridge(dstBridge)` |
-| 5 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1932-1934 | `WithdrawIdentityMismatch` |
-| 6 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1935-1942 | `DstChainIdMismatch` |
-| 7 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1943-1948 | `RecipientHalfOutOfRange` |
-| 8 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1951-1953 | `InvalidRecipient` |
-| 9 | `nullifier`, `finalRoot`, `anchorLayer` are canonical Fr | 1957-1959 | `FieldElementOutOfRange` |
-| 10 | `!_nullifiers[bytes32(pub.nullifier)]` | 1961-1963 | `NullifierAlreadyUsed` |
-| 11 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1964-1968 | `LayerOutOfRange` |
-| 12 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1969-1971 | `UnknownAnchor` |
-| 13 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1977-1978 | `WithdrawalProofRejected` |
-| 14 | `pub.amount ≤ liabilitiesOf(tokenId)` | 1981-1984 | `WithdrawTreasuryShortfall` |
+| 1 | C4 verifier wired | 1926-1927 | `WithdrawByProofDisabled` |
+| 2 | `pub.tokenId ≤ type(uint32).max` **and** that id is listed (`_tokens[id].token != 0`) | 1934-1937 | `UnsupportedTokenId` |
+| 3 | `pub.amount ≤ maxWithdrawalAmount(tokenId)` | 1939 | `TransferTooLarge` |
+| 4 | `pub.dstBridge == uint160(address(this))` | 1942-1944 | `WrongDstBridge(dstBridge)` |
+| 5 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1945-1947 | `WithdrawIdentityMismatch` |
+| 6 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1948-1955 | `DstChainIdMismatch` |
+| 7 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1956-1961 | `RecipientHalfOutOfRange` |
+| 8 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1964-1966 | `InvalidRecipient` |
+| 9 | `nullifier`, `finalRoot`, `anchorLayer` are canonical Fr | 1970-1972 | `FieldElementOutOfRange` |
+| 10 | `!_nullifiers[bytes32(pub.nullifier)]` | 1974-1976 | `NullifierAlreadyUsed` |
+| 11 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1977-1981 | `LayerOutOfRange` |
+| 12 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1982-1984 | `UnknownAnchor` |
+| 13 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1990-1991 | `WithdrawalProofRejected` |
+| 14 | `pub.amount ≤ liabilitiesOf(tokenId)` | 1994-1997 | `WithdrawTreasuryShortfall` |
 
 Read `maxWithdrawalAmount(usdcTokenId())` before burning ECC (`ackinacki-bridge` does through
 `BridgeClient::usdc_payout_cap`). The payout cap is stored in `TokenInfo.maxWithdrawal`; it is
 initialized on listing and can increase with `setTokenLimits`, but lowering deposit limits never
 reduces it. The existing six-value `tokenInfo` getter continues to report deposit limits.
 
-Effects then interactions (`:1994-2018`): mark the nullifier used, debit the token's book —
+Effects then interactions (`:2007-2031`): mark the nullifier used, debit the token's book —
 `treasuryBalance` for `usdcTokenId`, the listing's own `liabilities` for every other id, both
 through `_debitLiabilities`; then, **for USDC only**, when the liquid principal is short of
 `amount`, `_refillFromAave` pulls what the USDC on hand cannot pay — if the pool cannot return
@@ -731,6 +735,8 @@ principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1963`, `B − S` floor
 | `setYieldRecipient(addr)` | 1914 | Non-zero. |
 | `fundTreasury(amount)` | 1828 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
 | `migrateTreasury(successor)` | 1847 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
+| `fundToken(tokenId, token, amount)` | 2276 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Not for USDC (`CannotMigrateUsdc`). `token` must be what this bridge lists under `tokenId` (`FundedTokenMismatch`). Pulls exactly `amount` from the caller and adds it to the listing's liabilities, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `tvlCap`, which gates `deposit` only; allowed while paused. |
+| `migrateToken(tokenId, successor)` | 2296 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's `maxWithdrawalAmount(tokenId)` must not be below this listing's (`SuccessorWithdrawalCapTooLow`). The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. |
 | `transferOwnership(addr)` | 1922 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_pullFromAave(amount)` (`:2035`), called with `amount ≤ A` only, withdraws exactly `amount` and books it with `_bookPull` (`:2043`), which requires the
@@ -745,18 +751,18 @@ Views: `aUsdcBalance()`, `accruedYield()` = `A − S` floored at 0, `totalAssets
 | Function | Caller |
 |---|---|
 | `deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` | anyone, while not `paused` |
-| `pause`, `unpause`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `migrateTreasury`, `setAaveEnabled`, `setLiquidReserveBps`, `setSupplyMultiplierBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
+| `pause`, `unpause`, `withdrawFromAave`, `emergencyWithdrawAll`, `writeOffUnbackedPrincipal`, `harvestYield`, `skimExcessUsdc`, `migrateTreasury`, `migrateToken`, `setAaveEnabled`, `setLiquidReserveBps`, `setSupplyMultiplierBps`, `setYieldRecipient`, `transferOwnership` | `owner` |
 | `supplyForSelf` | the bridge itself, from `deposit` |
-| `fundTreasury` | `owner` or `predecessor` |
+| `fundTreasury`, `fundToken` | `owner` or `predecessor` |
 | `acceptOwnership` | `pendingOwner` |
 | everything else | view/pure |
 
 The owner can **pause** the bridge (`pause()` / `unpause()`, `:1685`, `:1692`; a call that would not
 change the state reverts `AlreadyInThatPauseState()`). While `paused` is true, `deposit`,
 `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert `BridgePaused()`; the owner's AAVE
-functions stay available, so funds can be moved out of AAVE during a pause. The only owner path
-that moves user principal is `migrateTreasury`, which works only while paused and only into the
-bridge that names this one as `predecessor`; otherwise the owner can only route funds between the
+functions stay available, so funds can be moved out of AAVE during a pause. The only owner paths
+that move user funds are `migrateTreasury` and `migrateToken`, which work only while paused and only
+into the bridge that names this one as `predecessor`; otherwise the owner can only route funds between the
 contract and AAVE, and skim `balanceOf(this) − treasuryBalance`. `emergencyWithdrawAll` is the AAVE-failure escape hatch.
 
 ---
@@ -774,6 +780,8 @@ contract and AAVE, and skim `balanceOf(this) − treasuryBalance`. `emergencyWit
 | `WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)` | `0x88738ab1295650557339cebd9882c9db35ae232be3a8fcb180054213fe0dad92` | `nullifier`, `recipient`, `tokenId` |
 | `TreasuryFunded(address,uint256,uint256)` | `0xc368570c718ead78e572d31d3c0a44869e1623a1355733b857032ded01322d83` | `from` |
 | `TreasuryMigrated(address,uint256)` | `0x8a7c92de40fc5fb3ac08137bd5d6656cae1706c5026efc082c00156a6b25a325` | `successor` |
+| `TokenFunded(address,uint32,uint256,uint256)` | `0x8288ccb0cc01af7847ed27acd88b68b4154cbaa01265d5b5f37d30011d59814d` | `from`, `tokenId` |
+| `TokenMigrated(address,uint32,uint256)` | `0xa511872da658220468d6b3e166bad63e1fa1218e060ae7cf7a6cee10a9ced258` | `successor`, `tokenId` |
 | `Paused(address)` | `0x62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a258` | `by` |
 | `Unpaused(address)` | `0x5db9ee0a495bf2e6ff9c91a7834c1ba4fdd244a5e8aa4e537bd38aeae4b073aa` | `by` |
 | `AaveSupplyRefused(uint256,bytes)` | `0x863f40a1dc5b5cfdbbea5d5370f509ac7cfa1969a8499bb7479bb1929fec7154` | — |
@@ -799,6 +807,8 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0xb719d032` | `predecessor()` |
 | `0xf6471f4b` | `fundTreasury(uint256)` |
 | `0x46756f19` | `migrateTreasury(address)` |
+| `0xb3f3aed2` | `fundToken(uint32,address,uint256)` |
+| `0xa6df3aa6` | `migrateToken(uint32,address)` |
 | `0xecb3dc88` | `depositCounter()` |
 | `0x313dab20` | `treasuryBalance()` |
 | `0x8456cb59` | `pause()` |
@@ -823,6 +833,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `AaveSupplyRefused`.
 
 Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `NothingToMigrate`,
+`CannotMigrateUsdc`, `FundedTokenMismatch`, `SuccessorWithdrawalCapTooLow`,
 `TreasuryNotLiquid`, and `InvalidPredecessor` from the constructor.
 
 `verifyBlock`: `VerifyBlockDisabled`, `AttestationProofRejected`, `LayerHashesProofRejected`,
@@ -929,7 +940,7 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeLayerAnchor.t.sol` (5) | `_expectedPrevAnchor` under grow/shrink walks — the AB-Q4 regression — and QC-A2-4: `t` does not fall when later blocks skip higher layers. |
 | `AckiNackiBridgeStorageV2.t.sol` (3) | Genesis seed immutability, per-layer heads, shallow-successor does not zero deep layers. |
 | `AckiNackiBridgeWithdrawByProof.t.sol` (40) | Full `withdrawByProof` matrix: identity, chain-id + alias scoping, cross-chain replay, token id, recipient split, anchors in L1/L2/L3 windows, nullifier replay, distinct-nullifier payout, `anchorLayer` range (`LayerOutOfRange`), treasury shortfall, byte-for-byte PI forwarding. |
-| `AckiNackiBridgePredecessor.t.sol` (17) | Two live bridges for one AN identity on one chain each pay only the proofs that name them; a successor refuses a proof its unpaused predecessor paid, and the predecessor refuses one bound to the successor; every other `dstBridge` is refused (fuzz); constructor checks on `predecessor`; `migrateTreasury` / `fundTreasury`. |
+| `AckiNackiBridgePredecessor.t.sol` (32) | Two live bridges for one AN identity on one chain each pay only the proofs that name them; a successor refuses a proof its unpaused predecessor paid, and the predecessor refuses one bound to the successor; every other `dstBridge` is refused (fuzz); constructor checks on `predecessor`; `migrateTreasury` / `fundTreasury`. |
 | `AckiNackiBridgeWithdrawByProofOrder2.t.sol` (1) | L1 anchor accepted when `numLayers == 2`. |
 | `AckiNackiBridgeProductionVerifyBlock.t.sol` (4) | Real SHPLONK `.bin` + real calldata + `bound_scenario.json`; skipped when artefacts are absent. |
 | `AckiNackiBridgeProductionWithdrawByProof.t.sol` (5) | Real C4 verifier: isolated verify, tampered proof, mismatched `pub`, a `pub.dstBridge` other than the proof's, and the `dstBridge` instance rewritten in the calldata. |
@@ -994,7 +1005,8 @@ Read off the code, without a formal audit claim.
 6. User principal is owner-reachable only as a whole: owner functions move funds only between the
    contract and AAVE, skim strictly above `treasuryBalance`, or — paused — hand all of it to a
    contract whose `predecessor()` returns this bridge (`migrateTreasury`). Any contract can
-   return that, so the owner key decides where the book goes.
+   return that, so the owner key decides where the book goes. `migrateToken` is the same power
+   over a non-USDC listing's liabilities and the tokens behind them.
 
 **Deliberate trade-offs and limitations (all flagged in-code)**
 

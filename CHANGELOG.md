@@ -296,9 +296,11 @@ assigns it when the release is tagged.
   Withdrawal records and locks include the currency, while existing USDC keys are preserved.
   The JSON burn summary includes `token_id` and uses that token's decimal precision.
 
-- `migrateTreasury` and `fundTreasury` move USDC only. There is no procedure for replacing an EVM
-  bridge that holds another listed token: after `setEvmBridge` moves the chain away from it, both
-  bridges can refuse a burn of that token with the ECC already burned. See `contracts/an/README.md`.
+- `AckiNackiBridge.migrateToken(tokenId, successor)` (owner, paused only) hands a non-USDC listing's
+  custody and liabilities to the successor through its `fundToken`, with nothing minted on Acki Nacki.
+  The successor must list the same token under the same id, with a withdrawal cap no lower than the
+  old one. When replacing a bridge, call it for every such token before `setEvmBridge` reopens
+  withdrawals: both bridges can refuse a later burn of a token left behind, with the ECC already burned.
 - The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
   `delistToken`, `tokenInfo`, `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and
   `maxWithdrawalAmount`. Liabilities and limits use each token's base units; AAVE stays USDC-only.

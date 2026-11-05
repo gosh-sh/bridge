@@ -456,6 +456,12 @@ contract AckiNackiBridge {
     /// @notice `migrateTreasury`: this paused bridge handed its whole
     ///         `treasuryBalance` to `successor`.
     event TreasuryMigrated(address indexed successor, uint256 amount);
+    /// @notice A non-USDC listing took over liabilities through `fundToken`.
+    event TokenFunded(
+        address indexed from, uint32 indexed tokenId, uint256 amount, uint256 liabilitiesAfter
+    );
+    /// @notice `migrateToken` handed a listing's liabilities to `successor`.
+    event TokenMigrated(address indexed successor, uint32 indexed tokenId, uint256 amount);
 
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     event Paused(address indexed by);
@@ -585,6 +591,13 @@ contract AckiNackiBridge {
     /// @notice `migrateTreasury`: part of `treasuryBalance` is still in AAVE;
     ///         `withdrawFromAave` or `emergencyWithdrawAll` first.
     error TreasuryNotLiquid(uint256 liquid, uint256 treasuryBalance);
+    /// @notice USDC moves with `migrateTreasury` and `fundTreasury`.
+    error CannotMigrateUsdc();
+    /// @notice `fundToken`: this bridge lists another token under `tokenId`.
+    error FundedTokenMismatch(uint32 tokenId, address token);
+    /// @notice `migrateToken`: the successor would refuse a withdrawal this
+    ///         listing accepts. Raise the successor's limits first.
+    error SuccessorWithdrawalCapTooLow(uint256 cap, uint256 required);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -2239,15 +2252,7 @@ contract AckiNackiBridge {
     ///      take the approved USDC in its `fundTreasury`, so this is an owner
     ///      power over the whole book.
     function migrateTreasury(address successor) external onlyOwner nonReentrant {
-        if (!paused) revert NotPaused();
-        if (successor == address(this) || successor.code.length == 0) {
-            revert NotSuccessor(successor);
-        }
-        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
-            if (address(p) != address(this)) revert NotSuccessor(successor);
-        } catch {
-            revert NotSuccessor(successor);
-        }
+        _requirePausedForSuccessor(successor);
         uint256 amount = treasuryBalance;
         if (amount == 0) revert NothingToMigrate();
         uint256 liquid = usdc.balanceOf(address(this));
@@ -2260,6 +2265,69 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(successor, amount);
         }
         emit TreasuryMigrated(successor, amount);
+    }
+
+    /// @notice Add `amount` of a listed non-USDC token to its liabilities
+    ///         without a `Deposit`, so nothing is minted on Acki Nacki. For ECC
+    ///         already backed by a predecessor's custody: `predecessor` calls it
+    ///         from `migrateToken`, and the owner calls it for a predecessor
+    ///         that cannot migrate. Caller must `approve` first. Not capped by
+    ///         `tvlCap` (that cap gates `deposit` only) and allowed while paused.
+    function fundToken(uint32 tokenId, address token, uint256 amount) external nonReentrant {
+        if (msg.sender != owner && msg.sender != address(predecessor)) {
+            revert NotOwnerOrPredecessor();
+        }
+        if (tokenId == usdcTokenId) revert CannotMigrateUsdc();
+        if (amount == 0) revert InvalidAmount();
+        TokenInfo storage info = _requireListedId(tokenId);
+        if (info.token != token) revert FundedTokenMismatch(tokenId, token);
+        info.liabilities += _pullExact(IERC20(token), amount);
+        emit TokenFunded(msg.sender, tokenId, amount, info.liabilities);
+    }
+
+    /// @notice Hand a non-USDC listing's whole liabilities and the tokens behind
+    ///         them to `successor`, the bridge that names this one as its
+    ///         `predecessor`. The successor must list the same token under the
+    ///         same id, with a withdrawal cap no lower than this listing's.
+    ///         Tokens above the liabilities stay here.
+    /// @dev Paused only, for the same reason as `migrateTreasury`. The same
+    ///      `predecessor()` caveat applies: this is an owner power over the
+    ///      listing's whole custody.
+    function migrateToken(uint32 tokenId, address successor) external onlyOwner nonReentrant {
+        _requirePausedForSuccessor(successor);
+        if (tokenId == usdcTokenId) revert CannotMigrateUsdc();
+        TokenInfo storage info = _requireListedId(tokenId);
+        uint256 amount = info.liabilities;
+        if (amount == 0) revert NothingToMigrate();
+        uint256 cap = AckiNackiBridge(successor).maxWithdrawalAmount(tokenId);
+        if (cap < info.maxWithdrawal) {
+            revert SuccessorWithdrawalCapTooLow(cap, info.maxWithdrawal);
+        }
+        IERC20 token = IERC20(info.token);
+        uint256 liquid = token.balanceOf(address(this));
+        if (liquid < amount) revert TreasuryNotLiquid(liquid, amount);
+
+        info.liabilities = 0;
+        if (!_callToken(token, abi.encodeCall(IERC20.approve, (successor, amount)))) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        AckiNackiBridge(successor).fundToken(tokenId, address(token), amount);
+        if (token.balanceOf(address(this)) != liquid - amount) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        emit TokenMigrated(successor, tokenId, amount);
+    }
+
+    function _requirePausedForSuccessor(address successor) private view {
+        if (!paused) revert NotPaused();
+        if (successor == address(this) || successor.code.length == 0) {
+            revert NotSuccessor(successor);
+        }
+        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
+            if (address(p) != address(this)) revert NotSuccessor(successor);
+        } catch {
+            revert NotSuccessor(successor);
+        }
     }
 
     /// @notice Pause user-facing entrypoints (`deposit`, `verifyBlock`,

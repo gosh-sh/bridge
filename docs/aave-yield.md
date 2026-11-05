@@ -290,9 +290,6 @@ already has one therefore cannot pay a burn bound to the old one, and the old on
 bound to the new one, whether either is paused or not. Burns made before the switch are paid by the
 old bridge, and only by it.
 
-This order covers USDC only. There is no procedure for replacing a bridge that holds another listed
-token: see `contracts/an/README.md`, "Which EVM bridge pays a withdrawal".
-
 The old bridge's user principal (`treasuryBalance`) has to follow the eccUSDC it backs once the old
 bridge has paid what it owes, and the new bridge cannot pay anyone until it has that principal. So
 withdrawals to the chain close for the time the old bridge needs to pay the burns already made, and
@@ -306,7 +303,8 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    anchor nothing. Start its `verifyBlock` relayer, its withdrawal relayer and a
    `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
    `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccBridge`, so that deposits into the new
-   bridge are finalized. Deposits into the old bridge still are too.
+   bridge are finalized. Deposits into the old bridge still are too. List every other token the old
+   bridge holds under the same id, with a withdrawal cap no lower than the old listing's.
 2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
    message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
    (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
@@ -341,6 +339,11 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    Acki Nacki. Only the owner and `predecessor` may call it. A deposit the old bridge took before
    its pause is in the `treasuryBalance` that moves, and Acki Nacki still finalizes it: the old
    bridge stays trusted until step 6.
+
+   Then call `migrateToken(<tokenId>, <new bridge>)` on the old bridge for every other listed token
+   with liabilities. It hands over the listing's liabilities and the tokens behind them, through the
+   new bridge's `fundToken`. A token left behind strands later burns of it, with the ECC already
+   burned (`contracts/an/README.md`, "Which EVM bridge pays a withdrawal").
 5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccBridge`.
    Point `ackinacki-bridge withdraw --bridge-address` at the new bridge.
 6. **Stop trusting the old bridge** (`setTrustedL1Bridge(<chainId>, <old>, false)`) and stop its

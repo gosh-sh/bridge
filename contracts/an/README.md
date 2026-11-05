@@ -314,13 +314,16 @@ bridge pays the burns bound to it, and `setEvmBridge` with the new bridge reopen
 them once the principal has moved — the order is in `docs/aave-yield.md`,
 "Replacing a bridge on the same chain".
 
-There is no procedure for replacing an EVM bridge that holds a token other than
-USDC; that order covers USDC only. `migrateTreasury` and `fundTreasury` move USDC,
-and no owner call moves another token's funds or liabilities. `setEvmBridge` binds
-every currency on a chain to one address, so after the switch a burn of such a
-token is refused by the old bridge with `WrongDstBridge`, and by the new one with
+On the EVM side `migrateTreasury` moves USDC, and `migrateToken(tokenId, successor)`
+moves each other listed token, its custody and its liabilities together, with
+nothing minted here. Both run on the paused old bridge, and the registry here does
+not change. The new bridge must list the token under the same id, with a withdrawal
+cap no lower than the old listing's (`FundedTokenMismatch`,
+`SuccessorWithdrawalCapTooLow`). A token left behind strands later burns:
+`setEvmBridge` binds every currency on a chain to one address, so the old bridge
+refuses them with `WrongDstBridge`, and the new one with
 `WithdrawTreasuryShortfall` if its liabilities fall short, with the ECC already
-burned. A bridge with such liabilities cannot be replaced safely.
+burned.
 
 Like `_trustedL1Bridge`, the binding is not carried through `updateCode`: after
 an upgrade every withdrawal is refused with 239 until the owner calls

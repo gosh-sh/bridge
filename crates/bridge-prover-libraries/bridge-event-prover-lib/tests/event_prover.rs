@@ -19,11 +19,11 @@ use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 
 // Reused from the test_withdrawal.rs fixture — first record of the
 // upstream `withdrawals.txt`. Inlining keeps the test hermetic.
-const EVENT_BOC_B64: &str = "te6ccgEBBAEAyQABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAIZdmoHXvdgAQJwPIOJWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAA9CQAAAAAIDAgBDgAm3yq/MUPIYsiAFU9xmlVK1j7ShCFBTfqlHoaqgQg+0MAAodC01zGY0wFMpJaO4RLxFTkQ49E4=";
+const EVENT_BOC_B64: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAFcmro7a1gAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9CQAAAAAM/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEIdoOfRZocIfPbLTU7IlRS1PBWIn4bOQDPFUR0DaXn+QACh0LTXMZjTAUyklo7hEvEVORDj0Tg==";
 // NOTE: keep this string identical to
 // bridge-event-witness/tests/test_withdrawal.rs.
 
-const EXPECTED_TOKEN_ID: u32 = 2;
+const EXPECTED_TOKEN_ID: u32 = 3;
 
 // Constants matching `gosh_dense_balanced_tree::MAX_CHAIN_LEN` at the
 // pinned revision. If the upstream bumps this we want a loud failure here.
@@ -107,9 +107,10 @@ fn happy_path_translates_to_circuit_inputs() {
     let inputs = build_proof_inputs(&w, default_event_circuit_params())
         .expect("build_proof_inputs must succeed on fully-populated witness");
 
-    // public_instances layout (11 slots, see event_verifier.rs):
+    // public_instances layout (12 slots, see event_verifier.rs):
     //   [token_id, amount, recipient_hi, recipient_lo, dst_chain_id,
-    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer]
+    //    sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root, anchor_layer,
+    //    dst_bridge]
     assert_eq!(inputs.public_instances.len(), TOTAL_PUBLIC_INPUTS);
     assert_eq!(
         inputs.public_instances[0],
@@ -119,8 +120,9 @@ fn happy_path_translates_to_circuit_inputs() {
     // The remaining slots come from BE/LE byte-packing of the fixture
     // data; we don't recompute them here, but we assert they're distinct
     // from the zero-byte default so we know the translation actually
-    // ran. (Slots 1..=9 are amount, recipient_hi, recipient_lo,
-    // dst_chain_id, sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root.)
+    // ran. (Slots 1..=11 are amount, recipient_hi, recipient_lo,
+    // dst_chain_id, sender_acc_fr, dapp_fr, acc_fr, nullifier, final_root,
+    // anchor_layer, dst_bridge.)
     for slot in 1..TOTAL_PUBLIC_INPUTS {
         assert_ne!(
             inputs.public_instances[slot],

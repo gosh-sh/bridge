@@ -141,10 +141,9 @@ make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/
 
 The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
 `contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` and check the ABI before
-deployment. This build's bridge version is 1.15.0 and its code hash starts with
-`618e77a2`; the voucher identity is unchanged, and the compiled ABI is byte-identical to
-1.14.0's — only the embedded key and the version constant moved, so
-`check_bridge_abi_in_sync.sh` stays green without touching the runtime copies.
+deployment. This build's bridge version is 1.16.0 and its code hash starts with
+`d7b876af`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
+them apart.
 
 ## Build gotchas
 

@@ -28,10 +28,12 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_CHAIN_BALANCE_EXCEEDED = 236;
     uint16 constant ERR_L2_VERIFIER_UNSET = 237;
     uint16 constant ERR_L2_VERIFIER_DEPLOYED = 238;
+    uint16 constant ERR_NO_EVM_BRIDGE = 239;
+    uint16 constant ERR_PARENT_OWNER_ANCHORS_ENABLED = 240;
     uint16 constant ERR_MESSAGE_IS_EXIST = 400;
     uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
     uint16 constant ERR_MESSAGE_EXPIRED = 402;
-    uint16 constant ERR_TOKEN_UNREGISTERED = 240;
-    uint16 constant ERR_TOKEN_CONFIG = 241;
-    uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 242;
+    uint16 constant ERR_TOKEN_UNREGISTERED = 241;
+    uint16 constant ERR_TOKEN_CONFIG = 242;
+    uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 243;
 }

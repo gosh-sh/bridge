@@ -36,6 +36,15 @@ contract MockAavePool is IAavePool {
     uint256 public supplyHaircut;
     /// @notice Pay this many fewer USDC than aTokens burned on `withdraw`.
     uint256 public redeemHaircut;
+    /// @notice Refuse every `supply`, as a paused or frozen reserve or a
+    ///         reached supply cap does.
+    bool public supplyRefused;
+    /// @notice Serve a `withdraw` of at most this much, as a reserve whose
+    ///         liquidity is borrowed out does. `type(uint256).max` = no limit.
+    uint256 public withdrawLimit = type(uint256).max;
+
+    error SupplyRefused();
+    error NotEnoughAvailableLiquidity();
 
     constructor(address _underlying, address _aToken) {
         underlying = IERC20(_underlying);
@@ -54,7 +63,16 @@ contract MockAavePool is IAavePool {
         redeemHaircut = haircut;
     }
 
+    function setSupplyRefused(bool refused) external {
+        supplyRefused = refused;
+    }
+
+    function setWithdrawLimit(uint256 limit) external {
+        withdrawLimit = limit;
+    }
+
     function supply(address, uint256 amount, address onBehalfOf, uint16) external override {
+        if (supplyRefused) revert SupplyRefused();
         require(underlying.transferFrom(msg.sender, address(this), amount), "pool: pull");
         uint256 minted = amount > supplyHaircut ? amount - supplyHaircut : 0;
         if (minted > 0) aToken.mintTo(onBehalfOf, minted);
@@ -68,6 +86,7 @@ contract MockAavePool is IAavePool {
             toBurn = bal - leftoverOnMaxWithdraw;
         }
         require(bal >= toBurn, "pool: insufficient aUSDC");
+        if (toBurn > withdrawLimit) revert NotEnoughAvailableLiquidity();
         aToken.burnFrom(msg.sender, toBurn);
         uint256 payout = toBurn > redeemHaircut ? toBurn - redeemHaircut : 0;
         require(underlying.transfer(to, payout), "pool: push");

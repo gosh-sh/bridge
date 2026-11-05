@@ -7,6 +7,8 @@ export PRIVATE_KEY; PRIVATE_KEY=$(tr -d '[:space:]' </run/input)
 export GENESIS_LAST_SEEN_BLOCK_SEQNO=$GENESIS_SEED_SEQNO
 export WITHDRAW_ACC_FR=0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a WITHDRAW_DAPP_FR=0
 export USDC_TOKEN_ID=3 USDC_ADDRESS=$ARB_USDC
+# This run's local network has paid nothing through an earlier bridge.
+export PREDECESSOR_BRIDGE=0x0000000000000000000000000000000000000000
 rm -rf "$WORK/evm" && cp -r /bin-ci/evm "$WORK/evm" && cd "$WORK/evm"
 log "deployer $(cast wallet address --private-key "$PRIVATE_KEY"), $(cast balance --ether "$(cast wallet address --private-key "$PRIVATE_KEY")" --rpc-url "$ARB_RPC") ETH"
 forge script script/DeployShellnetE2EBridge.s.sol:DeployShellnetE2EBridge --rpc-url "$ARB_RPC" --broadcast --slow \
@@ -20,7 +22,8 @@ bridge = [t["contractAddress"] for t in run["transactions"] if t.get("contractNa
 blocks = [int(r["blockNumber"], 16) for r in run["receipts"]]
 print(f"BRIDGE_ADDRESS={bridge}\nBRIDGE_DEPLOY_BLOCK={min(blocks)}")
 for name, addr in re.findall(r"^\s+([A-Za-z]+): (0x[0-9a-fA-F]{40})$", open(sys.argv[2]).read(), re.M):
-    if name not in ("USDC",):
+    # Logged, not deployed by this run: Circle's USDC, the AAVE aToken and the (here zero) predecessor bridge.
+    if name not in ("USDC", "aUSDC", "predecessor"):
         print(f"ADDR_{name.upper()}={addr}")
 PY
 cat "$OUT/evm.env"

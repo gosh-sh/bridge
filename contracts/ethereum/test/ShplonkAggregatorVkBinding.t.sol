@@ -42,7 +42,7 @@ contract ShplonkAggregatorVkBindingTest is Test {
     }
 
     function test_withdrawal_mutatedVkDigest_rejected() public {
-        uint256 numInner = 11;
+        uint256 numInner = 12;
         bytes memory cd =
             vm.readFileBinary("verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin");
         IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
@@ -60,6 +60,7 @@ contract ShplonkAggregatorVkBindingTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.dstBridge = _word(cd, ACC + 11);
 
         // Preserve length + inner PIs; corrupt only the digest slot.
         bytes32 original = bytes32(_word(cd, ACC + numInner));
@@ -80,7 +81,7 @@ contract ShplonkAggregatorVkBindingTest is Test {
             )
         );
         BridgeWithdrawalAggregatorVerifier bad =
-            new BridgeWithdrawalAggregatorVerifier(w, bytes32(uint256(_word(cd, ACC + 11)) ^ 1));
+            new BridgeWithdrawalAggregatorVerifier(w, bytes32(uint256(_word(cd, ACC + 12)) ^ 1));
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
         pub.tokenId = _word(cd, ACC + 0);
         pub.amount = _word(cd, ACC + 1);
@@ -93,6 +94,7 @@ contract ShplonkAggregatorVkBindingTest is Test {
         pub.nullifier = _word(cd, ACC + 8);
         pub.finalRoot = _word(cd, ACC + 9);
         pub.anchorLayer = _word(cd, ACC + 10);
+        pub.dstBridge = _word(cd, ACC + 11);
         assertFalse(bad.verifyWithdrawal(cd, pub), "wrong pin must reject unmodified calldata");
     }
 
@@ -250,8 +252,8 @@ contract ShplonkAggregatorVkBindingTest is Test {
         IBridgeWithdrawalVerifier v = ShplonkDeployLib.deployWithdrawalAdapter(
             "verifiers/BridgeWithdrawalAggregatorVerifier.bin"
         );
-        // (12 accumulator + 11 inner) * 32 = 736 B. No digest word.
-        bytes memory tooShort = new bytes((12 + 11) * 32);
+        // (12 accumulator + 12 inner) * 32 = 768 B. No digest word.
+        bytes memory tooShort = new bytes((12 + 12) * 32);
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub;
         assertFalse(
             v.verifyWithdrawal(tooShort, pub),

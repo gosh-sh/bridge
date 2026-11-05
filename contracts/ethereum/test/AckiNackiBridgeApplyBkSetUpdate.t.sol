@@ -14,6 +14,7 @@ import "./mocks/MockPrimaryVerifier.sol";
 import "./mocks/MockFallbackVerifier.sol";
 import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockERC20.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeApplyBkSetUpdateTest
 /// @notice Covers the BK-set rotation entry point against the canonical
@@ -62,8 +63,8 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             vb,
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -375,29 +376,32 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
             _genesisFixture(0, 0);
         AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+        MockAaveLib.pool(usdc);
 
         vm.expectRevert(AckiNackiBridge.ZeroBkSetCommitment.selector);
-        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+        new AckiNackiBridge(oracle, usdc, MockAaveLib.pool(usdc), MockAaveLib.aToken(usdc), vb, bw);
     }
 
     function test_eth20_constructorRejectsNonCanonicalGenesisCommitment() public {
         (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
             _genesisFixture(R, 0);
         AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+        MockAaveLib.pool(usdc);
 
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R));
-        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+        new AckiNackiBridge(oracle, usdc, MockAaveLib.pool(usdc), MockAaveLib.aToken(usdc), vb, bw);
     }
 
     function test_eth20_constructorRejectsNonCanonicalGenesisPrevAnchor() public {
         (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
             _genesisFixture(L2, R + 1);
         AckiNackiBridge.BridgeWithdrawConfig memory bw = VerifyBlockConfigLib.disabledWithdraw();
+        MockAaveLib.pool(usdc);
 
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.FieldElementOutOfRange.selector, R + 1)
         );
-        new AckiNackiBridge(oracle, usdc, address(0), address(0), vb, bw);
+        new AckiNackiBridge(oracle, usdc, MockAaveLib.pool(usdc), MockAaveLib.aToken(usdc), vb, bw);
     }
 
     /// @dev Zero is a legal prev anchor — a first block may genuinely carry it.
@@ -418,8 +422,8 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         AckiNackiBridge deployed = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.disabled(),
             VerifyBlockConfigLib.disabledWithdraw()
         );
@@ -460,7 +464,12 @@ contract AckiNackiBridgeApplyBkSetUpdateTest is Test {
         (address oracle, address usdc, AckiNackiBridge.VerifyBlockConfig memory vb) =
             _genesisFixture(commitment, prevAnchor);
         return new AckiNackiBridge(
-            oracle, usdc, address(0), address(0), vb, VerifyBlockConfigLib.disabledWithdraw()
+            oracle,
+            usdc,
+            MockAaveLib.pool(usdc),
+            MockAaveLib.aToken(usdc),
+            vb,
+            VerifyBlockConfigLib.disabledWithdraw()
         );
     }
 

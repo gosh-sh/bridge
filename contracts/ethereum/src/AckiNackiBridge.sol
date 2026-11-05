@@ -8,13 +8,17 @@ import "./IPrimaryVerifier.sol";
 import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
+import "./IPredecessorBridge.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
 /// @dev Holds user USDC (ERC-20, 6 decimals) on deposit and routes idle balance
 ///      into AAVE V3 USDC market for yield.
-///      - `deposit(uint256 amount)` stays cheap: funds accumulate in the contract;
-///        an owner/keeper batches supplies to AAVE with `supplyToAave()` to amortise gas.
+///      - `deposit` keeps `liquidReserveBps` of the treasury liquid and supplies
+///        the rest to AAVE once the liquid principal reaches
+///        `supplyMultiplierBps` times that target; a failed supply is reported,
+///        never reverted. `withdrawByProof` pulls a shortfall back from AAVE,
+///        refilling the target when the pool allows.
 ///      - Owner can harvest accrued yield without touching user principal.
 ///
 ///      AN→ETH state (Phase 4): the bridge stores a rolling commitment to the
@@ -32,7 +36,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 ///      to the per-layer rolling windows (`_layerWindows`).
 ///      `withdrawByProof` consumes those windows plus a Circuit 4
 ///      (`bridge-event-prove-circuit`) SHPLONK aggregator proof whose
-///      11 public inputs include `finalRoot` and `anchorLayer`. The bridge
+///      12 public inputs include `finalRoot`, `anchorLayer` and `dstBridge`. The bridge
 ///      calls `_isKnownLayerAnchor(anchorLayer, finalRoot)` off-circuit
 ///      (this contract) — the circuit only proves that the event's hash
 ///      chain extends *into* `finalRoot` via a dense-chain extension and
@@ -67,7 +71,9 @@ contract AckiNackiBridge {
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
-    /// @notice Upper bound on the liquid reserve (50% of treasury kept as USDC)
+    /// @notice Bounds on the liquid reserve: 10% to 50% of the treasury
+    ///         kept as USDC.
+    uint256 public constant MIN_LIQUID_RESERVE_BPS = 1_000;
     uint256 public constant MAX_LIQUID_RESERVE_BPS = 5_000;
 
     /// @notice Maximum number of layer-hash slots per block (matches
@@ -188,10 +194,15 @@ contract AckiNackiBridge {
     /// @notice Principal currently supplied to AAVE (book value, excludes yield)
     uint256 public suppliedPrincipal;
 
-    /// @notice Fraction of the treasury to keep liquid as USDC, in basis points.
-    ///         e.g. 500 = 5% of `treasuryBalance` stays as plain USDC to serve small
-    ///         withdrawals without a round-trip through AAVE.
+    /// @notice Fraction of the treasury to keep liquid as USDC, in basis
+    ///         points: the target a deposit leaves liquid when it supplies
+    ///         AAVE, and the level a withdrawal refills to when it pulls.
     uint256 public liquidReserveBps;
+
+    /// @notice A deposit supplies AAVE once the liquid principal reaches
+    ///         this multiple of the target, in basis points (20_000 = 2×).
+    ///         Above 1×, and `liquidReserveBps` × this stays at most 100%.
+    uint256 public supplyMultiplierBps;
 
     /// @notice Address authorised to manage AAVE routing & harvest yield
     address public owner;
@@ -330,6 +341,14 @@ contract AckiNackiBridge {
     ///         `treasuryBalance` and whose idle balance AAVE may hold.
     uint32 public immutable usdcTokenId;
 
+    /// @notice The bridge this one replaces on the same chain, or zero. It
+    ///         only authorizes the treasury handover: the predecessor may call
+    ///         `fundTreasury`, and its `migrateTreasury` accepts only a bridge
+    ///         that names it here. Replay between the two needs nothing from
+    ///         it — each withdrawal proof names the bridge that pays it
+    ///         (`WithdrawalPublicInputs.dstBridge`).
+    IPredecessorBridge public immutable predecessor;
+
     /// @notice Replay-protection store. Keyed by `bytes32(nullifier)` from
     ///         the proof's public input slot [8]. The Circuit 4 nullifier is
     ///         `Poseidon(block_id_fr, tokenId, amount, recipientHi,
@@ -409,6 +428,16 @@ contract AckiNackiBridge {
     event YieldHarvested(address indexed recipient, uint256 amount);
     event AaveEnabledSet(bool enabled);
     event LiquidReserveBpsSet(uint256 bps);
+    event SupplyMultiplierBpsSet(uint256 bps);
+    /// @notice A deposit tried to supply `amount` and the pool refused.
+    ///         `reason` is the pool's revert data, `ApproveFailed()` when
+    ///         `approve` returned false, or `AaveSupplyFailed(amount, 0)`
+    ///         when no aUSDC was credited. The deposit went through.
+    event AaveSupplyRefused(uint256 amount, bytes reason);
+    /// @notice A withdrawal could not pull `amount` above its shortfall to
+    ///         refill the liquid target; `reason` is the pool's revert data.
+    ///         The payout went through.
+    event AaveRefillFailed(uint256 amount, bytes reason);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     /// @notice Owner nominated `newOwner`; they must `acceptOwnership`.
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
@@ -421,6 +450,12 @@ contract AckiNackiBridge {
     /// @notice Owner skimmed liquid USDC above `treasuryBalance` (post-emergency
     ///         yield / over-collateral) to `yieldRecipient` (QC-A1-3).
     event ExcessUsdcSkimmed(address indexed recipient, uint256 amount);
+    /// @notice `fundTreasury`: `from` (the owner or `predecessor`) added
+    ///         `amount` to `treasuryBalance` without a `Deposit`.
+    event TreasuryFunded(address indexed from, uint256 amount, uint256 treasuryBalanceAfter);
+    /// @notice `migrateTreasury`: this paused bridge handed its whole
+    ///         `treasuryBalance` to `successor`.
+    event TreasuryMigrated(address indexed successor, uint256 amount);
 
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     event Paused(address indexed by);
@@ -494,11 +529,16 @@ contract AckiNackiBridge {
     error InvalidAaveAddress();
     error NotOwner();
     error Reentrancy();
-    error AaveDisabled();
     error ReserveBpsTooHigh();
-    error NothingToSupply();
+    error ReserveBpsTooLow();
+    /// @notice `supplyMultiplierBps` must stay above 1× (10_000).
+    error MultiplierTooLow();
+    /// @notice `reserveBps` × `multiplierBps` above 100%: the supply
+    ///         threshold would sit above the whole treasury.
+    error ReserveBandTooWide(uint256 reserveBps, uint256 multiplierBps);
     error AaveWithdrawFailed(uint256 requested, uint256 received);
-    /// @notice `supplyToAave` minted no aUSDC for `requested` USDC.
+    /// @notice The pool credited no aUSDC for `requested` USDC; carried in
+    ///         `AaveSupplyRefused`, never reverted with.
     error AaveSupplyFailed(uint256 requested, uint256 received);
     /// @notice `writeOffUnbackedPrincipal`: `suppliedPrincipal` is already
     ///         covered by `aUsdcBalance()`.
@@ -512,8 +552,10 @@ contract AckiNackiBridge {
     ///         but aUSDC still remains. Zeroing `suppliedPrincipal` would let
     ///         `harvestYield` treat leftover principal as yield.
     error EmergencyLeftoverAToken(uint256 leftover);
-    /// @notice USDC `approve` returned false (do not ignore the bool).
+    /// @notice USDC `approve` returned false; carried in `AaveSupplyRefused`.
     error ApproveFailed();
+    /// @notice `supplyForSelf` called by anyone but this bridge.
+    error NotSelf();
     /// @notice `msg.sender` is not `pendingOwner`.
     error OwnershipNotPending();
     error NoYield();
@@ -531,6 +573,18 @@ contract AckiNackiBridge {
     error LayerHashActiveZero(uint256 index);
     /// @notice No skimable liquid USDC above `treasuryBalance` (QC-A1-3).
     error NoExcessUsdc();
+    /// @notice `fundTreasury` caller is neither `owner` nor `predecessor`.
+    error NotOwnerOrPredecessor();
+    /// @notice `migrateTreasury` needs the bridge paused.
+    error NotPaused();
+    /// @notice `migrateTreasury` target does not name this bridge as its
+    ///         `predecessor`.
+    error NotSuccessor(address successor);
+    /// @notice `migrateTreasury`: nothing to hand over.
+    error NothingToMigrate();
+    /// @notice `migrateTreasury`: part of `treasuryBalance` is still in AAVE;
+    ///         `withdrawFromAave` or `emergencyWithdrawAll` first.
+    error TreasuryNotLiquid(uint256 liquid, uint256 treasuryBalance);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -588,6 +642,13 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` identity slots are zero — no real proof
     ///         could ever bind to a zero-identity bridge.
     error InvalidBridgeWithdrawalIdentity();
+    /// @notice The withdrawal proof names another EVM bridge
+    ///         (`pub.dstBridge != address(this)`).
+    error WrongDstBridge(uint256 dstBridge);
+    /// @notice `BridgeWithdrawConfig.predecessor` is not an `AckiNackiBridge`
+    ///         on this chain wired to the same AN-side `(dappFr, accFr)`, or
+    ///         it was set while `withdrawByProof` is disabled.
+    error InvalidPredecessor(address predecessor);
     /// @notice The proof's `pub.tokenId` is not listed on this bridge, or does
     ///         not fit a uint32 (the width AN encodes the ECC currency id in).
     ///         List it with `listToken` before such a proof can be paid.
@@ -767,6 +828,12 @@ contract AckiNackiBridge {
         ///      Exactly one id now pays out USDC. Further tokens are added
         ///      after deployment with `listToken`.
         uint32 usdcTokenId;
+        /// @notice The `AckiNackiBridge` this deployment replaces on the same
+        ///         chain whose treasury it may take over, or zero. Must have
+        ///         code here and carry the same `(dappFr, accFr)`; else
+        ///         `InvalidPredecessor`. Requires `bridgeWithdrawalVerifier`
+        ///         to be non-zero.
+        IPredecessorBridge predecessor;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -786,9 +853,10 @@ contract AckiNackiBridge {
     ///                            `BridgeWithdrawConfig({...address(0), 0, 0})`
     ///                            to disable. When `bridgeWithdrawalVerifier`
     ///                            is non-zero, both `dappFr` and `accFr`
-    ///                            must be non-zero.
-    /// @dev Pass address(0) for `_aavePool`/`_aUSDC` to disable AAVE.
-    ///      `_usdc` must always be non-zero — deposits pull USDC via `transferFrom`.
+    ///                            must be non-zero. `predecessor` names the
+    ///                            bridge whose treasury this one may take over.
+    /// @dev `_usdc`, `_aavePool` and `_aUSDC` must all be non-zero: every
+    ///      bridge supplies AAVE from its deposits.
     constructor(
         address _blockHeaderOracle,
         address _usdc,
@@ -800,10 +868,7 @@ contract AckiNackiBridge {
         if (_blockHeaderOracle == address(0)) revert InvalidOracle();
         if (_usdc == address(0)) revert InvalidUsdc();
 
-        // Both AAVE addresses must be provided together — or none at all.
-        bool aaveWired = _aavePool != address(0) || _aUSDC != address(0);
-        bool aaveAllSet = _aavePool != address(0) && _aUSDC != address(0);
-        if (aaveWired && !aaveAllSet) revert InvalidAaveAddress();
+        if (_aavePool == address(0) || _aUSDC == address(0)) revert InvalidAaveAddress();
 
         blockHeaderOracle = IBlockHeaderOracle(_blockHeaderOracle);
 
@@ -865,6 +930,10 @@ contract AckiNackiBridge {
         bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
         bridgeWithdrawalAltDstHostChainId = _bw.altDstHostChainId;
         usdcTokenId = _bw.usdcTokenId;
+        if (address(_bw.predecessor) != address(0)) {
+            _requirePredecessor(_bw);
+        }
+        predecessor = _bw.predecessor;
 
         // List USDC up front so a deployment that never makes an owner call
         // behaves exactly as the single-token bridge did: the same per-tx cap,
@@ -873,11 +942,33 @@ contract AckiNackiBridge {
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
-        aaveEnabled = aaveAllSet;
+        aaveEnabled = true;
         liquidReserveBps = 1_000; // default 10% liquid reserve
+        supplyMultiplierBps = 20_000; // supply once liquid principal reaches 2× that
         _reentrancyStatus = _NOT_ENTERED;
 
         emit OwnershipTransferred(address(0), msg.sender);
+    }
+
+    /// @dev A predecessor's treasury backs eccUSDC of the same AN-side bridge,
+    ///      so it has to be deployed on this chain (it has code at this address
+    ///      here) and bound to the same `(dappFr, accFr)`. The field is
+    ///      immutable.
+    function _requirePredecessor(BridgeWithdrawConfig memory _bw) private view {
+        IPredecessorBridge p = _bw.predecessor;
+        if (address(_bw.bridgeWithdrawalVerifier) == address(0) || address(p).code.length == 0) {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.bridgeWithdrawalDappFr() returns (uint256 dappFr) {
+            if (dappFr != _bw.dappFr) revert InvalidPredecessor(address(p));
+        } catch {
+            revert InvalidPredecessor(address(p));
+        }
+        try p.bridgeWithdrawalAccFr() returns (uint256 accFr) {
+            if (accFr != _bw.accFr) revert InvalidPredecessor(address(p));
+        } catch {
+            revert InvalidPredecessor(address(p));
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -887,7 +978,10 @@ contract AckiNackiBridge {
     /// @notice Deposit a listed ERC-20 to be bridged to Acki Nacki.
     /// @dev Caller must `approve` this contract for `amount` before calling.
     ///      Emits a `Deposit` event that is later proven by a ZK circuit.
-    ///      Funds stay in custody; only USDC can be supplied to AAVE.
+    ///      Funds stay in custody; only USDC can be supplied to AAVE. The USDC
+    ///      deposit that lifts the liquid principal to the supply threshold
+    ///      supplies everything above the target to AAVE
+    ///      (`_supplyAboveTarget`); a refusing pool never reverts it.
     /// @param token       Listed ERC-20 to transfer.
     /// @param amount      Amount in the token's base units.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
@@ -920,6 +1014,7 @@ contract AckiNackiBridge {
         _creditLiabilities(tokenId, credited);
 
         emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token);
+        if (tokenId == usdcTokenId) _supplyAboveTarget();
     }
 
     // ---------------------------------------------------------------------
@@ -1777,23 +1872,30 @@ contract AckiNackiBridge {
     ///   2. `pub.dstChainId == block.chainid`, or — on shellnet E2E deploys
     ///      only — `pub.dstChainId == altDstChainId` while
     ///      `block.chainid == altDstHostChainId`. Cross-chain replay of the
-    ///      same proof is rejected because nullifiers are per-contract *and*
-    ///      `dstChainId` must match the executing chain (or its scoped alias).
-    ///   3. `pub.dappFr == bridgeWithdrawalDappFr` and
+    ///      same proof is rejected because `dstChainId` must match the
+    ///      executing chain (or its scoped alias).
+    ///   3. `pub.dstBridge == address(this)`: the AN-side bridge wrote the
+    ///      EVM bridge it pays out through into the event, and the circuit
+    ///      binds it to the event bytes, so another bridge on the same chain
+    ///      — an earlier or a later one — cannot pay the same burn.
+    ///      Nullifiers are per-contract and need no cross-bridge lookup.
+    ///   4. `pub.dappFr == bridgeWithdrawalDappFr` and
     ///      `pub.accFr == bridgeWithdrawalAccFr` (defensive — also enforced
     ///      by the verifier under the same identity, but checked here so
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
-    ///   4. `pub.nullifier` has not been used before (replay protection).
-    ///   5. `pub.tokenId` names a listed ERC-20 and the amount fits its withdrawal cap.
-    ///   6. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
+    ///   5. `pub.nullifier` has not been used before (replay protection).
+    ///   6. `pub.tokenId` names a listed ERC-20 and the amount fits its withdrawal cap.
+    ///   7. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
     ///
     /// State updates (CEI):
     ///   - **Effects**: mark `nullifier` used; debit the listing's liabilities
     ///     (and `treasuryBalance` for USDC).
-    ///   - **Interactions**: optionally pull USDC from AAVE, then pay the
-    ///     listed ERC-20 through `_pushExact`.
+    ///   - **Interactions**: for a USDC payout whose liquid principal is short,
+    ///     a pull from AAVE (`_refillFromAave`) — required for what the USDC on
+    ///     hand cannot pay, best effort up to the target of the new book; then
+    ///     pay the listed ERC-20 through `_pushExact`.
     ///
     /// @dev Permissionless. The caller pays gas but the payout goes to
     ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
@@ -1802,7 +1904,7 @@ contract AckiNackiBridge {
     /// @param proof   Circuit 4 proof bytes accepted by
     ///                `IBridgeWithdrawalVerifier` (Halo2 SHPLONK aggregator
     ///                proof in production).
-    /// @param pub     Public-input slots [0..10]; see `IBridgeWithdrawalVerifier`.
+    /// @param pub     Public-input slots [0..11]; see `IBridgeWithdrawalVerifier`.
     /// @return success Always `true` on a successful payout; reverts on failure.
     function withdrawByProof(
         bytes calldata proof,
@@ -1824,6 +1926,9 @@ contract AckiNackiBridge {
         if (pub.amount > payoutInfo.maxWithdrawal) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
+        if (pub.dstBridge != uint256(uint160(address(this)))) {
+            revert WrongDstBridge(pub.dstBridge);
+        }
         if (pub.dappFr != bridgeWithdrawalDappFr || pub.accFr != bridgeWithdrawalAccFr) {
             revert WithdrawIdentityMismatch();
         }
@@ -1865,7 +1970,7 @@ contract AckiNackiBridge {
             revert UnknownAnchor(pub.finalRoot);
         }
 
-        // ---- Crypto: verify the withdrawal proof. The 11 public inputs flow
+        // ---- Crypto: verify the withdrawal proof. The 12 public inputs flow
         //      verbatim through the adapter; the layer-window check above
         //      guards against a forged `finalRoot` that the circuit alone
         //      cannot bind to the bridge's view of AN state.
@@ -1878,21 +1983,30 @@ contract AckiNackiBridge {
             revert WithdrawTreasuryShortfall(pub.amount, owed);
         }
 
+        // Measured before the debit: the USDC on hand and the part of it
+        // that is principal.
+        uint256 onHand = usdc.balanceOf(address(this));
+        uint256 liquid = _liquidPrincipal();
+        uint256 overBooked =
+            suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
+
         // ---- Effects (CEI: mutate state before any external call). ----
         _nullifiers[nullifierKey] = true;
         _debitLiabilities(payoutTokenId, pub.amount);
 
         // ---- Interactions ----
-        // Top up liquid USDC from AAVE if the contract's plain USDC balance
-        // is below the requested amount. The pull may reach aUSDC above
+        // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
+        // pull; every other token sits liquid in the contract. Only what the
+        // USDC on hand cannot pay has to come from AAVE. The pull also tries to
+        // leave the target of the new book liquid and to bring
+        // `suppliedPrincipal` back within the book, so it is attempted whenever
+        // the liquid principal falls short. It may reach aUSDC above
         // `suppliedPrincipal`: user principal is paid before yield.
-        // Only USDC is ever supplied to AAVE, so only a USDC payout can need
-        // this; every other token sits liquid in the contract.
-        if (payoutTokenId == usdcTokenId) {
-            uint256 liquid = usdc.balanceOf(address(this));
-            if (liquid < pub.amount) {
-                _pullFromAave(pub.amount - liquid);
-            }
+        if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
+            _refillFromAave(
+                onHand < pub.amount ? pub.amount - onHand : 0,
+                pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
+            );
         }
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
@@ -1978,30 +2092,8 @@ contract AckiNackiBridge {
     }
 
     // ---------------------------------------------------------------------
-    // AAVE management (owner-only)
+    // AAVE management (owner-only; supplying happens in `deposit`)
     // ---------------------------------------------------------------------
-
-    /// @notice Supply idle USDC from the bridge to AAVE, respecting the liquid reserve.
-    /// @param amount Exact amount to supply, or `type(uint256).max` to supply
-    ///               everything above the liquid reserve.
-    function supplyToAave(uint256 amount) external onlyOwner nonReentrant {
-        if (!aaveEnabled) revert AaveDisabled();
-
-        uint256 available = _amountSupplyable();
-        if (available == 0) revert NothingToSupply();
-
-        uint256 toSupply = amount == type(uint256).max ? available : amount;
-        if (toSupply == 0 || toSupply > available) revert InvalidAmount();
-
-        if (!usdc.approve(address(aavePool), toSupply)) revert ApproveFailed();
-        uint256 aBefore = aUsdcBalance();
-        aavePool.supply(address(usdc), toSupply, address(this), 0);
-        uint256 credited = aUsdcBalance() - aBefore;
-        if (credited == 0) revert AaveSupplyFailed(toSupply, 0);
-        suppliedPrincipal += credited;
-
-        emit SuppliedToAave(toSupply, suppliedPrincipal);
-    }
 
     /// @notice Withdraw USDC from AAVE back into the bridge (preemptively top up liquidity).
     /// @param amount Amount to withdraw, at most `min(suppliedPrincipal,
@@ -2092,19 +2184,27 @@ contract AckiNackiBridge {
         emit YieldHarvested(yieldRecipient, amount);
     }
 
-    /// @notice Liquid USDC held by the bridge above `treasuryBalance` (user
-    ///         principal). Typically post-`emergencyWithdrawAll` yield that is
-    ///         no longer tracked as AAVE `accruedYield()` (QC-A1-3).
+    /// @notice Liquid USDC above the part of the principal that sits here
+    ///         as USDC, capped so that taking it never leaves USDC + aUSDC
+    ///         below `treasuryBalance`: USDC sent to the bridge directly, or
+    ///         yield pulled out of AAVE (QC-A1-3). Zero while it covers a
+    ///         loss in the pool.
     function excessUsdc() public view returns (uint256) {
         uint256 liquid = usdc.balanceOf(address(this));
-        return liquid > treasuryBalance ? liquid - treasuryBalance : 0;
+        uint256 owed = treasuryBalance;
+        uint256 aboveBook = liquid + suppliedPrincipal;
+        uint256 aboveHoldings = liquid + aUsdcBalance();
+        if (aboveBook <= owed || aboveHoldings <= owed) return 0;
+        aboveBook -= owed;
+        aboveHoldings -= owed;
+        uint256 excess = aboveBook < aboveHoldings ? aboveBook : aboveHoldings;
+        return excess < liquid ? excess : liquid;
     }
 
     /// @notice Owner skim of `excessUsdc` to `yieldRecipient`. Does not touch
     ///         user principal (`treasuryBalance`).
     /// @param amount Amount to skim (`type(uint256).max` = all excess).
     function skimExcessUsdc(uint256 amount) external onlyOwner nonReentrant {
-        if (yieldRecipient == address(0)) revert InvalidRecipient();
         uint256 excess = excessUsdc();
         uint256 toSkim = amount == type(uint256).max ? excess : amount;
         if (excess == 0 || toSkim == 0 || toSkim > excess) revert NoExcessUsdc();
@@ -2112,6 +2212,56 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(yieldRecipient, toSkim);
         }
         emit ExcessUsdcSkimmed(yieldRecipient, toSkim);
+    }
+
+    /// @notice Add `amount` USDC to `treasuryBalance` without a `Deposit`, so
+    ///         nothing is minted on Acki Nacki. For eccUSDC already backed by
+    ///         a predecessor's treasury: `predecessor` calls it from
+    ///         `migrateTreasury`, and the owner calls it for a predecessor
+    ///         that cannot migrate. Caller must `approve` first. Not capped by
+    ///         `MAX_BRIDGE_TVL` (that cap gates `deposit` only) and allowed
+    ///         while paused.
+    function fundTreasury(uint256 amount) external nonReentrant {
+        if (msg.sender != owner && msg.sender != address(predecessor)) {
+            revert NotOwnerOrPredecessor();
+        }
+        if (amount == 0) revert InvalidAmount();
+        treasuryBalance += _pullExact(usdc, amount);
+        emit TreasuryFunded(msg.sender, amount, treasuryBalance);
+    }
+
+    /// @notice Hand the whole `treasuryBalance` to `successor`, the bridge
+    ///         that names this one as its `predecessor`. Leaves this bridge
+    ///         with nothing to pay withdrawals from; USDC above the book
+    ///         (`excessUsdc`, aUSDC yield) stays here for the owner.
+    /// @dev Paused only: a live bridge would keep paying from the book it
+    ///      just gave away. AAVE-supplied principal must be pulled back first.
+    ///      The `predecessor()` check catches a wrong address, not a hostile
+    ///      one: any contract can return this bridge from `predecessor()` and
+    ///      take the approved USDC in its `fundTreasury`, so this is an owner
+    ///      power over the whole book.
+    function migrateTreasury(address successor) external onlyOwner nonReentrant {
+        if (!paused) revert NotPaused();
+        if (successor == address(this) || successor.code.length == 0) {
+            revert NotSuccessor(successor);
+        }
+        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
+            if (address(p) != address(this)) revert NotSuccessor(successor);
+        } catch {
+            revert NotSuccessor(successor);
+        }
+        uint256 amount = treasuryBalance;
+        if (amount == 0) revert NothingToMigrate();
+        uint256 liquid = usdc.balanceOf(address(this));
+        if (liquid < amount) revert TreasuryNotLiquid(liquid, amount);
+
+        treasuryBalance = 0;
+        if (!usdc.approve(successor, amount)) revert WithdrawTransferFailed(successor, amount);
+        AckiNackiBridge(successor).fundTreasury(amount);
+        if (usdc.balanceOf(address(this)) != liquid - amount) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        emit TreasuryMigrated(successor, amount);
     }
 
     /// @notice Pause user-facing entrypoints (`deposit`, `verifyBlock`,
@@ -2131,18 +2281,30 @@ contract AckiNackiBridge {
         emit Unpaused(msg.sender);
     }
 
-    /// @notice Enable or disable further supplies to AAVE.
+    /// @notice Enable or disable the supply in `deposit`. Withdrawals pull
+    ///         from AAVE either way.
     function setAaveEnabled(bool enabled) external onlyOwner {
-        if (enabled && address(aavePool) == address(0)) revert InvalidAaveAddress();
         aaveEnabled = enabled;
         emit AaveEnabledSet(enabled);
     }
 
-    /// @notice Set the liquid reserve fraction (in basis points, capped at 50%).
+    /// @notice Set the liquid reserve fraction, between 10% and 50%, in
+    ///         basis points.
     function setLiquidReserveBps(uint256 bps) external onlyOwner {
+        if (bps < MIN_LIQUID_RESERVE_BPS) revert ReserveBpsTooLow();
         if (bps > MAX_LIQUID_RESERVE_BPS) revert ReserveBpsTooHigh();
+        _requireBand(bps, supplyMultiplierBps);
         liquidReserveBps = bps;
         emit LiquidReserveBpsSet(bps);
+    }
+
+    /// @notice Set the multiple of the target at which a deposit supplies
+    ///         AAVE, in basis points (20_000 = 2×). Above 1×.
+    function setSupplyMultiplierBps(uint256 bps) external onlyOwner {
+        if (bps <= BPS_DENOMINATOR) revert MultiplierTooLow();
+        _requireBand(liquidReserveBps, bps);
+        supplyMultiplierBps = bps;
+        emit SupplyMultiplierBpsSet(bps);
     }
 
     function setYieldRecipient(address recipient) external onlyOwner {
@@ -2180,12 +2342,79 @@ contract AckiNackiBridge {
     // Internal helpers
     // ---------------------------------------------------------------------
 
-    /// @dev USDC that may be supplied to AAVE without dipping below the liquid reserve.
-    function _amountSupplyable() internal view returns (uint256) {
-        uint256 reserve = (treasuryBalance * liquidReserveBps) / BPS_DENOMINATOR;
-        uint256 bal = usdc.balanceOf(address(this));
-        if (bal <= reserve) return 0;
-        return bal - reserve;
+    /// @dev A threshold above the whole treasury would never be reached.
+    function _requireBand(uint256 reserveBps, uint256 multiplierBps) internal pure {
+        if (reserveBps * multiplierBps > BPS_DENOMINATOR * BPS_DENOMINATOR) {
+            revert ReserveBandTooWide(reserveBps, multiplierBps);
+        }
+    }
+
+    /// @dev The USDC kept liquid for a book of `book`.
+    function _liquidTarget(uint256 book) internal view returns (uint256) {
+        return (book * liquidReserveBps) / BPS_DENOMINATOR;
+    }
+
+    /// @dev The part of the principal held here as USDC: USDC above it
+    ///      (`excessUsdc`) is not principal and never supplied.
+    function _liquidPrincipal() internal view returns (uint256) {
+        uint256 booked = treasuryBalance;
+        uint256 supplied = suppliedPrincipal;
+        uint256 owed = booked > supplied ? booked - supplied : 0;
+        uint256 liquid = usdc.balanceOf(address(this));
+        return liquid < owed ? liquid : owed;
+    }
+
+    /// @dev Once the liquid principal reaches the threshold, supply all of
+    ///      it above the target. Any refusal by the pool is reported with
+    ///      `AaveSupplyRefused` and leaves the USDC and the allowance as they
+    ///      were: the supply runs in `supplyForSelf`, whose revert undoes it.
+    function _supplyAboveTarget() internal {
+        if (!aaveEnabled) return;
+        uint256 target = _liquidTarget(treasuryBalance);
+        uint256 liquid = _liquidPrincipal();
+        if (liquid <= target || liquid < (target * supplyMultiplierBps) / BPS_DENOMINATOR) {
+            return;
+        }
+        uint256 amount = liquid - target;
+        try this.supplyForSelf(amount) returns (uint256 credited) {
+            suppliedPrincipal += credited;
+            emit SuppliedToAave(amount, suppliedPrincipal);
+        } catch (bytes memory reason) {
+            emit AaveSupplyRefused(amount, reason);
+        }
+    }
+
+    /// @notice A step of `deposit`, callable by this bridge only: supply
+    ///         `amount` USDC and return the aUSDC credited. Reverts — so the
+    ///         caller can report it and carry on — when `approve` fails, the
+    ///         pool reverts, or nothing is credited.
+    function supplyForSelf(uint256 amount) external returns (uint256 credited) {
+        if (msg.sender != address(this)) revert NotSelf();
+        if (!usdc.approve(address(aavePool), amount)) revert ApproveFailed();
+        uint256 aBefore = aUsdcBalance();
+        aavePool.supply(address(usdc), amount, address(this), 0);
+        credited = aUsdcBalance() - aBefore;
+        if (credited == 0) revert AaveSupplyFailed(amount, 0);
+    }
+
+    /// @dev Pull `wanted` from AAVE, bounded by the position, of which only
+    ///      `required` has to arrive. When the pool cannot serve `wanted`,
+    ///      `AaveRefillFailed` reports the part above `required` and only
+    ///      `required` is pulled.
+    function _refillFromAave(uint256 required, uint256 wanted) internal {
+        uint256 position = aUsdcBalance();
+        if (required > position) revert InsufficientTreasury();
+        uint256 want = wanted < position ? wanted : position;
+        if (want > required) {
+            uint256 before = usdc.balanceOf(address(this));
+            try aavePool.withdraw(address(usdc), want, address(this)) returns (uint256) {
+                _bookPull(want, usdc.balanceOf(address(this)) - before, required);
+                return;
+            } catch (bytes memory reason) {
+                emit AaveRefillFailed(want - required, reason);
+            }
+        }
+        if (required != 0) _pullFromAave(required);
     }
 
     /// @dev The part of `suppliedPrincipal` that aUSDC actually covers.
@@ -2195,17 +2424,20 @@ contract AckiNackiBridge {
         return booked < poolBal ? booked : poolBal;
     }
 
-    /// @dev Pull exactly `amount` USDC from AAVE, or revert. Bounded by the
-    ///      aUSDC balance, not by the book; the book drops by at most what it
-    ///      holds, so a pull that reaches interest leaves it at zero.
+    /// @dev Pull exactly `amount` USDC from AAVE, or revert. Callers bound
+    ///      `amount` by the aUSDC balance, not by the book; the book drops by
+    ///      at most what it holds, so a pull that reaches interest leaves it
+    ///      at zero.
     function _pullFromAave(uint256 amount) internal {
-        if (amount > aUsdcBalance()) revert InsufficientTreasury();
-
         uint256 before = usdc.balanceOf(address(this));
         aavePool.withdraw(address(usdc), amount, address(this));
-        uint256 received = usdc.balanceOf(address(this)) - before;
-        if (received < amount) revert AaveWithdrawFailed(amount, received);
+        _bookPull(amount, usdc.balanceOf(address(this)) - before, amount);
+    }
 
+    /// @dev Book a pull of `amount` that brought `received` USDC, of which
+    ///      `required` had to arrive.
+    function _bookPull(uint256 amount, uint256 received, uint256 required) internal {
+        if (received < required) revert AaveWithdrawFailed(amount, received);
         uint256 booked = suppliedPrincipal;
         suppliedPrincipal = amount >= booked ? 0 : booked - amount;
         emit WithdrawnFromAave(amount, received);
@@ -2217,7 +2449,6 @@ contract AckiNackiBridge {
 
     /// @notice Current aUSDC balance held by the bridge (principal + accrued interest).
     function aUsdcBalance() public view returns (uint256) {
-        if (address(aUSDC) == address(0)) return 0;
         return aUSDC.balanceOf(address(this));
     }
 

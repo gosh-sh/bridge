@@ -9,11 +9,13 @@ import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 import "../test/mocks/MockERC20.sol";
+import "../test/mocks/MockAave.sol";
 
 /**
  * @title GenDepositSetup
- * @notice Local-only helper: deploys a mock USDC + oracle + bridge (AAVE /
- *         verifyBlock / withdraw all disabled), then mints + approves USDC for
+ * @notice Local-only helper: deploys a mock USDC, a mock AAVE market for it,
+ *         an oracle and a bridge (verifyBlock / withdraw disabled), then
+ *         mints + approves USDC for
  *         the deployer so a `cast`-driven loop can emit 10 distinct `Deposit`
  *         events for real proof generation. Not for any live network.
  */
@@ -43,11 +45,14 @@ contract GenDepositSetup is Script {
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            usdcTokenId: 0
+            usdcTokenId: 0,
+            predecessor: IPredecessorBridge(address(0))
         });
 
+        MockAUSDC aUsdc = new MockAUSDC();
+        MockAavePool pool = new MockAavePool(address(usdc), address(aUsdc));
         AckiNackiBridge bridge = new AckiNackiBridge(
-            address(oracle), address(usdc), address(0), address(0), vbDisabled, bwDisabled
+            address(oracle), address(usdc), address(pool), address(aUsdc), vbDisabled, bwDisabled
         );
 
         // Fund the deployer generously and pre-approve the bridge for max.
@@ -59,5 +64,6 @@ contract GenDepositSetup is Script {
         console.log("USDC:", address(usdc));
         console.log("ORACLE:", address(oracle));
         console.log("BRIDGE:", address(bridge));
+        console.log("AAVE_POOL:", address(pool));
     }
 }

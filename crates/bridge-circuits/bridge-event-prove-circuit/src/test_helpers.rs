@@ -1,8 +1,8 @@
 //! Test / synthetic-witness helpers for `bridge-event-prove-circuit`.
 //!
 //! Most helpers consume **real BOCs** captured from a local Acki Nacki node
-//! by `acki-nacki/tests/exchange/generate_withdrawals.py` and shipped as
-//! `bridge-event-prove-circuit/withdrawals.txt`. There is no synthetic
+//! by `crates/bridge-prover-libraries/python/capture_withdrawal_fixtures.py`
+//! and shipped as `bridge-event-prove-circuit/withdrawals.txt`. There is no synthetic
 //! event-BOC builder — fixtures must originate from the live contract — but
 //! the surrounding two-level Merkle witnesses and dense chain are built
 //! synthetically by [`build_two_level_tree`] / [`build_dense_chain`].
@@ -15,7 +15,7 @@ use crate::boc_helper::*;
 use crate::bridge_event_prove_circuit::{
     be_bytes_to_fr, poseidon_hash_96_native, BridgeEventProveCircuit, ABI_EVENT_ID,
     BODY_CELL_LEN, EVENT_ABI_PREFIX_END, EVENT_ABI_PREFIX_START, EVENT_TOKEN_ID_END,
-    EVENT_TOKEN_ID_START, RECIPIENT_CELL_LEN, RECIPIENT_HALF_LEN, RECIPIENT_HI_END,
+    EVENT_DST_BRIDGE_END, EVENT_DST_BRIDGE_START, EVENT_TOKEN_ID_START, RECIPIENT_CELL_LEN, RECIPIENT_HALF_LEN, RECIPIENT_HI_END,
     RECIPIENT_HI_START, RECIPIENT_LEN_FIXED, RECIPIENT_LO_END, RECIPIENT_LO_START,
     SENDER_CELL_LEN, TOTAL_PUBLIC_INPUTS,
 };
@@ -78,6 +78,8 @@ pub struct WithdrawalFields {
     pub dst_chain_id_val: Fr,
     pub recipient_hi_val: Fr,
     pub recipient_lo_val: Fr,
+    /// The EVM bridge the event is bound to, 20 bytes packed BE.
+    pub dst_bridge_val: Fr,
     /// Sender's account_id parsed from `WithdrawalRecord::sender_addr`
     /// (the part after `0:` in `0:<32-byte hex>`). Cross-checked against
     /// the algebraic decode of `entries[3].cell_repr_data` bits [11..267)
@@ -129,11 +131,11 @@ pub fn parse_withdrawal_boc(event_boc_b64: &str) -> [BocFlattenData; 4] {
         BODY_CELL_LEN,
     );
 
-    // ABI event id at body[2..6) must be 0x3c838959
+    // ABI event id at body[2..6) must be 0x728804fc
     let abi_slice = &serialized[1].cell_repr_data[EVENT_ABI_PREFIX_START..EVENT_ABI_PREFIX_END];
     assert_eq!(
         abi_slice, &ABI_EVENT_ID,
-        "ABI event id mismatch at body[2..6) — expected WithdrawalInitiated 0x3c838959, got {:02x?}",
+        "ABI event id mismatch at body[2..6) — expected WithdrawalInitiated 0x728804fc, got {:02x?}",
         abi_slice,
     );
 
@@ -258,6 +260,7 @@ pub fn extract_withdrawal_fields(rec: &WithdrawalRecord) -> WithdrawalFields {
         be_bytes_to_fr(&recipient_payload[RECIPIENT_HI_START..RECIPIENT_HI_END]);
     let recipient_lo_val =
         be_bytes_to_fr(&recipient_payload[RECIPIENT_LO_START..RECIPIENT_LO_END]);
+    let dst_bridge_val = be_bytes_to_fr(&body[EVENT_DST_BRIDGE_START..EVENT_DST_BRIDGE_END]);
 
     // Sanity-check half-length (compile-time constant — runtime check is a
     // belt-and-suspenders against later refactors).
@@ -285,6 +288,7 @@ pub fn extract_withdrawal_fields(rec: &WithdrawalRecord) -> WithdrawalFields {
         dst_chain_id_val,
         recipient_hi_val,
         recipient_lo_val,
+        dst_bridge_val,
         sender_account_id,
         source_dst_chain_id: rec.dst_chain_id,
         source_amount: rec.amount,
@@ -499,9 +503,10 @@ pub fn nullifier_native(
     ])
 }
 
-/// Bundled leading public-input Fr values, in `PUB_*` slot order.
-/// Constructed by [`compute_leading_public_inputs`] and consumed by
-/// [`make_instances`].
+/// Bundled public-input Fr values the event determines: the nine leading
+/// slots in `PUB_*` order, and `dst_bridge`, which trails `final_root` and
+/// `anchor_layer`. Constructed by [`compute_leading_public_inputs`] and
+/// consumed by [`make_instances`].
 #[derive(Clone, Copy, Debug)]
 pub struct LeadingPublicInputs {
     pub token_id: Fr,
@@ -513,9 +518,11 @@ pub struct LeadingPublicInputs {
     pub dapp_fr: Fr,
     pub acc_fr: Fr,
     pub nullifier: Fr,
+    pub dst_bridge: Fr,
 }
 
 impl LeadingPublicInputs {
+    /// The nine leading slots, without `dst_bridge`.
     pub fn to_vec(self) -> Vec<Fr> {
         vec![
             self.token_id,
@@ -572,10 +579,11 @@ pub fn compute_leading_public_inputs(
         dapp_fr,
         acc_fr,
         nullifier,
+        dst_bridge: w.dst_bridge_val,
     }
 }
 
-/// Concatenate `[leading_public_inputs..., final_root, anchor_layer]` into
+/// Concatenate `[leading_public_inputs..., final_root, anchor_layer, dst_bridge]` into
 /// a single instance vector matching the circuit's `assigned_instances`
 /// order.
 ///
@@ -591,6 +599,7 @@ pub fn make_instances(
     v.extend(leading.to_vec());
     v.push(final_root);
     v.push(anchor_layer);
+    v.push(leading.dst_bridge);
     v
 }
 

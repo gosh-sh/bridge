@@ -2,7 +2,7 @@
 
 Deploy scripts (`DeployRealBridge`, `DeployShellnetE2EBridge`) load these artefacts. 
 
-Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-09-23**, the same
+Sizes below were measured with `wc -c` on the committed `.bin` files on **2026-11-02**, the same
 metric `scripts/check_eip170_verifier_bins.sh` uses. Re-measure rather than trusting the row.
 
 | File | Circuit | Inner PIs | Size | EIP-170 (24 576 B) |
@@ -10,7 +10,7 @@ metric `scripts/check_eip170_verifier_bins.sh` uses. Re-measure rather than trus
 | `PrimaryAggregatorVerifier.bin` | 1A primary attestation | 4 | 21 655 B | OK (88%) |
 | `FallbackAggregatorVerifier.bin` | 1B fallback attestation | 4 | 21 655 B | OK (K=21 inner, 88%) |
 | `LayerHashesAggregatorVerifier.bin` | 2 layer hashes | 14 | 19 263 B | OK (k_outer=22, 78%) |
-| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 11 | 21 314 B | OK (24 instances) |
+| `BridgeWithdrawalAggregatorVerifier.bin` | 4 withdrawal | 12 | 21 475 B | OK (25 instances, 87%) |
 
 Against 0.2.0 Layer hashes stays at `k_outer=22` (19 100 → 19 263 B). Primary and Fallback
 at 21 655 B are the tightest — regenerate with the size gate in the loop, not after it.
@@ -48,11 +48,11 @@ is keygen'd on the shared `K=20` ceremony SRS (see
 `crates/bridge-prover-libraries/bridge-prover-lib/src/keys/event.rs:76`) even though the circuit
 itself fits at `K=19` — halo2-axiom bakes `params.k()` into `vk.domain`, so the value that lands
 in the inner `k` witness (and, transitively, in the `vkDigest` Poseidon preimage) is `20`. The
-aggregated Yul is 21 314 B (24 outer instances = 12 KZG accumulator limbs + 11 re-exposed
-Circuit-4 public inputs, the last of which is 1-indexed `anchorLayer`, plus 1 Poseidon digest of
-the inner VK witnesses that the on-chain adapter pins against its immutable `vkDigest`). Rotated
-2026-09-23 for the inner-VK-digest binding (previous rotation 2026-09-18 for the `events_pos`
-nullifier preimage and the per-layer anchor scan).
+aggregated Yul is 21 475 B (25 outer instances = 12 KZG accumulator limbs + 12 re-exposed
+Circuit-4 public inputs, the last of which is `dstBridge`, plus 1 Poseidon digest of the inner VK
+witnesses that the on-chain adapter pins against its immutable `vkDigest`). Rotated 2026-11-02 for
+the `dstBridge` public input (previous rotations: 2026-09-23 for the inner-VK-digest binding,
+2026-09-18 for the `events_pos` nullifier preimage and the per-layer anchor scan).
 
 All three `verifyBlock` circuits use the SHPLONK aggregator path. Circuit **1B** is keygen'd at
 inner `K=21` (vs `K=20` for primary/layer): the fallback circuit verifies two attestation

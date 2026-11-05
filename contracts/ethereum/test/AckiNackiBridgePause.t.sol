@@ -18,6 +18,7 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./helpers/Bn254FrLib.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgePauseTest
 /// @notice Tests for the global pause / unpause flag (incident-response control).
@@ -76,8 +77,8 @@ contract AckiNackiBridgePauseTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -133,7 +134,8 @@ contract AckiNackiBridgePauseTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: seedAnchor,
-            anchorLayer: 1
+            anchorLayer: 1,
+            dstBridge: uint256(uint160(address(bridge)))
         });
     }
 

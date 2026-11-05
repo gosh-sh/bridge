@@ -28,6 +28,7 @@ TVL = 10_000_000_000
 USDC_TOKEN = 68
 SECOND_TOKEN = 85
 THIRD_TOKEN = 102
+EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
 
 
@@ -126,6 +127,8 @@ class BridgeLimits(unittest.TestCase):
         self.call("constructor", {"pubkey": "0x" + self.keys["public"],
                                   "usdcWallet": "0:" + "00" * 32})
         self.seed(TVL - TRANSFER)
+        self.bind(1)
+        self.bind(2)
         for chain in (1, 2):
             self.register(USDC_TOKEN, 3, TRANSFER, TVL, chain=chain)
 
@@ -151,6 +154,13 @@ class BridgeLimits(unittest.TestCase):
     def seed(self, first, second=0):
         self.call("testSeed", {"voucherCode": self.voucher_code,
                                "first": str(first), "second": str(second)})
+
+    def bind(self, chain, bridge=EVM_BRIDGE):
+        self.call("setEvmBridge", {"dstChainId": str(chain), "evmBridge": str(bridge)},
+                  signed=True)
+
+    def evm_bridge(self, chain):
+        return int(self.call("getEvmBridge", {"dstChainId": str(chain)})["response"]["value0"], 0)
 
     def limits(self, chain=1):
         return self.call("getDepositLimits", {"chainId": str(chain)})["response"]
@@ -207,8 +217,8 @@ class BridgeLimits(unittest.TestCase):
     def test_unregistered_proven_token_cannot_mint_usdc(self):
         before = self.call("getTotalBridged", {"tokenId": 3})["response"]
         self.call("testRejectProof")
-        self.finalize(token=SECOND_TOKEN, expect=240)
-        self.confirm_token(expect=240)
+        self.finalize(token=SECOND_TOKEN, expect=241)
+        self.confirm_token(expect=241)
         self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"], before)
 
     def test_second_token_has_independent_mint_burn_and_chain_accounting(self):
@@ -237,8 +247,8 @@ class BridgeLimits(unittest.TestCase):
 
     def test_token_identity_cannot_be_reassigned(self):
         self.register(SECOND_TOKEN, 4, 100, 1000)
-        self.register(THIRD_TOKEN, 4, 100, 1000, expect=241)
-        self.register(SECOND_TOKEN, 5, 100, 1000, expect=241)
+        self.register(THIRD_TOKEN, 4, 100, 1000, expect=242)
+        self.register(SECOND_TOKEN, 5, 100, 1000, expect=242)
         self.assertEqual(int(self.token_limits(4)["evmToken"], 0), SECOND_TOKEN)
         self.assertFalse(self.token_limits(5)["listed"])
 
@@ -249,7 +259,7 @@ class BridgeLimits(unittest.TestCase):
         config = self.token_limits()
         self.assertEqual(int(config["outstanding"]), 10**18)
         self.assertEqual(int(config["maxWithdrawal"]), 10**18)
-        self.finalize(token=SECOND_TOKEN, amount=1, expect=242)
+        self.finalize(token=SECOND_TOKEN, amount=1, expect=243)
         self.withdraw_token(10**18)
         self.assertEqual(int(self.token_limits()["outstanding"]), 0)
 
@@ -271,6 +281,7 @@ class BridgeLimits(unittest.TestCase):
         self.assertTrue(config["listed"])
         self.assertEqual(int(config["evmToken"], 0), SECOND_TOKEN)
         self.assertEqual(int(config["outstanding"]), 10**18)
+        self.bind(1)
         self.withdraw_token(10**18)
         self.assertEqual(int(self.token_limits()["outstanding"]), 0)
 
@@ -280,6 +291,7 @@ class BridgeLimits(unittest.TestCase):
         self.call("testLegacyUpgrade")
         self.assertEqual(self.limits()["outstanding"], before)
         self.assertFalse(self.token_limits()["listed"])
+        self.bind(1)
         self.withdraw(TRANSFER)
         self.assertEqual(int(self.limits()["outstanding"]), int(before) - TRANSFER)
 
@@ -289,6 +301,7 @@ class BridgeLimits(unittest.TestCase):
         config = self.token_limits(token_id=3, chain=3)
         self.assertEqual(int(config["maxTransfer"]), 10_000_000)
         self.assertEqual(int(config["maxWithdrawal"]), TRANSFER)
+        self.bind(3)
         result = self.withdraw(TRANSFER, chain=3)
         self.assertEqual(result["messages"], [])
         self.assertEqual(int(self.limits(chain=3)["outstanding"]), 0)
@@ -298,13 +311,13 @@ class BridgeLimits(unittest.TestCase):
         self.register(SECOND_TOKEN, 4, amount, amount * 10)
         self.confirm_token(deposit=100)
         self.finalize(deposit=101, amount=amount, token=SECOND_TOKEN)
-        self.register(SECOND_TOKEN, 4, amount, amount, expect=241)
+        self.register(SECOND_TOKEN, 4, amount, amount, expect=242)
         self.confirm_token(deposit=101)
         self.assertEqual(int(self.token_limits()["outstanding"]), amount * 2)
 
     def test_usdc_registration_cannot_raise_the_protocol_caps(self):
-        self.register(USDC_TOKEN, 3, TRANSFER + 1, TVL, expect=241)
-        self.register(USDC_TOKEN, 3, TRANSFER, TVL + 1, expect=241)
+        self.register(USDC_TOKEN, 3, TRANSFER + 1, TVL, expect=242)
+        self.register(USDC_TOKEN, 3, TRANSFER, TVL + 1, expect=242)
 
     def test_issue_98_values(self):
         limits = self.limits()
@@ -339,6 +352,19 @@ class BridgeLimits(unittest.TestCase):
         self.refund(self.withdraw(TRANSFER, chain=1), TRANSFER, 1_000_000_000, 236)
         self.assertEqual(int(self.limits(1)["outstanding"]), 0)
         self.assertEqual(int(self.limits(2)["outstanding"]), TRANSFER)
+
+    def test_a_chain_without_an_evm_bridge_refuses_before_any_limit(self):
+        self.assertEqual(self.evm_bridge(1), EVM_BRIDGE)
+        self.bind(1, 0)
+        self.assertEqual(self.evm_bridge(1), 0)
+        self.assertEqual(self.evm_bridge(2), EVM_BRIDGE)
+        self.refund(self.withdraw(TRANSFER + 1, chain=1), TRANSFER + 1, 1_000_000_000, 239)
+        self.refund(self.withdraw(1_000_000, chain=1), 1_000_000, 1_000_000_000, 239)
+        self.refund(self.withdraw(1_000_000, chain=7), 1_000_000, 1_000_000_000, 239)
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL - TRANSFER)
+        self.bind(1)
+        self.assertTrue(self.withdraw(1_000_000, chain=1)["vm_success"])
+        self.assertEqual(int(self.limits(1)["outstanding"]), TVL - TRANSFER - 1_000_000)
 
     def test_owner_recovery_credits_only_the_source_chain_and_enforces_limits(self):
         self.seed(0, TVL)

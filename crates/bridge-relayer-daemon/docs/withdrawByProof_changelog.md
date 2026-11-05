@@ -50,7 +50,7 @@ Newest first.
   cryptographic: Deploy #10 was freshly bootstrapped and no one had ever
   bridged IN, so `treasuryBalance == 0`.
 - **Fix landed in this runbook.** New [Case 5](#case-5--withdrawtreasuryshortfall--bridge-treasury-empty)
-  with the Aave-faucet recipe (`FAUCET.mint(USDC, wallet, amount)` →
+  with a faucet recipe (`FAUCET.mint(USDC, wallet, amount)` →
   `USDC.approve(bridge)` → `bridge.deposit(amount, 0, 0x11…11)`). Also
   added a treasury-seed step (now
   [Step 2](#step-2--seed-the-bridge-treasury-fresh-deploy-only)) to

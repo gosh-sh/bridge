@@ -38,8 +38,8 @@ impl std::fmt::Display for BridgeVersion {
 pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 16, 0));
 /// The newest bridge this build was checked against.
 pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
-/// The mandatory protocol floor includes the token-aware callback, even in
-/// development builds. The thirteen-input deposit key itself dates to 1.15.0.
+/// The mandatory protocol floor: the thirteen-input deposit key and the
+/// token-aware callback both arrive with 1.16.0, even in development builds.
 pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.

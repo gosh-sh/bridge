@@ -47,7 +47,7 @@ use bridge_relayer_daemon::{
     RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
     SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
     WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
+    WithdrawalPublicInputs, GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -267,7 +267,7 @@ enum Cmd {
     /// the historical `export-c4-poseidon-snark --fixture` subprocess),
     /// aggregates the inner snark (`aggregate-proof`, which self-checks the
     /// regenerated Yul source == committed `.sol`), cross-checks the calldata
-    /// binds the eleven public inputs, and writes a `proof_event` JSON that
+    /// binds the twelve public inputs, and writes a `proof_event` JSON that
     /// `submit-withdraw` / `daemon-withdraw` consume unchanged.
     ProveWithdrawShplonk {
         /// `PrivateWitness` JSON (from the `bridge-event-witness` builder).
@@ -1719,6 +1719,19 @@ where
             },
         };
 
+        // A proof bound to another EVM bridge never pays on this one.
+        if !pub_inputs.names_bridge(bridge.bridge_address()) {
+            warn!(
+                proof = %proof_path.display(),
+                dst_bridge = %format!("{:#042x}", pub_inputs.dst_bridge),
+                bridge = %bridge.bridge_address(),
+                "proof is bound to another bridge (dstBridge); parking"
+            );
+            st.parked_permanent += 1;
+            st.done.insert(proof_path);
+            continue;
+        }
+
         // Idempotency: skip anything already withdrawn on-chain.
         match bridge.is_nullifier_used(pub_inputs.nullifier).await {
             Ok(true) => {
@@ -2069,6 +2082,17 @@ async fn run_bridge_daemon(
     }
 }
 
+/// Refuse a proof bound to another EVM bridge before spending gas on it.
+fn ensure_names_bridge(pub_inputs: &WithdrawalPublicInputs, bridge: Address) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        pub_inputs.names_bridge(bridge),
+        "the proof is bound to bridge {:#042x} (dstBridge), not {bridge}: withdrawByProof there \
+         would revert WrongDstBridge",
+        pub_inputs.dst_bridge,
+    );
+    Ok(())
+}
+
 async fn submit_withdraw(
     proof_event: PathBuf,
     rpc_url: String,
@@ -2079,6 +2103,7 @@ async fn submit_withdraw(
     let bundle = PartnerWithdrawalProof::from_json_bytes(&std::fs::read(&proof_event)?)?;
     let proof = bundle.proof_bytes()?;
     let pub_inputs = bundle.public_inputs()?;
+    ensure_names_bridge(&pub_inputs, bridge_address)?;
 
     if dry_run {
         let provider = read_provider(&rpc_url).await?;
@@ -2199,6 +2224,7 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
 
     let proof_bytes = summary.proof.proof_bytes()?;
     let pub_inputs = summary.proof.public_inputs()?;
+    ensure_names_bridge(&pub_inputs, bridge_address)?;
 
     if args.dry_run {
         let provider = read_provider(&rpc_url).await?;
@@ -2843,6 +2869,7 @@ mod withdraw_scan_tests {
         dry_run_reason: Option<String>,
         fail_first_only: bool,
         submit_reason: Option<(String, bool)>,
+        address: Option<alloy::primitives::Address>,
         calls: Mutex<Calls>,
     }
 
@@ -2853,8 +2880,16 @@ mod withdraw_scan_tests {
         submit: usize,
     }
 
+    /// Slot 11 (`dstBridge`) of [`write_valid_proof_fixture`] is `12`.
+    const FIXTURE_DST_BRIDGE: alloy::primitives::Address =
+        alloy::primitives::Address::with_last_byte(12);
+
     #[async_trait]
     impl bridge_relayer_daemon::WithdrawBridge for StubBridge {
+        fn bridge_address(&self) -> alloy::primitives::Address {
+            self.address.unwrap_or(FIXTURE_DST_BRIDGE)
+        }
+
         async fn is_nullifier_used(
             &self,
             _n: alloy::primitives::U256,
@@ -3089,6 +3124,29 @@ mod withdraw_scan_tests {
             calls.dry_run, 0,
             "already-used proof must short-circuit before dry-run"
         );
+    }
+
+    #[tokio::test]
+    async fn proof_for_another_bridge_is_parked_without_touching_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proof_path = write_valid_proof_fixture(tmp.path(), 3);
+
+        let bridge = StubBridge {
+            address: Some(alloy::primitives::Address::with_last_byte(13)),
+            ..Default::default()
+        };
+        let mut st = WithdrawScanState::default();
+
+        let transient = withdraw_scan_once(&bridge, tmp.path(), false, &mut st)
+            .await
+            .unwrap();
+
+        assert!(!transient);
+        assert_eq!(st.parked_permanent, 1);
+        assert_eq!(st.paid, 0);
+        assert!(st.done.contains(&proof_path));
+        let calls = bridge.calls.lock().unwrap();
+        assert_eq!((calls.is_used, calls.dry_run, calls.submit), (0, 0, 0));
     }
 }
 

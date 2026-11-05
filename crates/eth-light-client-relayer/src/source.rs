@@ -25,6 +25,39 @@ use crate::{
 #[async_trait]
 pub trait BeaconSource: Send + Sync {
     async fn fetch_finality(&self) -> Result<FinalityUpdate, RelayerError>;
+
+    /// `GET /eth/v1/beacon/light_client/updates?start_period=P&count=1`, with
+    /// the signing domain at its `signature_slot`. What a rotate proves.
+    async fn period_update(&self, period: u64) -> Result<PeriodUpdate, RelayerError>;
+}
+
+/// The best update the beacon node holds for one period, as it answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeriodUpdate {
+    pub raw_json: String,
+    pub chain: Option<BeaconChainParams>,
+}
+
+/// `signature_slot` of a `/updates` answer, else its attested slot plus one.
+fn update_signature_slot(json: &str) -> Result<u64, RelayerError> {
+    let v: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| RelayerError::beacon(format!("light_client/updates JSON: {e}")))?;
+    let data = if v.is_array() {
+        &v[0]["data"]
+    } else if v.get("data").is_some() {
+        &v["data"]
+    } else {
+        &v
+    };
+    let slot = |x: &serde_json::Value| {
+        x.as_u64()
+            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+    };
+    slot(&data["signature_slot"])
+        .or_else(|| slot(&data["attested_header"]["beacon"]["slot"]).map(|s| s + 1))
+        .ok_or_else(|| {
+            RelayerError::beacon("light_client/updates: no signature_slot or attested slot")
+        })
 }
 
 /// Execution header walk used after an accepted checkpoint. Returns the span
@@ -313,6 +346,18 @@ impl BeaconSource for HttpBeaconSource {
         update.chain = Some(self.chain_params_at(update.signature_slot).await?);
         Ok(update)
     }
+
+    async fn period_update(&self, period: u64) -> Result<PeriodUpdate, RelayerError> {
+        let raw_json = self.fetch_period_update(period).await?;
+        let chain = Some(
+            self.chain_params_at(update_signature_slot(&raw_json)?)
+                .await?,
+        );
+        Ok(PeriodUpdate {
+            raw_json,
+            chain,
+        })
+    }
 }
 
 impl HttpBeaconSource {
@@ -593,13 +638,23 @@ fn parse_anchored_exec_hash(json: &str) -> Result<[u8; 32], RelayerError> {
 /// Test source: pop from a queue of updates.
 pub struct InMemoryBeaconSource {
     inner: Mutex<Vec<FinalityUpdate>>,
+    periods: Mutex<std::collections::HashMap<u64, String>>,
 }
 
 impl InMemoryBeaconSource {
     pub fn new(updates: Vec<FinalityUpdate>) -> Self {
         Self {
             inner: Mutex::new(updates),
+            periods: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// What `/updates?start_period=period` answers.
+    pub fn set_period_update(&self, period: u64, raw_json: impl Into<String>) {
+        self.periods
+            .lock()
+            .expect("poisoned")
+            .insert(period, raw_json.into());
     }
 
     pub fn push(&self, update: FinalityUpdate) {
@@ -618,6 +673,30 @@ impl BeaconSource for InMemoryBeaconSource {
             return Ok(q[0].clone());
         }
         Ok(q.remove(0))
+    }
+
+    async fn period_update(&self, period: u64) -> Result<PeriodUpdate, RelayerError> {
+        let raw_json = self
+            .periods
+            .lock()
+            .expect("poisoned")
+            .get(&period)
+            .cloned()
+            .ok_or_else(|| {
+                RelayerError::beacon(format!("in-memory beacon: no update for period {period}"))
+            })?;
+        // The chain of the queued updates: the HTTP source reads one for
+        // every answer.
+        let chain = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .last()
+            .and_then(|u| u.chain);
+        Ok(PeriodUpdate {
+            raw_json,
+            chain,
+        })
     }
 }
 

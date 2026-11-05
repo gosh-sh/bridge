@@ -1,5 +1,11 @@
 # L2 anchoring — implementation plan
 
+> **`deploy_bridge_bundle.sh` is gone.** The bridge is deployed on Arbitrum Sepolia (421614)
+> only, against the AAVE market there, with `DeployShellnetE2EBridge`;
+> [`tests/e2e/local-net/prover-host/jobs/deploy.sh`](../../../tests/e2e/local-net/prover-host/jobs/deploy.sh)
+> is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
+> the script describe bridges already deployed and no longer apply to a new one.
+
 Concrete file/function-level plan expanding
 [`l2_anchoring_proposal.md`](l2_anchoring_proposal.md). Assumes W=128, P=8
 (see `bridge-prover-lib/src/lib.rs:46`). L1 stride = W·P = 1024.

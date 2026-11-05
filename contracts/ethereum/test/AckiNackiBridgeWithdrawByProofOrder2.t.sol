@@ -18,6 +18,7 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./helpers/Bn254FrLib.sol";
+import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofOrder2Test
 /// @notice Q3 regression: order>=2 key blocks record L1 in the layer-1 window,
@@ -50,8 +51,8 @@ contract AckiNackiBridgeWithdrawByProofOrder2Test is Test {
         bridge = new AckiNackiBridge(
             address(new MockBlockHeaderOracle()),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primary)),
                 IFallbackVerifier(address(fallback_)),
@@ -103,7 +104,8 @@ contract AckiNackiBridgeWithdrawByProofOrder2Test is Test {
                 accFr: ACC_FR,
                 nullifier: 42,
                 finalRoot: layers[0],
-                anchorLayer: 1
+                anchorLayer: 1,
+                dstBridge: uint256(uint160(address(bridge)))
             });
 
         assertTrue(bridge.withdrawByProof(_dummyProof(), pub));

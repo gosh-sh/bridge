@@ -1,5 +1,11 @@
 # Live relayer runbook — shellnet → Sepolia (L2 anchoring)
 
+> **`deploy_bridge_bundle.sh` is gone.** The bridge is deployed on Arbitrum Sepolia (421614)
+> only, against the AAVE market there, with `DeployShellnetE2EBridge`;
+> [`tests/e2e/local-net/prover-host/jobs/deploy.sh`](../../../tests/e2e/local-net/prover-host/jobs/deploy.sh)
+> is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
+> the script describe bridges already deployed and no longer apply to a new one.
+
 How to deploy, run and recover `relayer daemon-live`, the AN→ETH relayer that
 proves Acki Nacki shellnet state and posts it to an `AckiNackiBridge` on
 Sepolia. Withdrawals (`withdrawByProof`, Circuit 4) are covered by the
@@ -245,9 +251,25 @@ set -a; source L2_config/env; set +a          # your key (.env) and endpoints
 CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=2 \
 PRIVATE_KEY="$RELAYER_PRIVATE_KEY" \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
+PREDECESSOR_BRIDGE=<the Sepolia bridge whose treasury this one takes over, or the zero address> \
 BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   ./scripts/deploy_bridge_bundle.sh 2>&1 | tee "logs/deploy_L2_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
+
+- `PREDECESSOR_BRIDGE` has no default in this script. Name the Sepolia bridge
+  for the same `WITHDRAW_ACC_FR` whose treasury this one should take over with
+  `migrateTreasury`, or the zero address. It need not be paused and does not
+  protect against replay: each withdrawal proof names the one EVM bridge that
+  may pay it, the one `eccUSDCBridge.getEvmBridge(11155111)` returned when it
+  was burnt. The cutover is in `docs/aave-yield.md`, "Replacing a bridge on
+  the same chain".
+- Once the bridge is deployed, the owner of `eccUSDCBridge` on Acki Nacki
+  calls `setTrustedL1Bridge(11155111, <new bridge>, true)` and
+  `setEvmBridge(11155111, <new bridge>)`. Until `getEvmBridge(11155111)`
+  returns the new address, `ackinacki-bridge withdraw --bridge-address <new
+  bridge>` stops before the burn, and the relayer has nothing to pay: every
+  burn names the bridge `getEvmBridge` returned at the time. When a bridge
+  already serves 11155111, follow the cutover above instead.
 
 - `BRIDGE_SEED_SEQNO` pins the seed to S; without it the script picks the
   newest boundary at deploy time, which can be later than the S the set was

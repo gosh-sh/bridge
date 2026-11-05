@@ -31,8 +31,87 @@ assigns it when the release is tagged.
   be re-proven with this key: finalize pending deposits on the old pair before switching.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
-  bridge. `DeployRealBridge` defaults to `3` and requires it on mainnet.
+  bridge. `DeployRealBridge` defaults to `3`.
 
+- **AAVE is mandatory, automatic, and Arbitrum Sepolia only** (#142). Redeploy the bridge:
+  storage slots from `owner` on move down by one (`supplyMultiplierBps` is slot 9 with the token registry), and the
+  constructor reverts `InvalidAaveAddress` when either AAVE address is zero, on every chain.
+  - `supplyToAave(uint256)` is removed, and with it the errors `AaveDisabled` and
+    `NothingToSupply`. A keeper that called it has nothing left to call. `deposit` now keeps
+    `liquidReserveBps` of the book liquid and supplies the rest once the liquid principal reaches
+    `supplyMultiplierBps` times that; below it a deposit makes no pool call. A pool that refuses
+    never fails a deposit: it emits `AaveSupplyRefused` and the USDC stays on the bridge. USDC sent
+    to the bridge directly is never supplied.
+  - `withdrawByProof` pays from the bridge's USDC while the liquid principal covers the payout.
+    Otherwise it pulls from AAVE what the USDC on hand cannot pay — if the pool cannot return that,
+    the payout reverts and its nullifier stays unused, as before — and tries to pull enough more to
+    leave the target of the new book liquid; a refused refill emits `AaveRefillFailed` and the
+    payout still goes through.
+  - `setLiquidReserveBps` reverts `ReserveBpsTooLow` below `1_000` (10 %); it and
+    `setSupplyMultiplierBps` revert `ReserveBandTooWide(reserveBps, multiplierBps)` when their
+    product exceeds 100 %, and `setSupplyMultiplierBps` reverts `MultiplierTooLow` at 1× or below.
+  - `excessUsdc()` returns the liquid USDC above the principal that a pool loss does not need,
+    `min(U + S − B, U + A − B)`: USDC sent to the bridge is skimmable while principal sits in the
+    pool, and never while it covers a loss.
+  - `DeployRealBridge` deploys on Arbitrum Sepolia (421614) only, on the AAVE market there: pool
+    `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff`, aToken
+    `0x460b97BD498E1157530AEb3086301d5225b91216`, Circle USDC
+    `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`, from `script/ArbitrumSepoliaAave.sol` with no
+    override. Chain ids 1 and 11155111 and `USE_AAVE` are gone; `USE_AXIOM_ORACLE=true` reverts.
+    `deployment_real.json` gains `aave_pool` and `aave_ausdc`. `DeployShellnetE2EBridge` gets the
+    same market on 421614 and reverts on any chain but 421614 and anvil; `DeployTestBridge` runs on
+    anvil only and needs `USDC_ADDRESS`.
+  - `DeployReuseVerifiersBridge.s.sol` and `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
+    are removed. Deploy with `DeployShellnetE2EBridge` on Arbitrum Sepolia, fed by
+    `compute_bridge_anchors`, as `tests/e2e/local-net/prover-host/jobs/deploy.sh` does.
+  - Replacing the live 421614 bridge `0x3FB082a905a895151224F6d93bD074E816338638` follows
+    `docs/aave-yield.md`; it predates `migrateTreasury`, so the new bridge's owner covers its
+    `treasuryBalance()` with `fundTreasury`. Before `migrateTreasury` on a bridge with this change,
+    pull the position back with `withdrawFromAave(type(uint256).max)` (`TreasuryNotLiquid`
+    otherwise).
+- **A withdrawal proof names the one EVM bridge that may pay it** (bridge-audit#140). A second
+  `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
+  first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
+  made before the switch below are paid by the bridge they named. Upgrade in this order:
+  `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
+  then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. Replacing an
+  existing bridge closes withdrawals to its chain (`setEvmBridge(<chainId>, 0)`) until the old
+  bridge has paid the burns bound to it and its principal has moved; deposits stay open. The
+  order is in `docs/aave-yield.md`, "Replacing a bridge on the same chain".
+- **Circuit 4 verification key rotated.** Withdrawal proofs built for the previous key do not
+  verify against the new `BridgeWithdrawalAggregatorVerifier`, and new proofs do not verify
+  against the old one. `BridgeWithdrawalAggregatorVerifier.{bin,sol}` and its
+  `_calldata.bin` are regenerated; the `vkDigest` pinned in `ShplonkDeployLib`
+  (`WITHDRAWAL_VK_DIGEST`) and the Yul code hash (`WITHDRAWAL_YUL_CODEHASH`) change with them.
+  The verifier is immutable in `AckiNackiBridge`, so a bridge needs a new deployment. Circuit 4
+  has twelve public inputs, the twelfth being `dstBridge`; `proof_event_*.json` carries twelve
+  `public_instances_hex`, the aggregated calldata is 3 712 bytes with the inner-VK digest at
+  word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
+  revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
+  before the upgrade are proven with the release their bridge was deployed for.
+- **`eccUSDCBridge` 1.15.0** (code hash `71074c89af517458c73566d3e84937279547622e01e827eb9bf7161e156135a3`):
+  `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
+  `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
+  evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
+  EVM bridge set is refused with reason 239 (`ERR_NO_EVM_BRIDGE`) and burns nothing. The binding
+  is not carried through `updateCode`: call `setEvmBridge` for every chain right after the
+  upgrade, before withdrawals reopen. The zerostate binds `BRIDGE_ZS_L1_BRIDGE` for
+  `BRIDGE_ZS_L1_CHAIN_ID`.
+- **`AckiNackiBridge.withdrawByProof`**: `WithdrawalPublicInputs` gains `dstBridge` as its last
+  field, so the selector is `0xc7d38069` (was `0xa9753d18`) and
+  `IBridgeWithdrawalVerifier.verifyWithdrawal` is `0xbcd3e6c9`. A proof whose `dstBridge` is not
+  the bridge's own address reverts `WrongDstBridge(uint256)`. Tooling that encodes the call by
+  hand needs the twelve-field tuple.
+- **`ackinacki-bridge withdraw`** needs `eccUSDCBridge` 1.16.0. Before burning it requires
+  `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
+  the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
+  names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
+  bridge the message names and `--allow-retry` — the idempotency key does not include the
+  bridge, so the run resumes without a second burn; without the flag it stops with exit 3.
+- **`relayer daemon-withdraw` and `relayer daemon-bridge`** park a `proof_event_*.json` whose
+  `dstBridge` is another bridge without sending it, and treat `WrongDstBridge` as permanent;
+  `relayer submit-withdraw` and `relayer withdraw-e2e` refuse such a proof. `bridge-verifier-daemon`
+  accepts twelve public instances and refuses eleven.
 - `deposit-relayer arbitrum-anchors` and `deposit-relayer arbitrum-vector` move to `eth-lc-relayer`
   (`arbitrum-anchors` needs a build with `--features live-submit`): change the binary in the unit
   file and drop `deposit-relayer`'s global `--state` if the command line has it; the subcommands'
@@ -42,6 +121,14 @@ assigns it when the release is tagged.
   move to `contracts/an/0.81.1_compiled/exchange/` (code hashes `d0fa5bca…`, `7bf4ec29…`); ABIs
   are unchanged, and the relayers build them in from the new folder. Rebuild with
   `make SOLD_0_81_1=<sold 0.81.1>`.
+- **`AckiNackiBridge` constructor: `BridgeWithdrawConfig` gains a last field, `predecessor`** —
+  the bridge on the same chain whose treasury this one may take over with `migrateTreasury` /
+  `fundTreasury`, or zero. A non-zero one must have code on this chain and the same
+  `WITHDRAW_DAPP_FR` / `WITHDRAW_ACC_FR`, else the deploy reverts `InvalidPredecessor`; it need not
+  be paused. New view: `predecessor()`. Update tooling that encodes the constructor; deployed
+  bridges are unchanged. The bridge deploy scripts read it from `PREDECESSOR_BRIDGE` (optional,
+  zero by default); `deploy_bridge_bundle.sh` requires `PREDECESSOR_BRIDGE` to be set, to the zero
+  address if there is none.
 - Every long-running service takes three directories and writes nowhere else
   (bridge-audit#132): `--state-dir`, `--work-dir`, `--log-dir`, each with an environment
   variable (`DEPOSIT_RELAYER_*_DIR`, `ETH_LC_RELAYER_*_DIR`, `ARBITRUM_ANCHORS_*_DIR`,
@@ -78,9 +165,71 @@ assigns it when the release is tagged.
   and `EXPECTED_BRIDGE_COMMIT` is the commit of the image. `EXPECTED_RELAYER_SHA256` and
   `EXPECTED_AGGREGATE_PROOF_SHA256` are optional. The layout and the migration are in
   `docker/README.md`.
+- `eth-lc-relayer daemon` proves the committee rotate itself (bridge-audit#145). With rotate on
+  (the default) it needs two more prover binaries beside `--rotate-prover-bin`:
+  `--shard-prover-bin` / `LIGHT_CLIENT_SHARD_PROVER_BIN` (`export_shard_snark`) and
+  `--step-snark-prover-bin` / `LIGHT_CLIENT_STEP_SNARK_PROVER_BIN` (`export_step_snark`), all three
+  built from `eth-light-client-prover` with `--features aggregation`, and two SRS files in
+  `--prover-dir`: `kzg_bn254_21.srs` (the release asset of that name) and `kzg_bn254_20.srs`,
+  cut from it once with `downsize_srs --input kzg_bn254_21.srs --output kzg_bn254_20.srs --k 20`
+  (`eth-light-client-prover`'s, shipped in the `bridge-eth-lc-relayer` image). Without them it
+  refuses to start and names what is missing; `--no-rotate` starts it without.
+  `scripts/ursus/eth-light-client-relayer.service` and its env example carry the new binaries
+  and the `--state-dir` / `--work-dir` / `--log-dir` flags (`ETH_LC_RELAYER_*_DIR` in the env
+  file) in place of `--state`: update an installed unit before restarting it. In Docker the
+  `bridge-eth-lc-relayer` image ships the binaries; put `kzg_bn254_21.srs` into
+  `$BRIDGE_DATA/params/lc-prover/` and cut `kzg_bn254_20.srs` beside it (`docker/README.md`,
+  Install, item 2). The daemon no longer auto-rotates the one committed fixture period.
+  Verification keys are unchanged.
+- `export_shard_snark`, `export_step_snark` and `rotate_tree_n8` no longer fall back to an SRS
+  under `data/`: `SHARD_SRS_PATH`, `STEP_SRS_PATH` and `OUTER_SRS` are required, and `STEP_SRS`
+  with a step snark. `rotate_tree_n8` fails when `STEP_DIR` is set and holds no
+  `step_proof.bin`, instead of building the tree without the step snark, which is a different
+  circuit than the one the light client pins.
 
 ### New / Improvements
 
+- `eth-lc-relayer daemon` starts the rotate of period P as soon as the contract holds P and the
+  beacon serves `light_client/updates?start_period=P`, in the background while the steps of P go
+  on. Its stages run as child processes and keep their inputs and outputs in
+  `<work-dir>/rotate-<P>/`: a restart re-runs only the stage that had not finished, and the
+  directory goes once the contract is past P. The stages' proving keys are written to
+  `<prover-dir>/rotate-keys/` on the first rotate after an install or a binary upgrade and
+  reused after that. Before `submitRotate` the daemon checks the bundle: a bundle for a period the
+  contract has left is dropped, and one whose verification key is not the pinned
+  `rotate_vk_blob.bin` or whose current committee is not the contract's is logged and not sent.
+  Each stage is killed after `--rotate-timeout-secs` (default 10800) and on daemon shutdown;
+  transcripts are `rotate-<P>-<stage>-<time>-{stdout,stderr}.log` in `--log-dir`. A failed
+  stage is started again after 10, then 20 minutes, from the beacon node's answers fetched anew;
+  after the third failure in a period the daemon leaves that period alone. A `submitRotate`
+  whose outcome stays unknown no longer holds up the steps: it is sent again on the next ticks
+  until it lands or the contract moves past it. A bundle proven for another Gloas fork slot than the contract's
+  is proven again instead of sent. To prove a period again by hand, stop the daemon, remove
+  `<work-dir>/rotate-<P>/` and start it. The prove takes about 1.5 h; the tree stage peaks at
+  about 50 GB RSS and the step prover keeps running beside it, so plan for about 75 GB (a
+  container memory limit has to sit above that). `rotate-keys/` takes about 40 GB of disk. The
+  nodes need the tvm-sdk#284 decider (tvm-sdk `v3.1.0.an`).
+- `--owner-hop` works with rotate on: at the first update of a new period without a sent rotate,
+  the daemon logs an error naming why (still proving, failed, refused) and falls back to the owner
+  hop; a rotate sent and not yet confirmed gets five sends first. Once the contract refuses
+  the hop (after `disableOwnerRotation`) the daemon stops hopping and proves the rotate past the
+  boundary instead; take `--owner-hop` off when disabling owner rotation. It no longer requires
+  `--no-rotate`. `docker/compose.yaml` runs `eth-lc-relayer` that way
+  (`--owner-hop --rotate-timeout-secs 10800`, no `--no-rotate`).
+- `export_shard_snark`, `export_step_snark` and `rotate_tree_n8` prove a live hand-off:
+  `ROTATE_UPDATE_PATH` names the beacon update of period P (`/updates?start_period=P`) and, for
+  `export_step_snark`, `COMMITTEE_JSON_PATH` the update of P−1, whose next committee signed it.
+  `ROTATE_KEY_DIR` keeps their proving keys between runs; a key written by another build is
+  regenerated, not used.
+- `AckiNackiBridge.migrateTreasury(address successor)` (owner, paused only) sends the whole
+  `treasuryBalance` to a contract whose `predecessor()` returns this bridge; emits
+  `TreasuryMigrated`. The bridge cannot tell a real successor from any contract giving that answer:
+  the owner key decides where the book goes. Pull AAVE principal back first (`TreasuryNotLiquid`).
+- `AckiNackiBridge.fundTreasury(uint256 amount)` (owner or `predecessor`) adds USDC to
+  `treasuryBalance` with no `Deposit` event and no `MAX_BRIDGE_TVL` check; emits `TreasuryFunded`.
+- `deposit-relayer` needs an EVM RPC that serves `eth_getLogs` and transaction receipts for at
+  least the last 7 days (30 preferred); one that keeps ~10 000 blocks cannot prove a deposit
+  older than that. Check `RPC_URL` before the next restart.
 - Images for every service, built from the sources of one commit by `docker/Dockerfile`:
   `docker.gosh.sh/bridge-relayer`, `bridge-deposit-relayer`, `bridge-eth-lc-relayer` and
   `bridge-cli` (`.woodpecker/images.yaml`: built on every pull request, pushed on `main` and
@@ -93,9 +242,27 @@ assigns it when the release is tagged.
   `scheme://host`: RPC URLs carry API keys, and transport errors quote them.
 - `ackinacki-bridge deposit --log-dir` / `BRIDGE_DEPOSIT_LOG_DIR` keeps each prover tool's
   stderr, one file per run; `withdraw` keeps the aggregator's calldata under `--work-dir`.
+- The five `*.patch` files in the repository root and `scripts/check_eth_beacon_lc_sources.sh`
+  are removed: acki-nacki takes the AN contracts through `contracts/an/place.json`. Nothing to do.
+- `AckiNackiBridge` gains `setSupplyMultiplierBps(uint256)` (owner) and the view
+  `supplyMultiplierBps()`, default `20_000` (2×); it emits `SupplyMultiplierBpsSet(uint256)`. A
+  deposit supplies once the liquid principal reaches that multiple of the target. New events to
+  alert on: `AaveSupplyRefused(uint256 amount, bytes reason)` — the pool refused a deposit's
+  supply, the USDC stayed on the bridge — and `AaveRefillFailed(uint256 amount, bytes reason)` —
+  a payout went through but the pool did not return the refill above the shortfall. `reason` is
+  the pool's revert data. `supplyForSelf(uint256)` is external only for the bridge's own use and
+  reverts `NotSelf` for any other caller.
+- `DeployShellnetE2EBridge`, `DeployTestBridge` and `GenDepositSetup` deploy a mock AAVE market
+  on local anvil (31337). `DeployShellnetE2EBridge` and `DeployRealBridge` expose `deploy()`,
+  which returns the bridge. The local e2e (`tests/e2e/local-net`) checks that the bridge is on the
+  421614 market, that the deposit supplied part of its USDC, and that `withdrawByProof` pulled it
+  back.
+- `.woodpecker/solidity.yaml` runs the Arbitrum Sepolia fork suite
+  (`AckiNackiBridgeArbSepoliaAaveForkTest`) against `https://sepolia-rollup.arbitrum.io/rpc` on
+  every pull request; an outage of that RPC fails the check.
 
 - After the upgrade to `eccUSDCBridge` 1.16.0, and on a fresh zerostate, the AN token registry
-  is empty: every deposit, USDC included, is refused with 240 until `setBridgeToken` registers
+  is empty: every deposit, USDC included, is refused with 241 until `setBridgeToken` registers
   USDC as ECC `3` for each source chain. Pause the AN bridge and let pending vouchers confirm
   before `updateCode`; register, then unpause.
 - `ackinacki-bridge` requires AN bridge 1.16.0 (`MIN_BRIDGE_VERSION`) for the token registry
@@ -108,7 +275,7 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
-- `eccUSDCBridge` 1.16.0 (code hash `7c9525de…`) credits the proven ERC-20 to its registered
+- `eccUSDCBridge` 1.16.0 (code hash `d7b876af…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register the same token and ECC id on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
@@ -117,7 +284,7 @@ assigns it when the release is tagged.
   `finalizeDeposit`, `initiateWithdrawal` and `confirmDeposit` signatures are preserved.
   Upgrading from 1.15.0 requires the structured `userCell` returned by
   `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)`, followed by token registration
-  and restoration of the trusted bridge and anchor configuration. Subsequent upgrades preserve
+  and restoration of the trusted bridge, EVM bridge (`setEvmBridge`) and anchor configuration. Subsequent upgrades preserve
   token configuration and outstanding inventory automatically.
 - `ackinacki-bridge withdraw --token-id` selects the registered ECC currency (default `3`,
   USDC). Amount precision comes from the destination token registry; no rounding is performed.
@@ -154,6 +321,17 @@ assigns it when the release is tagged.
 - The web UI checks USDC's current `tokenInfo` transfer limit, TVL capacity and deposit switch
   before approval and again before deposit. A closed, absent or unreadable listing refuses the request.
 - `eth-lc-relayer arbitrum-anchors` discovers the new token-bearing `Deposit` event.
+- `eccUSDCBridge` 1.15.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `71074c89…`):
+  `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
+  `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240) until the owner's anchors are off for the verifier's
+  parent chain, and `deployL2Verifier` throws 240 on a closed chain for a parent chain the owner
+  still anchors. Before, the owner could still reach a closed Arbitrum chain by accepting a
+  parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
+  (or Ethereum) first, then the Arbitrum chain. `updateCode` drops the verifier code and the
+  verifiers: install and deploy them again after the upgrade.
+- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
+  no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
+  verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.
 - `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe
   holds: both streams are read to the end, and its transcript is written like the step
   prover's.

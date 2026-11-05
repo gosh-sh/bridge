@@ -11,6 +11,7 @@ import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 
 import "./helpers/VerifyBlockConfigLib.sol";
+import "./helpers/MockAaveLib.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./helpers/Bn254FrLib.sol";
 import "./mocks/MockPrimaryVerifier.sol";
@@ -175,8 +176,8 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         bridge = new AckiNackiBridge(
             address(oracle),
             address(usdc),
-            address(0),
-            address(0),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
             VerifyBlockConfigLib.with(
                 IPrimaryVerifier(address(primaryVerifier)),
                 IFallbackVerifier(address(fallbackVerifier)),
@@ -560,6 +561,50 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(dai.balanceOf(RECIPIENT) - before, 1e18);
     }
 
+    function test_otherTokenDeposit_leavesTheAaveBandAlone() public {
+        address pool = address(bridge.aavePool());
+        vm.mockCallRevert(
+            pool, abi.encodeWithSelector(IAavePool.supply.selector), bytes("refused")
+        );
+        usdc.mint(funder, 10e6);
+        vm.startPrank(funder);
+        usdc.approve(address(bridge), 10e6);
+        bridge.deposit(address(usdc), 10e6, bytes32(uint256(1)));
+        vm.stopPrank();
+        vm.clearMockedCalls();
+        assertEq(bridge.suppliedPrincipal(), 0, "the refused USDC stays liquid");
+
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
+        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
+        _depositDai(funder, 1e18);
+
+        assertEq(bridge.suppliedPrincipal(), 0, "a DAI deposit supplies no USDC");
+        assertEq(usdc.balanceOf(address(bridge)), 10e6);
+        assertEq(dai.balanceOf(address(bridge)), 1e18);
+    }
+
+    function test_otherTokenPayout_pullsNothingFromAave() public {
+        usdc.mint(funder, 10e6);
+        vm.startPrank(funder);
+        usdc.approve(address(bridge), 10e6);
+        bridge.deposit(address(usdc), 10e6, bytes32(uint256(1)));
+        vm.stopPrank();
+        uint256 supplied = bridge.suppliedPrincipal();
+        assertGt(supplied, 0, "the USDC deposit reached the pool");
+
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
+        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
+        _depositDai(funder, 1e18);
+
+        bridge.withdrawByProof(
+            _dummyProof(),
+            _pubFor(DAI_TOKEN_ID, 1e18, Bn254FrLib.toFr(uint256(keccak256("daiOut"))))
+        );
+
+        assertEq(dai.balanceOf(RECIPIENT), 1e18);
+        assertEq(bridge.suppliedPrincipal(), supplied, "a DAI payout leaves the pool alone");
+    }
+
     function test_delistToken_refusesWhileLiabilitiesRemain() public {
         bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
         bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
@@ -765,7 +810,8 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
             accFr: ACC_FR,
             nullifier: nullifier,
             finalRoot: seedAnchor,
-            anchorLayer: 1
+            anchorLayer: 1,
+            dstBridge: uint256(uint160(address(bridge)))
         });
     }
 

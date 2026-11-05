@@ -2,11 +2,15 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     error::RelayerError,
     prover::ProofGenerator,
+    rotate::{
+        check_before_submit, remove_rotate_dirs_before, run_rotate, PreSubmit, RotateDir,
+        RotateInputs, RotateOutput, RotateStageRunner,
+    },
     source::{BeaconSource, ExecutionSource},
     state::RelayerState,
     submitter::{AnSubmitter, SubmitOutcome},
@@ -17,13 +21,11 @@ use crate::{
 pub struct RelayerConfig {
     pub state_path: PathBuf,
     pub poll_interval: Duration,
-    /// When the beacon period is ahead of `last_committee_period`, attempt
-    /// `generate_rotate` + `submitRotate`. Default **true**: tvm-sdk#284
-    /// (KZG accumulator decider) co-deploys with this contract. `--no-rotate`
-    /// / `enable_rotate = false` returns [`TickOutcome::RotateRequired`]
-    /// instead. `rotate_tree_n8` is a committed-fixture tree, not a live
-    /// hand-off: a live period that is not the fixture's returns
-    /// [`TickOutcome::RotateRequired`] without starting the ~40 GB job.
+    /// Prove the hand-off from the committee the contract holds in the
+    /// background, during that committee's period, and send it with
+    /// `submitRotate` ([`Relayer::with_rotate`]). Default **true**.
+    /// `--no-rotate` / `enable_rotate = false`: a period jump returns
+    /// [`TickOutcome::RotateRequired`], or takes the owner hop.
     pub enable_rotate: bool,
     /// After the first accepted `submitUpdate`, call `disableOwnerAnchors` +
     /// `disableOwnerRotation` with the relayer keys (must be the owner
@@ -31,10 +33,11 @@ pub struct RelayerConfig {
     /// client anchors only one checkpoint block per epoch and no L2, the flip
     /// leaves every other deposit block without a writer.
     pub flip_owner: bool,
-    /// With `enable_rotate = false`: on a period jump, prove a step of the
-    /// new period and advance the committee with the owner key
+    /// On a period jump the contract did not get a rotate for, prove a step
+    /// of the new period and advance the committee with the owner key
     /// (`setCommitteeCommitment`) instead of stopping at
-    /// [`TickOutcome::RotateRequired`]. A shadow-only convenience; the
+    /// [`TickOutcome::RotateRequired`]. With rotate on this is the fallback,
+    /// logged as an ERROR with the reason the rotate did not make it. The
     /// contract refuses it after `disableOwnerRotation`. Default **false**.
     pub owner_hop: bool,
     /// Call `submitAncestry` after each accepted checkpoint. Default
@@ -127,6 +130,87 @@ pub struct Relayer<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> {
     /// and the new one and calls `submitAncestry` (31/32 coverage). CLI-only
     /// without it.
     execution: Option<Arc<dyn ExecutionSource>>,
+    rotate: Option<RotateWiring>,
+}
+
+/// The background rotate: its stages, where they write, and the job.
+struct RotateWiring {
+    runner: Arc<dyn RotateStageRunner>,
+    work_dir: PathBuf,
+    vk_pin: [u8; 32],
+    job: Option<RotateJob>,
+    /// A finished proof not yet settled with the contract.
+    ready: Option<RotateOutput>,
+    /// Why the last rotate did not reach the contract.
+    note: Option<String>,
+    /// A period whose proof was refused: this process does not prove it
+    /// again.
+    refused: Option<u64>,
+    /// `submitRotate` calls for the period, none of them confirmed.
+    sends: PeriodCount,
+    /// Rotates of the period that ended in a failed stage.
+    failures: PeriodCount,
+    /// No new attempt before this, after a failed stage.
+    retry_at: Option<std::time::Instant>,
+    /// Fetch the inputs again before the next attempt; a changed answer
+    /// discards the stages proven from the old one.
+    refetch: bool,
+    /// The contract refused an owner hop: the boundary waits for the rotate
+    /// instead.
+    hop_refused: bool,
+}
+
+/// A count that starts again at zero for another period.
+#[derive(Clone, Copy, Debug, Default)]
+struct PeriodCount {
+    period: u64,
+    count: u32,
+}
+
+impl PeriodCount {
+    fn bump(&mut self, period: u64) -> u32 {
+        if self.period != period {
+            *self = Self {
+                period,
+                count: 0,
+            };
+        }
+        self.count += 1;
+        self.count
+    }
+
+    fn of(&self, period: u64) -> u32 {
+        if self.period == period {
+            self.count
+        } else {
+            0
+        }
+    }
+}
+
+/// `submitRotate` calls without a confirmation the owner hop waits for at
+/// the boundary. The proof itself is kept and sent again past them.
+const MAX_ROTATE_SENDS: u32 = 5;
+
+/// Failed rotates of one period before it is not started again.
+const MAX_ROTATE_FAILURES: u32 = 3;
+
+/// Wait after the first failed rotate of a period; doubled after each next.
+const ROTATE_RETRY_BACKOFF: Duration = Duration::from_secs(10 * 60);
+
+struct RotateJob {
+    period: u64,
+    started: std::time::Instant,
+    handle: tokio::task::JoinHandle<Result<RotateOutput, RelayerError>>,
+}
+
+/// A job that is dropped — superseded, or the daemon stopping — is aborted,
+/// and the prover it runs is killed with it (`kill_on_drop`). The stages it
+/// finished stay on disk.
+impl Drop for RotateJob {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
@@ -144,7 +228,36 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             submitter,
             state,
             execution: None,
+            rotate: None,
         })
+    }
+
+    /// Prove rotates with `runner` in `<work_dir>/rotate-<P>/`, and send only
+    /// a proof whose VK blob hashes to `vk_pin`
+    /// ([`crate::rotate::pinned_rotate_vk_sha256`] outside tests).
+    pub fn with_rotate(
+        mut self,
+        runner: Arc<dyn RotateStageRunner>,
+        work_dir: PathBuf,
+        vk_pin: [u8; 32],
+    ) -> Self {
+        // The stages run with the prover directory as their working directory.
+        let work_dir = std::path::absolute(&work_dir).unwrap_or(work_dir);
+        self.rotate = Some(RotateWiring {
+            runner,
+            work_dir,
+            vk_pin,
+            job: None,
+            ready: None,
+            note: None,
+            refused: None,
+            sends: PeriodCount::default(),
+            failures: PeriodCount::default(),
+            retry_at: None,
+            refetch: false,
+            hop_refused: false,
+        });
+        self
     }
 
     pub fn with_execution(mut self, rpc: Arc<dyn ExecutionSource>) -> Self {
@@ -169,6 +282,10 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             );
         }
 
+        if let Some(outcome) = self.drive_rotate(&update).await? {
+            return Ok(outcome);
+        }
+
         let period = update.period();
         if let Some(last_p) = self.state.last_committee_period {
             if period > last_p {
@@ -179,10 +296,19 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     Ok(on_chain) if on_chain >= period => {
                         self.state.record_rotate(on_chain);
                         self.persist()?;
+                        self.drop_rotate_before(on_chain);
                         info!(
                             on_chain,
                             last_p, "committee already rotated on chain; recording it"
                         );
+                    },
+                    // Not knowing whether the rotate landed is no reason to
+                    // hop over it; the next tick reads the contract again.
+                    Err(e) if self.config.enable_rotate => {
+                        warn!(error = %e, "getCommitteeState at the period boundary failed; next tick");
+                        return Ok(TickOutcome::AnPending {
+                            reason: format!("getCommitteeState at the period boundary: {e}"),
+                        });
                     },
                     _ => return self.handle_period_jump(update, last_p, period).await,
                 }
@@ -243,37 +369,492 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 to_period,
             });
         }
-        let mut update = update;
-        if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+        // A proof that went out and is not confirmed yet may still land; it
+        // gets its remaining sends before the owner hop.
+        if let Some(rotate) = self.rotate.as_ref() {
+            let sends = rotate.sends.of(from_period);
+            if self.config.owner_hop
+                && rotate
+                    .ready
+                    .as_ref()
+                    .is_some_and(|out| out.from_period == from_period)
+                && sends < MAX_ROTATE_SENDS
+            {
+                return Ok(TickOutcome::AnPending {
+                    reason: format!(
+                        "the rotate proof from period {from_period} is unconfirmed after {sends} \
+                         of {MAX_ROTATE_SENDS} sends; the owner hop waits for the rest"
+                    ),
+                });
+            }
+        }
+        // The rotate is proven during the period it rotates from; reaching
+        // the boundary without it on chain means it did not make it in time.
+        let why = self.rotate_status(from_period);
+        let hop_refused = self.rotate.as_ref().is_some_and(|r| r.hop_refused);
+        if self.config.owner_hop && !hop_refused {
+            error!(
+                from_period,
+                to_period,
+                reason = %why,
+                "committee period advanced before a rotate was accepted; falling back to the owner \
+                 hop"
+            );
+            let mut update = update;
+            if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+                return Ok(outcome);
+            }
+            let outcome = self.owner_hop(update, from_period, to_period).await?;
+            if let Some(period) = self
+                .state
+                .last_committee_period
+                .filter(|p| *p > from_period)
+            {
+                self.drop_rotate_before(period);
+            }
             return Ok(outcome);
         }
-        let bundle = match self.prover.generate_rotate(to_period, update.chain).await {
-            Ok(b) => b,
-            Err(e) => {
-                let reason = e.to_string();
-                // rotate_tree_n8 proves a committed fixture, not this
-                // hand-off. Do not treat that as a failed 40 GB run to retry.
-                if reason.contains("committed fixture") {
-                    self.state.record_rotate_pending(to_period);
-                    self.persist()?;
-                    warn!(from_period, to_period, %reason, "live rotate is not the fixture tree");
-                    return Ok(TickOutcome::RotateRequired {
-                        from_period,
-                        to_period,
-                    });
+        self.state.record_rotate_pending(to_period);
+        self.persist()?;
+        warn!(
+            from_period,
+            to_period,
+            reason = %why,
+            hop_refused,
+            "committee period advanced; waiting for the rotate proof (no --owner-hop, or the \
+             contract refused it)"
+        );
+        Ok(TickOutcome::RotateRequired {
+            from_period,
+            to_period,
+        })
+    }
+
+    /// The background rotate, once a tick: settle a finished proof with the
+    /// contract, or start the rotate the contract is due. `Some` when this
+    /// tick moved the committee; the step waits for the next tick. A send
+    /// that is refused or not confirmed leaves the tick to the step and the
+    /// period boundary.
+    async fn drive_rotate(
+        &mut self,
+        update: &FinalityUpdate,
+    ) -> Result<Option<TickOutcome>, RelayerError> {
+        if !self.config.enable_rotate || self.rotate.is_none() {
+            return Ok(None);
+        }
+        self.collect_rotate(false).await;
+        let rotate = self.rotate.as_ref().expect("checked above");
+        if rotate.ready.is_some() {
+            return Ok(match self.settle_ready_rotate().await? {
+                Some(
+                    moved @ (TickOutcome::Rotated {
+                        ..
+                    }
+                    | TickOutcome::AlreadyOnHead {
+                        ..
+                    }),
+                ) => Some(moved),
+                _ => None,
+            });
+        }
+        if rotate.job.is_none() {
+            self.maybe_start_rotate(update).await?;
+        }
+        Ok(None)
+    }
+
+    /// Take the result of a finished job (all of it when `block`, which only
+    /// tests use).
+    async fn collect_rotate(&mut self, block: bool) {
+        let Some(rotate) = self.rotate.as_mut() else {
+            return;
+        };
+        let finished = rotate
+            .job
+            .as_ref()
+            .is_some_and(|job| block || job.handle.is_finished());
+        if !finished {
+            return;
+        }
+        let mut job = rotate.job.take().expect("checked above");
+        match (&mut job.handle).await {
+            Ok(Ok(out)) => {
+                info!(
+                    period = job.period,
+                    mins = job.started.elapsed().as_secs() / 60,
+                    "rotate proof finished"
+                );
+                rotate.ready = Some(out);
+            },
+            Ok(Err(e)) => {
+                let failed = rotate.failures.bump(job.period);
+                if failed >= MAX_ROTATE_FAILURES {
+                    error!(
+                        period = job.period,
+                        failed,
+                        error = %e,
+                        "rotate failed again; not started again by this process"
+                    );
+                    rotate.refused = Some(job.period);
+                    rotate.note = Some(format!(
+                        "the rotate from period {} failed {failed} times, last: {e}. Fix the \
+                         cause, remove {} and restart the daemon",
+                        job.period,
+                        RotateDir::new(&rotate.work_dir, job.period)
+                            .root()
+                            .display()
+                    ));
+                } else {
+                    let wait = ROTATE_RETRY_BACKOFF * 2u32.pow(failed - 1);
+                    warn!(
+                        period = job.period,
+                        failed,
+                        retry_in_mins = wait.as_secs() / 60,
+                        error = %e,
+                        "rotate failed; trying again with the inputs fetched anew"
+                    );
+                    rotate.retry_at = Some(std::time::Instant::now() + wait);
+                    rotate.refetch = true;
+                    rotate.note = Some(format!(
+                        "the rotate from period {} failed ({failed} of {MAX_ROTATE_FAILURES}): {e}",
+                        job.period
+                    ));
                 }
-                return Ok(TickOutcome::ProofFailed {
-                    reason,
-                });
+            },
+            Err(e) => {
+                rotate.note = Some(format!(
+                    "the rotate from period {} stopped: {e}",
+                    job.period
+                ));
+            },
+        }
+    }
+
+    /// Test hook: wait for the background rotate and take its result.
+    #[doc(hidden)]
+    pub async fn wait_for_rotate(&mut self) {
+        self.collect_rotate(true).await;
+    }
+
+    /// Period of the rotate running in the background.
+    pub fn rotate_running(&self) -> Option<u64> {
+        self.rotate.as_ref()?.job.as_ref().map(|job| job.period)
+    }
+
+    async fn settle_ready_rotate(&mut self) -> Result<Option<TickOutcome>, RelayerError> {
+        let chain = match self.submitter.get_committee_state().await {
+            Ok(chain) => chain,
+            Err(e) => {
+                warn!(error = %e, "getCommitteeState before submitRotate failed; next tick");
+                return Ok(None);
             },
         };
-        match self.submitter.submit_rotate(&bundle).await? {
+        let rotate = self.rotate.as_mut().expect("drive_rotate checked");
+        let out = rotate.ready.clone().expect("drive_rotate checked");
+        let from = out.from_period;
+        match check_before_submit(&out, &rotate.vk_pin, &chain) {
+            PreSubmit::Stale {
+                on_chain,
+            } => {
+                info!(
+                    from_period = from,
+                    on_chain, "rotate proof finished after the contract moved on; not sent"
+                );
+                rotate.ready = None;
+                RotateDir::new(&rotate.work_dir, from).remove();
+                if self
+                    .state
+                    .last_committee_period
+                    .is_none_or(|p| p < on_chain)
+                {
+                    self.state.record_rotate(on_chain);
+                    self.persist()?;
+                }
+                Ok(None)
+            },
+            PreSubmit::Refuse(reason) => {
+                error!(from_period = from, %reason, "rotate proof not sent");
+                rotate.ready = None;
+                rotate.refused = Some(from);
+                rotate.note = Some(format!(
+                    "the rotate proof from period {from} was not sent: {reason}"
+                ));
+                Ok(None)
+            },
+            PreSubmit::Send => {
+                if let Some(why) = self.gloas_slot_blocks(&out).await {
+                    self.rotate_note(why);
+                    return Ok(None);
+                }
+                let rotate = self.rotate.as_mut().expect("drive_rotate checked");
+                rotate.sends.bump(from);
+                // A transport error says as little about the chain as a wait
+                // that timed out.
+                let outcome = match self.submitter.submit_rotate(&out.bundle).await {
+                    Ok(outcome) => outcome,
+                    Err(e) => SubmitOutcome::NotSent {
+                        reason: format!("submitRotate: {e}"),
+                    },
+                };
+                self.settle_rotate(from, out.bundle.period, outcome)
+                    .map(Some)
+            },
+        }
+    }
+
+    /// Why `out` cannot go out against the contract's `getGloasForkSlot`
+    /// now. A proof for another slot is discarded and proven again from
+    /// inputs fetched anew; an unset slot keeps it until the owner sets one.
+    async fn gloas_slot_blocks(&mut self, out: &RotateOutput) -> Option<String> {
+        if self.config.pin_fork_slot_from_beacon {
+            return None;
+        }
+        let proven = out.gloas_fork_slot();
+        match self.submitter.get_gloas_fork_slot().await {
+            Ok((slot, true)) if slot == proven => None,
+            Ok((slot, true)) => {
+                let from = out.from_period;
+                warn!(
+                    from_period = from,
+                    proven,
+                    contract = slot,
+                    "rotate proof is for another Gloas slot than the contract's; proving it again"
+                );
+                let rotate = self.rotate.as_mut().expect("drive_rotate checked");
+                rotate.ready = None;
+                RotateDir::new(&rotate.work_dir, from).remove();
+                Some(format!(
+                    "the rotate proof from period {from} names Gloas slot {proven}, the contract \
+                     {slot}; proving it again"
+                ))
+            },
+            Ok((_, false)) => Some(
+                "getGloasForkSlot is unset (exit 256); the rotate proof waits for owner \
+                 set-gloas-fork-slot"
+                    .into(),
+            ),
+            Err(e) => Some(format!("getGloasForkSlot before submitRotate: {e}")),
+        }
+    }
+
+    /// Start the rotate from the committee the contract holds once the
+    /// beacon chain is in that committee's period, unless the boundary is
+    /// already behind and the owner hop takes it.
+    async fn maybe_start_rotate(&mut self, update: &FinalityUpdate) -> Result<(), RelayerError> {
+        let Some(period) = self.state.last_committee_period else {
+            return Ok(());
+        };
+        let rotate = self.rotate.as_ref().expect("drive_rotate checked");
+        // Past the boundary the owner hop takes the period, unless the
+        // contract refused it; then the rotate is the only way on.
+        let hop_takes_it = self.config.owner_hop && !rotate.hop_refused && update.period() > period;
+        if update.signing_period() < period
+            || hop_takes_it
+            || rotate.refused == Some(period)
+            || rotate
+                .retry_at
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return Ok(());
+        }
+        let chain = match self.submitter.get_committee_state().await {
+            Ok(chain) => chain,
+            Err(e) => {
+                self.rotate_note(format!("getCommitteeState: {e}"));
+                return Ok(());
+            },
+        };
+        if chain.period != period {
+            if chain.period > period {
+                info!(
+                    recorded = period,
+                    on_chain = chain.period,
+                    "committee moved on chain; recording it"
+                );
+                self.state.record_rotate(chain.period);
+                self.persist()?;
+                self.drop_rotate_before(chain.period);
+            } else {
+                warn!(
+                    recorded = period,
+                    on_chain = chain.period,
+                    "the state file is ahead of the contract; no rotate is started"
+                );
+                self.rotate_note(format!(
+                    "the state file records committee period {period} and the contract holds {}: \
+                     a state directory from another deployment, or a re-bootstrapped contract",
+                    chain.period
+                ));
+            }
+            return Ok(());
+        }
+        let work_dir = self
+            .rotate
+            .as_ref()
+            .expect("drive_rotate checked")
+            .work_dir
+            .clone();
+        remove_rotate_dirs_before(&work_dir, period);
+        let dir = RotateDir::new(&work_dir, period);
+        let refetch =
+            std::mem::take(&mut self.rotate.as_mut().expect("drive_rotate checked").refetch);
+        let inputs = match dir.load_inputs() {
+            Ok(Some(saved)) if refetch => match self.rotate_inputs(period).await {
+                Ok(fresh) if fresh == saved => saved,
+                Ok(fresh) => {
+                    warn!(
+                        period,
+                        "the beacon node answers other inputs than the failed rotate had; proving \
+                         from the start"
+                    );
+                    dir.remove();
+                    dir.save_inputs(&fresh)?;
+                    fresh
+                },
+                Err(why) => {
+                    info!(period, reason = %why, "rotate not started");
+                    self.rotate_note(why);
+                    if let Some(rotate) = self.rotate.as_mut() {
+                        rotate.refetch = true;
+                    }
+                    return Ok(());
+                },
+            },
+            Ok(Some(inputs)) => inputs,
+            Ok(None) => match self.rotate_inputs(period).await {
+                Ok(inputs) => {
+                    dir.save_inputs(&inputs)?;
+                    inputs
+                },
+                Err(why) => {
+                    info!(period, reason = %why, "rotate not started");
+                    self.rotate_note(why);
+                    return Ok(());
+                },
+            },
+            Err(e) => {
+                warn!(dir = %dir.root().display(), error = %e, "unreadable rotate inputs; removing");
+                dir.remove();
+                return Ok(());
+            },
+        };
+        let rotate = self.rotate.as_mut().expect("drive_rotate checked");
+        let runner = rotate.runner.clone();
+        let job_dir = dir.clone();
+        let handle =
+            tokio::spawn(async move { run_rotate(runner.as_ref(), &job_dir, &inputs).await });
+        rotate.job = Some(RotateJob {
+            period,
+            started: std::time::Instant::now(),
+            handle,
+        });
+        info!(period, dir = %dir.root().display(), "rotate started in the background");
+        Ok(())
+    }
+
+    /// The update of `period` and of the period before, checked; the reason
+    /// when the beacon node does not have them yet.
+    async fn rotate_inputs(&self, period: u64) -> Result<RotateInputs, String> {
+        let update = self
+            .source
+            .period_update(period)
+            .await
+            .map_err(|e| format!("update of period {period}: {e}"))?;
+        let committee = self
+            .source
+            .period_update(period.saturating_sub(1))
+            .await
+            .map_err(|e| format!("update of period {}: {e}", period.saturating_sub(1)))?;
+        let mut chain = update.chain;
+        if !self.config.pin_fork_slot_from_beacon {
+            match self.submitter.get_gloas_fork_slot().await {
+                Ok((slot, true)) => {
+                    if let Some(chain) = chain.as_mut() {
+                        chain.gloas_fork_slot = slot;
+                    }
+                },
+                Ok((_, false)) => {
+                    return Err("getGloasForkSlot is unset; owner set-gloas-fork-slot".into());
+                },
+                Err(e) => return Err(format!("getGloasForkSlot: {e}")),
+            }
+        }
+        let inputs = RotateInputs {
+            period,
+            update_json: update.raw_json,
+            committee_json: committee.raw_json,
+            chain,
+        };
+        inputs.check().map_err(|e| e.to_string())?;
+        Ok(inputs)
+    }
+
+    fn rotate_note(&mut self, note: String) {
+        if let Some(rotate) = self.rotate.as_mut() {
+            rotate.note = Some(note);
+        }
+    }
+
+    /// Why the rotate from `period` is not on chain, for the log.
+    fn rotate_status(&self, period: u64) -> String {
+        let Some(rotate) = self.rotate.as_ref() else {
+            return "no rotate prover is configured".into();
+        };
+        if let Some(job) = &rotate.job {
+            return format!(
+                "the rotate from period {} is still proving ({} min in)",
+                job.period,
+                job.started.elapsed().as_secs() / 60
+            );
+        }
+        if let Some(out) = &rotate.ready {
+            return format!(
+                "the rotate proof from period {} is waiting to be sent",
+                out.from_period
+            );
+        }
+        rotate
+            .note
+            .clone()
+            .unwrap_or_else(|| format!("no rotate from period {period} was started"))
+    }
+
+    /// Stop and remove every rotate from a period before `period`: the
+    /// contract is past it.
+    fn drop_rotate_before(&mut self, period: u64) {
+        let Some(rotate) = self.rotate.as_mut() else {
+            return;
+        };
+        if rotate.job.as_ref().is_some_and(|job| job.period < period) {
+            rotate.job = None;
+        }
+        if rotate
+            .ready
+            .as_ref()
+            .is_some_and(|out| out.from_period < period)
+        {
+            rotate.ready = None;
+        }
+        rotate.note = None;
+        rotate.retry_at = None;
+        rotate.refetch = false;
+        remove_rotate_dirs_before(&rotate.work_dir, period);
+    }
+
+    fn settle_rotate(
+        &mut self,
+        from_period: u64,
+        to_period: u64,
+        outcome: SubmitOutcome,
+    ) -> Result<TickOutcome, RelayerError> {
+        match outcome {
             SubmitOutcome::Accepted {
                 tx_hash,
             } => {
                 self.state.record_rotate(to_period);
                 self.persist()?;
-                info!(to_period, "submitRotate accepted");
+                self.drop_rotate_before(to_period);
+                info!(to_period, tx = ?tx_hash.map(hex::encode), "submitRotate accepted");
                 Ok(TickOutcome::Rotated {
                     period: to_period,
                     tx_hash,
@@ -296,11 +877,9 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 // without an attempt on record the same codes mean the chain
                 // sits on a committee this daemon cannot rotate from, which is
                 // an operator's business.
+                let code = crate::submitter::parsed_exit_code(&reason);
                 if self.state.rotate_in_flight_period == Some(to_period)
-                    && matches!(
-                        crate::submitter::parsed_exit_code(&reason),
-                        Some(242) | Some(253)
-                    )
+                    && matches!(code, Some(242) | Some(253))
                 {
                     let before = self.state.clone();
                     self.state.record_rotate(to_period);
@@ -308,6 +887,7 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         self.state = before;
                         return Err(e);
                     }
+                    self.drop_rotate_before(to_period);
                     warn!(
                         to_period,
                         reason = %reason,
@@ -318,16 +898,45 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         finalized_slot: self.state.last_finalized_slot.unwrap_or(0),
                     });
                 }
+                error!(from_period, to_period, %reason, "submitRotate refused");
+                // Anything but the contract's own refusal is sent again.
+                let Some(code) = code else {
+                    self.note_unconfirmed_rotate(from_period, &reason);
+                    return Ok(TickOutcome::AnRejected {
+                        reason,
+                    });
+                };
+                if let Some(rotate) = self.rotate.as_mut() {
+                    rotate.note = Some(format!("submitRotate refused: {reason}"));
+                    match code {
+                        // Another Gloas slot than the proof's: proven again
+                        // from inputs that carry the contract's.
+                        255 => {
+                            rotate.ready = None;
+                            RotateDir::new(&rotate.work_dir, from_period).remove();
+                        },
+                        // Gloas slot unset: the proof waits for the owner.
+                        256 => {},
+                        // The contract's own refusal is not proven again by
+                        // this process.
+                        _ => {
+                            rotate.ready = None;
+                            rotate.refused = Some(from_period);
+                        },
+                    }
+                }
                 Ok(TickOutcome::AnRejected {
                     reason,
                 })
             },
             // The proof went out and its fate is unknown: the chain may have
-            // run the rotation after the wait gave up.
+            // run the rotation after the wait gave up. The proof is kept and
+            // sent again; the checks before it see a landed rotation.
             SubmitOutcome::Pending {
                 reason,
             } => {
                 self.mark_rotate_in_flight(to_period)?;
+                self.note_unconfirmed_rotate(from_period, &reason);
                 Ok(TickOutcome::AnPending {
                     reason,
                 })
@@ -339,11 +948,27 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 reason,
             } => {
                 self.mark_rotate_in_flight(to_period)?;
+                self.note_unconfirmed_rotate(from_period, &reason);
                 Ok(TickOutcome::AnPending {
                     reason,
                 })
             },
         }
+    }
+
+    /// After a send without a confirmation: the proof is kept and sent again
+    /// on the next tick, for as long as the contract has not moved past it.
+    /// `MAX_ROTATE_SENDS` only bounds how long the owner hop waits for it.
+    fn note_unconfirmed_rotate(&mut self, from_period: u64, reason: &str) {
+        let Some(rotate) = self.rotate.as_mut() else {
+            return;
+        };
+        let sends = rotate.sends.of(from_period);
+        warn!(from_period, sends, %reason, "submitRotate not confirmed; sending it again next tick");
+        rotate.note = Some(format!(
+            "the rotate proof from period {from_period} is unconfirmed after {sends} sends (the \
+             owner hop waits for {MAX_ROTATE_SENDS}): {reason}"
+        ));
     }
 
     /// Prove against `getGloasForkSlot()`, not the beacon spec. A published
@@ -463,6 +1088,13 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     ?other,
                     "owner hop refused; leaving period pending"
                 );
+                // The contract's refusal, `disableOwnerRotation` most likely:
+                // from here the boundary waits for the rotate instead.
+                if matches!(other, SubmitOutcome::Rejected { .. }) {
+                    if let Some(rotate) = self.rotate.as_mut() {
+                        rotate.hop_refused = true;
+                    }
+                }
                 self.state.record_rotate_pending(to_period);
                 self.persist()?;
                 return Ok(TickOutcome::AnRejected {
@@ -867,6 +1499,8 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -1217,28 +1851,826 @@ mod tests {
         }
         assert_eq!(r.state().rotate_pending_period, Some(1));
     }
+    /// `/updates?start_period=P` answer with an update attested at `slot`.
+    fn period_update(slot: u64) -> String {
+        format!(
+            r#"[{{"version":"fulu","data":{{"attested_header":{{"beacon":{{"slot":"{slot}"}}}}}}}}]"#
+        )
+    }
 
-    #[tokio::test]
-    async fn enable_rotate_submits_rotate() {
-        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
-        let dir = tempdir().unwrap();
-        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+    struct RotateRig {
+        relayer: Relayer<InMemoryBeaconSource, MockProofGenerator, MockAnSubmitter>,
+        submitter: Arc<MockAnSubmitter>,
+        runner: Arc<crate::rotate::MockRotateRunner>,
+        work: PathBuf,
+        state: PathBuf,
+    }
+
+    /// The contract holds committee 1 and the beacon chain is in period 1:
+    /// the rotate 1→2 is due. `updates` are the finality updates in order.
+    fn rotate_rig(
+        updates: Vec<FinalityUpdate>,
+        owner_hop: bool,
+        runner: crate::rotate::MockRotateRunner,
+        dir: &Path,
+    ) -> RotateRig {
+        let state = dir.join("state.json");
+        let work = dir.join("work");
+        let mut cfg = RelayerConfig::new(state.clone());
         cfg.poll_interval = Duration::from_millis(1);
         cfg.enable_rotate = true;
-        let mut r = Relayer::new(
+        cfg.owner_hop = owner_hop;
+        let source = InMemoryBeaconSource::new(updates);
+        source.set_period_update(0, period_update(100));
+        source.set_period_update(1, period_update(SLOTS_PER_SYNC_PERIOD + 100));
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_committee_period(1);
+        let runner = Arc::new(runner);
+        let relayer = Relayer::new(
             cfg,
-            Arc::new(src),
+            Arc::new(source),
             Arc::new(MockProofGenerator::new()),
-            Arc::new(MockAnSubmitter::accepting()),
+            submitter.clone(),
         )
-        .unwrap();
-        r.tick().await.unwrap();
+        .unwrap()
+        .with_rotate(
+            runner.clone(),
+            work.clone(),
+            crate::rotate::MockRotateRunner::vk_pin(),
+        );
+        RotateRig {
+            relayer,
+            submitter,
+            runner,
+            work,
+            state,
+        }
+    }
+
+    fn held_runner(
+        stage: crate::rotate::Stage,
+    ) -> (crate::rotate::MockRotateRunner, Arc<tokio::sync::Notify>) {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let mut runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        runner.hold = Some((stage, notify.clone()));
+        (runner, notify)
+    }
+
+    /// The rotate starts inside the period it rotates from, the head keeps
+    /// moving while it is proven, and the proof goes out once it is done —
+    /// before the boundary.
+    #[tokio::test]
+    async fn the_rotate_runs_in_its_period_while_steps_go_on() {
+        use crate::rotate::Stage;
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, release) = held_runner(Stage::Tree);
+        let mut rig = rotate_rig(
+            vec![
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+                update(p + 134, p + 128),
+            ],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(
+            r.rotate_running(),
+            None,
+            "the committee period is learnt on this tick"
+        );
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(r.rotate_running(), Some(1));
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(
+            r.rotate_running(),
+            Some(1),
+            "still proving; the head moved anyway"
+        );
+        assert_eq!(rig.submitter.rotate_submits(), 0);
+
+        release.notify_one();
+        r.wait_for_rotate().await;
         match r.tick().await.unwrap() {
             TickOutcome::Rotated {
                 period, ..
-            } => assert_eq!(period, 1),
+            } => assert_eq!(period, 2),
             other => panic!("{other:?}"),
         }
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert_eq!(rig.submitter.get_committee_period().await.unwrap(), 2);
+        assert_eq!(rig.submitter.current_committee(), [0xD1; 32]);
+        assert!(
+            !rig.work.join("rotate-1").exists(),
+            "an accepted rotate leaves no directory"
+        );
+        assert_eq!(rig.runner.runs(), vec![
+            (1, Stage::Shard),
+            (1, Stage::StepSnark),
+            (1, Stage::Tree)
+        ]);
+        // Period 1 still has updates to come; the committee period does not
+        // drop back with them, and no second rotate starts.
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::Unchanged { .. }
+        ));
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert_eq!(r.rotate_running(), None);
+    }
+
+    /// A restart after a stage was cut short: the finished stages are not run
+    /// again, the cut one is, from an empty directory.
+    #[tokio::test]
+    async fn a_restart_runs_only_the_stage_that_did_not_finish() {
+        use crate::rotate::Stage;
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let updates = vec![update(p + 70, p + 64), update(p + 102, p + 96)];
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        *runner.fail_once.lock().unwrap() = Some(Stage::Tree);
+        let mut rig = rotate_rig(updates.clone(), false, runner, dir.path());
+        rig.relayer.tick().await.unwrap();
+        rig.relayer.tick().await.unwrap();
+        rig.relayer.wait_for_rotate().await;
+        let rotate_dir = rig.work.join("rotate-1");
+        assert!(rotate_dir.join("shard").is_dir());
+        assert!(rotate_dir.join("step").is_dir());
+        assert!(!rotate_dir.join("tree").exists());
+        assert!(
+            rotate_dir.join("tree.partial/started").exists(),
+            "the cut stage left its partial"
+        );
+        let state = rig.state.clone();
+        drop(rig);
+
+        // The same state and work directories, a new process.
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(vec![update(p + 134, p + 128)], false, runner, dir.path());
+        assert_eq!(rig.state, state);
+        rig.relayer.tick().await.unwrap();
+        assert_eq!(rig.relayer.rotate_running(), Some(1));
+        rig.relayer.wait_for_rotate().await;
+        assert_eq!(rig.runner.runs(), vec![(1, Stage::Tree)]);
+        assert!(matches!(
+            rig.relayer.tick().await.unwrap(),
+            TickOutcome::Rotated {
+                period: 2,
+                ..
+            }
+        ));
+    }
+
+    /// The boundary passes with the rotate still proving. With `--owner-hop`
+    /// the owner moves the committee, and the rotate from the period left
+    /// behind is stopped and removed.
+    #[tokio::test]
+    async fn at_the_boundary_without_a_rotate_the_owner_hop_takes_over() {
+        use crate::rotate::Stage;
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, _never) = held_runner(Stage::StepSnark);
+        let mut rig = rotate_rig(
+            vec![
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+                update(2 * p + 40, 2 * p + 8),
+            ],
+            true,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { finalized_slot, .. } if finalized_slot == 2 * p + 8),
+            "{out:?}"
+        );
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert_eq!(rig.submitter.get_committee_period().await.unwrap(), 2);
+        assert_eq!(rig.submitter.rotate_submits(), 0);
+        assert_eq!(
+            r.rotate_running(),
+            None,
+            "the rotate from period 1 is stopped"
+        );
+        assert!(!rig.work.join("rotate-1").exists());
+    }
+
+    /// Without `--owner-hop` the daemon waits for the proof at the boundary,
+    /// and sends it when it is done: the contract still holds period 1.
+    #[tokio::test]
+    async fn at_the_boundary_without_the_owner_hop_the_rotate_is_awaited() {
+        use crate::rotate::Stage;
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, release) = held_runner(Stage::Tree);
+        let mut rig = rotate_rig(
+            vec![
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+                update(2 * p + 40, 2 * p + 8),
+            ],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        match r.tick().await.unwrap() {
+            TickOutcome::RotateRequired {
+                from_period,
+                to_period,
+            } => assert_eq!((from_period, to_period), (1, 2)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(r.rotate_running(), Some(1));
+        release.notify_one();
+        r.wait_for_rotate().await;
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Rotated {
+            period: 2,
+            ..
+        }));
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(r.state().last_finalized_slot, Some(2 * p + 8));
+    }
+
+    /// The committee moved on chain while the rotate was proven — an owner
+    /// hop or a manual `submit-rotate`: the finished proof is not sent.
+    #[tokio::test]
+    async fn a_rotate_finished_after_the_contract_moved_on_is_not_sent() {
+        use crate::rotate::Stage;
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, release) = held_runner(Stage::Tree);
+        let mut rig = rotate_rig(
+            vec![
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+                update(p + 134, p + 128),
+            ],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        rig.submitter.set_committee_period(2);
+        release.notify_one();
+        r.wait_for_rotate().await;
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        assert_eq!(rig.submitter.rotate_submits(), 0);
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert!(!rig.work.join("rotate-1").exists());
+    }
+
+    /// A proof whose VK blob is not the pinned one, or that starts from
+    /// another committee than the contract's, is never sent — and not proven
+    /// again on the next tick.
+    #[tokio::test]
+    async fn a_rotate_that_fails_the_checks_is_not_sent() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        for wrong in ["vk", "committee"] {
+            let dir = tempdir().unwrap();
+            let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+            let mut rig = rotate_rig(
+                vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+                false,
+                runner,
+                dir.path(),
+            );
+            if wrong == "vk" {
+                rig.relayer.rotate.as_mut().unwrap().vk_pin = [0; 32];
+            } else {
+                rig.submitter.set_current_committee([0x77; 32]);
+            }
+            let r = &mut rig.relayer;
+            r.tick().await.unwrap();
+            r.tick().await.unwrap();
+            r.wait_for_rotate().await;
+            r.tick().await.unwrap();
+            r.tick().await.unwrap();
+            assert_eq!(rig.submitter.rotate_submits(), 0, "{wrong}");
+            assert_eq!(r.rotate_running(), None, "{wrong}");
+            assert_eq!(rig.runner.runs().len(), 3, "{wrong}: proven once");
+            assert_eq!(r.state().last_committee_period, Some(1), "{wrong}");
+            let status = r.rotate_status(1);
+            let named = if wrong == "vk" {
+                "rotate_vk_blob.bin sha256"
+            } else {
+                "currentCommittee"
+            };
+            assert!(status.contains(named), "{wrong}: {status}");
+        }
+    }
+
+    /// No update attested in the period yet, or no update of the period
+    /// before: nothing is started.
+    #[tokio::test]
+    async fn without_live_inputs_no_prover_starts() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        for (period_1, period_0) in [
+            (Some(period_update(100)), Some(period_update(100))),
+            (Some(period_update(p + 100)), None),
+            (Some(period_update(p + 100)), Some(period_update(p + 100))),
+            (None, Some(period_update(100))),
+            (Some(String::new()), Some(period_update(100))),
+        ] {
+            let dir = tempdir().unwrap();
+            let source =
+                InMemoryBeaconSource::new(vec![update(p + 70, p + 64), update(p + 102, p + 96)]);
+            if let Some(json) = &period_1 {
+                source.set_period_update(1, json.clone());
+            }
+            if let Some(json) = &period_0 {
+                source.set_period_update(0, json.clone());
+            }
+            let submitter = Arc::new(MockAnSubmitter::accepting());
+            submitter.set_committee_period(1);
+            let runner = Arc::new(crate::rotate::MockRotateRunner::new([0xC0; 32]));
+            let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+            cfg.poll_interval = Duration::from_millis(1);
+            let mut r = Relayer::new(
+                cfg,
+                Arc::new(source),
+                Arc::new(MockProofGenerator::new()),
+                submitter,
+            )
+            .unwrap()
+            .with_rotate(
+                runner.clone(),
+                dir.path().join("work"),
+                crate::rotate::MockRotateRunner::vk_pin(),
+            );
+            r.tick().await.unwrap();
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::SubmittedUpdate { .. }
+            ));
+            assert_eq!(r.rotate_running(), None, "{period_1:?} / {period_0:?}");
+            assert!(runner.runs().is_empty());
+            assert!(!dir.path().join("work/rotate-1").exists());
+        }
+    }
+
+    /// `call_contract` broadcasts and waits in one call, so a wait that times
+    /// out can still have left the rotation on the chain. The retry is then
+    /// refused with `ERR_WRONG_COMMITTEE` (242) against the committee it
+    /// rotates to. Unless that refusal is read as "it landed", every later
+    /// tick re-enters the period jump and the head never moves again.
+    #[tokio::test]
+    async fn a_rotate_that_timed_out_and_then_is_refused_as_applied_is_recorded() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+                update(2 * p + 40, 2 * p + 8),
+            ],
+            false,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.script_rotate(vec![
+            SubmitOutcome::NotSent {
+                reason: "submitRotate: Error: wait message timed out".into(),
+            },
+            SubmitOutcome::Rejected {
+                reason: "submitRotate failed: tvm error (account=0abc) (exit_code=242)".into(),
+            },
+        ]);
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        // The unconfirmed send leaves the tick to the step, which is past the
+        // boundary.
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::RotateRequired { .. }), "{out:?}");
+        assert_eq!(r.state().rotate_in_flight_period, Some(2));
+        assert_eq!(r.state().last_committee_period, Some(1));
+
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AlreadyOnHead { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert_eq!(r.state().rotate_in_flight_period, None);
+
+        // The point of recording it: the daemon reaches the step again.
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { .. }),
+            "the head must advance after the rotation is recorded: {out:?}"
+        );
+        assert_eq!(r.state().last_finalized_slot, Some(2 * p + 8));
+    }
+
+    /// The same refusal without an attempt of this daemon's own on record
+    /// means the chain sits on a committee it cannot rotate from. That is not
+    /// a rotation to record — it needs an operator.
+    #[tokio::test]
+    async fn a_wrong_committee_refusal_with_no_attempt_in_flight_is_not_recorded() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+            false,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.script_rotate(vec![SubmitOutcome::Rejected {
+            reason: "submitRotate failed: tvm error (account=0abc) (exit_code=242)".into(),
+        }]);
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Unchanged { .. }), "{out:?}");
+        assert_eq!(rig.submitter.rotate_submits(), 1);
+        assert_eq!(r.state().last_committee_period, Some(1));
+        assert_eq!(r.state().rotate_in_flight_period, None);
+        assert!(
+            r.rotate_status(1).contains("exit_code=242"),
+            "{}",
+            r.rotate_status(1)
+        );
+        // The contract's own refusal: not proven again by this process.
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), None);
+        assert_eq!(rig.runner.runs().len(), 3);
+    }
+
+    /// A send whose fate stays unknown past the boundary gets
+    /// `MAX_ROTATE_SENDS` in all; the owner hop waits for them, then takes the
+    /// period.
+    #[tokio::test]
+    async fn an_unconfirmed_rotate_has_its_sends_before_the_owner_hop() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+                update(2 * p + 40, 2 * p + 8),
+            ],
+            true,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.script_rotate(
+            (0..MAX_ROTATE_SENDS)
+                .map(|_| SubmitOutcome::NotSent {
+                    reason: "submitRotate: Error: wait message timed out".into(),
+                })
+                .collect(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        for send in 1..MAX_ROTATE_SENDS {
+            let out = r.tick().await.unwrap();
+            assert!(
+                matches!(out, TickOutcome::AnPending { .. }),
+                "send {send}: {out:?}"
+            );
+            assert_eq!(rig.submitter.rotate_submits(), send);
+            assert_eq!(r.state().last_committee_period, Some(1));
+        }
+        let out = r.tick().await.unwrap();
+        assert_eq!(rig.submitter.rotate_submits(), MAX_ROTATE_SENDS);
+        assert_eq!(r.state().last_committee_period, Some(2), "{out:?}");
+        r.tick().await.unwrap();
+        assert_eq!(rig.submitter.rotate_submits(), MAX_ROTATE_SENDS);
+    }
+
+    /// `--dry-run` with rotate on: the mock contract is bootstrapped by the
+    /// first step, so the rotate runs and the loop crosses the boundary.
+    #[tokio::test]
+    async fn a_dry_run_rotates_across_the_boundary() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let source = InMemoryBeaconSource::new(vec![
+            update(p + 70, p + 64),
+            update(p + 102, p + 96),
+            update(2 * p + 40, 2 * p + 8),
+        ]);
+        source.set_period_update(0, period_update(100));
+        source.set_period_update(1, period_update(p + 100));
+        let submitter = Arc::new(MockAnSubmitter::dry_run());
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        cfg.pin_fork_slot_from_beacon = true;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(source),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap()
+        .with_rotate(
+            Arc::new(crate::rotate::MockRotateRunner::new([0xC0; 32])),
+            "work-relative".into(),
+            crate::rotate::MockRotateRunner::vk_pin(),
+        );
+        assert!(r.rotate.as_ref().unwrap().work_dir.is_absolute());
+        r.rotate.as_mut().unwrap().work_dir = dir.path().join("work");
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        r.wait_for_rotate().await;
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate { .. }),
+            "{out:?}"
+        );
+        assert_eq!(r.state().last_committee_period, Some(2));
+    }
+
+    /// A node outage that eats more sends than the owner hop waits for does
+    /// not cost the proof: without the hop it is sent until it lands.
+    #[tokio::test]
+    async fn an_unconfirmed_rotate_is_kept_past_the_send_count() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+            false,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.script_rotate(
+            (0..MAX_ROTATE_SENDS + 1)
+                .map(|_| SubmitOutcome::NotSent {
+                    reason: "submitRotate: error sending request: Connection refused".into(),
+                })
+                .collect(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        for _ in 0..=MAX_ROTATE_SENDS {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(rig.submitter.rotate_submits(), MAX_ROTATE_SENDS + 1);
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(2));
+        assert_eq!(rig.runner.runs().len(), 3);
+    }
+
+    /// Once the contract refuses the owner hop (`disableOwnerRotation`), the
+    /// boundary waits for the rotate, and the rotate is started past it.
+    #[tokio::test]
+    async fn a_refused_owner_hop_leaves_the_period_to_the_rotate() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(2 * p + 40, 2 * p + 8)],
+            true,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.flip_owner().await.unwrap();
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnRejected { .. }), "{out:?}");
+        assert_eq!(r.rotate_running(), None);
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::RotateRequired { .. }), "{out:?}");
+        assert_eq!(r.rotate_running(), Some(1));
+        r.wait_for_rotate().await;
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(2));
+    }
+
+    /// A failed stage is started again after a backoff, from inputs fetched
+    /// anew, and after `MAX_ROTATE_FAILURES` not at all.
+    #[tokio::test]
+    async fn a_failing_rotate_backs_off_and_then_stops() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        *runner.fail_once.lock().unwrap() = Some(crate::rotate::Stage::Shard);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        for failed in 1..MAX_ROTATE_FAILURES {
+            r.tick().await.unwrap();
+            assert_eq!(r.rotate_running(), None, "failure {failed}: backing off");
+            let status = r.rotate_status(1);
+            assert!(
+                status.contains(&format!("{failed} of {MAX_ROTATE_FAILURES}")),
+                "{status}"
+            );
+            *rig.runner.fail_once.lock().unwrap() = Some(crate::rotate::Stage::Shard);
+            r.rotate.as_mut().unwrap().retry_at = Some(std::time::Instant::now());
+            r.tick().await.unwrap();
+            assert_eq!(
+                r.rotate_running(),
+                Some(1),
+                "failure {failed}: started again"
+            );
+            r.wait_for_rotate().await;
+        }
+        assert_eq!(rig.runner.runs().len(), MAX_ROTATE_FAILURES as usize);
+        r.rotate.as_mut().unwrap().retry_at = None;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), None);
+        assert_eq!(rig.runner.runs().len(), MAX_ROTATE_FAILURES as usize);
+        let status = r.rotate_status(1);
+        assert!(status.contains("rotate-1"), "{status}");
+    }
+
+    /// A proof for another Gloas slot than the contract's is not sent; it is
+    /// proven again from inputs that carry the contract's slot.
+    #[tokio::test]
+    async fn a_rotate_for_another_gloas_slot_is_proven_again() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let runner = crate::rotate::MockRotateRunner::new([0xC0; 32]);
+        let mut rig = rotate_rig(
+            vec![
+                with_chain(update(p + 70, p + 64), 1),
+                with_chain(update(p + 102, p + 96), 1),
+            ],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        r.wait_for_rotate().await;
+        rig.submitter.set_gloas_fork(5 * p, true);
+        r.tick().await.unwrap();
+        assert_eq!(rig.submitter.rotate_submits(), 0);
+        assert!(!rig.work.join("rotate-1").exists());
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        r.wait_for_rotate().await;
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        assert_eq!(rig.submitter.rotate_submits(), 1);
+        assert_eq!(rig.runner.runs().len(), 6);
+    }
+
+    /// Not knowing whether a rotate landed is no reason to hop over it.
+    #[tokio::test]
+    async fn a_failed_committee_read_at_the_boundary_does_not_hop() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, _never) = held_runner(crate::rotate::Stage::Shard);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(2 * p + 40, 2 * p + 8)],
+            true,
+            runner,
+            dir.path(),
+        );
+        rig.submitter.fail_committee_period_reads();
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnPending { .. }), "{out:?}");
+        assert_eq!(r.state().last_committee_period, Some(1));
+    }
+
+    /// A daemon that stops — SIGTERM ends `run_until_shutdown` and drops the
+    /// relayer — kills the stage prover rather than waiting hours for it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stopping_the_daemon_kills_the_running_stage() {
+        use crate::rotate::{SubprocessRotateConfig, SubprocessRotateRunner};
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let params = dir.path().join("params");
+        std::fs::create_dir_all(&params).unwrap();
+        let pid_file = dir.path().join("pid");
+        let bin = dir.path().join("shard.sh");
+        let script = dir.path().join("shard.src");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nexec sleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Copied rather than written in place: see `prover::tests::install_script`.
+        assert!(std::process::Command::new("cp")
+            .arg(&script)
+            .arg(&bin)
+            .status()
+            .unwrap()
+            .success());
+        let runner = SubprocessRotateRunner::new(SubprocessRotateConfig {
+            shard_prover_bin: bin.clone(),
+            step_snark_prover_bin: bin.clone(),
+            rotate_prover_bin: bin,
+            prover_dir: params,
+            log_dir: dir.path().join("logs"),
+            timeout: Duration::from_secs(600),
+        });
+        let source =
+            InMemoryBeaconSource::new(vec![update(p + 70, p + 64), update(p + 102, p + 96)]);
+        source.set_period_update(0, period_update(100));
+        source.set_period_update(1, period_update(p + 100));
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_committee_period(1);
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(source),
+            Arc::new(MockProofGenerator::new()),
+            submitter,
+        )
+        .unwrap()
+        .with_rotate(Arc::new(runner), dir.path().join("work"), [0; 32]);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        let mut pid = String::new();
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if text.ends_with('\n') {
+                    pid = text.trim().to_string();
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!pid.is_empty(), "the stage prover never started");
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| !stat.split(") ").nth(1).unwrap_or("").starts_with('Z'))
+                .unwrap_or(false)
+        };
+        assert!(alive());
+        drop(r);
+        for _ in 0..200 {
+            if !alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(), "the stage prover outlived the daemon");
+        let rotate_dir = dir.path().join("work/rotate-1");
+        assert!(
+            rotate_dir.join("inputs/update.json").is_file(),
+            "the inputs stay for the restart"
+        );
+        assert!(
+            !rotate_dir.join("shard").exists(),
+            "a killed stage is not done"
+        );
     }
 
     /// `submit-rotate` is a one-shot against the contract. The running
@@ -1384,83 +2816,6 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
-    }
-
-    /// `call_contract` broadcasts and waits in one call, so a wait that times
-    /// out can still have left the rotation on the chain. The retry is then
-    /// refused with `ERR_WRONG_COMMITTEE` (242) against the committee it
-    /// rotates to. Unless that refusal is read as "it landed", every later
-    /// tick re-enters the period jump and the head never moves again.
-    #[tokio::test]
-    async fn a_rotate_that_timed_out_and_then_is_refused_as_applied_is_recorded() {
-        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
-        let submitter = Arc::new(MockAnSubmitter::accepting());
-        submitter.script_rotate(vec![
-            SubmitOutcome::NotSent {
-                reason: "submitRotate: Error: wait message timed out".into(),
-            },
-            SubmitOutcome::Rejected {
-                reason: "submitRotate failed: tvm error (account=0abc) (exit_code=242)".into(),
-            },
-        ]);
-        let dir = tempdir().unwrap();
-        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
-        cfg.poll_interval = Duration::from_millis(1);
-        cfg.enable_rotate = true;
-        let mut r = Relayer::new(
-            cfg,
-            Arc::new(src),
-            Arc::new(MockProofGenerator::new()),
-            submitter,
-        )
-        .unwrap();
-        r.tick().await.unwrap();
-
-        let out = r.tick().await.unwrap();
-        assert!(matches!(out, TickOutcome::AnPending { .. }), "{out:?}");
-        assert_eq!(r.state().rotate_in_flight_period, Some(1));
-        assert_eq!(r.state().last_committee_period, Some(0));
-
-        let out = r.tick().await.unwrap();
-        assert!(matches!(out, TickOutcome::AlreadyOnHead { .. }), "{out:?}");
-        assert_eq!(r.state().last_committee_period, Some(1));
-        assert_eq!(r.state().rotate_in_flight_period, None);
-
-        // The point of recording it: the daemon reaches the step again.
-        let out = r.tick().await.unwrap();
-        assert!(
-            matches!(out, TickOutcome::SubmittedUpdate { .. }),
-            "the head must advance after the rotation is recorded: {out:?}"
-        );
-        assert_eq!(r.state().last_finalized_slot, Some(8192));
-    }
-
-    /// The same refusal without an attempt of this daemon's own on record
-    /// means the chain sits on a committee it cannot rotate from. That is not
-    /// a rotation to record — it needs an operator.
-    #[tokio::test]
-    async fn a_wrong_committee_refusal_with_no_attempt_in_flight_is_not_recorded() {
-        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
-        let submitter = Arc::new(MockAnSubmitter::accepting());
-        submitter.script_rotate(vec![SubmitOutcome::Rejected {
-            reason: "submitRotate failed: tvm error (account=0abc) (exit_code=242)".into(),
-        }]);
-        let dir = tempdir().unwrap();
-        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
-        cfg.poll_interval = Duration::from_millis(1);
-        cfg.enable_rotate = true;
-        let mut r = Relayer::new(
-            cfg,
-            Arc::new(src),
-            Arc::new(MockProofGenerator::new()),
-            submitter,
-        )
-        .unwrap();
-        r.tick().await.unwrap();
-        let out = r.tick().await.unwrap();
-        assert!(matches!(out, TickOutcome::AnRejected { .. }), "{out:?}");
-        assert_eq!(r.state().last_committee_period, Some(0));
-        assert_eq!(r.state().rotate_in_flight_period, None);
     }
 
     #[tokio::test]

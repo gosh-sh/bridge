@@ -532,8 +532,10 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
         EXIT_UNKNOWN_BLOCK => Some(
             "ERR_UNKNOWN_BLOCK — the deposit's block is not in the canonical-chain anchor set; \
              confirm canonicality with `scripts/deposit_anchor_params.py --verify`, then the \
-             anchor writer must admit it — setAcceptedBlockHash(chainId, blockHash, true) while \
-             owner anchors are enabled, otherwise the light client",
+             chain's anchor writer must admit it — the owner's setAcceptedBlockHash(chainId, \
+             blockHash, true) while owner anchors are enabled for that chain, the light client \
+             for Ethereum, the Arbitrum block verifier (`eth-lc-relayer arbitrum-anchors`) for \
+             Arbitrum",
         ),
         EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
         EXIT_TRANSFER_TOO_LARGE => {

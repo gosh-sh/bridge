@@ -4,24 +4,27 @@ pragma solidity ^0.8.19;
 import "forge-std/Script.sol";
 import "../src/AckiNackiBridge.sol";
 import "../src/MockBlockHeaderOracle.sol";
-import "../src/AxiomBlockHeaderOracle.sol";
 import "../src/IPrimaryVerifier.sol";
 import "../src/IFallbackVerifier.sol";
 import "../src/ILayerHashesMovementVerifier.sol";
 import "../src/IBridgeWithdrawalVerifier.sol";
 import "./ShplonkDeployLib.sol";
+import "./PredecessorEnv.sol";
+import "./ArbitrumSepoliaAave.sol";
 
 /**
  * @title DeployRealBridge
  * @notice Deployment script for the production bridge contract.
  * @dev AN→ETH verifiers: R15 SHPLONK aggregators for 1A + 1B + 2 (1B hybrid was retired on e2a962b).
  *
- * Oracle mode:
- *   - chainid 1: USE_AXIOM_ORACLE must be set true (Mock forbidden).
- *   - other nets: USE_AXIOM_ORACLE=true → Axiom; default → Mock (testing).
+ * Chain: Arbitrum Sepolia (421614) only; any other chain id reverts. The
+ * bridge always gets the AAVE V3 USDC market of that chain — the pool and
+ * aToken constants of `ArbitrumSepoliaAave`, with no override.
+ *
+ * Oracle: MockBlockHeaderOracle. USE_AXIOM_ORACLE=true reverts: Axiom has no
+ * deployment on Arbitrum.
  *
  * verifyBlock wiring:
- *   - chainid 1: WIRE_VERIFY_BLOCK must be set true.
  *   - WIRE_VERIFY_BLOCK=true → deploy Primary/Fallback/LayerHashes Shplonk adapters.
  *     Requires GENESIS_BK_SET_COMMITMENT (non-zero) and GENESIS_PREV_MAX_LEVEL_LAYER_HASH.
  *     Requires `verifiers/PrimaryAggregatorVerifier.bin` + `FallbackAggregatorVerifier.bin`
@@ -36,10 +39,14 @@ import "./ShplonkDeployLib.sol";
  *     script always wires Circuit 4, so WIRE_VERIFY_BLOCK=true is required on
  *     every chain (`WithdrawRequiresVerifyBlock`). VerifyBlock-only bring-up:
  *     DeployShellnetE2EBridge on local anvil.
+ *
+ * Predecessor:
+ *   - PREDECESSOR_BRIDGE (optional, zero by default): the bridge on this
+ *     chain whose treasury this one may take over (`migrateTreasury` /
+ *     `fundTreasury`).
  */
 contract DeployRealBridge is Script {
     struct WireInputs {
-        bool useAave;
         bool wireVerifyBlock;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevAnchor;
@@ -48,6 +55,7 @@ contract DeployRealBridge is Script {
         uint256 altDstChainId;
         uint256 altDstHostChainId;
         uint32 usdcTokenId;
+        address predecessor;
     }
 
     struct DeployResult {
@@ -62,7 +70,6 @@ contract DeployRealBridge is Script {
         address oracleAddr;
         string oracleType;
         address bridgeAddr;
-        bool useAave;
         bool wireVerifyBlock;
         address primaryVerifierAddr;
         address fallbackVerifierAddr;
@@ -70,66 +77,54 @@ contract DeployRealBridge is Script {
         address withdrawalVerifierAddr;
         uint256 genesisBkSetCommitment;
         uint256 genesisPrevAnchor;
+        address predecessor;
     }
 
-    address constant AXIOM_V2_CORE_MAINNET = 0x69963768F8407dE501029680dE46945F838Fc98B;
-    address constant AXIOM_V2_CORE_SEPOLIA = 0x69963768F8407dE501029680dE46945F838Fc98B;
-
-    address constant AAVE_V3_POOL_MAINNET = 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2;
-    address constant USDC_MAINNET = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    address constant AAVE_V3_aUSDC_MAINNET = 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c;
-
-    address constant AAVE_V3_POOL_SEPOLIA = 0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951;
-    address constant USDC_SEPOLIA = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
-    address constant AAVE_V3_aUSDC_SEPOLIA = 0x16dA4541aD1807f4443d92D26044C1147406EB80;
-
     function run() external {
-        bool mainnet = block.chainid == 1;
-        bool useAxiomOracle =
-            mainnet ? vm.envBool("USE_AXIOM_ORACLE") : vm.envOr("USE_AXIOM_ORACLE", false);
-        WireInputs memory w = _readWireInputs(mainnet);
-        if (mainnet) {
-            require(useAxiomOracle, "mainnet forbids MockBlockHeaderOracle");
-            require(w.wireVerifyBlock, "mainnet requires WIRE_VERIFY_BLOCK=true");
-            require(w.usdcTokenId == 3, "mainnet USDC_TOKEN_ID must match AN ECC id 3");
-            require(w.altDstChainId == 0, "mainnet altDstChainId must be 0");
-            require(w.altDstHostChainId == 0, "mainnet altDstHostChainId must be 0");
-            // Owner 2026-09-08 (sauin Q5): this script-level require is the
-            // intended guarantee. The contract does not enforce the alias
-            // pair. USDC_TOKEN_ID is separately checked against the AN ECC id.
-        }
+        deploy();
+    }
 
+    function deploy() public returns (AckiNackiBridge bridge) {
+        require(
+            block.chainid == ArbitrumSepoliaAave.CHAIN_ID,
+            "DeployRealBridge: Arbitrum Sepolia (421614) only"
+        );
+        require(
+            !vm.envOr("USE_AXIOM_ORACLE", false), "Axiom oracle not supported on Arbitrum Sepolia"
+        );
+        WireInputs memory w = _readWireInputs();
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
 
-        (address oracleAddr, string memory oracleType) = _deployOracle(useAxiomOracle);
+        address oracleAddr = address(new MockBlockHeaderOracle());
+        string memory oracleType = "MockBlockHeaderOracle";
+        console.log("MockBlockHeaderOracle deployed at:", oracleAddr);
         DeployResult memory r = _deployBridge(oracleAddr, w);
 
         vm.stopBroadcast();
 
-        _logSummary(oracleType, oracleAddr, r, w, useAxiomOracle);
+        _logSummary(oracleType, oracleAddr, r, w);
 
         _writeDeploymentJson(
             DeploymentJsonArgs({
                 oracleAddr: oracleAddr,
                 oracleType: oracleType,
                 bridgeAddr: r.bridgeAddr,
-                useAave: w.useAave,
                 wireVerifyBlock: w.wireVerifyBlock,
                 primaryVerifierAddr: r.primaryVerifierAddr,
                 fallbackVerifierAddr: r.fallbackVerifierAddr,
                 layerHashesVerifierAddr: r.layerHashesVerifierAddr,
                 withdrawalVerifierAddr: r.withdrawalVerifierAddr,
                 genesisBkSetCommitment: w.genesisBkSetCommitment,
-                genesisPrevAnchor: w.genesisPrevAnchor
+                genesisPrevAnchor: w.genesisPrevAnchor,
+                predecessor: w.predecessor
             })
         );
         console.log("\nDeployment info saved to: deployment_real.json");
+        bridge = AckiNackiBridge(r.bridgeAddr);
     }
 
-    function _readWireInputs(bool mainnet) internal view returns (WireInputs memory w) {
-        w.useAave = vm.envOr("USE_AAVE", false);
-        w.wireVerifyBlock =
-            mainnet ? vm.envBool("WIRE_VERIFY_BLOCK") : vm.envOr("WIRE_VERIFY_BLOCK", false);
+    function _readWireInputs() internal view returns (WireInputs memory w) {
+        w.wireVerifyBlock = vm.envOr("WIRE_VERIFY_BLOCK", false);
         // NB-Q8 wires Circuit 4 on this script. That is illegal without the
         // verifyBlock triple (empty windows → every withdraw UnknownAnchor).
         require(w.wireVerifyBlock, "DeployRealBridge requires WIRE_VERIFY_BLOCK=true");
@@ -150,19 +145,23 @@ contract DeployRealBridge is Script {
         uint256 tokenId = vm.envOr("USDC_TOKEN_ID", uint256(3));
         require(tokenId <= type(uint32).max, "USDC_TOKEN_ID exceeds uint32");
         w.usdcTokenId = uint32(tokenId);
+        w.predecessor = PredecessorEnv.read();
     }
 
     function _deployBridge(address oracleAddr, WireInputs memory w)
         internal
         returns (DeployResult memory r)
     {
-        (address usdcAddr, address aavePool, address aUSDC) = _resolveTokenAddresses(w.useAave);
-
         AckiNackiBridge.VerifyBlockConfig memory vb = _buildVerifyBlockConfig(
             w.wireVerifyBlock, w.genesisBkSetCommitment, w.genesisPrevAnchor
         );
         AckiNackiBridge.BridgeWithdrawConfig memory bw = _buildWithdrawConfig(
-            w.withdrawDappFr, w.withdrawAccFr, w.altDstChainId, w.altDstHostChainId, w.usdcTokenId
+            w.withdrawDappFr,
+            w.withdrawAccFr,
+            w.altDstChainId,
+            w.altDstHostChainId,
+            w.usdcTokenId,
+            w.predecessor
         );
 
         if (w.wireVerifyBlock) {
@@ -173,7 +172,14 @@ contract DeployRealBridge is Script {
         r.withdrawalVerifierAddr = address(bw.bridgeWithdrawalVerifier);
 
         console.log("Deploying AckiNackiBridge (Shplonk verifiers only)...");
-        AckiNackiBridge bridge = new AckiNackiBridge(oracleAddr, usdcAddr, aavePool, aUSDC, vb, bw);
+        AckiNackiBridge bridge = new AckiNackiBridge(
+            oracleAddr,
+            ArbitrumSepoliaAave.USDC,
+            ArbitrumSepoliaAave.POOL,
+            ArbitrumSepoliaAave.AUSDC,
+            vb,
+            bw
+        );
         r.bridgeAddr = address(bridge);
 
         console.log("AckiNackiBridge deployed at:", r.bridgeAddr);
@@ -183,9 +189,8 @@ contract DeployRealBridge is Script {
         string memory oracleType,
         address oracleAddr,
         DeployResult memory r,
-        WireInputs memory w,
-        bool useAxiomOracle
-    ) internal view {
+        WireInputs memory w
+    ) internal pure {
         console.log("\n=== Deployment Complete ===");
         console.log("Oracle type:", oracleType);
         console.log("Oracle:", oracleAddr);
@@ -196,58 +201,12 @@ contract DeployRealBridge is Script {
             console.log("LayerHashesAggregatorVerifier:", r.layerHashesVerifierAddr);
         }
         console.log("BridgeWithdrawalAggregatorVerifier:", r.withdrawalVerifierAddr);
-        if (!useAxiomOracle) {
-            console.log("\n  ** WARNING: MockBlockHeaderOracle - NOT for production **");
-        }
+        console.log("Predecessor:", w.predecessor);
+        console.log("AAVE pool:", ArbitrumSepoliaAave.POOL);
+        console.log("aUSDC:", ArbitrumSepoliaAave.AUSDC);
         if (!w.wireVerifyBlock) {
             console.log("\n  ** verifyBlock DISABLED - WIRE_VERIFY_BLOCK + Shplonk .bin **");
         }
-    }
-
-    function _deployOracle(bool useAxiomOracle)
-        internal
-        returns (address oracleAddr, string memory oracleType)
-    {
-        if (useAxiomOracle) {
-            address axiomV2Core;
-            if (block.chainid == 1) {
-                axiomV2Core = AXIOM_V2_CORE_MAINNET;
-            } else if (block.chainid == 11155111) {
-                axiomV2Core = AXIOM_V2_CORE_SEPOLIA;
-            } else {
-                revert("Axiom oracle not supported on this chain");
-            }
-            oracleAddr = address(new AxiomBlockHeaderOracle(axiomV2Core));
-            oracleType = "AxiomBlockHeaderOracle";
-        } else {
-            oracleAddr = address(new MockBlockHeaderOracle());
-            oracleType = "MockBlockHeaderOracle";
-        }
-        console.log(string(abi.encodePacked(oracleType, " deployed at:")), oracleAddr);
-    }
-
-    function _resolveTokenAddresses(bool useAave)
-        internal
-        view
-        returns (address usdcAddr, address aavePool, address aUSDC)
-    {
-        if (block.chainid == 1) {
-            usdcAddr = USDC_MAINNET;
-            if (useAave) {
-                aavePool = AAVE_V3_POOL_MAINNET;
-                aUSDC = AAVE_V3_aUSDC_MAINNET;
-            }
-            return (usdcAddr, aavePool, aUSDC);
-        }
-        if (block.chainid == 11155111) {
-            usdcAddr = USDC_SEPOLIA;
-            if (useAave) {
-                aavePool = AAVE_V3_POOL_SEPOLIA;
-                aUSDC = AAVE_V3_aUSDC_SEPOLIA;
-            }
-            return (usdcAddr, aavePool, aUSDC);
-        }
-        revert("USDC/AAVE wiring only supported on mainnet (1) or Sepolia (11155111)");
     }
 
     function _buildVerifyBlockConfig(
@@ -275,8 +234,7 @@ contract DeployRealBridge is Script {
         // `BUNDLE_STRIDE` MUST match the daemon's `AnchorMode::stride()`
         // for this deployment — `W·P` for L1, `W²` for L2. Required for
         // production verifyBlock wiring (reverts with `InvalidBundleStride`
-        // otherwise); the matching `deploy_bridge_bundle.sh` exports it
-        // from `LEVEL`.
+        // otherwise).
         vb = AckiNackiBridge.VerifyBlockConfig({
             primaryVerifier: v.primary,
             fallbackVerifier: v.fallback_,
@@ -301,7 +259,8 @@ contract DeployRealBridge is Script {
         uint256 accFr,
         uint256 altDstChainId,
         uint256 altDstHostChainId,
-        uint32 usdcTokenId
+        uint32 usdcTokenId,
+        address predecessor
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");
         IBridgeWithdrawalVerifier w =
@@ -314,7 +273,8 @@ contract DeployRealBridge is Script {
             accFr: accFr,
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
-            usdcTokenId: usdcTokenId
+            usdcTokenId: usdcTokenId,
+            predecessor: IPredecessorBridge(predecessor)
         });
     }
 
@@ -346,6 +306,9 @@ contract DeployRealBridge is Script {
                 verifierJson,
                 '  "withdrawal_verifier": "',
                 vm.toString(a.withdrawalVerifierAddr),
+                '",\n',
+                '  "predecessor": "',
+                vm.toString(a.predecessor),
                 '",\n'
             )
         );
@@ -367,8 +330,13 @@ contract DeployRealBridge is Script {
                 ",\n",
                 '  "withdraw_wired": true,\n',
                 verifierJson,
-                '  "aave_enabled": ',
-                a.useAave ? "true" : "false",
+                '  "aave_pool": "',
+                vm.toString(ArbitrumSepoliaAave.POOL),
+                '",\n',
+                '  "aave_ausdc": "',
+                vm.toString(ArbitrumSepoliaAave.AUSDC),
+                '",\n',
+                '  "aave_enabled": true',
                 "\n}"
             )
         );

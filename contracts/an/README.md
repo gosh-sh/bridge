@@ -49,8 +49,12 @@ verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
 for one chain and needs a light client or an Arbitrum block verifier deployed
 for it (`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
-for chain id 0); the no-argument `disableOwnerAnchors()` does the same for the
-chain whose client was deployed last. Neither checks that the light-client
+for chain id 0). A chain with an Arbitrum block verifier closes only after its
+parent chain: until the owner writer is off there, `disableOwnerAnchorsOn`
+throws `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240), because a parent-chain block
+the owner accepts lets the verifier admit any block of the Arbitrum chain. The
+no-argument `disableOwnerAnchors()` does the same for the chain whose client
+was deployed last. Neither checks that the light-client
 account is Active. Each client writes only for its own chain:
 `acceptBlockHashFromLightClient` and `forgetBlockHashFromLightClient` compare
 the sender against the client of the chain named in the call. An L2 source
@@ -122,8 +126,8 @@ The existing `finalizeDeposit`, `confirmDeposit` and `initiateWithdrawal` signat
 
 For an upgrade from 1.15.0, build `userCell` with
 `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)` and pass it to the old `updateCode`.
-Register every token lane afterward and restore trusted bridge and anchor configuration before
-opening deposits. Newer `updateCode` calls preserve the token registry and outstanding balances.
+Register every token lane afterward and restore trusted bridge, EVM bridge (`setEvmBridge`) and
+anchor configuration before opening deposits and withdrawals. Newer `updateCode` calls preserve the token registry and outstanding balances.
 Voucher-code rotation still requires the historical deposit cutoff described below.
 
 ## Arbitrum blocks
@@ -215,8 +219,13 @@ than 393 168 blocks past N.
    which deploys at a new address and replaces the recorded verifier.
 4. Check `getL2Verifier(l2ChainId)` on the bridge, which returns the address
    and the parent chain, and `getConfig()` on the verifier.
-5. When the verifier is admitting blocks, `disableOwnerAnchorsOn(l2ChainId)`
-   turns the owner writer off for that chain.
+5. When the verifier is admitting blocks, turn the owner writer off for the
+   parent chain (`disableOwnerAnchorsOn(parentChainId)`, or the light client
+   relayer's flip), then `disableOwnerAnchorsOn(l2ChainId)` for the Arbitrum
+   chain. In the other order the second call throws
+   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240). On a closed Arbitrum chain,
+   `deployL2Verifier` throws 240 too for a parent chain the owner still
+   anchors.
 
 The verifier code and the recorded verifiers are not carried through
 `updateCode`. After a bridge upgrade, repeat steps 1 and 3 with the arguments
@@ -241,8 +250,10 @@ minute, and miss many batches; a free Alchemy key keeps it. When an assertion en
 ## Transfer and network limits
 
 Deposits and withdrawals are limited to **50 USDC** (50,000,000 base units).
-Each L1 bridge limits `treasuryBalance` (deposited principal minus completed
-payouts) to **10,000 USDC**, including principal supplied to Aave. Yield and
+Each L1 bridge refuses a deposit that would take `treasuryBalance` (deposited
+principal minus completed payouts) past **10,000 USDC**, including principal
+supplied to Aave. Owner `fundTreasury` and `migrateTreasury` top-ups are not
+checked against that cap. Yield and
 direct token donations do not increase that counter or its capacity.
 `MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the first deposit width guard;
 the lower product ceiling is `MAX_TRANSFER_AMOUNT`.
@@ -266,13 +277,13 @@ breaks both — see *Restoring a chain's outstanding amount* below.
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
 with 235; the latter is retryable after withdrawals. Both checks precede proof
-verification and are repeated on confirmation. A withdrawal that is oversized,
-that would burn more than bridged minted less bridged burned, or that exceeds
-its destination chain's outstanding amount returns the attached ECC without
-burning it and emits `WithdrawalRefused` instead of `WithdrawalInitiated`. That
-event carries the same fields plus `reason` — the error code the call would have
-thrown had the refusal thrown: 234, 233 and 236 for the three cases in that
-order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
+verification and are repeated on confirmation. A withdrawal to a chain with no
+EVM bridge set, or one that is oversized, that would burn more than bridged
+minted less bridged burned, or that exceeds its destination chain's outstanding
+amount returns the attached ECC without burning it and emits `WithdrawalRefused`
+instead of `WithdrawalInitiated`. That event carries the same fields except
+`dstBridge`, plus `reason` — the error code the call would have thrown had the
+refusal thrown: 239, 234, 233 and 236 for the four cases in that order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
 it uses no `rawReserve`.
 `ensureBalance()` is free. Dapp 0 contains only system contracts, and mainnet
 has an unlimited dapp configuration deployed for dapp 0. Withdrawal messages
@@ -285,6 +296,27 @@ block time (errors 402 and 401); an identical recorded message is rejected with
 expire; voucher identity remains the deposit double-mint protection. CLI and
 relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
 same BOC while valid.
+
+### Which EVM bridge pays a withdrawal
+
+`WithdrawalInitiated` names the EVM bridge that may pay it: `dstBridge`, the
+address the owner set for the destination chain with
+`setEvmBridge(dstChainId, evmBridge)` (read back with `getEvmBridge(dstChainId)`,
+0 if unset; `evmBridge = 0` clears it). Circuit 4 publishes those bytes of the
+event, and `AckiNackiBridge.withdrawByProof` refuses a proof naming any address
+but its own (`WrongDstBridge`). A withdrawal to a chain with no EVM bridge set is
+refused with 239 and burns nothing.
+
+`setEvmBridge` decides where every later burn to that chain is paid; a burn
+already made stays bound to the bridge it named. When an EVM bridge is replaced,
+`setEvmBridge(dstChainId, 0)` closes withdrawals to that chain while the old
+bridge pays the burns bound to it, and `setEvmBridge` with the new bridge reopens
+them once the principal has moved — the order is in `docs/aave-yield.md`,
+"Replacing a bridge on the same chain".
+
+Like `_trustedL1Bridge`, the binding is not carried through `updateCode`: after
+an upgrade every withdrawal is refused with 239 until the owner calls
+`setEvmBridge` again for each chain.
 
 ### Restoring a chain's outstanding amount
 
@@ -429,11 +461,11 @@ Before committing new artefacts:
 
 ## Two pause domains
 
-Custody on Ethereum (USDC in `AckiNackiBridge`, some of it in AAVE) and the ECC
+Custody on Arbitrum (USDC in `AckiNackiBridge`, some of it in AAVE) and the ECC
 ledger on Acki Nacki are two books. Each side has its own stop switch, and
 neither reaches the other:
 
-- Ethereum: `AckiNackiBridge.pause()` / `unpause()`. While `paused` is true,
+- Arbitrum: `AckiNackiBridge.pause()` / `unpause()`. While `paused` is true,
   `deposit`, `verifyBlock`, `applyBkSetUpdate` and `withdrawByProof` revert
   `BridgePaused`. Owner AAVE management stays available so funds can be moved
   out of the pool.
@@ -475,7 +507,7 @@ it against the tracked artefact before and after an upgrade.
 
 `zerostate_init.py` brings a premined `eccUSDCBridge` to the state a fresh chain
 needs: it builds the data cell with `BridgeZerostateData`, upgrades the premine
-stub to the bridge's code, seeds the trusted L1 bridge, installs the
+stub to the bridge's code, seeds the trusted L1 bridge and binds withdrawals to that chain to it, installs the
 light-client and Arbitrum block verifier code, and writes the account into the
 zerostate. acki-nacki places
 it next to the contracts and calls `initialize(ctx)` while generating a
@@ -483,7 +515,8 @@ zerostate, so a new setup call or a new storage field is a change in this
 repository alone.
 
 Set `BRIDGE_ZS_L1_BRIDGE` to the fresh paired L1 bridge's nonzero `0x` address
-before generating a zerostate. There is no default: missing or malformed values
+before generating a zerostate. It is both the trusted L1 bridge for deposits and
+the EVM bridge withdrawals to `BRIDGE_ZS_L1_CHAIN_ID` are bound to. There is no default: missing or malformed values
 stop generation before any account is changed. `BRIDGE_ZS_L1_CHAIN_ID` defaults
 to Sepolia (`11155111`); set it to the deployment's EIP-155 chain id for another
 network.

@@ -3,18 +3,18 @@
 # WHAT IT IS
 # ----------
 # Per-network profile file. See `bridge_config.shellnet` for the schema
-# doc-comment. This file targets a local devnet brought up by
-# `crates/bridge-prover-libraries/scripts/deploy_bridge_bundle.sh`
-# (or the docker-compose stack under acki-nacki/).
+# doc-comment. This file targets a local devnet: the docker-compose stack
+# under acki-nacki/ and a bridge on local anvil (`DeployTestBridge` or
+# `DeployShellnetE2EBridge`, both with a mock AAVE market there).
 #
 # HOW TO CONSUME
 # --------------
 #   cd crates/ackinacki-bridge
 #   export BURNER_PRIVATE_KEY=0x…
 #   export BRIDGE_CONFIG=./config/bridge_config.local
-#   # after your local `deploy_bridge_bundle.sh` writes L1_config/env,
-#   # copy the BRIDGE_ADDRESS from that file into this one — or point
-#   # BRIDGE_CONFIG at the relayer-style env directly.
+#   # after your local deploy, copy the bridge address it logs into
+#   # BRIDGE_ADDRESS below — or point BRIDGE_CONFIG at the relayer-style
+#   # env directly.
 #   ../bridge-prover-libraries/target/release/ackinacki-bridge withdraw …
 
 # --- Ethereum side (local Anvil / Hardhat) ------------------------------------
@@ -63,8 +63,7 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
 # NO DEFAULT — a local devnet redeploys the bridge on every run. Fill
-# this in from `crates/bridge-prover-libraries/L1_config/env` (or
-# L2_config/env) after `deploy_bridge_bundle.sh` completes. Leaving it
+# this in from the address your local deploy logs. Leaving it
 # commented forces a clean "missing required argument BRIDGE_ADDRESS"
 # refusal instead of a silent submit against the wrong bridge.
 # BRIDGE_ADDRESS=0x…

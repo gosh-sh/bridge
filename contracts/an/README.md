@@ -536,5 +536,9 @@ network.
     scripts/check_zerostate_data_encoder.py
 
 AN `maxTvl` cannot decrease after registration: a lower ceiling could abort a confirmation
-whose voucher has already been consumed. To restrict new deposits, close the AN deposit switch
-or lower the EVM TVL cap; the latter leaves earlier deposits payable.
+whose voucher has already been consumed. To restrict new deposits, close them on EVM
+(`setTokenDepositsEnabled`) or lower the EVM TVL cap; earlier deposits stay payable.
+`finalizeDeposit` reads the AN deposit switch and `maxTransfer` when the proof arrives,
+not when the deposit was made. Closing the switch or lowering `maxTransfer` therefore also
+refuses deposits already locked on EVM, with 243 or 234, until it is reopened or raised.
+Change them only after those deposits are finalized.

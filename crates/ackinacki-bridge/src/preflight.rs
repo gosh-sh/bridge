@@ -671,6 +671,33 @@ async fn call_is_paused(
 /// ECC token id the bridge withdraws (`USDC_ECC_ID` in `eccBridge`).
 const BRIDGED_USDC_TOKEN_ID: u32 = 3;
 
+/// The token and unit a payout-cap refusal names.
+fn payout_cap_label(token_id: u32, cap: U256) -> String {
+    if token_id == BRIDGED_USDC_TOKEN_ID {
+        format!("USDC ({cap} micro-USDC)")
+    } else {
+        format!("ECC[{token_id}] ({cap} base units)")
+    }
+}
+
+/// What a shortfall refusal says the bridge owes for this token.
+fn held_label(token_id: u32, held: U256) -> String {
+    if token_id == BRIDGED_USDC_TOKEN_ID {
+        format!("treasuryBalance is {held} µUSDC")
+    } else {
+        format!("liabilitiesOf({token_id}) is {held} base units")
+    }
+}
+
+/// What a user can do about a shortfall of this token.
+fn shortfall_advice(token_id: u32) -> &'static str {
+    if token_id == BRIDGED_USDC_TOKEN_ID {
+        "Top the treasury up (README Step 3) and re-run."
+    } else {
+        "This bridge cannot pay that amount of this token yet."
+    }
+}
+
 /// Execute an ABI getter against the fetched bridge account, without a network
 /// call.
 pub(crate) async fn call_bridge_getter(
@@ -2975,8 +3002,9 @@ pub async fn check_bridge_deploy_for_token(
     if U256::from(amount.0) > max_transfer {
         return Err(CliError::Preflight {
             reason: format!(
-                "withdrawal exceeds the bridge's current payout cap for USDC ({max_transfer} \
-                 micro-USDC); reduce the amount before burning ECC"
+                "withdrawal exceeds the bridge's current payout cap for {}; reduce the amount \
+                 before burning ECC",
+                payout_cap_label(token_id, max_transfer),
             ),
             source: None,
         });
@@ -2986,12 +3014,13 @@ pub async fn check_bridge_deploy_for_token(
     if treasury < needed {
         return Err(CliError::Preflight {
             reason: format!(
-                "--bridge-address {bridge}: treasuryBalance is {treasury} µUSDC but this \
-                 withdrawal needs {needed} ({}). withdrawByProof would revert \
-                 WithdrawTreasuryShortfall. Top the treasury up (README Step 3) and re-run.\n\x20 \
-                 Note this is a preflight, not a guarantee — the treasury is shared, and it can \
-                 be drained again while this withdrawal waits for its anchor bundle.",
+                "--bridge-address {bridge}: {} but this withdrawal needs {needed} ({}). \
+                 withdrawByProof would revert WithdrawTreasuryShortfall. {}\n\x20 Note this is a \
+                 preflight, not a guarantee — the amount is shared, and it can be drained again \
+                 while this withdrawal waits for its anchor bundle.",
+                held_label(token_id, treasury),
                 amount.display(),
+                shortfall_advice(token_id),
             ),
             source: None,
         });
@@ -3094,6 +3123,17 @@ pub async fn check_window_scan(
 // and a second copy of a selector table is a second thing to drift.
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn refusal_wording_names_the_token_being_withdrawn() {
+        let amount = U256::from(7u64);
+        assert_eq!(payout_cap_label(3, amount), "USDC (7 micro-USDC)");
+        assert_eq!(payout_cap_label(4, amount), "ECC[4] (7 base units)");
+        assert_eq!(held_label(3, amount), "treasuryBalance is 7 µUSDC");
+        assert_eq!(held_label(4, amount), "liabilitiesOf(4) is 7 base units");
+        assert!(shortfall_advice(3).contains("Top the treasury up"));
+        assert!(!shortfall_advice(4).contains("treasury"));
+    }
+
     use serde_json::json;
 
     use super::*;

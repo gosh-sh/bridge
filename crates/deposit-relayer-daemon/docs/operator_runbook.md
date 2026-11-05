@@ -147,6 +147,8 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 - it exited 0, but its voucher deploy and `confirmDeposit` were not both visible within
   that time (`AnInterfaceSubmitter::settle`);
 - the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235);
+- the token is not registered for the source chain (241), or its deposits are closed on AN (243).
+  Both clear once the owner calls `setBridgeToken`;
 - an external message was already recorded or expired (400 / 402). Observe the
   voucher before retrying; this does not establish that its mint succeeded.
 

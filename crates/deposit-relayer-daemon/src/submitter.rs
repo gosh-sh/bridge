@@ -512,6 +512,8 @@ const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
 const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
 const EXIT_TVL_CAP: i32 = 235;
+const EXIT_TOKEN_UNREGISTERED: i32 = 241;
+const EXIT_TOKEN_DEPOSITS_DISABLED: i32 = 243;
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -590,6 +592,18 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
             reason: format!(
                 "ERR_TVL_CAP — source-chain deposit capacity is full; waiting for withdrawals \
                  (exit_code={code}): {detail}"
+            ),
+        },
+        EXIT_TOKEN_UNREGISTERED => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TOKEN_UNREGISTERED — this token is not registered for the source chain; \
+                 retrying until the owner calls setBridgeToken (exit_code={code}): {detail}"
+            ),
+        },
+        EXIT_TOKEN_DEPOSITS_DISABLED => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TOKEN_DEPOSITS_DISABLED — deposits of this token are closed on AN; retrying \
+                 until setBridgeToken reopens them (exit_code={code}): {detail}"
             ),
         },
         400 | 402 => SubmitOutcome::Pending {
@@ -1079,7 +1093,7 @@ mod tests {
 
     #[test]
     fn capacity_and_message_retries_do_not_park_a_deposit() {
-        for code in [235, 400, 402] {
+        for code in [235, 241, 243, 400, 402] {
             for result in [
                 classify_reverted(Some(code), "Reverted"),
                 classify_call_error(&format!("exit_code={code}")),

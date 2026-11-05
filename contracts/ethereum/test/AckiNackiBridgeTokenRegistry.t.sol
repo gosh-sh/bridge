@@ -563,9 +563,7 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
 
     function test_otherTokenDeposit_leavesTheAaveBandAlone() public {
         address pool = address(bridge.aavePool());
-        vm.mockCallRevert(
-            pool, abi.encodeWithSelector(IAavePool.supply.selector), bytes("refused")
-        );
+        vm.mockCallRevert(pool, abi.encodeWithSelector(IAavePool.supply.selector), bytes("refused"));
         usdc.mint(funder, 10e6);
         vm.startPrank(funder);
         usdc.approve(address(bridge), 10e6);

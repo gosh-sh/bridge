@@ -291,6 +291,8 @@ assigns it when the release is tagged.
   Withdrawal records and locks include the currency, while existing USDC keys are preserved.
   The JSON burn summary includes `token_id` and uses that token's decimal precision.
 
+- `migrateTreasury` and `fundTreasury` move USDC only. When a bridge is replaced, other listed tokens
+  stay on the old bridge, which keeps paying the burns bound to it.
 - The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
   `delistToken`, `tokenInfo`, `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and
   `maxWithdrawalAmount`. Liabilities and limits use each token's base units; AAVE stays USDC-only.

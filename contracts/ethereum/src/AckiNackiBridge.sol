@@ -1029,13 +1029,12 @@ contract AckiNackiBridge {
     ///      mapping is one-to-one in both directions.
     ///
     ///      Listing is deliberately not enough to make a token usable
-    ///      end to end: the AN side must mint the matching ECC currency for
-    ///      deposits to be credited, and today it mints `USDC_ECC_ID` for
-    ///      every proof whatever token the proof carries. A new listing
-    ///      therefore starts with **deposits closed**; withdrawals by proof
-    ///      work from the moment it exists. Open deposits with
-    ///      `setTokenDepositsEnabled(tokenId, true)` only once the AN
-    ///      deployment credits that id.
+    ///      end to end: AN's `setBridgeToken` must register the same token and
+    ///      id for this chain, or AN refuses to finalize its deposits. A new
+    ///      listing therefore starts with **deposits closed**; withdrawals by
+    ///      proof work from the moment it exists. Open deposits with
+    ///      `setTokenDepositsEnabled(tokenId, true)` only once AN registers
+    ///      the token.
     /// @param token       The ERC-20. Must not be already listed.
     /// @param tokenId     AN ECC currency id. Must not be already used.
     /// @param decimals    Token decimals, metadata only — see `TokenInfo`.
@@ -1050,12 +1049,11 @@ contract AckiNackiBridge {
         uint256 maxTransfer,
         uint256 tvlCap
     ) external onlyOwner {
-        // Deposits start closed. The Acki Nacki side mints `USDC_ECC_ID` for
-        // every proof it accepts and ignores the proven token, so a token
-        // listed open would have a permissionless deposit lane the moment the
-        // listing transaction lands — before a second transaction could close
-        // it. The owner opens it with `setTokenDepositsEnabled` once an Acki
-        // Nacki deployment credits that id.
+        // Deposits start closed. Acki Nacki refuses to finalize a token it has
+        // not registered, so a token listed open would take permissionless
+        // deposits the moment the listing transaction lands, before Acki Nacki
+        // could credit them. The owner opens it with `setTokenDepositsEnabled`
+        // once the token is registered there.
         _listToken(tokenId, token, decimals, maxTransfer, tvlCap, false);
     }
 

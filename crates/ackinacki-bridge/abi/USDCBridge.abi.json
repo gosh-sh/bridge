@@ -340,8 +340,11 @@
 		{
 			"name": "finalizeDeposit",
 			"inputs": [
-				{"name":"proof","type":"bytes"},
-				{"name":"publicInputs","type":"bytes"}
+				{"name":"chainId","type":"uint256"},
+				{"name":"header","type":"bytes"},
+				{"name":"txIndex","type":"uint16"},
+				{"name":"receiptProof","type":"bytes[]"},
+				{"name":"logIndex","type":"uint16"}
 			],
 			"outputs": [
 			]

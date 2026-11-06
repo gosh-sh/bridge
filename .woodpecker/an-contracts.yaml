@@ -41,10 +41,11 @@ steps:
     commands:
       - python3 contracts/an/zerostate/test_zerostate_init.py
   place-manifest:
-    image: python:3-alpine
+    # The check lists tracked files with git. python:3 (Debian) ships it; installing it
+    # at run time made the step fail whenever the package mirror did not resolve.
+    image: python:3
     depends_on: [ ]
     commands:
-      - apk add --no-cache git
       - python3 scripts/check_place_manifest.py
   relayer-abis:
     image: python:3-alpine

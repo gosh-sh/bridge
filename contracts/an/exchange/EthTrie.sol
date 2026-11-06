@@ -13,7 +13,8 @@ library EthTrie {
     uint16 constant ERR_INLINE = 304;      // an inline (under 32 bytes) child node: not supported
     uint16 constant ERR_ABSENT = 305;      // the key is not in the trie
     uint16 constant ERR_HEADER = 306;      // the header does not hash to the expected block hash
-    uint16 constant ERR_NO_LOG = 307;      // no log from that emitter with that topic
+    uint16 constant ERR_NO_LOG = 307;      // no log from that emitter with that topic, or no log at that index
+    uint16 constant ERR_RECEIPT_STATUS = 308; // the transaction of the receipt failed
 
     uint8 constant STR = 0;
     uint8 constant LIST = 1;
@@ -269,6 +270,40 @@ library EthTrie {
             r = _skip(r, dataLen);
         }
         revert(ERR_NO_LOG);
+    }
+
+    /// Log `index` of a receipt whose transaction succeeded: a slice at the
+    /// log's RLP header. `r` and `len` are a receipt-trie value as `prove`
+    /// returns it, typed or legacy; the receipt must fill it exactly.
+    function receiptLog(TvmSlice r, uint len, uint index) internal pure returns (TvmSlice) {
+        uint8 p;
+        (p, r) = _byte(r);
+        uint typed = 0;
+        if (p < 0xc0) {
+            (p, r) = _byte(r);              // typed receipt: drop the type byte
+            typed = 1;
+        }
+        uint8 kind;
+        uint n;
+        uint hdr;
+        uint t;
+        (kind, n, hdr, r) = _hdrFrom(p, r);
+        require(kind == LIST && typed + hdr + n == len, ERR_RLP);
+        (kind, n, hdr, r) = _hdr(r);        // status: 1, the single byte 0x01
+        require(kind == BYTE && n == 1, ERR_RECEIPT_STATUS);
+        (t, r) = _skipItem(r);              // cumulativeGasUsed
+        (t, r) = _skipItem(r);              // logsBloom
+        uint logsLen;
+        (kind, logsLen, hdr, r) = _hdr(r);
+        require(kind == LIST, ERR_RLP);
+        uint used = 0;
+        for (uint i = 0; i < index; i++) {
+            require(used < logsLen, ERR_NO_LOG);
+            (t, r) = _skipItem(r);
+            used += t;
+        }
+        require(used < logsLen, ERR_NO_LOG);
+        return r;
     }
 
     /// Value of storage `slot` of `account` in the state `stateRoot`, from

@@ -11,7 +11,6 @@ abstract contract eccBridgeErrors {
     uint16 constant ERR_MULTIPLE_ECC = 217;
     uint16 constant ERR_RECIPIENT_TOO_LONG = 218;
     uint16 constant ERR_HASH_MISMATCH = 219;
-    uint16 constant ERR_INVALID_ZKPROOF = 220;
     uint16 constant ERR_UNSUPPORTED_TOKEN = 221;
     uint16 constant ERR_UNSUPPORTED_SRC_CHAIN = 222;
     uint16 constant ERR_RECIPIENT_EMPTY = 223;
@@ -36,4 +35,5 @@ abstract contract eccBridgeErrors {
     uint16 constant ERR_TOKEN_UNREGISTERED = 241;
     uint16 constant ERR_TOKEN_CONFIG = 242;
     uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 243;
+    uint16 constant ERR_NOT_DEPOSIT_LOG = 244;
 }

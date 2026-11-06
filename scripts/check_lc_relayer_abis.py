@@ -52,7 +52,7 @@ BUILT_IN = [
     ),
     (
         REPO / "crates/ackinacki-bridge/abi/USDCBridge.abi.json",
-        REPO / "contracts/an/0.80.0_compiled/exchange/eccBridge.abi.json",
+        REPO / "contracts/an/0.81.1_compiled/exchange/eccBridge.abi.json",
         [
             "getLightClient",
             "isOwnerAnchorsEnabled",

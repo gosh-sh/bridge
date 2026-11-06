@@ -27,8 +27,8 @@ CONTEXT_VERSION = 1
 L1_CHAIN_ID = os.environ.get("BRIDGE_ZS_L1_CHAIN_ID", "11155111")
 L1_BRIDGE = os.environ.get("BRIDGE_ZS_L1_BRIDGE")
 
-BRIDGE_TVC = "contracts/an/0.80.0_compiled/exchange/eccBridge.tvc"
-BRIDGE_ABI = "contracts/an/0.80.0_compiled/exchange/eccBridge.abi.json"
+BRIDGE_TVC = "contracts/an/0.81.1_compiled/exchange/eccBridge.tvc"
+BRIDGE_ABI = "contracts/an/0.81.1_compiled/exchange/eccBridge.abi.json"
 VOUCHER_TVC = "contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc"
 LIGHT_CLIENT_TVC = "contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.tvc"
 L2_VERIFIER_TVC = "contracts/an/0.81.1_compiled/exchange/ArbitrumBlockVerifier.tvc"

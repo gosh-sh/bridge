@@ -2,32 +2,30 @@
 # ArbitrumBlockVerifier next to their sources.
 #
 # Each contract is built with the compiler its tracked artefact was built with,
-# because any other one changes the code hash: eccBridge with sold 0.80.0
-# (../0.80.0_compiled), DepositVoucher with sold 0.81.0 (../0.81.0_compiled),
-# EthBeaconLightClient and ArbitrumBlockVerifier with sold 0.81.1
-# (../0.81.1_compiled). The light client and the verifier call gosh.keccak256,
-# which 0.81.1 is the first release to assemble. A build refuses a compiler
-# that reports a different version. It does not touch the tracked artefacts:
-# copy the rebuilt ones over by hand and commit them together.
+# because any other one changes the code hash: DepositVoucher with sold 0.81.0
+# (../0.81.0_compiled); eccBridge, EthBeaconLightClient and
+# ArbitrumBlockVerifier with sold 0.81.1 (../0.81.1_compiled). These three
+# call gosh.keccak256, which 0.81.1 is the first release to assemble. A build
+# refuses a compiler that reports a different version. It does not touch the
+# tracked artefacts: copy the rebuilt ones over by hand and commit them
+# together.
 #
-#   make SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
-#        SOLD_0_81_1=/path/to/sold-0.81.1
+#   make SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
 
-SOLD_0_80 ?=
 SOLD_0_81 ?=
 SOLD_0_81_1 ?=
 TVM_VERSION ?= gosh
 TVCS := eccBridge DepositVoucher EthBeaconLightClient ArbitrumBlockVerifier
 
-SOLD_VAR_eccBridge := SOLD_0_80
-SOLD_VERSION_eccBridge := 0.80.0
+SOLD_VAR_eccBridge := SOLD_0_81_1
+SOLD_VERSION_eccBridge := 0.81.1
 SOLD_VAR_DepositVoucher := SOLD_0_81
 SOLD_VERSION_DepositVoucher := 0.81.0
 SOLD_VAR_EthBeaconLightClient := SOLD_0_81_1
 SOLD_VERSION_EthBeaconLightClient := 0.81.1
 SOLD_VAR_ArbitrumBlockVerifier := SOLD_0_81_1
 SOLD_VERSION_ArbitrumBlockVerifier := 0.81.1
-SOLD_eccBridge := $(SOLD_0_80)
+SOLD_eccBridge := $(SOLD_0_81_1)
 SOLD_DepositVoucher := $(SOLD_0_81)
 SOLD_EthBeaconLightClient := $(SOLD_0_81_1)
 SOLD_ArbitrumBlockVerifier := $(SOLD_0_81_1)

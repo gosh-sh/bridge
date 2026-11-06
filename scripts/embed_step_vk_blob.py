@@ -2,8 +2,7 @@
 """Rewrite the `VK_BLOB` literal in an AN-side `EthBeaconLightClient.sol` from the
 eth-light-client-prover step fixture, and update the sha256 in the comment above it.
 
-Mirror of `embed_deposit_vk_blob.py` for the light-client `step` circuit. Every VK
-rotation must reach three places: the fixture in this repo
+Every VK rotation of the light-client `step` circuit must reach three places: the fixture in this repo
 (`eth-light-client-prover/fixtures/step_vkblob/`), the `tvm-sdk` opcode fixtures
 (`scripts/sync_step_opcode_fixtures_to_tvm_sdk.sh`), and the blob embedded in
 `EthBeaconLightClient.sol`. Hand-editing 17 KB of hex is how the deposit blob

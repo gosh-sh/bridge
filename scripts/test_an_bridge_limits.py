@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run bridge limit regressions in TVM without a node or proof generation.
+"""Run bridge limit and deposit-receipt regressions in TVM without a node.
 
-Set SOLD_0_80 to sold 0.80.0. Halo2 verification is stubbed in a temporary
-source copy. Directed events are omitted because tvm-debugger tries to decode
-them as function return values; `WithdrawalRefused` is replaced by a hook that
+Set SOLD_0_81_1 to sold 0.81.1 and SOLD_0_81 to sold 0.81.0, and TVM_DEBUGGER to a
+tvm-debugger that runs KECCAK256 (tvm-sdk fd76a8a9 or later). Every deposit is a real
+receipt proof: `finalize` builds a block whose receipt trie holds the deposit
+(`scripts/deposit-receipt/vectors.py`) and a test hook anchors its hash. Directed events are
+omitted because tvm-debugger tries to decode them as function return values; `WithdrawalRefused` is replaced by a hook that
 records its reason, so a refusal's cause is still asserted. Test hooks seed
 balances and derive voucher addresses. The bridge registers USDC alone; a test hook lifts that check
 for one case so the per-token accounting stays covered, and `test_only_usdc_can_be_registered` runs
@@ -20,9 +22,13 @@ import shutil
 import subprocess
 import tempfile
 import time
+import sys
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts/deposit-receipt"))
+import vectors  # noqa: E402
+
 BRIDGE = "0:" + "1a" * 32
 SENDER = "0:" + "ab" * 32
 TRANSFER = 50_000_000
@@ -34,6 +40,10 @@ EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
 ACCEPT_REACHED = 999
 GAS_CREDIT = 500_000
+TRANSFER_LOG = ((USDC_TOKEN).to_bytes(20, "big"), [bytes.fromhex(
+    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"), b"\0" * 12 + b"\xab" * 20,
+    b"\0" * 31 + b"\x2a"], TRANSFER.to_bytes(32, "big"))
+SUPPLY_LOG = (b"\x77" * 20, [b"\x55" * 32, b"\0" * 31 + b"\x2a"], b"\0" * 64)
 
 
 def command(args):
@@ -52,14 +62,11 @@ class BridgeLimits(unittest.TestCase):
         shutil.copytree(REPO / "contracts/an", src)
         bridge = src / "exchange/eccBridge.sol"
         source = bridge.read_text()
-        verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
-        assert source.count(verification) == 1
-        source = source.replace(verification, "testVerifyProof()")
         usdc_only = "require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);"
         assert source.count(usdc_only) == 1
         source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || "
                                 "(_testAllowOtherTokens && tokenId > USDC_ECC_ID), ERR_TOKEN_CONFIG);")
-        accept = "tvm.accept();\n        require(\n            testVerifyProof(),"
+        accept = "tvm.accept();\n        DepositPI f = _provenDeposit("
         assert source.count(accept) == 1
         source = source.replace(accept, f"require(!_testStopAtAccept, {ACCEPT_REACHED});\n        " + accept)
         source = re.sub(r"emit WithdrawalRefused\{dest: addrExtern\}\(.*?\);",
@@ -86,9 +93,30 @@ class BridgeLimits(unittest.TestCase):
     function testAllowOtherTokens() public { tvm.accept(); _testAllowOtherTokens = true; }
     bool _testStopAtAccept;
     function testStopAtAccept() public { tvm.accept(); _testStopAtAccept = true; }
-    bool _testRejectProof;
-    function testRejectProof() public { tvm.accept(); _testRejectProof = true; }
-    function testVerifyProof() private view returns (bool) { return !_testRejectProof; }
+    function testAnchor(uint256 chainId, uint256 blockHash) public {
+        tvm.accept();
+        _acceptedBlockHash[chainId][blockHash] = true;
+    }
+    function testTrust(uint256 chainId, uint256 l1Bridge) public {
+        tvm.accept();
+        _trustedL1Bridge[chainId][l1Bridge] = true;
+    }
+    function testReceiptLog(bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)
+        public pure returns (uint256 emitter, uint256 topic0)
+    {
+        (, uint256 root) = EthTrie.headerRoots(header, gosh.keccak256(header));
+        (uint256 key, uint nibbles) = EthTrie.receiptKey(txIndex);
+        (TvmSlice r, uint len) = EthTrie.prove(root, key, nibbles, receiptProof);
+        r = EthTrie.receiptLog(r, len, logIndex);
+        uint8 kind;
+        uint n;
+        uint hdr;
+        (kind, n, hdr, r) = EthTrie._hdr(r);
+        (kind, n, hdr, r) = EthTrie._hdr(r);
+        (emitter, r) = EthTrie._uint(r, 20);
+        (kind, n, hdr, r) = EthTrie._hdr(r);
+        (topic0, r) = EthTrie._hash(r);
+    }
     function testSeed(TvmCell voucherCode, uint128 first, uint128 second) public {
         tvm.accept();
         _depositVoucherCode = voucherCode;
@@ -98,8 +126,6 @@ class BridgeLimits(unittest.TestCase):
         _outstandingByChain[2] = second;
         _trustedL1Bridge[1][42] = true;
         _trustedL1Bridge[2][42] = true;
-        _acceptedBlockHash[1][123] = true;
-        _acceptedBlockHash[2][123] = true;
     }
     function testVoucher(uint256 depositId, uint256 chainId) public view returns (address voucher) {
         uint256 h = tvm.hash(abi.encode(depositId, uint256(42), uint256(0), chainId));
@@ -110,7 +136,7 @@ class BridgeLimits(unittest.TestCase):
 """
         end = source.rfind("}")
         bridge.write_text(source[:end] + hooks + source[end:])
-        sold = os.environ["SOLD_0_80"]
+        sold = os.environ["SOLD_0_81_1"]
         command([sold, "--tvm-version", "gosh", "--base-path", str(src),
                  str(bridge), "-o", str(cls.root)])
         cls.abi = cls.root / "eccBridge.abi.json"
@@ -180,10 +206,33 @@ class BridgeLimits(unittest.TestCase):
     def limits(self, chain=1):
         return self.call("getDepositLimits", {"chainId": str(chain)})["response"]
 
-    def finalize(self, deposit=0, amount=TRANSFER, chain=1, expect=0, header=None, token=USDC_TOKEN):
-        pi = [deposit, 1, amount, 42, chain, 0, 0, 0, 43, 0, 123, token, 0]
-        return self.call("finalizeDeposit", {"proof": "", "publicInputs": b"".join(
-            n.to_bytes(32, "little") for n in pi).hex()}, expect=expect, header=header)
+    def finalize(self, deposit=0, amount=TRANSFER, chain=1, expect=0, header=None, token=USDC_TOKEN,
+                 logs=None, receipt=None, anchor=True, log_index=1, **block):
+        """Finalize a deposit from a block of its own: the deposit transaction's receipt carries
+        the USDC transfer, the `Deposit` log, and an AAVE supply after it."""
+        if receipt is None:
+            if logs is None:
+                logs = [TRANSFER_LOG, vectors.deposit_log(42, deposit, amount, 43, token), SUPPLY_LOG]
+            receipt = vectors.receipt(logs)
+        v = vectors.synthetic(receipt, **block)
+        if anchor:
+            self.anchor(v, chain)
+        return self.submit(v, chain, log_index, expect=expect, header=header)
+
+    def anchor(self, v, chain=1):
+        self.call("testAnchor", {"chainId": str(chain), "blockHash": v["blockHash"]})
+
+    def submit(self, v, chain=1, log_index=1, expect=0, header=None):
+        return self.call("finalizeDeposit", {
+            "chainId": str(chain), "header": v["header"], "txIndex": v["txIndex"],
+            "receiptProof": v["receiptProof"], "logIndex": log_index}, expect=expect, header=header)
+
+    def voucher(self, deposit, chain=1):
+        return self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})[
+            "response"]["voucher"]
+
+    def deployed(self, result, deposit, chain=1):
+        self.assertEqual([m["destination"] for m in result["messages"]], [self.voucher(deposit, chain)])
 
     def confirm(self, deposit=0, amount=TRANSFER, chain=1, source=None, expect=0):
         voucher = self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})[
@@ -238,14 +287,12 @@ class BridgeLimits(unittest.TestCase):
         for token, token_id in ((SECOND_TOKEN, 4), (THIRD_TOKEN, 5), (SECOND_TOKEN, 2), (SECOND_TOKEN, 0)):
             self.set_bridge_token(token, token_id, 100, 1000, expect=242)
             self.assertFalse(self.token_limits(token_id)["listed"])
-        self.call("testRejectProof")
         self.finalize(token=SECOND_TOKEN, expect=241)
         self.confirm_token(expect=241)
         self.assertTrue(self.token_limits(3)["listed"])
 
     def test_unregistered_proven_token_cannot_mint_usdc(self):
         before = self.call("getTotalBridged", {"tokenId": 3})["response"]
-        self.call("testRejectProof")
         self.finalize(token=SECOND_TOKEN, expect=241)
         self.confirm_token(expect=241)
         self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"], before)
@@ -404,20 +451,16 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(int(limits["maxTvl"]), TVL)
 
     def test_finalize_refuses_before_accept_within_the_gas_credit(self):
-        self.register(SECOND_TOKEN, 4, 1000, 2000)
-        self.register(THIRD_TOKEN, 5, 1000, 2000, enabled=False)
-        self.confirm_token(amount=1000, deposit=500)
-        self.confirm_token(amount=500, deposit=501)
         self.call("testStopAtAccept")
-        for token, amount, code in ((THIRD_TOKEN + 1, 1, 241), (THIRD_TOKEN, 1, 243),
-                                    (SECOND_TOKEN, 1001, 234), (SECOND_TOKEN, 501, 235),
-                                    (USDC_TOKEN, TRANSFER + 1, 234), (SECOND_TOKEN, 500, ACCEPT_REACHED),
-                                    (USDC_TOKEN, TRANSFER, ACCEPT_REACHED)):
-            result = self.finalize(deposit=502, token=token, amount=amount, expect=code)
-            self.assertLess(result["gas_used"], GAS_CREDIT, (token, amount))
+        result = self.finalize(anchor=False, expect=224)
+        self.assertLess(result["gas_used"], GAS_CREDIT)
+        result = self.finalize(expect=ACCEPT_REACHED)
+        self.assertLess(result["gas_used"], GAS_CREDIT)
+        self.call("setPaused", {"paused": True}, signed=True)
+        result = self.finalize(expect=231)
+        self.assertLess(result["gas_used"], GAS_CREDIT)
 
-    def test_limits_refuse_before_proof_verification(self):
-        self.call("testRejectProof")
+    def test_limits_refuse_a_proven_deposit(self):
         self.finalize(amount=TRANSFER + 1, expect=234)
         self.seed(TVL)
         self.finalize(amount=1, expect=235)
@@ -579,6 +622,120 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(second["messages"], [])
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
 
+
+    # ------------------------------------------------------------ deposit receipt
+
+    def test_a_proven_deposit_deploys_its_voucher(self):
+        self.deployed(self.finalize(deposit=7), 7)
+
+    def test_legacy_typed_and_arbitrum_receipts_all_prove(self):
+        for i, tx_type in enumerate((0, 1, 2, 3, 4, 0x64, 0x68, 0x6a, 0x78)):
+            with self.subTest(tx_type=tx_type):
+                log = vectors.deposit_log(42, 10 + i, TRANSFER // 10, 43, USDC_TOKEN)
+                receipt = vectors.receipt([TRANSFER_LOG, log], tx_type=tx_type)
+                self.deployed(self.finalize(receipt=receipt), 10 + i)
+
+    def test_the_deposit_log_is_the_one_at_log_index(self):
+        logs = [vectors.deposit_log(42, 30, 1, 43, USDC_TOKEN), TRANSFER_LOG,
+                vectors.deposit_log(42, 31, 2, 43, USDC_TOKEN)]
+        self.deployed(self.finalize(logs=logs, log_index=0), 30)
+        self.deployed(self.finalize(logs=logs, log_index=2), 31)
+        self.finalize(logs=logs, log_index=1, expect=244)
+        self.finalize(logs=logs, log_index=3, expect=307)
+        self.finalize(logs=[], log_index=0, expect=307)
+
+    def test_a_deposit_from_an_untrusted_emitter_is_refused(self):
+        for emitter in (43, 0):
+            with self.subTest(emitter=emitter):
+                self.call("testTrust", {"chainId": "1", "l1Bridge": "0"})
+                log = vectors.deposit_log(emitter, 40, 1, 43, USDC_TOKEN)
+                self.finalize(logs=[log], log_index=0, expect=222)
+        self.call("testTrust", {"chainId": "2", "l1Bridge": "43"})
+        self.finalize(logs=[vectors.deposit_log(43, 40, 1, 43, USDC_TOKEN)], log_index=0, expect=222)
+
+    def test_another_event_of_the_bridge_is_refused(self):
+        withdrawal = vectors.keccak256(b"WithdrawalPaid(uint256,address,uint256,bytes32,uint256,address)")
+        for topic0 in (withdrawal, vectors.LEGACY_DEPOSIT_TOPIC0, b"\0" * 32):
+            with self.subTest(topic0=topic0.hex()):
+                log = vectors.deposit_log(42, 41, 1, 43, USDC_TOKEN, topic0=topic0)
+                self.finalize(logs=[log], log_index=0, expect=244)
+
+    def test_a_deposit_log_of_another_shape_is_refused(self):
+        legacy = vectors.deposit_log(42, 42, 1, 43, USDC_TOKEN, drop_words=1,
+                                     topic0=vectors.LEGACY_DEPOSIT_TOPIC0)
+        for log in (vectors.deposit_log(42, 42, 1, 43, USDC_TOKEN, drop_words=1),
+                    vectors.deposit_log(42, 42, 1, 43, USDC_TOKEN, extra_words=1),
+                    vectors.deposit_log(42, 42, 1, 43, USDC_TOKEN, extra_topics=1),
+                    vectors.deposit_log(42, 42, 1, 43, USDC_TOKEN, drop_words=4), legacy):
+            with self.subTest(log=log[2].hex()[:16]):
+                self.finalize(logs=[log], log_index=0, expect=244)
+
+    def test_a_deposit_log_inside_another_logs_data_is_refused(self):
+        inner = vectors.rlp(list(vectors.deposit_log(42, 43, 1, 43, USDC_TOKEN)))
+        outer = (b"\x77" * 20, [vectors.keccak256(b"Forward(bytes)")], inner)
+        self.finalize(logs=[outer], log_index=0, expect=244)
+        self.finalize(logs=[outer], log_index=1, expect=307)
+        carrier = (vectors.deposit_log(42, 0, 0, 0, 0)[0], [vectors.DEPOSIT_TOPIC0], inner)
+        self.finalize(logs=[carrier], log_index=0, expect=244)
+
+    def test_a_block_that_is_not_accepted_is_refused(self):
+        self.finalize(anchor=False, expect=224)
+        v = vectors.synthetic(vectors.receipt([vectors.deposit_log(42, 44, 1, 43, USDC_TOKEN)]))
+        self.anchor(v, chain=2)
+        self.submit(v, chain=1, log_index=0, expect=224)
+        self.deployed(self.submit(v, chain=2, log_index=0), 44, chain=2)
+
+    def test_a_repeated_deposit_id_reaches_the_same_voucher(self):
+        self.deployed(self.finalize(deposit=45, amount=1), 45)
+        self.deployed(self.finalize(deposit=45, amount=2, number=9_000_001), 45)
+
+    def test_a_tampered_block_receipt_or_proof_is_refused(self):
+        v = vectors.synthetic(vectors.receipt([TRANSFER_LOG, vectors.deposit_log(42, 46, 1, 43, USDC_TOKEN)]))
+        self.anchor(v)
+
+        def flip(h, at):
+            b = bytearray.fromhex(h)
+            b[at] ^= 1
+            return b.hex()
+
+        leaf = v["receiptProof"][-1]
+        for case, change, code in (
+                ("header", {"header": flip(v["header"], 100)}, 224),
+                ("receipt", {"receiptProof": v["receiptProof"][:-1] + [flip(leaf, len(leaf) // 2 - 40)]}, 302),
+                ("root node", {"receiptProof": [flip(v["receiptProof"][0], 50)] + v["receiptProof"][1:]}, 302),
+                ("node dropped", {"receiptProof": v["receiptProof"][:-1]}, 303),
+                ("node added", {"receiptProof": v["receiptProof"] + [leaf]}, 303),
+                ("no proof", {"receiptProof": []}, 303),
+                ("another transaction", {"txIndex": v["txIndex"] + 1}, 302),
+                ("past the last transaction", {"txIndex": 0x7f}, 305)):
+            with self.subTest(case=case):
+                self.submit(dict(v, **change), expect=code)
+        self.deployed(self.submit(v), 46)
+
+    def test_a_failed_transaction_is_refused(self):
+        receipt = vectors.receipt([vectors.deposit_log(42, 47, 1, 43, USDC_TOKEN)], status=0)
+        self.finalize(receipt=receipt, log_index=0, expect=308)
+
+    def test_deposit_fields_are_checked_after_the_proof(self):
+        self.finalize(logs=[vectors.deposit_log(42, 48, 0, 43, USDC_TOKEN)], log_index=0, expect=204)
+        self.finalize(logs=[vectors.deposit_log(42, 48, 1 << 64, 43, USDC_TOKEN)], log_index=0, expect=214)
+        self.finalize(logs=[vectors.deposit_log(42, 48, 1, 0, USDC_TOKEN)], log_index=0, expect=230)
+        self.finalize(logs=[vectors.deposit_log(42, 48, 1, 43, SECOND_TOKEN)], log_index=0, expect=241)
+
+    def test_live_arbitrum_sepolia_receipts_prove(self):
+        for name in ("arbitrum_sepolia_326615634.json", "arbitrum_sepolia_326657966.json"):
+            with self.subTest(vector=name):
+                live = json.loads((REPO / "scripts/deposit-receipt/fixtures" / name).read_text())
+                args = dict(live["finalizeDeposit"])
+                chain = args.pop("chainId")
+                log = live["logs"][0]
+                got = self.call("testReceiptLog", args)["response"]
+                self.assertEqual(int(got["emitter"], 0), int(log["address"], 16))
+                self.assertEqual(int(got["topic0"], 0), int(log["topics"][0], 16))
+                # These are the deployed bridge's five-field Deposit: proven, then refused.
+                self.call("testAnchor", {"chainId": str(chain), "blockHash": live["blockHash"]})
+                self.call("testTrust", {"chainId": str(chain), "l1Bridge": str(int(log["address"], 16))})
+                self.submit({**args}, chain=chain, log_index=args["logIndex"], expect=244)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1436,7 +1436,7 @@ mod tests {
         // accounting.
         assert_eq!(
             &hash[..8],
-            "9fad87b9",
+            "8047924b",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

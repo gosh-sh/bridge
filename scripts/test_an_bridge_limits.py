@@ -30,6 +30,8 @@ SECOND_TOKEN = 85
 THIRD_TOKEN = 102
 EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
+ACCEPT_REACHED = 999
+GAS_CREDIT = 500_000
 
 
 def command(args):
@@ -51,6 +53,9 @@ class BridgeLimits(unittest.TestCase):
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
         source = source.replace(verification, "testVerifyProof()")
+        accept = "tvm.accept();\n        require(\n            testVerifyProof(),"
+        assert source.count(accept) == 1
+        source = source.replace(accept, f"require(!_testStopAtAccept, {ACCEPT_REACHED});\n        " + accept)
         source = re.sub(r"emit WithdrawalRefused\{dest: addrExtern\}\(.*?\);",
                         "_testLastRefusal = reason;", source, flags=re.S)
         source = source.replace(
@@ -71,6 +76,8 @@ class BridgeLimits(unittest.TestCase):
     function testLastRefusal() public view returns (uint16 reason) {
         reason = _testLastRefusal;
     }
+    bool _testStopAtAccept;
+    function testStopAtAccept() public { tvm.accept(); _testStopAtAccept = true; }
     bool _testRejectProof;
     function testRejectProof() public { tvm.accept(); _testRejectProof = true; }
     function testVerifyProof() private view returns (bool) { return !_testRejectProof; }
@@ -373,6 +380,19 @@ class BridgeLimits(unittest.TestCase):
         limits = self.limits()
         self.assertEqual(int(limits["maxTransfer"]), TRANSFER)
         self.assertEqual(int(limits["maxTvl"]), TVL)
+
+    def test_finalize_refuses_before_accept_within_the_gas_credit(self):
+        self.register(SECOND_TOKEN, 4, 1000, 2000)
+        self.register(THIRD_TOKEN, 5, 1000, 2000, enabled=False)
+        self.confirm_token(amount=1000, deposit=500)
+        self.confirm_token(amount=500, deposit=501)
+        self.call("testStopAtAccept")
+        for token, amount, code in ((THIRD_TOKEN + 1, 1, 241), (THIRD_TOKEN, 1, 243),
+                                    (SECOND_TOKEN, 1001, 234), (SECOND_TOKEN, 501, 235),
+                                    (USDC_TOKEN, TRANSFER + 1, 234), (SECOND_TOKEN, 500, ACCEPT_REACHED),
+                                    (USDC_TOKEN, TRANSFER, ACCEPT_REACHED)):
+            result = self.finalize(deposit=502, token=token, amount=amount, expect=code)
+            self.assertLess(result["gas_used"], GAS_CREDIT, (token, amount))
 
     def test_limits_refuse_before_proof_verification(self):
         self.call("testRejectProof")

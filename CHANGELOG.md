@@ -279,8 +279,9 @@ assigns it when the release is tagged.
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted.
 - `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
   (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
-  parked while a token is unregistered or closed on AN.
-- `eccBridge` 1.16.0 (code hash `9fad87b9…`) credits the proven ERC-20 to its registered
+  parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and
+  234 and 235, before `accept`, so a retry costs the bridge no gas.
+- `eccBridge` 1.16.0 (code hash `8047924b…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register the same token and ECC id on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use

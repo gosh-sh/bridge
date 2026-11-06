@@ -1177,14 +1177,14 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
                 ERR_UNSUPPORTED_SRC_CHAIN);
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
+        f.evmToken = _parseToken(publicInputs);
+        _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
         // pre-accept gas limit. Permissionless submission — the proof itself is
         // the authorization; a garbage proof only wastes the bridge's own gas.
         tvm.accept();
-        f.evmToken = _parseToken(publicInputs);
-        _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
         require(
             gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof),
             ERR_INVALID_ZKPROOF
@@ -1520,8 +1520,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         return (hi << 128) | lo;
     }
 
-    /// @dev Read ONLY the deposited ERC-20 (Fr #11) out of the same proven
-    ///      blob, after `accept`, for the same reason as `_parseBlockHash`.
+    /// @dev Read ONLY the deposited ERC-20 (Fr #11) out of the same proven blob.
     function _parseToken(bytes publicInputs) private pure returns (uint256 token) {
         TvmSlice s = TvmSlice(publicInputs);
         for (uint k = 0; k < 12; k++) {

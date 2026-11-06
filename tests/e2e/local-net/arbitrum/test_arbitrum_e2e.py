@@ -1,6 +1,8 @@
 """Arbitrum Sepolia e2e: a fresh AckiNackiBridge on Arbitrum Sepolia, 2 USDC deposited through
 it to the local Acki Nacki network with `ackinacki-bridge deposit`, and the same 2 USDC
-withdrawn back with `ackinacki-bridge withdraw`.
+withdrawn back with `ackinacki-bridge withdraw`. A second ERC-20, 18 decimals and listed as ECC
+id 4 by this run, makes the same round trip next to USDC, on the same bridge and in the same
+bundle, and each token's books stay its own.
 
 Nothing is accepted by hand. The one trusted input on the Acki Nacki side is the Sepolia
 light client's committee, proven from the beacon chain and set once (section 5); then the
@@ -13,7 +15,8 @@ deployed and the deposit sent as soon as the network is up; the light client is 
 the deposit waits for its Arbitrum assertion (half an hour at least), and daemon-live proves
 the network's 16384-block bundles from the start. The withdrawal does not wait for the deposit:
 its 2 USDC are minted by the owner for 421614 and burned right away, so the burn lands in the
-first bundle, and the bridge pays it out of the deposit's 2 USDC.
+first bundle, and the bridge pays it out of the deposit's 2 USDC. The second token's burn lands
+in that bundle too.
 
 The tests run in file order and pytest stops at the first failure (-x): each one is a step
 of the scenario and asserts what that step must have produced, from the chains or from the
@@ -32,10 +35,14 @@ from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC,
                       SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
+TOKEN_AMOUNT = 2 * 10**18   # base units: 2 of the second token, there and back
+TOKEN_SUPPLY = 10 * 10**18  # what ListE2EToken.s.sol mints to the deployer
+TOKEN_ID = 4
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
-RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: 103 min)
+WITHDRAW_PROOF_SECS = 7200  # one Circuit 4 proof, after waiting for the other withdrawal's on the prove lock
+RUN_SECS = 3 * 3600         # how long a run may take, for the committee-period check
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 
@@ -59,7 +66,7 @@ def test_01_deployer_key_matches_its_address(arb, ctx):
         "ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY is not the key of ARBITRUM_SEPOLIA_E2E_ADDRESS"
     eth, usdc = arb.eth(address), arb.usdc(address)
     print(f"  {address}: {eth / 1e18:.5f} ETH, {usdc / 1e6} USDC")
-    assert eth >= 5 * 10**15, f"{address} has {eth / 1e18} ETH on Arbitrum Sepolia; a run needs ~0.005"
+    assert eth >= 8 * 10**15, f"{address} has {eth / 1e18} ETH on Arbitrum Sepolia; a run needs ~0.008"
     assert usdc >= AMOUNT, f"{address} has {usdc / 1e6} USDC on Arbitrum Sepolia; the run moves 2"
     ctx.update(address=address, usdc_before=usdc)
 
@@ -167,6 +174,22 @@ def test_23_trust_set(an, arb, ctx):
     assert arb.call(ctx["bridge"], "storedLastSeenBlockSeqNo()") == int(g["GENESIS_SEED_SEQNO"])
 
 
+def test_24_second_token_listed_on_both_sides(run, an, arb, ctx):
+    """A fresh ERC-20 is listed on the bridge as ECC id 4, with its deposits open, and registered
+    on Acki Nacki under the same id. Nothing deposits it before both are done."""
+    run.job("list-token", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
+    run.finish("list-token", 600)
+    token = kv(run.get("token.env"))["TOKEN_ADDRESS"]
+    print(f"  second token https://sepolia.arbiscan.io/address/{token}")
+    assert arb.balance_of(token, ctx["address"]) == TOKEN_SUPPLY
+    assert arb.call(ctx["bridge"], "maxWithdrawalAmount(uint32)", TOKEN_ID.to_bytes(32, "big")) > 0, \
+        "the bridge does not list the second token"
+    got = an("token", token)
+    assert got.get("TOKEN_REGISTERED") == "true", f"setBridgeToken did not register {token}: {got}"
+    assert int(got["TOKEN_ID"]) == TOKEN_ID, got
+    ctx.update(token=token)
+
+
 # ── 3 · deposit services, right away ────────────────────────────────────────
 
 
@@ -176,11 +199,11 @@ def owner_keys():
 
 
 def test_30_sender_keys_funded(run, arb):
-    """The relayer and the withdrawal's burner have gas of their own, so no two senders share a nonce."""
+    """The relayer and the withdrawals' burners have gas of their own, so no two senders share a nonce."""
     run.job("fund", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     run.finish("fund", 600)
     f = kv(run.get("fund.env"))
-    for role in ("RELAYER", "WITHDRAW_BURNER"):
+    for role in ("RELAYER", "WITHDRAW_BURNER", "WITHDRAW_BURNER_TOKEN"):
         assert arb.eth(f[f"{role}_ADDRESS"]) > 0, f"{role.lower()} {f[f'{role}_ADDRESS']} has no ETH"
 
 
@@ -238,14 +261,14 @@ def steps(run, job):
     return out
 
 
-def step_done(run, step, what, timeout):
+def step_done(run, step, what, timeout, job="cli-deposit"):
     def check():
-        state = steps(run, "cli-deposit").get(step, ("", ""))
-        assert state[0] != "failed", f"deposit step {step} failed: {state[1]}\n" + tail(run.log("cli-deposit"))
-        code = run.wait("cli-deposit", 1)
-        assert code in (None, 0), f"ackinacki-bridge deposit exited {code} before {step}\n" + tail(run.log("cli-deposit"))
+        state = steps(run, job).get(step, ("", ""))
+        assert state[0] != "failed", f"deposit step {step} failed: {state[1]}\n" + tail(run.log(job))
+        code = run.wait(job, 1)
+        assert code in (None, 0), f"ackinacki-bridge deposit exited {code} before {step}\n" + tail(run.log(job))
         return state if state[0] in ("done", "skipped") else None
-    return wait_for(what, check, timeout, log=lambda: run.log("cli-deposit"))
+    return wait_for(what, check, timeout, log=lambda: run.log(job))
 
 
 def test_40_deposit_sent(run, ctx):
@@ -269,6 +292,20 @@ def test_41_deposit_event_received(run, arb, ctx):
     ctx.update(supplied=supplied)
 
 
+def test_41a_second_token_deposit_sent(run, arb, ctx):
+    """The CLI deposits 2 of the second token from the same address once USDC's deposit is on
+    chain, so the two never share a nonce. The bridge books it under its own id and keeps it
+    liquid: only USDC goes to AAVE."""
+    run.job("cli-deposit-token", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
+            FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2", TOKEN=ctx["token"])
+    state = step_done(run, "evm_confirm", "the second token's Deposit event is received", 900, "cli-deposit-token")
+    assert state[1].startswith("depositId"), state
+    bridge = ctx["bridge"]
+    assert arb.call(bridge, "liabilitiesOf(uint32)", TOKEN_ID.to_bytes(32, "big")) == TOKEN_AMOUNT
+    assert arb.balance_of(ctx["token"], bridge) == TOKEN_AMOUNT
+    assert arb.call(bridge, "suppliedPrincipal()") == ctx["supplied"], "the second token's deposit moved the AAVE book"
+
+
 # ── 4b · withdrawal: ackinacki-bridge withdraw, alongside the deposit ──────
 
 
@@ -281,26 +318,41 @@ def test_42_withdrawal_multisig_funded(an, ctx):
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
 
 
-def log_line(run, pattern, what, timeout):
+def test_42a_second_token_withdrawal_multisig_funded(an, ctx):
+    """A third multisig gets 2 of the second token the owner mints with mintAndSendTokenBridged, for
+    the same reason: the bridge already holds that token's deposit to pay it with."""
+    got = an("msig-token", TOKEN_AMOUNT)
+    ctx.update(tmsig=got["MSIG"], tmsig_keys=an.cat(got["MSIG_KEYS"]))
+    balances = an("ecc", ctx["tmsig"])
+    assert int(balances["ECC4"]) == TOKEN_AMOUNT, "the multisig does not hold the 2 of the second token"
+    assert int(balances["ECC3"]) == 0, "the second token's mint paid USDC"
+
+
+def log_line(run, pattern, what, timeout, log="cli-withdraw"):
+    """Both withdrawals are one job, cli-withdraw; `log` names the one to watch."""
     def check():
-        text = run.log("cli-withdraw")
+        text = run.log(log)
         code = run.wait("cli-withdraw", 1)
         m = re.search(pattern, text)
         assert m or code in (None, 0), f"ackinacki-bridge withdraw exited {code} before: {what}\n" + tail(text)
         return m
-    return wait_for(what, check, timeout, log=lambda: run.log("cli-withdraw"))
+    return wait_for(what, check, timeout, log=lambda: run.log(log))
 
 
 def test_43_burn_on_acki_nacki(run, ctx):
-    """The CLI burns the 2 USDC on Acki Nacki."""
-    run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY") + "\n" + ctx["wmsig_keys"].replace("\n", ""),
-            FROM=ctx["wmsig"], TO=ctx["address"], AMOUNT="2")
+    """The CLI burns the 2 USDC and the 2 of the second token on Acki Nacki."""
+    keys = [env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"), ctx["wmsig_keys"].replace("\n", ""), ctx["tmsig_keys"].replace("\n", "")]
+    run.job("cli-withdraw", stdin="\n".join(keys), FROM=ctx["wmsig"], TOKEN_FROM=ctx["tmsig"], TOKEN_ID=TOKEN_ID,
+            TO=ctx["address"], AMOUNT="2")
     log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
+    log_line(run, r"burn broadcast an_tx=", "the second token's burn is sent", 900, log="cli-withdraw-token")
 
 
 def test_44_withdrawal_event_captured(run):
-    """The bridge emits WithdrawalInitiated and the CLI captures it."""
+    """The bridge emits WithdrawalInitiated for each burn and each CLI captures its own."""
     log_line(run, r"captured WithdrawalInitiated event", "WithdrawalInitiated is captured", 900)
+    log_line(run, r"captured WithdrawalInitiated event", "the second token's WithdrawalInitiated is captured", 900,
+             log="cli-withdraw-token")
 
 
 # ── 5 · the light client, while the deposit waits for its assertion ────────
@@ -430,6 +482,21 @@ def test_65_deposit_delivered(run, an, ctx):
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the multisig does not hold the 2 USDC"
 
 
+def test_66_second_token_deposit_delivered(run, an, ctx):
+    """The second token's deposit goes the same way, through its own anchor, proof and
+    finalizeDeposit, and lands in its own currency on the same multisig."""
+    job = "cli-deposit-token"
+    state = step_done(run, "anchor", "the second token's deposit block is accepted", ANCHOR_SECS, job)
+    assert an("accepted", ARB_CHAIN, state[1]).get("ACCEPTED") == "true", f"isAcceptedBlockHash({ARB_CHAIN}, {state[1]})"
+    step_done(run, "prove", "the second token's deposit proof is generated", 3600, job)
+    step_done(run, "finalize", "the second token's finalizeDeposit is confirmed", 900, job)
+    step_done(run, "credit", "the second token is minted", 900, job)
+    run.finish(job, 600)
+    balances = an("ecc", ctx["msig"])
+    assert int(balances["ECC4"]) == TOKEN_AMOUNT, "the multisig does not hold the 2 of the second token"
+    assert int(balances["ECC3"]) == AMOUNT, "the second token's deposit moved the multisig's USDC"
+
+
 # ── 7 · the withdrawal lands ────────────────────────────────────────────────
 
 
@@ -440,14 +507,13 @@ def test_70_burn_bundle_verified(run):
 
 def test_71_withdrawal_proof_generated(run):
     """Circuit 4 and its SHPLONK aggregation prove the withdrawal."""
-    log_line(run, r"capture \+ prove complete", "the withdrawal proof is generated", 3600)
+    log_line(run, r"capture \+ prove complete", "the withdrawal proof is generated", WITHDRAW_PROOF_SECS)
 
 
 def test_72_withdrawal_paid(run, ctx):
     """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
     m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
-    run.finish("cli-withdraw", 300)
     ctx.update(withdraw_tx=m.group(1))
 
 
@@ -474,3 +540,26 @@ def test_73_usdc_delivered(arb, an, ctx):
         f"{ctx['address']} holds {after / 1e6} USDC, {ctx['usdc_before'] / 1e6} before the deposit"
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == 0, "the withdrawal multisig still holds USDC"
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the deposit's 2 USDC left the recipient multisig"
+
+
+def test_74_second_token_withdrawal_paid(run):
+    """The second token's burn is in the same bundle; its proof and withdrawByProof follow."""
+    log = "cli-withdraw-token"
+    log_line(run, r"stage 5/6", "verifyBlock covers the second token's burn", COVERAGE_SECS, log=log)
+    log_line(run, r"capture \+ prove complete", "the second token's withdrawal proof is generated", WITHDRAW_PROOF_SECS, log=log)
+    m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "the second token's withdrawByProof is confirmed", 1800, log=log)
+    print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
+    run.finish("cli-withdraw", 300)
+
+
+def test_75_second_token_delivered_and_books_separate(arb, an, ctx):
+    """The 2 of the second token are back on ARBITRUM_SEPOLIA_E2E_ADDRESS, its liabilities and its
+    balance on the bridge are zero, and neither token's accounts moved the other's."""
+    token, bridge = ctx["token"], ctx["bridge"]
+    assert arb.balance_of(token, ctx["address"]) == TOKEN_SUPPLY, "the deployer did not get the second token back"
+    assert arb.balance_of(token, bridge) == 0, "the bridge still holds the second token"
+    assert arb.call(bridge, "liabilitiesOf(uint32)", TOKEN_ID.to_bytes(32, "big")) == 0, "the bridge still owes the second token"
+    burned = an("ecc", ctx["tmsig"])
+    assert int(burned["ECC4"]) == 0, "the withdrawal multisig still holds the second token"
+    kept = an("ecc", ctx["msig"])
+    assert (int(kept["ECC3"]), int(kept["ECC4"])) == (AMOUNT, TOKEN_AMOUNT), kept

@@ -4,6 +4,7 @@ members = [
     "crates/eth-frontend",
     "crates/acki-nacki-interface",
     "crates/deposit-chain-ids",
+    "crates/deposit-receipt",
 ]
 
 exclude = [

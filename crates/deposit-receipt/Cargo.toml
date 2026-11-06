@@ -1,0 +1,18 @@
+[package]
+name = "deposit-receipt"
+version = "0.2.0"
+edition = "2021"
+description = "The receipt proof eccBridge.finalizeDeposit takes for an EVM deposit"
+license = "Apache-2.0"
+
+# Shared by the root workspace, crates/deposit-relayer-daemon and
+# crates/ackinacki-bridge (through crates/bridge-prover-libraries), so nothing
+# here inherits from a workspace.
+[dependencies]
+alloy = { version = "2.0", features = ["consensus", "network", "providers", "rlp", "rpc-types-eth", "trie"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+tokio = { version = "1.42", features = ["macros", "rt"] }

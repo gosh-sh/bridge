@@ -99,7 +99,7 @@ test-coverage: ## Generate test coverage report
 # the env var (K=19 / K=20 but small enough), and
 # `bridge-circuits-heavy` sets `RUST_TEST_THREADS=1` for the rest (the
 # K=20 attestation-BLS MockProvers are the ones that need it).
-STANDALONE_CRATES := deposit-prover eth-light-client-prover frontend \
+STANDALONE_CRATES := eth-light-client-prover frontend \
 	crates/bridge-evm-aggregator crates/bridge-snark-utils \
 	crates/deposit-relayer-daemon crates/eth-light-client-relayer
 
@@ -202,12 +202,12 @@ ci: format-check lint test ## Run CI checks locally
 # Coverage and pre-push targets. No pipeline on GitHub runs `forge coverage`,
 # and the only Rust pipeline (`bridge-circuits.yaml`) only covers
 # `crates/bridge-circuits/`; every other Rust crate — the root workspace,
-# `bridge-relayer-daemon`, `bridge-evm-aggregator`, `deposit-prover`, etc. —
+# `bridge-relayer-daemon`, `bridge-evm-aggregator`, etc. —
 # has no PR-triggered CI. `make pre-push` is the gate for `forge coverage`
 # and for the three Rust units it explicitly runs: the root workspace
 # (`cargo test --workspace --locked`), `bridge-relayer-daemon` (via
 # `relayer-test`) and `bridge-evm-aggregator` (via `aggregator-test`).
-# Everything else — `deposit-prover`, `eth-light-client-prover`, the other
+# Everything else — `eth-light-client-prover`, the other
 # members of `crates/bridge-prover-libraries`, `deposit-relayer-daemon`,
 # `eth-light-client-relayer`, `bridge-snark-utils`, `frontend` — is NOT
 # tested by `make pre-push`. Run `make test-all`, or the per-crate command

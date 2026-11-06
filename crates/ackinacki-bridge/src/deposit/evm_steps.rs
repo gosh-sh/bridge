@@ -1065,7 +1065,7 @@ mod tests {
             .txs
             .lock()
             .unwrap()
-            .insert(h, deposit_tx(h, s.w.account, BRIDGE, 7, 2, Bytes::new()));
+            .insert(h, deposit_tx(h, s.w.account, BRIDGE, 7, Bytes::new()));
         let ui = RecordingUi::new(true);
         let out = request_deposit(
             &s.evm, &mut s.w, &ui, &s.store, &mut s.rec, &s.tx, WINDOW, None,

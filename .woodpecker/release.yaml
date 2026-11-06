@@ -2,10 +2,10 @@
 # the GitHub release for the tag.
 #
 # The manifest is the installer's, not this pipeline's: it fetches
-# `ackinacki-bridge-linux-x86_64.tar.gz`, `kzg_bn254_21.srs`,
-# `kzg_params_18.srs` and `SHA256SUMS` from `releases/latest/download`, and
-# checks every asset against that `SHA256SUMS` — so a release missing one of
-# the four leaves the documented first step of QUICKSTART.md returning 404.
+# `ackinacki-bridge-linux-x86_64.tar.gz`, `kzg_bn254_21.srs` and `SHA256SUMS`
+# from `releases/latest/download`, and checks every asset against that
+# `SHA256SUMS` — so a release missing one of the three leaves the documented
+# first step of QUICKSTART.md returning 404.
 #
 # The tarball is unpacked with `--strip-components=1`, so everything sits under
 # one top-level directory, and the installer then expects exactly:
@@ -15,38 +15,24 @@
 #   verifiers/*.bin      the bytecode stage 1 compares with the deployed verifier
 #   verifiers/*.sol      the source the proof is self-checked against
 #   bridge_config        the profile it writes as <prefix>/bridge_config.release
-#   deposit-prover/      the deposit prover, the working directory of its tools:
-#                        fetch_deposit_data, export_blake2b_proof and
-#                        export_vk_blob, configs/circuit_params.json, and an
-#                        empty data/ for the SRS and the proving key. Laid out
-#                        by crates/ackinacki-bridge/scripts/stage_deposit_prover.sh
 #
-# Neither ceremony file is built from source. Both are the Hermez KZG setup and
+# A deposit needs no prover: the CLI sends the deposit's receipt proof, which
+# the Acki Nacki bridge checks itself.
+#
+# The ceremony file is not built from source. It is the Hermez KZG setup and
 # identical for every release:
 #
 #   kzg_bn254_21.srs     257 MB, for withdrawals. The `ceremony` step carries it
 #                        forward from the newest earlier release that has it; it
 #                        was uploaded by hand once, to the first release that has it.
-#   kzg_params_18.srs    33 MB, for deposits; the installer puts it into
-#                        deposit-prover/data/. Never downloaded: derived from
-#                        kzg_bn254_21.srs with deposit-prover's `downsize_srs`
-#                        (the same tau, cut to k=18) in `verify-deposit-prover`,
-#                        which checks it before it is published.
 #
 # A tag fails in `ceremony`, before the builds, when no earlier release has
-# kzg_bn254_21.srs: without it the deposit file cannot be derived and the
-# deposit prover cannot be checked.
+# kzg_bn254_21.srs.
 #
 # The build fails at once while `MIN_BRIDGE_VERSION` in
 # crates/ackinacki-bridge/src/deposit/an_preflight.rs is still `None`: that CLI
 # would refuse every bridge. The CLI is built with no cargo features, so the
-# development-only `dev-unfixed-bridge` never reaches a release. Nothing is
-# published until `verify-deposit-prover` has unpacked the tarball outside the
-# source tree, put the derived kzg_params_18.srs into it and checked the deposit
-# prover with scripts/check_deposit_prover_bundle.sh: the SRS must carry the
-# Hermez [s]·G2, the verification key the bundle derives with it must be the one
-# the Acki Nacki bridge embeds, and it must prove the fixture deposit to the
-# fixture's public inputs.
+# development-only `dev-unfixed-bridge` never reaches a release.
 #
 # Secret: REVIEW_GH_TOKEN, the same one the review pipelines use — release
 # assets sit under a fine-grained token's **Contents** permission, so it needs
@@ -90,8 +76,7 @@ steps:
         if [ -n "$PREVIOUS" ]; then
           echo "Ceremony carried over from $PREVIOUS."
         else
-          echo "No earlier release has kzg_bn254_21.srs. The deposit prover's"
-          echo "kzg_params_18.srs is derived from it, so no release goes out without it."
+          echo "No earlier release has kzg_bn254_21.srs, and withdrawals need it."
           echo "Upload it once by hand to an earlier release, then re-run this pipeline:"
           echo "  gh release upload <tag> kzg_bn254_21.srs -R $REPO"
           exit 1
@@ -119,13 +104,6 @@ steps:
       - cargo build --release --locked -p ackinacki-bridge
       - cd ../bridge-evm-aggregator
       - cargo build --release --locked --bin aggregate-proof
-      # deposit-prover is its own workspace with its own rust-toolchain.toml,
-      # and its tools are cargo examples, used as they are. --examples also
-      # builds downsize_srs, which `verify-deposit-prover` derives
-      # kzg_params_18.srs with.
-      - cd ../../deposit-prover
-      - cargo build --release --locked --examples
-      - cd ..
 
   package:
     image: *rust_image
@@ -138,28 +116,9 @@ steps:
         install -m 0755 crates/bridge-evm-aggregator/target/release/aggregate-proof "$STAGE/"
         cp contracts/ethereum/verifiers/*.bin contracts/ethereum/verifiers/*.sol "$STAGE/verifiers/"
         cp crates/ackinacki-bridge/config/bridge_config "$STAGE/"
-        crates/ackinacki-bridge/scripts/stage_deposit_prover.sh "$STAGE/deposit-prover" --no-build
 
         tar -czf ackinacki-bridge-linux-x86_64.tar.gz -C dist ackinacki-bridge-linux-x86_64
         ls -l ackinacki-bridge-linux-x86_64.tar.gz
-
-  verify-deposit-prover:
-    image: *rust_image
-    commands:
-      - |
-        # kzg_params_18.srs is never downloaded: it is the carried k=21 Hermez
-        # ceremony cut to k=18. The tau is the same and [s]·G2 is kept; the G1
-        # powers are truncated and their Lagrange form recomputed. This is the
-        # file `publish` ships.
-        deposit-prover/target/release/examples/downsize_srs \
-          --input kzg_bn254_21.srs --output kzg_params_18.srs --k 18
-        # Unpacked outside the source tree, as a user gets it.
-        OUT=$(mktemp -d)
-        tar -xzf ackinacki-bridge-linux-x86_64.tar.gz -C "$OUT" --strip-components=1
-        cp kzg_params_18.srs "$OUT/deposit-prover/data/"
-        # The SRS's [s]·G2, then the embedded verification key and the fixture
-        # proof with it.
-        scripts/check_deposit_prover_bundle.sh "$OUT/deposit-prover" deposit-prover/fixtures/deposit_10proofs
 
   publish:
     image: maniator/gh
@@ -172,11 +131,10 @@ steps:
         TAG="$CI_COMMIT_TAG"
         echo "Publishing to $REPO $TAG"
 
-        # kzg_bn254_21.srs was carried over by `ceremony`, and kzg_params_18.srs
-        # derived from it and checked by `verify-deposit-prover`. One SHA256SUMS
-        # over everything shipped: the installer refuses an asset it cannot find a
+        # kzg_bn254_21.srs was carried over by `ceremony`. One SHA256SUMS over
+        # everything shipped: the installer refuses an asset it cannot find a
         # line for.
-        sha256sum ackinacki-bridge-linux-x86_64.tar.gz kzg_bn254_21.srs kzg_params_18.srs >SHA256SUMS
+        sha256sum ackinacki-bridge-linux-x86_64.tar.gz kzg_bn254_21.srs >SHA256SUMS
         cat SHA256SUMS
 
         # `gh release upload` requires the release to exist — a tag alone is not
@@ -187,5 +145,5 @@ steps:
 
         # --clobber so re-running a tag replaces its assets instead of failing.
         gh release upload "$TAG" -R "$REPO" --clobber \
-          ackinacki-bridge-linux-x86_64.tar.gz kzg_bn254_21.srs kzg_params_18.srs SHA256SUMS
+          ackinacki-bridge-linux-x86_64.tar.gz kzg_bn254_21.srs SHA256SUMS
         echo "Done."

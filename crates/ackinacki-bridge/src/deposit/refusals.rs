@@ -9,8 +9,6 @@
 pub const ERR_ZERO_AMOUNT: i32 = 204;
 /// The amount does not fit the bridge's accounting.
 pub const ERR_OVERFLOW: i32 = 214;
-/// The bridge rejected the proof.
-pub const ERR_INVALID_ZKPROOF: i32 = 220;
 /// The source chain or EVM bridge is not trusted by the bridge.
 pub const ERR_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 /// The bridge does not know the anchored block yet.
@@ -23,6 +21,17 @@ pub const ERR_PAUSED: i32 = 231;
 pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
 /// The source chain has no remaining deposit capacity.
 pub const ERR_TVL_CAP: i32 = 235;
+/// The proven log is not the bridge's `Deposit` in the shape it reads.
+pub const ERR_NOT_DEPOSIT_LOG: i32 = 244;
+/// The receipt proof does not prove a receipt of the block: a node too
+/// short (300), not RLP (301), not hashing to its parent's reference
+/// (302), off the transaction's path (303), inlined (304), or the path
+/// ends without the receipt (305).
+pub const ERR_RECEIPT_PROOF: std::ops::RangeInclusive<i32> = 300..=305;
+/// The receipt has no log at the `logIndex` sent.
+pub const ERR_NO_LOG: i32 = 307;
+/// The proven receipt is of a transaction that failed.
+pub const ERR_TX_FAILED: i32 = 308;
 /// The message expiry is too far ahead of the chain's clock.
 pub const ERR_MESSAGE_WITH_HUGE_EXPIREAT: i32 = 401;
 
@@ -108,10 +117,17 @@ fn by_code(code: i32) -> Reaction {
                    changed or wiped by a code upgrade); resume with --resume once its owner \
                    restores it",
         },
-        ERR_INVALID_ZKPROOF => Reaction::Refused {
+        ERR_NOT_DEPOSIT_LOG | ERR_NO_LOG | ERR_TX_FAILED => Reaction::Refused {
             code,
-            hint: "the bridge rejected the proof: the installed prover does not match the \
-                   bridge's verification key; keep the work directory and report it",
+            hint: "the bridge does not read the proven log as a successful deposit of the EVM \
+                   bridge, so it cannot be finalized from its receipt; sending it again gives the \
+                   same answer. Keep the work directory and report it to the bridge operator",
+        },
+        c if ERR_RECEIPT_PROOF.contains(&c) => Reaction::Refused {
+            code,
+            hint: "the bridge rejected the receipt proof against the block's receiptsRoot; \
+                   sending it again gives the same answer. Keep the work directory (its \
+                   receipt_proof.json) and report it to the bridge operator",
         },
         ERR_OVERFLOW | ERR_ZERO_AMOUNT | ERR_ZERO_RECIPIENT => Reaction::Refused {
             code,
@@ -203,10 +219,12 @@ mod tests {
             code: 222,
             ..
         }));
-        assert!(matches!(react(&executed(220)), Reaction::Refused {
-            code: 220,
-            ..
-        }));
+        for c in [244, 300, 301, 302, 303, 304, 305, 307, 308] {
+            assert!(
+                matches!(react(&executed(c)), Reaction::Refused { code, .. } if code == c),
+                "{c}"
+            );
+        }
         assert_eq!(react(&executed(224)), Reaction::BackToAnchor);
         assert_eq!(
             react(&FinalizeSend::Executed {
@@ -254,14 +272,14 @@ mod tests {
             Some(222)
         );
         assert_eq!(
-            exit_code_from_sdk(&json!({ "message": "exit_code=220" })),
+            exit_code_from_sdk(&json!({ "message": "exit_code=244" })),
             None
         );
     }
 
     #[test]
     fn hints_never_name_setters_the_bridge_does_not_have() {
-        for c in [214, 204, 220, 222, 230] {
+        for c in [214, 204, 222, 230, 244, 302, 308] {
             if let Reaction::Refused {
                 hint, ..
             } = react(&rejected(c))

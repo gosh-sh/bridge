@@ -16,9 +16,11 @@ snark-verifier.
 consumed on the AN side by the `ZKHALO2VERIFYWITHVK` opcode — a native **Halo2
 SHPLONK** check, *not* an EVM Yul verifier. So the aggregation must run in the
 **`gosh-sh/snark-verifier` (rev `164bd42`)** stack that reads a **gosh** halo2-base
-shard VK natively. `deposit-prover` already pins exactly that stack, so the
-wrap+aggregate lives there as `deposit-prover/examples/aggregate_rotate_shards.rs`
-with **no cross-fork bridge**. The earlier `crates/bridge-evm-aggregator` /
+shard VK natively. The wrap+aggregate first ran as
+`deposit-prover/examples/aggregate_rotate_shards.rs`, because `deposit-prover` pinned exactly
+that stack. `deposit-prover/` is gone (bridge-audit#139); wrap+aggregate now runs in this crate,
+in `examples/aggregate_rotate_glue.rs` and `examples/rotate_tree_n8.rs` (feature
+`aggregation`), still with **no cross-fork bridge**. The earlier `crates/bridge-evm-aggregator` /
 `bridge-snark-utils` (axiom `snark-verifier` v0.1.7) path was only ever a mechanics
 *probe* — it targets EVM Yul output and needs a gosh→axiom transcript bridge that is
 both unnecessary here and blocked by sibling-repo version drift. It is retained for
@@ -278,7 +280,9 @@ the verifier-side decider (opcode extension / Blake2b+Hermez emit) remain.
 ### Real cross-stack wrap+aggregate (measured 2026-08-21, n14)
 
 The probe above stands in the aggregator's own snarks for shard proofs. The **first
-end-to-end run with a REAL gosh-fork shard proof** — `deposit-prover/examples/aggregate_rotate_shards.rs`:
+end-to-end run with a REAL gosh-fork shard proof** — `deposit-prover/examples/aggregate_rotate_shards.rs`
+(`deposit-prover/` is gone since bridge-audit#139; the same wrap+aggregate now runs in
+`examples/aggregate_rotate_glue.rs` and `examples/rotate_tree_n8.rs`):
 
 1. Reads the real committee-shard artifacts from `examples/export_shard_snark.rs`
    (`shard_{vk,config,proof,instances}`, Hermez k=20, Poseidon transcript).
@@ -383,7 +387,7 @@ a `ROTATE_VK_BLOB`.
 | **2-to-1 node cost with REAL shard (the tree unit)** | ✅ `examples/measure_agg_node.rs` — fan-in 2, `VerifierUniversality::None`, Hermez k=21: fits at **k=21** (`num_advice=33`), gen_pk 322 s + prove 252 s, **peak RSS ≈ 40 GB**, outer 11 680 B / 18 inst, self-verify PASS. Confirms the recursion tree fits n14. |
 | Transcript bridge (gosh-fork shard proof → snark-verifier-loadable) | ✅ `src/poseidon_transcript.rs` (vendored `PoseidonWrite`/`PoseidonRead`, byte-identical to snark-verifier-sdk's `PoseidonTranscript<NativeLoader,_>`); fast validation `tests/poseidon_transcript_prove.rs` (real `create_proof`+`verify_proof`, tamper-rejected @ k8); real shard emit `examples/export_shard_snark.rs` — **n14: Hermez k=20, keygen_vk 203 s + keygen_pk 151 s + Poseidon prove 212 s, 25 920 B proof, self-verify PASS**, writes `shard_{vk,config,proof,instances}` in the exact `export_poseidon_snark` file shape (VK asserted to read back via `VerifyingKey::read::<BaseCircuitBuilder<Fr>>(RawBytesUnchecked, config)`) |
 | Step alignment to 2-level (`step.rs` swap `commit_sync_committee` → `_2level`) | ⏳ at the coordinated re-emit (changes the committee value, so ships with the rotate VkBlob) |
-| **Wrap + aggregate a REAL shard proof (cross-stack)** | ✅ `deposit-prover/examples/aggregate_rotate_shards.rs` — gosh-sh `compile → Snark::new → AggregationCircuit`; **n14: N=1 @ Hermez k=21, gen_pk 158 s + prove 127 s, outer 5888 B / 12 inst, self-verify PASS** (transcript bridge confirmed end to end). No axiom `bridge-snark-utils` needed. |
+| **Wrap + aggregate a REAL shard proof (cross-stack)** | ✅ `deposit-prover/examples/aggregate_rotate_shards.rs` (gone with `deposit-prover/`, bridge-audit#139; now `examples/aggregate_rotate_glue.rs` / `rotate_tree_n8.rs`) — gosh-sh `compile → Snark::new → AggregationCircuit`; **n14: N=1 @ Hermez k=21, gen_pk 158 s + prove 127 s, outer 5888 B / 12 inst, self-verify PASS** (transcript bridge confirmed end to end). No axiom `bridge-snark-utils` needed. |
 | **snark-verifier aggregation circuit + committee glue** | ✅ `src/rotate_aggregation.rs` `RotateAggregationCircuit` (feat `aggregation`) — `aggregate_snarks` + `node_from_hilo` (range-checked) + `sync_committee_root_from_subtrees` + `verify_merkle_branch` (gindex 87) + `combine_committee_commitment`, exposes `[current_commit, next_commit, period]` after 12 accumulator limbs. **n14: N=1 @ Hermez k=21, gen_pk 175 s + prove 155 s, outer 6816 B / 15 inst, self-verify PASS** (`examples/aggregate_rotate_glue.rs`). Generalised to read tree-node passthrough (`prev[12..]` → shard triples). |
 | **Full N=8 committee via 2-to-1 recursion TREE** | ✅ `examples/rotate_tree_n8.rs` + `examples/rotate_tree_fold.rs` — `8 shards → 4 L1 → 2 L2 → 1 root`, **every node Hermez k=21, peak RSS 40 GB, wall 20:11**, root folds 2×L2 + glue over 8 subtree roots, self-verify PASS (root 15 inst = 12 acc + 3 rotate PIs). Recursion cheapens upward (33→16→14 advice). The k=23 monolith (~250 GB → OOM) is retired. |
 | **Faithful committee — real data (distinct shards + real branch)** | ✅ `src/mainnet.rs::committee_source` (shared by emitter+driver) splits the REAL mainnet `next_sync_committee` (`fixtures/mainnet/update_period_1834.json`) into 8 distinct 64-pubkey slices; `export_shard_snark` keygens once + proves **8 distinct** `shard_{0..7}_*`; `rotate_tree_n8` builds the tree in order + a **real** `RotateGlueWitness` (real branch @ gindex 87, real `state_root`, real period). Data-only (shape/k/RAM unchanged). Anchor validated in-circuit locally: `next_committee_branch_binds_in_circuit_over_real_shards` (k20) + native `shards_reduce_to_full_committee_root` / `native_next_committee_branch_reconstructs_state_root` on the live fixture. |
@@ -405,13 +409,9 @@ real rotate aggregation:
    ```bash
    # a) emit the shard snark (vary the pubkey slice per shard for real N):
    cd eth-light-client-prover && cargo run --release --example export_shard_snark
-   # b) wrap (compile → Snark::new) + aggregate in the gosh-sh stack — no axiom bridge:
-   cd ../deposit-prover
-   SHARD_DIR=../eth-light-client-prover/out/shard_snark \
-     OUTER_SRS=../params/kzg_bn254_21.srs PROBE_N=1 PROBE_K_OUTER=21 \
-     cargo run --release --example aggregate_rotate_shards
-   # scale to the full committee once a Hermez k=23 SRS is on box:
-   #   PROBE_N=8 PROBE_K_OUTER=23 OUTER_SRS=../params/kzg_bn254_23.srs ...
+   # b) wrap (compile → Snark::new) + aggregate in the gosh-sh stack — no axiom bridge.
+   #    The deposit-prover example that did this alone is gone (bridge-audit#139);
+   #    aggregate_rotate_glue in step 2 wraps, aggregates and adds the glue in one run.
    ```
 2. **In-circuit glue on aggregated shard outputs. ✅ DONE (N=1).**
    `RotateAggregationCircuit` runs `node_from_hilo` (range-checked) +

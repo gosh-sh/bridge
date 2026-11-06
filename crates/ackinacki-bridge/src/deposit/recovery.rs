@@ -322,7 +322,6 @@ mod tests {
                 sepolia_sender(),
                 BRIDGE,
                 nonce,
-                2,
                 deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 5, ACC),
             ),
         );
@@ -355,7 +354,6 @@ mod tests {
                 sepolia_sender(),
                 BRIDGE,
                 7,
-                2,
                 deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 5, ACC),
             ),
         );
@@ -446,7 +444,6 @@ mod tests {
                 sepolia_sender(),
                 BRIDGE,
                 7,
-                2,
                 deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 5, ACC),
             ),
         );
@@ -498,7 +495,6 @@ mod tests {
                 sepolia_sender(),
                 BRIDGE,
                 7,
-                2,
                 deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 1, ACC),
             ),
         );
@@ -758,7 +754,6 @@ mod tests {
                 sepolia_sender(),
                 BRIDGE,
                 8,
-                2,
                 deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 5, ACC),
             ),
         );

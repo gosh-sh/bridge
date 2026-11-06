@@ -10,9 +10,7 @@
 //! | Metric | Type | Labels | Meaning |
 //! |---|---|---|---|
 //! | `deposit_relayer_ticks_total` | counter | `outcome` | One per `tick()`: `finalized`, `already_finalized`, `not_yet_available`, `waiting_for_anchor`, `proof_failed`, `an_rejected`, `an_pending`, `skipped`, `unprovable`, `error` |
-//! | `deposit_relayer_stage_duration_seconds` | histogram | `stage` | Wall time of `is_finalized`, `is_block_accepted`, `fetch_event`, `prove`, `submit`, and the whole `tick` |
-//! | `deposit_relayer_prover_stage_duration_seconds` | histogram | `example` | Wall time of each `deposit-prover` subprocess (`fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`) |
-//! | `deposit_relayer_prover_stage_failures_total` | counter | `example` | Subprocess exits that were not 0 (spawn failure, timeout, non-zero status) |
+//! | `deposit_relayer_stage_duration_seconds` | histogram | `stage` | Wall time of `is_finalized`, `is_block_accepted`, `fetch_event`, `prove` (collecting the block header and receipt proof), `submit`, and the whole `tick` |
 //! | `deposit_relayer_eth_get_logs_total` | counter | `outcome` | `eth_getLogs` calls: `ok`, `retry` (retryable error, retried), `error` (given up) |
 //! | `deposit_relayer_eth_scanned_blocks_total` | counter | | Blocks covered by `eth_getLogs` windows (the idle-scan cost) |
 //! | `deposit_relayer_eth_safe_head_block` | gauge | | `head - confirmations` at the last scan |
@@ -22,7 +20,7 @@
 //! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN; seeded from `state.json` `last_finalized_deposit_id` on start (parked/unprovable ids are not in that field) and never moves backwards when a lower outstanding id completes |
 //! | `deposit_relayer_attempts_since_progress` | gauge | | Attempt count of the last failed outstanding id (`state.json`); reset when any id finalizes. Waiting for a deposit nobody made yet is not an attempt |
 //! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` (`state.json` → `parked_deposit_ids`) |
-//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits the circuit cannot prove; only the EVM bridge operator can return those funds (`state.json` → `unprovable_deposit_ids`) |
+//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits that cannot be finalized from their receipt (failed transaction, a log the AN bridge does not read, over the message limit); only the EVM bridge operator can return those funds (`state.json` → `unprovable_deposit_ids`) |
 //! | `deposit_relayer_outstanding_deposits` | gauge | | Deposits still to retry, including anchor waits (`state.json` → `outstanding_deposits`) |
 //! | `deposit_relayer_waiting_for_anchor` | gauge | | Outstanding deposits waiting for an AN block anchor |
 //! | `deposit_relayer_oldest_anchor_wait_timestamp_seconds` | gauge | | First observation of the oldest anchor wait (persisted); 0 when none |
@@ -41,8 +39,6 @@ use metrics::{
 
 pub const TICKS_TOTAL: &str = "deposit_relayer_ticks_total";
 pub const STAGE_DURATION_SECONDS: &str = "deposit_relayer_stage_duration_seconds";
-pub const PROVER_STAGE_DURATION_SECONDS: &str = "deposit_relayer_prover_stage_duration_seconds";
-pub const PROVER_STAGE_FAILURES_TOTAL: &str = "deposit_relayer_prover_stage_failures_total";
 pub const ETH_GET_LOGS_TOTAL: &str = "deposit_relayer_eth_get_logs_total";
 pub const ETH_SCANNED_BLOCKS_TOTAL: &str = "deposit_relayer_eth_scanned_blocks_total";
 pub const ETH_SAFE_HEAD_BLOCK: &str = "deposit_relayer_eth_safe_head_block";
@@ -85,15 +81,6 @@ pub fn describe() {
         "Wall time of one tick stage (label `stage`: is_finalized, is_block_accepted, \
          fetch_event, prove, submit, tick)."
     );
-    describe_histogram!(
-        PROVER_STAGE_DURATION_SECONDS,
-        Unit::Seconds,
-        "Wall time of one deposit-prover subprocess (label `example`)."
-    );
-    describe_counter!(
-        PROVER_STAGE_FAILURES_TOTAL,
-        "deposit-prover subprocesses that did not exit 0 (label `example`)."
-    );
     describe_counter!(
         ETH_GET_LOGS_TOTAL,
         "eth_getLogs calls by outcome (label `outcome`: ok, retry, error)."
@@ -130,7 +117,8 @@ pub fn describe() {
     );
     describe_gauge!(
         UNPROVABLE_DEPOSITS,
-        "Deposits the circuit cannot prove; only the EVM bridge operator can return those funds."
+        "Deposits that cannot be finalized from their receipt; only the EVM bridge operator can \
+         return those funds."
     );
     describe_gauge!(
         OUTSTANDING_DEPOSITS,

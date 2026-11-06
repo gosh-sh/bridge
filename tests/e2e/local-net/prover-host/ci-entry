@@ -37,7 +37,7 @@ REPO=https://github.com/gosh-sh/bridge.git
 RUST_IMAGE=rust:1-bookworm
 SOCAT_IMAGE=alpine/socat:1.8.0.1
 # Every CI container is capped so a run cannot starve the host's other services. The caps
-# are per container: the build and the deposit prover get the large one; the provers that
+# are per container: the build gets the large one; the provers that
 # have to keep pace get the prover one: the light client's step prover (keygen and a proof
 # every epoch, ~42 GB at k=19, done within the 6.4-minute epoch or its spans are lost),
 # daemon-live (a bundle within ~10 minutes, peaking near 23 GB) and the withdrawal's Circuit 4;
@@ -47,7 +47,7 @@ LIMITS_PROVER=(--memory 64g --memory-swap 64g --cpus 32 --pids-limit 4096)
 LIMITS_SMALL=(--memory 8g --memory-swap 8g --cpus 4 --pids-limit 1024)
 limits() {
   case "$1" in
-    build|cli-deposit|deposit-relayer) echo large ;;
+    build) echo large ;;
     lc-keygen|lc-prove|lc-relayer|relayer|cli-withdraw) echo prover ;;
     *) echo small ;;
   esac

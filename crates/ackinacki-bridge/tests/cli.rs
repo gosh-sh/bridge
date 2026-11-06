@@ -893,8 +893,6 @@ fn deposit_without_home_refuses_to_default_its_directories() {
         "http://gql.invalid",
         "--usdc-bridge-account",
         &account,
-        "--deposit-prover-dir",
-        "/nonexistent/deposit-prover",
         "--wc-project-id",
         "p",
         "--state-dir",
@@ -908,7 +906,7 @@ fn deposit_without_home_refuses_to_default_its_directories() {
 
 #[test]
 fn deposit_resume_looks_its_operation_up_with_only_the_state_dir() {
-    // HOME is unset, and no endpoint, bridge, prover or work directory is
+    // HOME is unset, and no endpoint, bridge or work directory is
     // given: none is needed to learn that the state directory has no such
     // operation.
     let state = tempfile::TempDir::new().unwrap();

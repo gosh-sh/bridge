@@ -1,12 +1,13 @@
-//! Step 2: is the account one whose deposit can be proven?
+//! Step 2: is the account one whose deposit this CLI can follow?
 //!
-//! The circuit proves a transaction signed by the account's own key and
-//! sent straight to the bridge. A smart-contract account (Safe, ERC-4337)
-//! sends through its contract or an EntryPoint with calldata beyond the
-//! circuit's limit, and its USDC would be stuck. Code on the account
-//! catches the deployed ones; a `personal_sign` whose signer is not the
-//! account catches the rest, including an ERC-4337 account that is not
-//! deployed yet (it signs with ERC-6492, which recovers to nothing).
+//! Step 5 recognises the deposit as a transaction from the account, at the
+//! account's nonce, straight to the bridge with the requested calldata. A
+//! smart-contract account (Safe, ERC-4337) sends through its owner or an
+//! EntryPoint instead, so its deposit would close as not the one requested
+//! and its USDC would wait for the operator. Code on the account catches
+//! the deployed ones; a `personal_sign` whose signer is not the account
+//! catches the rest, including an ERC-4337 account that is not deployed yet
+//! (it signs with ERC-6492, which recovers to nothing).
 
 use alloy_primitives::{Address, Signature};
 
@@ -99,7 +100,8 @@ pub fn capability_warnings(caps: &serde_json::Value, chain_id: u64) -> Vec<Strin
     {
         out.push(
             "the wallet can pay gas through a paymaster; keep it off for this deposit: a \
-             sponsored transaction is sent through another contract and cannot be proven"
+             sponsored transaction is sent through another contract and is not recognised as this \
+             deposit"
                 .into(),
         );
     }
@@ -109,7 +111,7 @@ pub fn capability_warnings(caps: &serde_json::Value, chain_id: u64) -> Vec<Strin
     {
         out.push(
             "the wallet can batch calls; send the deposit as a single plain transaction: a \
-             batched one cannot be proven"
+             batched one is not recognised as this deposit"
                 .into(),
         );
     }
@@ -126,7 +128,7 @@ fn refuse(op_id: &str, reason: String) -> CliError {
     )
 }
 
-/// Refuses an account whose deposit could not be proven: code at the
+/// Refuses an account whose deposit this CLI could not follow: code at the
 /// address, or a `personal_sign` that does not come from its own key.
 /// Capabilities that hint at sponsoring or batching only warn.
 #[allow(clippy::too_many_arguments)]
@@ -149,8 +151,9 @@ pub async fn check(
         } => {
             return Err(refuse(
                 op_id,
-                "deposits from a smart-contract account (Safe, ERC-4337) cannot be proven: their \
-                 transactions exceed the circuit's calldata limit"
+                "deposits from a smart-contract account (Safe, ERC-4337) are not supported: they \
+                 are sent through another contract, and this CLI follows only a transaction the \
+                 account itself sends to the bridge"
                     .into(),
             ))
         },
@@ -159,7 +162,7 @@ pub async fn check(
         } => ui.warn(&format!(
             "this account delegates to {target} (EIP-7702). Turn off gas sponsoring and batched \
              calls for this deposit: through a sponsor or a batch the transaction is sent via a \
-             contract and cannot be proven"
+             contract and is not recognised as this deposit"
         )),
         CodeKind::Eoa => {},
     }

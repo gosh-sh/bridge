@@ -13,10 +13,11 @@
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, B256, U256};
+use deposit_receipt::{check_deposit_log, RpcLog};
 
 use crate::deposit::{
     evm::{parse_deposit_log, BlockTag, EvmRead, LogLite, ReceiptLite, TxLite, DEPOSIT_TOPIC0},
-    limits::{check_receipt_bounds, check_tx_shape, encoded_log_len, ShapeViolation, TxShape},
+    limits::{check_indices, Unfinalizable},
     log_index::receipt_log_index,
     retry,
     ui::Ui,
@@ -80,10 +81,9 @@ pub struct Found {
     /// The `Deposit` log's `logIndex`: its index among all the logs of the
     /// block.
     pub block_log_index: u64,
-    /// The `Deposit` log's position in the receipt: what the prover reads.
+    /// The `Deposit` log's position in the receipt: the `logIndex`
+    /// `finalizeDeposit` takes.
     pub receipt_log_index: u64,
-    /// The RLP length of the transaction's access list.
-    pub access_list_rlp_len: usize,
 }
 
 /// Why the transaction is not a deposit this CLI goes on with.
@@ -95,8 +95,9 @@ pub enum Negative {
     NoDeposit,
     /// It deposited something other than what was requested.
     Mismatch(String),
-    /// It is the requested deposit, but the circuit cannot prove it.
-    Unprovable(ShapeViolation),
+    /// It is the requested deposit, but the bridge cannot finalize it from
+    /// its receipt.
+    Unprovable(Unfinalizable),
 }
 
 /// What one observation allows.
@@ -204,28 +205,29 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
             tx.input.len()
         )));
     }
-    let max_encoded_log = receipt
-        .logs
-        .iter()
-        .map(|l| encoded_log_len(l.topics.len(), &l.data))
-        .max()
-        .unwrap_or(0);
-    if let Err(v) = check_receipt_bounds(receipt.logs.len(), max_encoded_log) {
-        return Classified::Negative(Negative::Unprovable(v));
-    }
-    if let Err(v) = check_tx_shape(
-        &TxShape {
-            tx_type: tx.tx_type,
-            to: tx.to,
-            input_len: tx.input.len(),
-            access_list_rlp_len: tx.access_list_rlp_len,
+    if let Err(reason) = check_deposit_log(
+        &RpcLog {
+            address: log.address,
+            topics: log.topics.clone(),
+            data: log.data.clone(),
         },
         exp.bridge,
     ) {
+        return Classified::Negative(Negative::Unprovable(Unfinalizable::NotDepositLog {
+            reason,
+        }));
+    }
+    let Some(tx_index) = receipt.tx_index else {
+        return Classified::Incomplete(format!(
+            "the node returned the receipt of {} without its transactionIndex",
+            receipt.tx_hash
+        ));
+    };
+    if let Err(v) = check_indices(tx_index, *position as u64) {
         return Classified::Negative(Negative::Unprovable(v));
     }
     let block_log_index = block_log_indices[*position];
-    // The prover finds the log by its receipt position. The lookup by
+    // The bridge finds the log by its receipt position. The lookup by
     // `logIndex` lands elsewhere only if the node numbered two logs alike.
     let indices: Vec<Option<u64>> = block_log_indices.iter().copied().map(Some).collect();
     match receipt_log_index(&indices, block_log_index) {
@@ -244,7 +246,6 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
         block_hash: receipt.block_hash,
         block_log_index,
         receipt_log_index: *position as u64,
-        access_list_rlp_len: tx.access_list_rlp_len,
     })
 }
 
@@ -395,7 +396,7 @@ pub async fn confirm(
                     Negative::Reverted => "reverted".to_string(),
                     Negative::NoDeposit => "to have no Deposit event".to_string(),
                     Negative::Mismatch(_) => "different from the request".to_string(),
-                    Negative::Unprovable(v) => format!("unprovable ({v})"),
+                    Negative::Unprovable(v) => format!("impossible to finalize ({v})"),
                 }
             )),
         }
@@ -436,7 +437,6 @@ mod tests {
     fn obs(
         status: bool,
         logs: Vec<LogLite>,
-        tx_type: u8,
         input: Bytes,
         head: u64,
         fin: Option<u64>,
@@ -444,7 +444,7 @@ mod tests {
         let b = header(100, 1);
         Observation::Receipt {
             receipt: deposit_receipt(TX, &b, status, logs),
-            tx: deposit_tx(TX, sepolia_sender(), BRIDGE, 7, tx_type, input),
+            tx: deposit_tx(TX, sepolia_sender(), BRIDGE, 7, input),
             head,
             finalized: fin,
             // The finalized chain has the receipt's block, when it reaches it.
@@ -468,12 +468,12 @@ mod tests {
 
     #[test]
     fn nothing_is_decided_before_depth_and_a_second_reading() {
-        let o = obs(true, good_logs(), 2, exp().calldata, 105, Some(90));
+        let o = obs(true, good_logs(), exp().calldata, 105, Some(90));
         assert!(matches!(judge(&o, None, &exp()), Verdict::WaitDepth {
             have: 6,
             need: 12
         }));
-        let o = obs(true, good_logs(), 2, exp().calldata, 111, Some(90));
+        let o = obs(true, good_logs(), exp().calldata, 111, Some(90));
         assert_eq!(
             judge(&o, None, &exp()),
             Verdict::Settle(B256::repeat_byte(1))
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn a_good_deposit_is_confirmed_with_both_log_indices() {
-        let o = obs(true, good_logs(), 2, exp().calldata, 111, Some(90));
+        let o = obs(true, good_logs(), exp().calldata, 111, Some(90));
         let Verdict::Confirmed(f) = judge(&o, Some(B256::repeat_byte(1)), &exp()) else {
             panic!()
         };
@@ -498,26 +498,19 @@ mod tests {
     #[test]
     fn negative_outcomes_wait_for_finality() {
         let seen = Some(B256::repeat_byte(1));
-        let reverted = obs(false, vec![], 2, exp().calldata, 111, Some(99));
+        let reverted = obs(false, vec![], exp().calldata, 111, Some(99));
         assert_eq!(
             judge(&reverted, seen, &exp()),
             Verdict::WaitFinality(Negative::Reverted)
         );
-        let reverted_fin = obs(false, vec![], 2, exp().calldata, 111, Some(100));
+        let reverted_fin = obs(false, vec![], exp().calldata, 111, Some(100));
         assert_eq!(
             judge(&reverted_fin, seen, &exp()),
-            Verdict::Final(Negative::Reverted)
-        );
-        // A reverted legacy transaction is exit 22, not exit 35.
-        let legacy_reverted = obs(false, vec![], 0, exp().calldata, 111, Some(100));
-        assert_eq!(
-            judge(&legacy_reverted, seen, &exp()),
             Verdict::Final(Negative::Reverted)
         );
         let no_log = obs(
             true,
             vec![transfer_log(USDC)],
-            2,
             exp().calldata,
             111,
             Some(100),
@@ -526,11 +519,64 @@ mod tests {
             judge(&no_log, seen, &exp()),
             Verdict::Final(Negative::NoDeposit)
         );
-        let legacy = obs(true, good_logs(), 0, exp().calldata, 111, Some(100));
-        assert!(matches!(
-            judge(&legacy, seen, &exp()),
-            Verdict::Final(Negative::Unprovable(_))
-        ));
+    }
+
+    /// `o` with its receipt changed by `f`.
+    fn with_receipt(mut o: Observation, f: impl FnOnce(&mut ReceiptLite)) -> Observation {
+        let Observation::Receipt {
+            receipt, ..
+        } = &mut o
+        else {
+            unreachable!()
+        };
+        f(receipt);
+        o
+    }
+
+    #[test]
+    fn a_position_beyond_the_bridges_uint16_cannot_be_finalized() {
+        let seen = Some(B256::repeat_byte(1));
+        let good = obs(true, good_logs(), exp().calldata, 111, Some(100));
+        let last = with_receipt(good.clone(), |r| r.tx_index = Some(65_535));
+        assert!(matches!(judge(&last, seen, &exp()), Verdict::Confirmed(_)));
+        let beyond = with_receipt(good, |r| r.tx_index = Some(65_536));
+        assert_eq!(
+            judge(&beyond, seen, &exp()),
+            Verdict::Final(Negative::Unprovable(Unfinalizable::IndexTooLarge {
+                what: "txIndex",
+                value: 65_536
+            }))
+        );
+    }
+
+    #[test]
+    fn a_receipt_without_its_transaction_index_is_read_again() {
+        let o = with_receipt(
+            obs(true, good_logs(), exp().calldata, 111, Some(100)),
+            |r| r.tx_index = None,
+        );
+        let v = judge(&o, Some(B256::repeat_byte(1)), &exp());
+        assert!(
+            matches!(&v, Verdict::Reread(why) if why.contains("transactionIndex")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn a_deposit_log_with_trailing_data_cannot_be_finalized() {
+        let mut logs = good_logs();
+        let mut data = logs[1].data.to_vec();
+        data.extend([0u8; 32]);
+        logs[1].data = data.into();
+        let o = obs(true, logs, exp().calldata, 111, Some(100));
+        let v = judge(&o, Some(B256::repeat_byte(1)), &exp());
+        assert!(
+            matches!(
+                &v,
+                Verdict::Final(Negative::Unprovable(Unfinalizable::NotDepositLog { .. }))
+            ),
+            "{v:?}"
+        );
     }
 
     #[test]
@@ -542,7 +588,7 @@ mod tests {
             receipt,
             tx,
             ..
-        } = obs(false, vec![], 2, exp().calldata, 111, Some(100))
+        } = obs(false, vec![], exp().calldata, 111, Some(100))
         else {
             unreachable!()
         };
@@ -569,7 +615,7 @@ mod tests {
 
     #[test]
     fn an_rpc_without_finalized_never_gives_a_negative_verdict() {
-        let reverted = obs(false, vec![], 2, exp().calldata, 10_000, None);
+        let reverted = obs(false, vec![], exp().calldata, 10_000, None);
         assert_eq!(
             judge(&reverted, Some(B256::repeat_byte(1)), &exp()),
             Verdict::WaitFinality(Negative::Reverted)
@@ -590,7 +636,6 @@ mod tests {
         let o = obs(
             true,
             other_amount,
-            2,
             deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 1, ACC),
             111,
             Some(100),
@@ -610,7 +655,6 @@ mod tests {
         let o = obs(
             true,
             other_account,
-            2,
             deposit_calldata(
                 alloy_primitives::Address::repeat_byte(0x7c),
                 12_500_000,
@@ -638,7 +682,6 @@ mod tests {
         let o = obs(
             true,
             logs,
-            2,
             deposit_calldata(alloy_primitives::Address::repeat_byte(0x7c), 1, ACC),
             111,
             Some(100),
@@ -658,7 +701,7 @@ mod tests {
     fn calldata_other_than_requested_is_a_mismatch_even_with_a_matching_log() {
         let mut input = exp().calldata.to_vec();
         input.push(0);
-        let o = obs(true, good_logs(), 2, Bytes::from(input), 111, Some(100));
+        let o = obs(true, good_logs(), Bytes::from(input), 111, Some(100));
         assert!(matches!(
             judge(&o, Some(B256::repeat_byte(1)), &exp()),
             Verdict::Final(Negative::Mismatch(_))
@@ -676,7 +719,7 @@ mod tests {
             ACC,
             Some(42),
         ));
-        let o = obs(true, logs, 2, exp().calldata, 111, Some(100));
+        let o = obs(true, logs, exp().calldata, 111, Some(100));
         let Verdict::Final(Negative::Mismatch(m)) = judge(&o, Some(B256::repeat_byte(1)), &exp())
         else {
             panic!()
@@ -746,7 +789,7 @@ mod tests {
             ("two logs with one logIndex", vec![same_index, good]),
         ];
         for (what, logs) in cases {
-            let o = obs(true, logs, 2, exp().calldata, 111, Some(100));
+            let o = obs(true, logs, exp().calldata, 111, Some(100));
             assert!(
                 matches!(judge(&o, seen, &exp()), Verdict::Reread(_)),
                 "{what}: {:?}",
@@ -772,7 +815,7 @@ mod tests {
         ];
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &b, true, bare.clone())),
@@ -817,7 +860,7 @@ mod tests {
         ];
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, true, wrong.clone())),
@@ -873,7 +916,7 @@ mod tests {
         let new = header(100, 2);
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, false, vec![])),
@@ -900,7 +943,7 @@ mod tests {
         let new = header(100, 2);
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, false, vec![])),
@@ -926,7 +969,7 @@ mod tests {
             let evm = FakeEvm::sepolia();
             evm.txs.lock().unwrap().insert(
                 TX,
-                deposit_tx(TX, sepolia_sender(), BRIDGE, 7, 2, exp().calldata),
+                deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
             );
             evm.script_receipt(TX, vec![Some(deposit_receipt(TX, &b, status, logs))]);
             evm.by_hash.lock().unwrap().insert(b.hash, b.clone());

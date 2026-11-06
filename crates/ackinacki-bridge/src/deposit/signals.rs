@@ -1,7 +1,7 @@
 //! SIGINT, SIGTERM and SIGHUP end a deposit run cleanly: the run's future
-//! is dropped, which kills the prover subprocess and releases every lock,
-//! and the operation stays where its record says, ready for `--resume`.
-//! SIGKILL cannot be caught; for it, the prover holds its own lock (prover.rs).
+//! is dropped, which releases every lock, and the operation stays where
+//! its record says, ready for `--resume`. SIGKILL cannot be caught; the
+//! kernel releases the locks of a killed process.
 //!
 //! The handlers stay installed for the rest of the process once
 //! [`until_signal`] has run: the run is meant to be the last thing the
@@ -55,13 +55,11 @@ async fn recv(s: &mut Option<Stream>) {
 }
 
 /// Runs `fut` to completion, or until SIGINT, SIGTERM or SIGHUP arrives.
-/// On a signal `fut` is dropped before this returns, so every subprocess
-/// it spawned with `kill_on_drop` is killed and every lock it held is
-/// released.
+/// On a signal `fut` is dropped before this returns, so every lock it held
+/// is released.
 ///
 /// The handlers are installed before `fut` is first polled. A signal and
-/// the end of `fut` noticed in the same wakeup count as the signal: Ctrl-C
-/// reaches the prover too, and its death is not the run's own failure.
+/// the end of `fut` noticed in the same wakeup count as the signal.
 pub async fn until_signal<F: Future>(fut: F) -> Result<F::Output, Signal> {
     let mut int = signal(SignalKind::interrupt()).ok();
     let mut term = signal(SignalKind::terminate()).ok();
@@ -155,8 +153,7 @@ pub fn interrupted(sig: Signal, state_dir: &Path, op: Option<String>) -> CliResu
     })
 }
 
-/// Operation records at a chosen stage, for this module's tests and for
-/// the prover's process tests.
+/// Operation records at a chosen stage, for this module's tests.
 #[cfg(test)]
 pub mod tests_support {
     use std::path::Path;
@@ -204,7 +201,6 @@ pub mod tests_support {
             block_hash: B256::repeat_byte(3),
             block_log_index: 0,
             receipt_log_index: 1,
-            access_list_rlp_len: 1,
             voucher_account: "ee".repeat(32),
         });
         rec.finalize = Some(FinalizeInfo {
@@ -221,7 +217,7 @@ pub mod tests_support {
             rec.failure = Some(Failure {
                 at: OpStage::Anchored,
                 reason: FailReason::Unprovable,
-                detail: "the transaction's shape cannot be proven".into(),
+                detail: "the deposit cannot be finalized from its receipt".into(),
                 exit: 35,
             });
         }
@@ -232,8 +228,7 @@ pub mod tests_support {
 
 // No test here installs a signal handler: tokio keeps one for the life of
 // the process, and a test binary that swallows SIGINT and SIGTERM outlives
-// the `timeout` and the Ctrl-C meant to stop it. `until_signal` runs, and
-// receives real signals, in the child processes of the prover's tests.
+// the `timeout` and the Ctrl-C meant to stop it.
 #[cfg(test)]
 mod tests {
     use super::{tests_support::record_at, *};
@@ -334,7 +329,7 @@ mod tests {
         assert_eq!(e.exit_code(), ExitCode::DepositUnprovable);
         let m = e.to_string();
         assert!(
-            m.contains("the transaction's shape cannot be proven"),
+            m.contains("the deposit cannot be finalized from its receipt"),
             "{m}"
         );
         assert!(!m.contains("--resume"), "{m}");

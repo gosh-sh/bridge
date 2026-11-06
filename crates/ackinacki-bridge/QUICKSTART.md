@@ -26,14 +26,11 @@ bash install.sh
 
 Nothing is compiled: it downloads the CLI, the `aggregate-proof` subprocess
 it shells out to, the verifier bytecode and source the proof is checked
-against, the Hermez KZG ceremony, the deposit prover, and the same ceremony
-at degree 18 for deposits — about 350 MB in total, most of it the ceremony.
+against, and the Hermez KZG ceremony for withdrawals — about 320 MB in
+total, most of it the ceremony. Deposits need nothing more than the CLI.
 Neither Rust, a Solidity compiler nor a checkout of the repository is
 needed. Every release asset is verified against the release's `SHA256SUMS`
-before it is written, and the deposit ceremony also against the Hermez
-[s]·G2. It wants ~13 GB free: withdrawal keys take ~9.5 GB, and the deposit
-prover writes a ~3.4 GB proving key on its first proof (on an upgrade
-that rotates the key, the old one stays until the new one is written).
+before it is written. It wants ~11 GB free: withdrawal keys take ~9.5 GB.
 Later withdrawals reuse those keys. The first withdrawal after an upgrade
 may write a new ~6.85 GB aggregator key beside the old one, so it wants
 ~7.5 GB more — ~10.7 GB when the upgrade also brings a new Circuit-4 key
@@ -46,12 +43,14 @@ profile.
 
 A withdrawal's `--dry-run` needs none of the prover artifacts. A real
 withdrawal needs all of them, and stage 1 refuses without them — before
-anything is broadcast. A deposit checks its prover on every run, dry runs
-included.
+anything is broadcast.
 
-An installation made before deposits existed has no deposit prover: run the
-new `install.sh` over it. It fetches what is missing and appends the deposit
-settings to your profile, leaving the rest of it as it was.
+Over an older installation, run the new `install.sh`. It replaces a CLI that
+still runs the retired deposit prover, fetches what else is missing, and
+appends the deposit settings to a profile from before deposits, leaving the
+rest of it as it was. The old `deposit-prover/` directory and the
+`BRIDGE_DEPOSIT_PROVER_DIR` line are no longer used; it names both, and you
+can delete them.
 
 ---
 
@@ -197,7 +196,7 @@ Moves USDC from an EVM wallet to an Acki Nacki account, where it arrives as
 eccUSDC. Your wallet signs; the CLI never sees its key. One deposit should
 take **about 17 minutes** — an estimate from its parts, not a timed run —
 plus however long the bridge owner takes to anchor your block by hand; the
-proof itself takes one to two minutes.
+receipt proof itself takes seconds.
 
 **Once the deposit transaction is sent, the USDC is in the bridge.**
 Everything before it refuses instead of guessing. Everything after it can
@@ -206,8 +205,8 @@ be resumed, except the two outcomes only the bridge operator can settle
 
 ## 8. What you need for a deposit
 
-- **The install from section 1.** It brings the deposit prover and its
-  ceremony; `install.sh --check` tells you whether they are in place.
+- **The install from section 1.** `install.sh --check` tells you whether
+  the CLI is in place and new enough.
 - **An EVM wallet that speaks WalletConnect, on a plain account** — see
   [section 13](#13-which-wallets-work) first. It needs the USDC you deposit
   and a little Sepolia ETH for two transactions, `approve` and `deposit`.
@@ -217,7 +216,8 @@ be resumed, except the two outcomes only the bridge operator can settle
 - **The recipient**, the Acki Nacki account as `dapp_id::account_id`. If the
   account is deployed, the dapp must be the one it lives in; if it does not
   exist yet, the deposit creates it.
-- **About 10 GB of free memory** for the proof.
+- **An EVM RPC that serves `eth_getBlockReceipts`.** The receipt proof
+  reads every receipt of the deposit's block; the profile's endpoint does.
 
 ## 9. Set your values
 
@@ -238,9 +238,9 @@ chain. Limit reads must succeed before an approval, deposit or burn is requested
 `--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
 mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits
 35–75 minutes for its block to be anchored. The new EVM deployment must expose `deposit(address,uint256,bytes32)`
-and be paired with an AN bridge at version 1.16.0 or newer using this build's
-key. Older deployment addresses are incompatible. The RPC, Acki Nacki endpoint,
-prover directory and state directory come from the profile. When reusing a
+and be paired with an AN bridge at version 1.17.0, which finalizes a deposit
+from its receipt proof. Older deployment addresses are incompatible. The RPC,
+Acki Nacki endpoint and state directory come from the profile. When reusing a
 profile, replace its old deployment values before running this build.
 
 ## 10. Dry run
@@ -251,10 +251,10 @@ ackinacki-bridge deposit --dry-run --network sepolia \
 echo "exit=$?"
 ```
 
-Exit 0 means the RPC is on Sepolia and serves whole blocks, the EVM bridge
-is deployed and not paused, the Acki Nacki bridge answers, is new enough, is
-not paused and trusts this EVM bridge, the recipient's dapp matches, and the
-prover directory is complete with the right ceremony. It prints both
+Exit 0 means the RPC is on Sepolia and serves `eth_getBlockReceipts`, the
+EVM bridge is deployed and not paused, the Acki Nacki bridge answers, is the
+version this CLI was built for, is not paused and trusts this EVM bridge, and
+the recipient's dapp matches. It prints both
 transactions and whom the wait for the anchor would wait for — `waiting for
 the bridge owner` on shellnet. Nothing is sent and no wallet is involved.
 
@@ -282,7 +282,7 @@ echo "exit=$?"
 3. **Sign the account check.** The wallet shows a message that starts with
    `Acki Nacki bridge deposit check` and names the operation, the bridge, the
    amount and the network. Signing it sends nothing and costs nothing: it
-   shows the account is a plain one whose deposit can be proven.
+   shows the account is a plain one whose deposit the CLI can follow.
 4. **Confirm `approve`**, the bridge's spending limit, set to exactly the
    amount. It is skipped when your allowance already covers the amount. Keep
    the limit as proposed: a lower one stops the run with exit 21 before any
@@ -297,13 +297,13 @@ echo "exit=$?"
 
 | Step | What happens | How long |
 |------|--------------|----------|
-| 1 preflight | both chains and the prover are checked | seconds |
+| 1 preflight | both chains are checked | seconds |
 | 2 wallet pairing | QR code, connection, account check | as fast as you confirm |
 | 3 approve | the spending limit | a block after you confirm |
 | 4 deposit request | **the USDC goes into the bridge** | a block after you confirm |
 | 5 EVM confirmation | 12 confirmations | ~2.5 min |
 | 6 block anchor | **the bridge owner anchors your block by hand** | **from ~13 min** |
-| 7 proof | on this machine | 1–2 min |
+| 7 proof | the receipt proof, from the block's receipts on the RPC | seconds |
 | 8 finalizeDeposit | a message to the Acki Nacki bridge; it pays the gas | seconds |
 | 9 credit | the eccUSDC reach the recipient, checked by the deposit's identity | seconds |
 
@@ -326,7 +326,7 @@ recipient's balance before and after.
 | 21 | `approve` failed, was rejected, or did not show on chain (or could not be confirmed) in time, or the limit was lowered | untouched |
 | 22 | the deposit transaction reverted | not taken; gas spent |
 | 30 | the deposit transaction has not been found yet | maybe sent |
-| 31–34 | the deposit is on chain; the Acki Nacki side has not finished | in the bridge; resumable |
+| 31–34 | the deposit is on chain; the Acki Nacki side has not finished (32: the receipt proof could not be built from the RPC) | in the bridge; resumable |
 | 35, 37 | the CLI cannot finalize this deposit | in the bridge; only the operator can help |
 
 **2, 3, 20, 21 and 22: nothing is stuck.** Fix what the message names and
@@ -356,17 +356,14 @@ Ethereum treasury does not hold.
 - **Browser-extension wallets** (MetaMask in the browser and the like) do
   not take a `wc:` URI. In this version they work only with `--qr-mode eip681
   --from-address 0x…`: one `ethereum:` QR code per transaction. **The risk of
-  this mode: such a code cannot ask for a type-2 (EIP-1559) transaction. A
-  wallet that sends a legacy transaction makes the deposit unprovable, and
-  the USDC stays in the bridge until the operator returns it (exit 35).** The
-  CLI asks you to accept that before it shows the codes. If the wallet lets
-  you choose, pick an EIP-1559 fee setting.
+  this mode: the wallet will not add the network, and some wallets drop the
+  call data, which leaves a transaction that deposits nothing.** The CLI asks
+  you to accept that before it shows the codes.
 
 Refused before any transaction is sent (exit 20):
 
 - **Safe and other smart-contract accounts, and ERC-4337 accounts.** The
-  circuit can prove their type-1 and type-2 enclosing transactions and
-  their receipts. The CLI still refuses an account that holds code, and,
+  CLI refuses an account that holds code, and,
   with WalletConnect, one whose signature on the check message is not made
   with the account's own key — which catches an ERC-4337 account that is not
   deployed yet. `--qr-mode eip681` has no signature check: there an
@@ -378,5 +375,5 @@ Accepted, with a warning:
 
 - **EIP-7702 accounts**, a plain account delegating to a contract. **Turn off
   gas sponsoring (a paymaster) and batched calls for this deposit.** A
-  sponsored or batched transaction goes through another contract and cannot
-  be proven: the USDC would stay in the bridge (exit 35).
+  sponsored or batched transaction goes through another contract and is not
+  recognised as this deposit: the USDC would stay in the bridge (exit 35).

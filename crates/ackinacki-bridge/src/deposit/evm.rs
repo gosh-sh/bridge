@@ -4,17 +4,20 @@
 
 use alloy::{
     consensus::Transaction as _,
-    eips::{BlockId, BlockNumberOrTag, Typed2718 as _},
+    eips::{BlockId, BlockNumberOrTag},
     providers::{DynProvider, Provider, ProviderBuilder},
-    rlp::Encodable,
     rpc::types::{Filter, TransactionRequest},
     sol_types::{SolCall, SolEvent, SolInterface},
     transports::TransportError,
 };
 use alloy_primitives::{Address, Bytes, B256, U256};
 use async_trait::async_trait;
+pub use deposit_receipt::DepositWitness;
 
-use crate::errors::{CliError, CliResult};
+use crate::{
+    deposit::limits::Unfinalizable,
+    errors::{CliError, CliResult},
+};
 
 alloy::sol! {
     /// The part of the EVM bridge a deposit uses.
@@ -98,6 +101,8 @@ pub struct ReceiptLite {
     pub block_hash: B256,
     /// The number of the block that holds it.
     pub block_number: u64,
+    /// The transaction's position in that block, if the node gave it.
+    pub tx_index: Option<u64>,
     /// The transaction succeeded.
     pub status: bool,
     /// The logs it emitted, in order.
@@ -115,12 +120,8 @@ pub struct TxLite {
     pub to: Option<Address>,
     /// The sender's nonce it uses.
     pub nonce: u64,
-    /// The EIP-2718 type.
-    pub tx_type: u8,
     /// The calldata.
     pub input: Bytes,
-    /// The RLP length of its access list; 0 when it has none.
-    pub access_list_rlp_len: usize,
     /// The block that holds it; `None` while it is pending.
     pub block_number: Option<u64>,
 }
@@ -196,9 +197,20 @@ pub trait EvmRead: Send + Sync {
         from_block: u64,
         to_block: u64,
     ) -> anyhow::Result<Vec<DepositLogRef>>;
-    /// Fetches every receipt and raw transaction of one block, the way
-    /// the prover's fetcher will. Returns the transaction count.
+    /// Reads one block the way the receipt proof does: its header, which
+    /// must encode to its hash, and `eth_getBlockReceipts`, whose receipts
+    /// must rebuild its `receiptsRoot`. Returns the transaction count.
     async fn probe_block(&self, tag: BlockTag) -> anyhow::Result<usize>;
+    /// The `finalizeDeposit` arguments for the `Deposit` log at
+    /// `receipt_log_index` (counted within the receipt) of transaction
+    /// `tx`, emitted by `bridge` on chain `chain_id`.
+    async fn deposit_witness(
+        &self,
+        chain_id: u64,
+        bridge: Address,
+        tx: B256,
+        receipt_log_index: u64,
+    ) -> Result<DepositWitness, WitnessError>;
     /// `eth_estimateGas` for a call from `from`, at `at`; `Latest` is the
     /// head as [`EvmRead::call`] reads it.
     async fn estimate_gas_at(
@@ -210,6 +222,54 @@ pub trait EvmRead: Send + Sync {
     ) -> anyhow::Result<u64>;
     /// The node's EIP-1559 fee estimate.
     async fn fees(&self) -> anyhow::Result<Fees>;
+}
+
+/// Why the receipt proof of a deposit could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WitnessError {
+    /// A read failed, or the node's answers did not hold together (the
+    /// receipts do not rebuild the block's root, the header does not hash
+    /// to the block): building it again later may succeed.
+    Retry(String),
+    /// The bridge cannot finalize this deposit from its receipt.
+    Final(Unfinalizable),
+}
+
+impl std::fmt::Display for WitnessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retry(why) => f.write_str(why),
+            Self::Final(u) => u.fmt(f),
+        }
+    }
+}
+
+impl From<deposit_receipt::Error> for WitnessError {
+    fn from(e: deposit_receipt::Error) -> Self {
+        use deposit_receipt::Error as E;
+        match e {
+            E::Failed(_) => Self::Final(Unfinalizable::Failed),
+            E::NotDeposit {
+                reason, ..
+            } => Self::Final(Unfinalizable::NotDepositLog {
+                reason,
+            }),
+            E::TooLarge {
+                what,
+                value,
+            } => Self::Final(Unfinalizable::IndexTooLarge {
+                what,
+                value: value as u64,
+            }),
+            E::Rpc {
+                ..
+            }
+            | E::NotFound(_)
+            | E::BlockChanged(..)
+            | E::ReceiptsRoot(_)
+            | E::Header(_) => Self::Retry(e.to_string()),
+        }
+    }
 }
 
 /// The calldata of `deposit(amount, account)`.
@@ -593,6 +653,7 @@ impl EvmRead for AlloyEvm {
             tx_hash: r.transaction_hash,
             block_hash,
             block_number,
+            tx_index: r.transaction_index,
             status: r.status(),
             logs: r.inner.logs().iter().map(log_lite).collect(),
         }))
@@ -607,9 +668,7 @@ impl EvmRead for AlloyEvm {
             from: t.inner.signer(),
             to: t.inner.to(),
             nonce: t.inner.nonce(),
-            tx_type: t.inner.ty(),
             input: t.inner.input().clone(),
-            access_list_rlp_len: t.inner.access_list().map(|al| al.length()).unwrap_or(0),
             block_number: t.block_number,
         }))
     }
@@ -666,34 +725,61 @@ impl EvmRead for AlloyEvm {
     }
 
     async fn probe_block(&self, t: BlockTag) -> anyhow::Result<usize> {
-        use futures::StreamExt as _;
-        let Some(b) = self.p.get_block_by_number(tag(t)).await? else {
-            anyhow::bail!("the RPC has no {t:?} block");
-        };
-        let hashes: Vec<B256> = b.transactions.hashes().collect();
-        let n = hashes.len();
-        let results = futures::stream::iter(hashes)
-            .map(|h| async move {
-                // As JSON, not as an Ethereum receipt: an L2 block holds the
-                // rollup's own transaction types (Arbitrum opens every block
-                // with a type-0x6a one), which the prover reads raw as well.
-                let receipt: serde_json::Value = self
-                    .p
-                    .raw_request("eth_getTransactionReceipt".into(), (h,))
-                    .await?;
-                anyhow::ensure!(!receipt.is_null(), "no receipt for {h}");
-                let raw: Bytes = self
-                    .p
-                    .raw_request("eth_getRawTransactionByHash".into(), (h,))
-                    .await?;
-                anyhow::ensure!(!raw.is_empty(), "no raw transaction for {h}");
-                anyhow::Ok(())
-            })
-            .buffer_unordered(8)
-            .collect::<Vec<_>>()
-            .await;
-        results.into_iter().collect::<anyhow::Result<Vec<()>>>()?;
+        // As JSON, not as Ethereum types: an L2 block holds the rollup's own
+        // transaction types (Arbitrum opens every block with a type-0x6a
+        // one), which the receipt proof reads as plain JSON as well.
+        let block: serde_json::Value = self
+            .p
+            .raw_request("eth_getBlockByNumber".into(), (tag(t), false))
+            .await?;
+        anyhow::ensure!(!block.is_null(), "the RPC has no {t:?} block");
+        let header: alloy::rpc::types::Header = serde_json::from_value(block.clone())?;
+        anyhow::ensure!(
+            alloy_primitives::keccak256(alloy::rlp::encode(&header.inner)) == header.hash,
+            "the header of block {} does not encode to its hash {}",
+            header.inner.number,
+            header.hash
+        );
+        let n = block["transactions"].as_array().map_or(0, Vec::len);
+        let mut receipts: Vec<deposit_receipt::RpcReceipt> = self
+            .p
+            .raw_request("eth_getBlockReceipts".into(), (header.hash,))
+            .await
+            .map_err(|e| anyhow::anyhow!("eth_getBlockReceipts: {e}"))?;
+        anyhow::ensure!(
+            receipts.len() == n,
+            "eth_getBlockReceipts returned {} receipts for the {n} transactions of block {}",
+            receipts.len(),
+            header.inner.number
+        );
+        receipts.sort_by_key(|r| r.transaction_index);
+        let values: Vec<Vec<u8>> = receipts
+            .iter()
+            .map(deposit_receipt::RpcReceipt::trie_value)
+            .collect();
+        anyhow::ensure!(
+            deposit_receipt::receipt_proof(&values, 0).0 == header.inner.receipts_root,
+            "the receipts eth_getBlockReceipts returned for block {} do not rebuild its \
+             receiptsRoot",
+            header.inner.number
+        );
         Ok(n)
+    }
+
+    async fn deposit_witness(
+        &self,
+        chain_id: u64,
+        bridge: Address,
+        tx: B256,
+        receipt_log_index: u64,
+    ) -> Result<DepositWitness, WitnessError> {
+        let index = usize::try_from(receipt_log_index).map_err(|_| {
+            WitnessError::Final(Unfinalizable::IndexTooLarge {
+                what: "logIndex",
+                value: receipt_log_index,
+            })
+        })?;
+        Ok(deposit_receipt::fetch(&self.p, chain_id, bridge, tx, index).await?)
     }
 
     async fn estimate_gas_at(
@@ -937,13 +1023,15 @@ mod tests {
     }
 
     /// A JSON-RPC node on loopback serving one Arbitrum block whose only
-    /// transaction is the rollup's own type-0x6a one.
-    async fn arbitrum_node() -> String {
+    /// transaction is the rollup's own type-0x6a one. Without
+    /// `block_receipts` it does not know `eth_getBlockReceipts`; with
+    /// `bad_root` its receipts do not rebuild the block's root.
+    async fn arbitrum_node(block_receipts: bool, bad_root: bool) -> String {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let tx = format!("{:#x}", B256::repeat_byte(0x6a));
         let zero = format!("{:#x}", B256::ZERO);
-        let block = serde_json::json!({
-            "hash": format!("{:#x}", B256::repeat_byte(0xb1)), "parentHash": zero,
+        let mut block = serde_json::json!({
+            "hash": zero, "parentHash": zero,
             "sha3Uncles": zero, "miner": format!("{:#x}", Address::ZERO), "stateRoot": zero,
             "transactionsRoot": zero, "receiptsRoot": zero,
             "logsBloom": format!("0x{}", "00".repeat(256)), "difficulty": "0x1",
@@ -952,8 +1040,8 @@ mod tests {
             "baseFeePerGas": "0x5f5e100", "l1BlockNumber": "0x1", "sendCount": "0x1",
             "sendRoot": zero, "size": "0x1", "uncles": [], "transactions": [tx],
         });
-        let receipt = serde_json::json!({
-            "blockHash": block["hash"], "blockNumber": "0x10", "contractAddress": null,
+        let mut receipt = serde_json::json!({
+            "blockHash": zero, "blockNumber": "0x10", "contractAddress": null,
             "cumulativeGasUsed": "0x0", "effectiveGasPrice": "0x5f5e100",
             "from": "0x00000000000000000000000000000000000a4b05", "gasUsed": "0x0",
             "gasUsedForL1": "0x0", "l1BlockNumber": "0x1", "logs": [],
@@ -961,6 +1049,13 @@ mod tests {
             "to": "0x00000000000000000000000000000000000a4b05", "transactionHash": tx,
             "transactionIndex": "0x0", "type": "0x6a",
         });
+        let value: deposit_receipt::RpcReceipt = serde_json::from_value(receipt.clone()).unwrap();
+        let root = deposit_receipt::receipt_proof(&[value.trie_value()], 0).0;
+        block["receiptsRoot"] = serde_json::json!(if bad_root { B256::ZERO } else { root });
+        let header: alloy::rpc::types::Header = serde_json::from_value(block.clone()).unwrap();
+        let hash = alloy_primitives::keccak256(alloy::rlp::encode(&header.inner));
+        block["hash"] = serde_json::json!(hash);
+        receipt["blockHash"] = serde_json::json!(hash);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move {
@@ -992,8 +1087,9 @@ mod tests {
                         buf.drain(..end + 4 + len);
                         let result = match req["method"].as_str() {
                             Some("eth_getBlockByNumber") => block.clone(),
-                            Some("eth_getTransactionReceipt") => receipt.clone(),
-                            Some("eth_getRawTransactionByHash") => serde_json::json!("0x6a01"),
+                            Some("eth_getBlockReceipts") if block_receipts => {
+                                serde_json::json!([receipt])
+                            },
                             _ => serde_json::Value::Null,
                         };
                         let body =
@@ -1014,8 +1110,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_block_with_an_l2_transaction_type_passes_the_probe() {
-        let evm = AlloyEvm::connect(&arbitrum_node().await).unwrap();
+        let evm = AlloyEvm::connect(&arbitrum_node(true, false).await).unwrap();
         assert_eq!(evm.probe_block(BlockTag::Number(16)).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_node_without_block_receipts_fails_the_probe_naming_the_method() {
+        let evm = AlloyEvm::connect(&arbitrum_node(false, false).await).unwrap();
+        let e = evm.probe_block(BlockTag::Number(16)).await.unwrap_err();
+        assert!(e.to_string().contains("eth_getBlockReceipts"), "{e:#}");
+    }
+
+    #[tokio::test]
+    async fn receipts_that_do_not_rebuild_the_root_fail_the_probe() {
+        let evm = AlloyEvm::connect(&arbitrum_node(true, true).await).unwrap();
+        let e = evm.probe_block(BlockTag::Number(16)).await.unwrap_err();
+        assert!(e.to_string().contains("receiptsRoot"), "{e:#}");
     }
 
     #[tokio::test(start_paused = true)]

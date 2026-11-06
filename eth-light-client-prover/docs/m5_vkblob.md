@@ -59,7 +59,7 @@ verifies against.
 | `step_proof_blake2b.bin` | 40 128 B | `c32e1964…f32a91db` | `proof_cell` (raw SHPLONK) |
 | `step_base_circuit_params.json` | 182 B | — | carried `BaseCircuitParams` (reference) |
 
-VkBlob wire (byte-identical to `deposit-prover/src/halo2_tvm_bundle.rs` Base
+VkBlob wire (byte-identical to `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs` Base
 path): magic `VKBLOB\0\0`, `version=1`, `transcript=0` (Blake2b), `shape=0`
 (Base), 5 reserved, then `len‖BaseCircuitParams-JSON` and `len‖VerifyingKey::write(RawBytes)`.
 
@@ -104,7 +104,7 @@ RESULT: PASS — production step VkBlob is opcode-readable
 ```bash
 cd /mnt/data/gosh/sergey-bridge/eth-light-client-prover
 # Hermez k=19 via tau-preserving downsize of the on-box Hermez k=20 SRS:
-STEP_SRS_PATH=/mnt/data/gosh/sergey-bridge/acki-nacki-bridge/deposit-prover/data/kzg_params_20.srs \
+STEP_SRS_PATH=<kzg_params_20.srs, cut from kzg_bn254_21.srs with downsize_srs --k 20> \
   cargo run --release --example export_step_vk_blob      # ~8 min, ~32 GB RSS
 # → out/step_vkblob/{step_vk_blob.bin, step_public_inputs.bin,
 #                    step_proof_blake2b.bin, step_base_circuit_params.json}

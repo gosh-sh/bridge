@@ -1673,8 +1673,12 @@ fn withdrawal_configuration_revert(reason: &str) -> bool {
 /// submit revert), signalling the caller to back off before the next scan.
 /// Permanent per-proof problems (parse errors, bad public inputs, proofs
 /// that fail the SHPLONK aggregator shape gate) park the proof in `st.done`
-/// and the scan drains the rest of the directory. Lower-level infra failures
-/// (RPC down during dry-run/submit) propagate as `Err`.
+/// and the scan drains the rest of the directory. A revert on the token's
+/// listing or transfer cap (`TransferTooLarge`, `UnsupportedTokenId`) keeps the
+/// proof for the next scan, moves on to the next proof and does not count as
+/// transient: it would otherwise slow every other payout and `verifyBlock` for
+/// as long as it lasts. Lower-level infra failures (RPC down during
+/// dry-run/submit) propagate as `Err`.
 async fn withdraw_scan_once<B>(
     bridge: &B,
     proofs_dir: &Path,
@@ -1796,11 +1800,13 @@ where
                             st.done.insert(proof_path);
                         },
                         WithdrawRevertKind::Transient => {
+                            if withdrawal_configuration_revert(&reason) {
+                                warn!(proof = %proof_path.display(), %reason, "dry-run reverted on the token's listing or transfer cap; retrying on the next scan");
+                                continue;
+                            }
                             warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
                             had_transient_failure = true;
-                            if !withdrawal_configuration_revert(&reason) {
-                                break;
-                            }
+                            break;
                         },
                     }
                 },
@@ -1844,11 +1850,13 @@ where
                 reason,
                 permanent: false,
             } => {
+                if withdrawal_configuration_revert(&reason) {
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted on the token's listing or transfer cap; retrying on the next scan");
+                    continue;
+                }
                 warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
                 had_transient_failure = true;
-                if !withdrawal_configuration_revert(&reason) {
-                    break;
-                }
+                break;
             },
         }
     }
@@ -2976,7 +2984,7 @@ mod withdraw_scan_tests {
     }
 
     #[tokio::test]
-    async fn configuration_reverts_retry_the_same_proof_without_blocking_the_next_payout() {
+    async fn configuration_reverts_retry_without_backoff_or_blocking_the_next_payout() {
         for (signature, argument) in [
             ("TransferTooLarge()", String::new()),
             ("UnsupportedTokenId(uint256)", format!("{:064x}", 3)),
@@ -3002,9 +3010,11 @@ mod withdraw_scan_tests {
                     ..Default::default()
                 };
                 let mut state = WithdrawScanState::default();
-                assert!(withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
-                    .await
-                    .unwrap());
+                assert!(
+                    !withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut state)
+                        .await
+                        .unwrap()
+                );
                 assert_eq!(state.parked_permanent, 0);
                 assert!(!state.done.contains(&first));
                 assert!(state.done.contains(&next));

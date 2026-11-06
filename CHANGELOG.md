@@ -51,7 +51,8 @@ assigns it when the release is tagged.
 ### New / Improvements
 
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
-  or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted.
+  or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted,
+  and such a proof does not slow other payouts or `verifyBlock` with `--backoff-max-secs`.
 - `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
   (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
   parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and

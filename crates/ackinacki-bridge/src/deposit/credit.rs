@@ -263,9 +263,9 @@ pub struct FinalizedCheck {
 /// How hard [`finalized_already`] looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Look {
-    /// Before a `finalizeDeposit` or a proof that has to be built again:
-    /// the events are read whenever the voucher code moved or no proof is
-    /// on disk (a new proof costs minutes), retried until the deadline.
+    /// Before a `finalizeDeposit` or a receipt proof that has to be built
+    /// again: the events are read whenever the voucher code moved or no
+    /// receipt proof is on disk, retried until the deadline.
     BeforeSend {
         /// A proof is on disk.
         have_proof: bool,
@@ -313,8 +313,9 @@ pub async fn finalized_already(
             return Some(false);
         }
         let events_too = match look {
-            // With a proof on disk, step 8's own look before every send is
-            // enough; without one, a new proof costs minutes.
+            // With a receipt proof on disk, step 8's own look before every
+            // send is enough; without one, the events are read before it is
+            // built again.
             Look::BeforeSend {
                 have_proof,
             } => !have_proof,
@@ -327,7 +328,7 @@ pub async fn finalized_already(
         }
     }
     let event = || finalized_event(an, bridge, &check.identity, check.not_before);
-    // The event is enough to stop proving and sending; step 9 follows the
+    // The event is enough to stop building and sending; step 9 follows the
     // rest of the chain to the delivered transfer.
     let found = match look {
         Look::Poll => once(deadline, event()).await,
@@ -346,8 +347,8 @@ pub async fn finalized_already(
                     "the bridge's DepositFinalized events could not be read; sending \
                      finalizeDeposit"
                 } else {
-                    "the bridge's DepositFinalized events could not be read; building the proof \
-                     again"
+                    "the bridge's DepositFinalized events could not be read; building the receipt \
+                     proof again"
                 });
             }
             found

@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// EVM networks a deposit can be made from. Each one must be a chain the
-/// deposit circuit accepts; mainnet is not one of them.
+/// deposit bridge accepts; mainnet is not one of them.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
 )]
@@ -254,10 +254,6 @@ pub struct DepositArgs {
     pub gql_endpoint: Option<String>,
     #[arg(long, env = "USDC_BRIDGE_ACCOUNT_ID")]
     pub usdc_bridge_account: Option<String>,
-    /// Directory holding the deposit prover, `configs/circuit_params.json`
-    /// and `data/`. The prover runs with this as its working directory.
-    #[arg(long, env = "BRIDGE_DEPOSIT_PROVER_DIR")]
-    pub deposit_prover_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_DEPOSIT_CONFIRMATIONS", default_value_t = 12)]
     pub confirmations: u64,
     /// Deposit operations, their locks and their claims. Keep it the same
@@ -266,13 +262,6 @@ pub struct DepositArgs {
     pub state_dir: Option<PathBuf>,
     #[arg(long, env = "BRIDGE_WORK_DIR")]
     pub work_dir: Option<PathBuf>,
-    /// Where each prover tool's stderr is kept, one file per run, named
-    /// after the operation and the tool. Without it only the tail a failure
-    /// quotes is shown.
-    #[arg(long, env = "BRIDGE_DEPOSIT_LOG_DIR")]
-    pub log_dir: Option<PathBuf>,
-    #[arg(long, default_value_t = 1800)]
-    pub prover_timeout_s: u64,
     /// 0 waits forever.
     #[arg(long, default_value_t = 0)]
     pub anchor_timeout_s: u64,
@@ -375,7 +364,7 @@ fn no_default_dirs(state: bool, work: bool) -> CliError {
     }
     if work {
         flags.push("--work-dir (BRIDGE_WORK_DIR)");
-        held.push("the work directory holds the proof files a --resume picks up");
+        held.push("the work directory holds the receipt proof a --resume picks up");
     }
     CliError::Usage {
         reason: format!(
@@ -404,16 +393,12 @@ pub struct DepositParams {
     pub bridge: Option<Address>,
     pub gql_endpoint: Option<String>,
     pub usdc_bridge_account: Option<[u8; 32]>,
-    pub prover_dir: Option<PathBuf>,
     pub confirmations: u64,
     pub state_dir: PathBuf,
-    /// Where a new operation keeps its proof files. `None` only for a
+    /// Where a new operation keeps its receipt proof. `None` only for a
     /// resume or an abandon run without `HOME` and without `--work-dir`:
     /// every operation records its own before its first write.
     pub work_dir: Option<PathBuf>,
-    /// Where the prover tools' transcripts go; `None` keeps none.
-    pub log_dir: Option<PathBuf>,
-    pub prover_timeout: Duration,
     pub anchor_timeout: Option<Duration>,
     pub relayer_grace: Duration,
     pub recovery_window: Duration,
@@ -467,7 +452,6 @@ impl DepositArgs {
         let amount = self.amount.as_deref().map(parse_amount).transpose()?;
         let to = self.to.as_deref().map(AnTarget::parse).transpose()?;
         for (flag, secs, max) in [
-            ("prover-timeout-s", self.prover_timeout_s, MAX_WAIT_S),
             ("anchor-timeout-s", self.anchor_timeout_s, MAX_WAIT_S),
             ("relayer-grace-s", self.relayer_grace_s, MAX_WAIT_S),
             ("recovery-window-s", self.recovery_window_s, MAX_WAIT_S),
@@ -496,9 +480,9 @@ impl DepositArgs {
             }
         }
         // A resume takes the chain, both bridges and the recipient from the
-        // operation's record, and needs the endpoints and the prover only
-        // for the steps its stage has left: a finished operation answers
-        // from the record alone. What a stage needs is asked for there.
+        // operation's record, and needs the endpoints only for the steps its stage has
+        // left: a finished operation answers from the record alone. What a
+        // stage needs is asked for there.
         if starts_new {
             if self.rpc_url.is_none() {
                 missing.push("--rpc-url (RPC_URL)");
@@ -511,9 +495,6 @@ impl DepositArgs {
             }
             if self.usdc_bridge_account.is_none() {
                 missing.push("--usdc-bridge-account (USDC_BRIDGE_ACCOUNT_ID)");
-            }
-            if self.deposit_prover_dir.is_none() {
-                missing.push("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)");
             }
         }
         if starts_new
@@ -559,7 +540,7 @@ impl DepositArgs {
             },
         };
         // No default under the current directory: the operations, their
-        // locks and the proof files would then depend on where the command
+        // locks and the receipt proofs would then depend on where the command
         // runs, and a run from elsewhere would not see a deposit that is
         // still unresolved. Only a new operation needs a work directory: a
         // resumed one has recorded its own.
@@ -574,8 +555,8 @@ impl DepositArgs {
         let (Some(state_dir), false) = (state_dir, no_work_dir) else {
             return Err(no_default_dirs(no_state_dir, no_work_dir));
         };
-        // Absolute from here on: the prover runs with its own working
-        // directory, where a relative path would point somewhere else.
+        // Absolute from here on: the record keeps the work directory, and a
+        // resume from another directory must find the same one.
         let abs = |path: PathBuf, flag: &'static str| -> CliResult<PathBuf> {
             std::path::absolute(&path).map_err(|e| CliError::ArgInvalid {
                 flag,
@@ -595,20 +576,9 @@ impl DepositArgs {
             bridge: self.bridge_address,
             gql_endpoint: self.gql_endpoint.clone(),
             usdc_bridge_account,
-            prover_dir: self
-                .deposit_prover_dir
-                .clone()
-                .map(|d| abs(d, "deposit-prover-dir"))
-                .transpose()?,
             confirmations: self.confirmations,
             state_dir: abs(state_dir, "state-dir")?,
             work_dir: work_dir.map(|w| abs(w, "work-dir")).transpose()?,
-            log_dir: self
-                .log_dir
-                .clone()
-                .map(|l| abs(l, "log-dir"))
-                .transpose()?,
-            prover_timeout: secs(self.prover_timeout_s),
             anchor_timeout: (self.anchor_timeout_s > 0).then(|| secs(self.anchor_timeout_s)),
             relayer_grace: secs(self.relayer_grace_s),
             recovery_window: secs(self.recovery_window_s),
@@ -640,7 +610,7 @@ mod tests {
         for n in Network::ALL {
             assert!(
                 deposit_chain_ids::SUPPORTED_DEPOSIT_CHAIN_IDS.contains(&n.chain_id()),
-                "{n:?} ({}) is not a chain the deposit circuit accepts",
+                "{n:?} ({}) is not a chain the deposit bridge accepts",
                 n.chain_id()
             );
         }
@@ -773,8 +743,6 @@ mod tests {
             &"1a".repeat(32),
             "--wc-project-id",
             "p",
-            "--deposit-prover-dir",
-            "./deposit-prover",
             "--work-dir",
             "work",
             "--state-dir",
@@ -786,11 +754,7 @@ mod tests {
         };
         let p = a.validate(&GlobalFlags::default()).unwrap();
         let cwd = std::env::current_dir().unwrap();
-        for (got, name) in [
-            (p.prover_dir.unwrap(), "deposit-prover"),
-            (p.work_dir.unwrap(), "work"),
-            (p.state_dir, "state"),
-        ] {
+        for (got, name) in [(p.work_dir.unwrap(), "work"), (p.state_dir, "state")] {
             assert!(
                 got.is_absolute() && got.starts_with(&cwd) && got.ends_with(name),
                 "{}",
@@ -855,8 +819,6 @@ mod tests {
             &account,
             "--wc-project-id",
             "p",
-            "--deposit-prover-dir",
-            "/tmp/deposit-prover",
         ];
         argv.extend_from_slice(extra);
         let cli = crate::args::Cli::try_parse_from(argv).unwrap();
@@ -896,8 +858,6 @@ mod tests {
             &"1a".repeat(32),
             "--wc-project-id",
             "p",
-            "--deposit-prover-dir",
-            "/opt/deposit-prover",
         ]
         .map(String::from)
         .to_vec();
@@ -955,7 +915,7 @@ mod tests {
             let msg = e.to_string();
             for said in [
                 "--work-dir (BRIDGE_WORK_DIR)",
-                "proof files",
+                "receipt proof",
                 "an absolute path that persists between runs",
             ] {
                 assert!(msg.contains(said), "{line:?}: {said}: {msg}");
@@ -967,7 +927,7 @@ mod tests {
     #[test]
     fn without_home_a_resume_and_an_abandon_need_no_work_directory() {
         // Every operation records its own work directory before its first
-        // write; an abandon writes no proof at all.
+        // write; an abandon writes no receipt proof at all.
         for line in every_mode().into_iter().skip(2) {
             let line = with(&line, &["--state-dir", "/var/lib/deposits"]);
             let argv: Vec<&str> = line.iter().map(String::as_str).collect();
@@ -1016,7 +976,6 @@ mod tests {
         // which may come after the deposit is on chain.
         let max = u64::MAX.to_string();
         for flag in [
-            "prover-timeout-s",
             "anchor-timeout-s",
             "relayer-grace-s",
             "recovery-window-s",
@@ -1056,7 +1015,7 @@ mod tests {
 
     #[test]
     fn a_resume_validates_with_the_state_directory_alone() {
-        // Whether the chains or the prover are needed depends on the
+        // Whether the chains are needed depends on the
         // operation's stage, which only its record knows.
         let p = validated_with_home(
             &[
@@ -1075,11 +1034,11 @@ mod tests {
             (None, None, None),
             "nothing is made up for a setting that was not given"
         );
-        assert!(p.usdc_bridge_account.is_none() && p.prover_dir.is_none());
+        assert!(p.usdc_bridge_account.is_none());
     }
 
     #[test]
-    fn a_new_deposit_and_a_dry_run_still_need_the_chains_and_the_prover() {
+    fn a_new_deposit_and_a_dry_run_still_need_the_chains() {
         let to = format!("{DAPP}::{ACC}");
         for extra in [None, Some("--dry-run")] {
             let mut argv = vec![
@@ -1106,7 +1065,6 @@ mod tests {
                 "--bridge-address (BRIDGE_ADDRESS)",
                 "--gql-endpoint (BRIDGE_GQL_ENDPOINT)",
                 "--usdc-bridge-account (USDC_BRIDGE_ACCOUNT_ID)",
-                "--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)",
             ] {
                 assert!(e.to_string().contains(flag), "{extra:?}, {flag}: {e}");
             }

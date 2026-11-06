@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context as _};
+use deposit_receipt::DepositWitness;
 use rand::Rng as _;
 use serde_json::json;
 
@@ -203,8 +204,7 @@ pub async fn finalize(
     store: &Store,
     rec: &mut OpRecord,
     cx: &FinCtx,
-    proof: &[u8],
-    pi: &[u8],
+    witness: &DepositWitness,
     ui: &dyn Ui,
 ) -> CliResult<FinalizeExit> {
     let op = rec.op_id.clone();
@@ -214,7 +214,7 @@ pub async fn finalize(
     // its send may have executed without showing yet. A refusal of another
     // message cannot settle that earlier attempt.
     let in_doubt = AtomicBool::new(rec.stage == OpStage::Finalizing);
-    let steps = attempts(an, send, store, rec, cx, proof, pi, ui, &in_doubt);
+    let steps = attempts(an, send, store, rec, cx, witness, ui, &in_doubt);
     match cx.deadline {
         None => steps.await,
         Some(d) => match tokio::time::timeout_at(d, steps).await {
@@ -236,8 +236,7 @@ async fn attempts(
     store: &Store,
     rec: &mut OpRecord,
     cx: &FinCtx,
-    proof: &[u8],
-    pi: &[u8],
+    witness: &DepositWitness,
     ui: &dyn Ui,
     in_doubt: &AtomicBool,
 ) -> CliResult<FinalizeExit> {
@@ -352,9 +351,7 @@ async fn attempts(
             )
         })?;
         let earlier = in_doubt.swap(true, Ordering::SeqCst);
-        let outcome = send
-            .send_finalize(cx.bridge, cx.bridge_dapp, proof, pi)
-            .await;
+        let outcome = send.send_finalize(cx.bridge, cx.bridge_dapp, witness).await;
         match react(&outcome) {
             Reaction::ToCredit => {
                 return Ok(FinalizeExit::ToCredit {
@@ -418,6 +415,15 @@ mod tests {
     use crate::deposit::an::{AccStatus, AccountInfo};
 
     const H: [u8; 32] = [0xbd; 32];
+
+    /// The arguments every send of these tests carries.
+    fn witness() -> DepositWitness {
+        crate::deposit::testkit::fake_witness(
+            11_155_111,
+            &crate::deposit::testkit::header(100, 1),
+            0,
+        )
+    }
 
     #[test]
     fn a_deployed_voucher_means_do_not_send() {
@@ -507,7 +513,6 @@ mod tests {
             block_hash: Default::default(),
             block_log_index: 0,
             receipt_log_index: 0,
-            access_list_rlp_len: 1,
             voucher_account: hex::encode([0xee; 32]),
         });
         store.write(&mut rec).unwrap();
@@ -540,7 +545,7 @@ mod tests {
             poll: std::time::Duration::from_secs(30),
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -612,7 +617,7 @@ mod tests {
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -652,7 +657,6 @@ mod tests {
             block_hash: Default::default(),
             block_log_index: 0,
             receipt_log_index: 0,
-            access_list_rlp_len: 1,
             voucher_account: hex::encode([0xee; 32]),
         });
         store.write(&mut rec).unwrap();
@@ -684,7 +688,7 @@ mod tests {
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::AnWaitTimeout);
@@ -727,7 +731,7 @@ mod tests {
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -784,13 +788,13 @@ mod tests {
         let mut rec = proved(&store);
         let (an, cx) = plain(
             [FinalizeSend::NotSent {
-                message: "encode finalizeDeposit: bad proof bytes".into(),
+                message: "encode finalizeDeposit: bad header bytes".into(),
             }],
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -800,7 +804,7 @@ mod tests {
         );
         assert!(
             e.to_string()
-                .contains("encode finalizeDeposit: bad proof bytes"),
+                .contains("encode finalizeDeposit: bad header bytes"),
             "{e}"
         );
         assert!(e.to_string().contains("--resume"), "{e}");
@@ -829,13 +833,13 @@ mod tests {
                     message: "timeout".into(),
                 },
                 FinalizeSend::NotSent {
-                    message: "encode finalizeDeposit: bad proof bytes".into(),
+                    message: "encode finalizeDeposit: bad header bytes".into(),
                 },
             ],
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -845,7 +849,7 @@ mod tests {
         );
         assert!(
             e.to_string()
-                .contains("encode finalizeDeposit: bad proof bytes"),
+                .contains("encode finalizeDeposit: bad header bytes"),
             "{e}"
         );
         assert!(e.to_string().contains("--resume"), "{e}");
@@ -870,13 +874,13 @@ mod tests {
                     message: "paused".into(),
                 },
                 FinalizeSend::NotSent {
-                    message: "encode finalizeDeposit: bad proof bytes".into(),
+                    message: "encode finalizeDeposit: bad header bytes".into(),
                 },
             ],
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -886,7 +890,7 @@ mod tests {
         );
         assert!(
             e.to_string()
-                .contains("encode finalizeDeposit: bad proof bytes"),
+                .contains("encode finalizeDeposit: bad header bytes"),
             "{e}"
         );
         assert!(
@@ -918,7 +922,7 @@ mod tests {
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -945,7 +949,7 @@ mod tests {
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -978,7 +982,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::BackToAnchor);
@@ -986,7 +990,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_rejected_proof_is_exit_33_with_the_verification_key_hint() {
+    async fn a_rejected_receipt_proof_is_exit_33_and_not_sent_again() {
         use crate::deposit::{refusals::FinalizeSend, store::*};
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path()).unwrap();
@@ -995,12 +999,12 @@ mod tests {
             [FinalizeSend::Executed {
                 tx_id: "t".into(),
                 aborted: true,
-                exit_code: Some(220),
+                exit_code: Some(302),
             }],
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1008,8 +1012,8 @@ mod tests {
             crate::errors::ExitCode::FinalizeRefused,
             "{e}"
         );
-        assert!(e.to_string().contains("220"), "{e}");
-        assert!(e.to_string().contains("verification key"), "{e}");
+        assert!(e.to_string().contains("302"), "{e}");
+        assert!(e.to_string().contains("receiptsRoot"), "{e}");
         assert_eq!(*an.sent.lock().unwrap(), 1, "a refusal is not retried");
     }
 
@@ -1029,7 +1033,7 @@ mod tests {
         });
         an.failing_getters.lock().unwrap().insert("isPaused".into());
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -1063,7 +1067,7 @@ mod tests {
             ecc3: 0,
         });
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -1094,7 +1098,7 @@ mod tests {
         an.fail_ext_messages
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::AnWaitTimeout, "{e}");
@@ -1128,7 +1132,7 @@ mod tests {
             serde_json::json!({"value0": format!("0x{}", hex::encode(H))}),
         ]);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let out = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap();
         assert_eq!(out, FinalizeExit::ToCredit {
@@ -1153,7 +1157,7 @@ mod tests {
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1193,7 +1197,7 @@ mod tests {
             serde_json::json!({"value0": true}),
         ]);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1213,12 +1217,12 @@ mod tests {
         let mut rec = finalizing(&store);
         let (an, cx) = plain(
             [FinalizeSend::NotSent {
-                message: "encode finalizeDeposit: bad proof bytes".into(),
+                message: "encode finalizeDeposit: bad header bytes".into(),
             }],
             600,
         );
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(
@@ -1228,7 +1232,7 @@ mod tests {
         );
         assert!(
             e.to_string()
-                .contains("encode finalizeDeposit: bad proof bytes"),
+                .contains("encode finalizeDeposit: bad header bytes"),
             "{e}"
         );
         assert_eq!(*an.sent.lock().unwrap(), 1);
@@ -1254,7 +1258,7 @@ mod tests {
             serde_json::json!({"value0": true}),
         ]);
         let ui = crate::deposit::ui::RecordingUi::new(true);
-        let e = finalize(&an, &an, &store, &mut rec, &cx, b"p", b"i", &ui)
+        let e = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
             .await
             .unwrap_err();
         assert_eq!(

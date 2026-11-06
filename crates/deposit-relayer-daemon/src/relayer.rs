@@ -5,10 +5,10 @@
 //!
 //! 1. asks the [`DepositSource`] for the confirmed `Deposit` event;
 //! 2. cheaply checks whether AN already finalized it
-//!    ([`AnSubmitter::is_finalized`]) so a replay skips the expensive proving
-//!    step; then waits for [`AnSubmitter::is_block_accepted`] before proving;
-//! 3. generates the AN-consumable proof triple via the [`ProofGenerator`];
-//! 4. submits it to AN via the [`AnSubmitter`] (`finalizeDeposit`);
+//!    ([`AnSubmitter::is_finalized`]) so a replay sends nothing; then waits for
+//!    [`AnSubmitter::is_block_accepted`] before building anything;
+//! 3. collects the block header and receipt proof via the [`WitnessBuilder`];
+//! 4. submits them to AN via the [`AnSubmitter`] (`finalizeDeposit`);
 //! 5. on success — advances [`RelayerState`] and persists it; otherwise records
 //!    the attempt on that id with backoff. A failed deposit stays outstanding
 //!    and does not block a later id. A deposit that is not made yet is waited
@@ -30,10 +30,10 @@ use tracing::{debug, error, info, warn};
 use crate::{
     error::RelayerError,
     metrics::{self as prom, StageTimer},
-    prover::ProofGenerator,
     source::{advance_scan_cursor, DepositSource},
     state::{unix_now_secs, DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
+    witness::{check_payload_len, WitnessBuilder},
 };
 
 /// Static configuration for one relayer instance.
@@ -106,31 +106,32 @@ impl RelayerConfig {
 /// What happened during a single [`Relayer::tick`] call.
 #[derive(Clone, Debug)]
 pub enum TickOutcome {
-    /// The deposit was proven and finalised on AN; the cursor advanced.
+    /// The deposit was finalised on AN; the cursor advanced.
     Finalized {
         deposit_id: u64,
         tx_hash: Option<[u8; 32]>,
     },
-    /// The nullifier was already set on AN (another relayer beat us, or a
-    /// prior submit we didn't observe succeeded). Cursor advances; no
-    /// proving was done.
+    /// The deposit's voucher already exists on AN (another relayer beat us,
+    /// or a prior submit we didn't observe succeeded). Cursor advances;
+    /// nothing was sent.
     AlreadyFinalized { deposit_id: u64 },
     /// The deposit is not made on Ethereum yet, or not `--confirmations`
     /// deep. Not a failure: it does not count toward `--skip-after-attempts`.
     NotYetAvailable { deposit_id: u64 },
-    /// The confirmed deposit's block has not been anchored on AN yet. No
-    /// proving or submission was attempted, and this does not count as failure.
+    /// The confirmed deposit's block has not been anchored on AN yet. Nothing
+    /// was built or submitted, and this does not count as failure.
     /// `first_wait` is true only if no start time is recorded for this wait;
     /// an existing wait stays non-new after restart. The daemon uses this
     /// flag to reset prior backoff for a new wait, while repeat waits can
     /// preserve active failure backoff.
     WaitingForAnchor { deposit_id: u64, first_wait: bool },
-    /// Proof generation failed (witness fetch blip, circuit error). The
-    /// relayer records the attempt and retries later; persistent failures
-    /// surface via the attempt counter / warning.
+    /// Building the header and receipt proof failed (an RPC error, receipts
+    /// that do not rebuild the block's `receiptsRoot`). The relayer records
+    /// the attempt and retries later; persistent failures surface via the
+    /// attempt counter / warning.
     ProofFailed { deposit_id: u64, reason: String },
-    /// AN rejected the finalize submission (verifier rejection, malformed
-    /// call). Recorded as an attempt; a corrected re-prove may succeed.
+    /// AN rejected the finalize submission (receipt proof refused, malformed
+    /// call). Recorded as an attempt; the retry builds the proof again.
     AnRejected { deposit_id: u64, reason: String },
     /// AN accepted the tx but confirmation timed out while still pending.
     /// The id stays outstanding with backoff so later deposits are not held
@@ -139,19 +140,20 @@ pub enum TickOutcome {
     /// The deposit was parked after `--skip-after-attempts` and is no longer
     /// retried. Operator must run `finalize-one` manually.
     Skipped { deposit_id: u64, reason: String },
-    /// The circuit cannot prove this deposit. Recorded in
-    /// `unprovable_deposit_ids` and advanced past at once; there is no
-    /// bundle, so `finalize-one` cannot help. Only the EVM bridge operator
-    /// can return the funds.
+    /// The deposit cannot be finalized from its receipt (its transaction
+    /// failed, the log is not a `Deposit` the AN bridge reads, or header and
+    /// proof are over the message limit). Recorded in
+    /// `unprovable_deposit_ids` and advanced past at once; `finalize-one`
+    /// cannot help. Only the EVM bridge operator can return the funds.
     Unprovable { deposit_id: u64, reason: String },
 }
 
-/// Single relayer instance. Holds a [`DepositSource`], a [`ProofGenerator`]
+/// Single relayer instance. Holds a [`DepositSource`], a [`WitnessBuilder`]
 /// and an [`AnSubmitter`].
-pub struct Relayer<S: DepositSource, P: ProofGenerator, A: AnSubmitter> {
+pub struct Relayer<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> {
     config: RelayerConfig,
     source: Arc<S>,
-    prover: Arc<P>,
+    witness: Arc<W>,
     submitter: Arc<A>,
     state: RelayerState,
     /// Last outstanding id retried in the current round.
@@ -163,13 +165,13 @@ pub struct Relayer<S: DepositSource, P: ProofGenerator, A: AnSubmitter> {
     retry_outstanding_next: bool,
 }
 
-impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
+impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     /// Build a relayer, loading any existing state from disk. If
     /// `state.json` doesn't exist, a fresh [`RelayerState`] is created.
     pub fn new(
         config: RelayerConfig,
         source: Arc<S>,
-        prover: Arc<P>,
+        witness: Arc<W>,
         submitter: Arc<A>,
     ) -> Result<Self, RelayerError> {
         let mut state = RelayerState::load(&config.state_path)?.unwrap_or_default();
@@ -201,7 +203,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         Ok(Self {
             config,
             source,
-            prover,
+            witness,
             submitter,
             state,
             last_outstanding_retry: None,
@@ -312,7 +314,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             });
         }
 
-        // 2. Cheap pre-check — skip proving on replays. Needs the event: the deposit's
+        // 2. Cheap pre-check — send nothing on replays. Needs the event: the deposit's
         //    AN identity includes its source contract and chain.
         let timer = StageTimer::start("is_finalized");
         let finalized = self.submitter.is_finalized(&event).await;
@@ -323,7 +325,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             self.persist_state()?;
             info!(
                 deposit_id = target,
-                "already finalized on AN; advancing without proving"
+                "already finalized on AN; advancing without submitting"
             );
             return Ok(TickOutcome::AlreadyFinalized {
                 deposit_id: target,
@@ -332,7 +334,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
         // Ethereum confirmation depth is not AN anchor readiness: the light
         // client still needs finality and proving time. Wait before doing any
-        // expensive work. Keep the log for retries, leaving new ids runnable.
+        // other work. Keep the log for retries, leaving new ids runnable.
         let timer = StageTimer::start("is_block_accepted");
         let accepted = self.submitter.is_block_accepted(&event).await;
         timer.finish();
@@ -361,7 +363,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     chain_id = event.source_chain_id,
                     block_number = event.block_number,
                     block_hash = %event.block_hash,
-                    "waiting for AN block anchor; proving and submission deferred"
+                    "waiting for AN block anchor; submission deferred"
                 );
             }
             if let Some(wait_secs) = warning_age_secs {
@@ -387,7 +389,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                 );
             }
             // Emit the deposit identifiers even if saving fails. A failed
-            // save remains a tick error, and no proving/submission follows.
+            // save remains a tick error, and no submission follows.
             self.persist_state()?;
             return Ok(TickOutcome::WaitingForAnchor {
                 deposit_id: target,
@@ -398,12 +400,17 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             self.persist_state()?;
         }
 
-        // 3. Generate the proof triple. Treated as recoverable: a transient
-        //    witness-fetch failure shouldn't crash the daemon.
+        // 3. Collect the header and receipt proof. Treated as recoverable: a transient
+        //    RPC failure shouldn't crash the daemon. The stage keeps its `prove` metric
+        //    label.
         let timer = StageTimer::start("prove");
-        let generated = self.prover.generate(&event).await;
+        let built = self
+            .witness
+            .build(&event)
+            .await
+            .and_then(|w| check_payload_len(&w).map(|()| w));
         timer.finish();
-        let bundle = match generated {
+        let witness = match built {
             Ok(b) => b,
             // The same deposit gets the same answer every time: no retry
             // holds the queue behind it.
@@ -414,9 +421,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     deposit_id = target,
                     reason = %reason,
                     unprovable = ?self.state.unprovable_deposit_ids,
-                    "deposit cannot be proven; recorded in unprovable_deposit_ids and skipped at \
-                     once. finalize-one cannot help; only the EVM bridge operator can return its \
-                     funds",
+                    "deposit cannot be finalized from its receipt; recorded in \
+                     unprovable_deposit_ids and skipped at once. finalize-one cannot help; only \
+                     the EVM bridge operator can return its funds",
                 );
                 return Ok(TickOutcome::Unprovable {
                     deposit_id: target,
@@ -425,12 +432,12 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             },
             Err(e) => {
                 if let Some(outcome) =
-                    self.record_failure(target, &format!("proof generation: {e}"), Some(&event))?
+                    self.record_failure(target, &format!("receipt proof: {e}"), Some(&event))?
                 {
                     return Ok(outcome);
                 }
                 let reason = e.to_string();
-                warn!(deposit_id = target, reason = %reason, "proof generation failed");
+                warn!(deposit_id = target, reason = %reason, "building the receipt proof failed");
                 return Ok(TickOutcome::ProofFailed {
                     deposit_id: target,
                     reason,
@@ -440,7 +447,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
 
         // 4. Submit + finalise on AN.
         let timer = StageTimer::start("submit");
-        let submitted = self.submitter.submit(&event, &bundle).await;
+        let submitted = self.submitter.submit(&event, &witness).await;
         timer.finish();
         match submitted? {
             SubmitOutcome::Finalized {
@@ -640,20 +647,20 @@ mod tests {
     use super::*;
     use crate::{
         fake_rpc::FakeRpc,
-        prover::MockProofGenerator,
         source::{EthLogSource, InMemoryDepositSource},
         submitter::MockAnSubmitter,
-        types::{DepositEvent, DepositProofBundle},
+        types::DepositEvent,
+        witness::{DepositWitness, MockWitnessBuilder},
     };
 
     #[derive(Default)]
-    struct CountingProver(AtomicUsize);
+    struct CountingBuilder(AtomicUsize);
 
     #[async_trait::async_trait]
-    impl ProofGenerator for CountingProver {
-        async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError> {
+    impl WitnessBuilder for CountingBuilder {
+        async fn build(&self, event: &DepositEvent) -> Result<DepositWitness, RelayerError> {
             self.0.fetch_add(1, Ordering::Relaxed);
-            MockProofGenerator::new().generate(event).await
+            MockWitnessBuilder::new().build(event).await
         }
     }
 
@@ -689,9 +696,9 @@ mod tests {
         async fn submit(
             &self,
             event: &DepositEvent,
-            bundle: &DepositProofBundle,
+            witness: &DepositWitness,
         ) -> Result<SubmitOutcome, RelayerError> {
-            self.inner.submit(event, bundle).await
+            self.inner.submit(event, witness).await
         }
     }
 
@@ -701,7 +708,7 @@ mod tests {
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
         source.insert(deposit(1));
-        let prover = Arc::new(CountingProver::default());
+        let builder = Arc::new(CountingBuilder::default());
         let gate = Arc::new(AnchorGate::default());
         gate.accepted.lock().unwrap().insert(1);
         let cfg = RelayerConfig {
@@ -710,7 +717,7 @@ mod tests {
             ..RelayerConfig::new(dir.path().join("state.json"))
         };
         let mut relayer =
-            Relayer::new(cfg.clone(), source.clone(), prover.clone(), gate.clone()).unwrap();
+            Relayer::new(cfg.clone(), source.clone(), builder.clone(), gate.clone()).unwrap();
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::WaitingForAnchor {
@@ -718,7 +725,7 @@ mod tests {
                 first_wait: true
             }
         ));
-        assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 0);
         assert_eq!(gate.inner.finalized_count(), 0);
         let started = relayer
             .state()
@@ -743,7 +750,7 @@ mod tests {
         ));
         drop(relayer);
 
-        let mut relayer = Relayer::new(cfg, source, prover.clone(), gate.clone()).unwrap();
+        let mut relayer = Relayer::new(cfg, source, builder.clone(), gate.clone()).unwrap();
         assert!(matches!(
             relayer.tick().await.unwrap(),
             TickOutcome::WaitingForAnchor {
@@ -762,7 +769,7 @@ mod tests {
         assert_eq!(relayer.state().outstanding(0).unwrap().attempts, 0);
         assert_eq!(relayer.state().attempts_since_progress, 0);
         assert!(relayer.state().parked_deposit_ids.is_empty());
-        assert_eq!(prover.0.load(Ordering::Relaxed), 1);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 1);
         gate.accepted.lock().unwrap().insert(0);
         assert!(matches!(
             relayer.tick().await.unwrap(),
@@ -771,7 +778,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(prover.0.load(Ordering::Relaxed), 2);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 2);
         assert_eq!(gate.inner.finalized_count(), 2);
         assert!(relayer.state().outstanding_deposits.is_empty());
     }
@@ -781,13 +788,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
-        let prover = Arc::new(CountingProver::default());
+        let builder = Arc::new(CountingBuilder::default());
         let gate = Arc::new(AnchorGate::default());
         gate.read_fails.store(true, Ordering::Relaxed);
         let mut relayer = Relayer::new(
             RelayerConfig::new(dir.path().join("state.json")),
             source,
-            prover.clone(),
+            builder.clone(),
             gate.clone(),
         )
         .unwrap();
@@ -797,7 +804,7 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("anchor read failed"));
-        assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 0);
         assert_eq!(gate.inner.finalized_count(), 0);
         assert!(relayer.state().outstanding_deposits.is_empty());
     }
@@ -817,7 +824,7 @@ mod tests {
                     ..RelayerConfig::new(dir.path().join("state.json"))
                 },
                 source.clone(),
-                Arc::new(CountingProver::default()),
+                Arc::new(CountingBuilder::default()),
                 gate.clone(),
             )
             .unwrap();
@@ -870,7 +877,7 @@ mod tests {
                 ..RelayerConfig::new(dir.path().join("state.json"))
             },
             source.clone(),
-            Arc::new(CountingProver::default()),
+            Arc::new(CountingBuilder::default()),
             gate.clone(),
         )
         .unwrap();
@@ -902,7 +909,7 @@ mod tests {
                     ..RelayerConfig::new(dir.path().join("state.json"))
                 },
                 source.clone(),
-                Arc::new(CountingProver::default()),
+                Arc::new(CountingBuilder::default()),
                 gate.clone(),
             )
             .unwrap();
@@ -928,12 +935,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
-        let prover = Arc::new(CountingProver::default());
+        let builder = Arc::new(CountingBuilder::default());
         let gate = Arc::new(AnchorGate::default());
         let mut relayer = Relayer::new(
             RelayerConfig::new(dir.path().join("state.json")),
             source,
-            prover.clone(),
+            builder.clone(),
             gate.clone(),
         )
         .unwrap();
@@ -960,7 +967,7 @@ mod tests {
         assert_eq!(counters.snapshot().an_rejected, 0);
         assert_eq!(counters.snapshot().proof_failed, 0);
         assert_eq!(relayer.state().attempts_since_progress, 0);
-        assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 0);
         assert_eq!(gate.inner.finalized_count(), 0);
     }
 
@@ -981,14 +988,14 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let gate = Arc::new(AnchorGate::default());
-        let prover = Arc::new(CountingProver::default());
+        let builder = Arc::new(CountingBuilder::default());
         let mut r = Relayer::new(
             RelayerConfig {
                 outstanding_backoff_secs: 0,
                 ..RelayerConfig::new(dir.path().join("state.json"))
             },
             Arc::new(ForwardErrorSource),
-            prover.clone(),
+            builder.clone(),
             gate.clone(),
         )
         .unwrap();
@@ -1028,7 +1035,7 @@ mod tests {
         assert_eq!(summary.tick_errors, 6);
         assert_eq!(summary.finalized, 1);
         assert_eq!(summary.an_rejected, 0);
-        assert_eq!(prover.0.load(Ordering::Relaxed), 1);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1037,7 +1044,7 @@ mod tests {
             let dir = tempdir().unwrap();
             let source = Arc::new(InMemoryDepositSource::new());
             let gate = Arc::new(AnchorGate::default());
-            let prover = Arc::new(CountingProver::default());
+            let builder = Arc::new(CountingBuilder::default());
             if start_with_error {
                 source.insert(deposit(0));
                 gate.read_fails.store(true, Ordering::Relaxed);
@@ -1048,7 +1055,7 @@ mod tests {
                     ..RelayerConfig::new(dir.path().join("state.json"))
                 },
                 source.clone(),
-                prover.clone(),
+                builder.clone(),
                 gate.clone(),
             )
             .unwrap();
@@ -1087,7 +1094,7 @@ mod tests {
             assert_eq!(summary.tick_errors, if start_with_error { 4 } else { 0 });
             assert_eq!(summary.finalized, 0);
             assert_eq!(summary.an_rejected, 0);
-            assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+            assert_eq!(builder.0.load(Ordering::Relaxed), 0);
             assert_eq!(gate.inner.finalized_count(), 0);
         }
     }
@@ -1109,11 +1116,11 @@ mod tests {
         }
     }
 
-    type R = Relayer<InMemoryDepositSource, MockProofGenerator, MockAnSubmitter>;
+    type R = Relayer<InMemoryDepositSource, MockWitnessBuilder, MockAnSubmitter>;
 
     fn make_relayer(
         source: Arc<InMemoryDepositSource>,
-        prover: Arc<MockProofGenerator>,
+        builder: Arc<MockWitnessBuilder>,
         submitter: Arc<MockAnSubmitter>,
         state_path: PathBuf,
     ) -> R {
@@ -1128,14 +1135,14 @@ mod tests {
             anchor_wait_warn_after_secs: 0,
             scan_cursor: None,
         };
-        Relayer::new(cfg, source, prover, submitter).unwrap()
+        Relayer::new(cfg, source, builder, submitter).unwrap()
     }
 
     #[tokio::test]
     async fn force_state_onto_another_bridge_starts_from_its_first_deposit() {
         let dir = tempdir().unwrap();
         let state_path = dir.path().join("state.json");
-        let old_bridge = DeploymentIdentity::new(1, Address::repeat_byte(0x01), "0x0");
+        let old_bridge = DeploymentIdentity::new(1, Address::repeat_byte(0x01));
         let mut old = RelayerState {
             deployment: Some(old_bridge),
             scan_done_through_block: Some(900),
@@ -1148,11 +1155,7 @@ mod tests {
         source.insert(deposit(0));
         let cursor = Arc::new(Mutex::new(old.scan_done_through_block));
         let cfg = RelayerConfig {
-            deployment: Some(DeploymentIdentity::new(
-                1,
-                Address::repeat_byte(0x02),
-                "0x0",
-            )),
+            deployment: Some(DeploymentIdentity::new(1, Address::repeat_byte(0x02))),
             force_state: true,
             scan_cursor: Some(cursor.clone()),
             ..RelayerConfig::new(&state_path)
@@ -1160,7 +1163,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             source,
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap();
@@ -1181,12 +1184,12 @@ mod tests {
         for id in 0..5 {
             source.insert(deposit(id));
         }
-        let prover = Arc::new(MockProofGenerator::new());
+        let builder = Arc::new(MockWitnessBuilder::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());
 
         let mut relayer = make_relayer(
             source,
-            prover,
+            builder,
             submitter.clone(),
             dir.path().join("state.json"),
         );
@@ -1233,7 +1236,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             source,
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap();
@@ -1297,7 +1300,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg.clone(),
             Arc::new(source),
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             submitter.clone(),
         )
         .unwrap();
@@ -1333,7 +1336,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             Arc::new(source),
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             submitter,
         )
         .unwrap();
@@ -1400,7 +1403,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             Arc::new(source),
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap();
@@ -1425,11 +1428,11 @@ mod tests {
     async fn not_yet_available_then_recovers() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
-        let prover = Arc::new(MockProofGenerator::new());
+        let builder = Arc::new(MockWitnessBuilder::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());
         let mut relayer = make_relayer(
             source.clone(),
-            prover,
+            builder,
             submitter,
             dir.path().join("state.json"),
         );
@@ -1459,13 +1462,13 @@ mod tests {
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
         source.insert(deposit(1));
-        let prover = Arc::new(MockProofGenerator::new());
+        let builder = Arc::new(MockWitnessBuilder::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());
         submitter.seed_finalized(0);
 
         let mut relayer = make_relayer(
             source,
-            prover,
+            builder,
             submitter.clone(),
             dir.path().join("state.json"),
         );
@@ -1492,11 +1495,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
-        let prover = Arc::new(MockProofGenerator::failing_on(0));
+        let builder = Arc::new(MockWitnessBuilder::failing_on(0));
         let submitter = Arc::new(MockAnSubmitter::accepting());
         let mut relayer = make_relayer(
             source,
-            prover,
+            builder,
             submitter.clone(),
             dir.path().join("state.json"),
         );
@@ -1517,9 +1520,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
-        let prover = Arc::new(MockProofGenerator::new());
+        let builder = Arc::new(MockWitnessBuilder::new());
         let submitter = Arc::new(MockAnSubmitter::with_verifier(Arc::new(|_| false)));
-        let mut relayer = make_relayer(source, prover, submitter, dir.path().join("state.json"));
+        let mut relayer = make_relayer(source, builder, submitter, dir.path().join("state.json"));
 
         match relayer.tick().await.unwrap() {
             TickOutcome::AnRejected {
@@ -1538,13 +1541,13 @@ mod tests {
         for id in 0..4 {
             source.insert(deposit(id));
         }
-        let prover = Arc::new(MockProofGenerator::new());
+        let builder = Arc::new(MockWitnessBuilder::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());
 
         {
             let mut r = make_relayer(
                 source.clone(),
-                prover.clone(),
+                builder.clone(),
                 submitter.clone(),
                 state_path.clone(),
             );
@@ -1558,7 +1561,7 @@ mod tests {
             }));
         }
 
-        let mut r2 = make_relayer(source, prover, submitter.clone(), state_path);
+        let mut r2 = make_relayer(source, builder, submitter.clone(), state_path);
         assert_eq!(r2.state().last_processed_deposit_id, Some(1));
         assert!(matches!(r2.tick().await.unwrap(), TickOutcome::Finalized {
             deposit_id: 2,
@@ -1574,7 +1577,7 @@ mod tests {
     fn relayer_skipping_after(
         attempts: u32,
         source: Arc<InMemoryDepositSource>,
-        prover: MockProofGenerator,
+        builder: MockWitnessBuilder,
         state_path: PathBuf,
     ) -> R {
         let cfg = RelayerConfig {
@@ -1586,7 +1589,7 @@ mod tests {
         Relayer::new(
             cfg,
             source,
-            Arc::new(prover),
+            Arc::new(builder),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap()
@@ -1608,7 +1611,7 @@ mod tests {
         async fn submit(
             &self,
             _: &DepositEvent,
-            _: &DepositProofBundle,
+            _: &DepositWitness,
         ) -> Result<SubmitOutcome, RelayerError> {
             Ok(self.0.lock().unwrap().remove(0))
         }
@@ -1636,7 +1639,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             source,
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             Arc::new(ScriptedSubmitter(Mutex::new(script))),
         )
         .unwrap();
@@ -1678,7 +1681,7 @@ mod tests {
         let mut relayer = relayer_skipping_after(
             3,
             source,
-            MockProofGenerator::failing_on(0),
+            MockWitnessBuilder::failing_on(0),
             dir.path().join("state.json"),
         );
 
@@ -1726,7 +1729,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             source,
-            Arc::new(MockProofGenerator::failing_on(0)),
+            Arc::new(MockWitnessBuilder::failing_on(0)),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap();
@@ -1769,7 +1772,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             source,
-            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockWitnessBuilder::new()),
             Arc::new(MockAnSubmitter::with_verifier(Arc::new(|_| false))),
         )
         .unwrap();
@@ -1824,7 +1827,7 @@ mod tests {
                 ..RelayerConfig::new(dir.path().join("state.json"))
             },
             source,
-            Arc::new(MockProofGenerator::unprovable_on(0)),
+            Arc::new(MockWitnessBuilder::unprovable_on(0)),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap();
@@ -1850,6 +1853,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_receipt_proof_over_the_message_limit_is_unprovable_and_never_sent() {
+        let dir = tempdir().unwrap();
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        let mut relayer = make_relayer(
+            source,
+            Arc::new(MockWitnessBuilder::with_header_len(
+                crate::witness::MAX_FINALIZE_PAYLOAD_BYTES,
+            )),
+            submitter.clone(),
+            dir.path().join("state.json"),
+        );
+        match relayer.tick().await.unwrap() {
+            TickOutcome::Unprovable {
+                deposit_id,
+                reason,
+            } => {
+                assert_eq!(deposit_id, 0);
+                assert!(reason.contains("limit"), "{reason}");
+            },
+            other => panic!("expected Unprovable, got {other:?}"),
+        }
+        assert_eq!(relayer.state().unprovable_deposit_ids, vec![0]);
+        assert_eq!(submitter.finalized_count(), 0);
+    }
+
+    #[tokio::test]
     async fn idle_polls_an_older_daemon_counted_do_not_park_after_upgrade() {
         // An older daemon counted every empty poll as a failed attempt and
         // saved the count. After the upgrade one real failure must not reach
@@ -1865,7 +1896,7 @@ mod tests {
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(5));
         let mut relayer =
-            relayer_skipping_after(64, source, MockProofGenerator::failing_on(5), state_path);
+            relayer_skipping_after(64, source, MockWitnessBuilder::failing_on(5), state_path);
 
         assert!(matches!(
             relayer.tick().await.unwrap(),
@@ -1886,7 +1917,7 @@ mod tests {
         let mut relayer = relayer_skipping_after(
             3,
             source.clone(),
-            MockProofGenerator::new(),
+            MockWitnessBuilder::new(),
             dir.path().join("state.json"),
         );
 
@@ -1918,9 +1949,9 @@ mod tests {
         for id in 0..5 {
             source.insert(deposit(id));
         }
-        let prover = Arc::new(MockProofGenerator::new());
+        let builder = Arc::new(MockWitnessBuilder::new());
         let submitter = Arc::new(MockAnSubmitter::accepting());
-        let mut r = make_relayer(source, prover, submitter, dir.path().join("state.json"));
+        let mut r = make_relayer(source, builder, submitter, dir.path().join("state.json"));
 
         let history = r
             .run_loop(10, |o| {

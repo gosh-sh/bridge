@@ -6,9 +6,9 @@
 //! `receiptsRoot` and reads log `logIndex` of that receipt as the bridge's
 //! `Deposit` event. [`fetch`] collects those arguments from an RPC node and
 //! checks each one the way the bridge will: the header must hash to the block
-//! hash, the receipts must rebuild the root, and the log must have the one shape
-//! the bridge accepts. It reads receipts as plain JSON, so Arbitrum receipt
-//! types (0x64–0x6a, 0x78) go through like Ethereum ones.
+//! hash, the receipts must rebuild the root, and the log must have the one
+//! shape the bridge accepts. It reads receipts as plain JSON, so Arbitrum
+//! receipt types (0x64–0x6a, 0x78) go through like Ethereum ones.
 
 use alloy::{
     consensus::{Eip658Value, Receipt, ReceiptWithBloom},
@@ -33,7 +33,10 @@ pub const DEPOSIT_DATA_LEN: usize = 4 * 32;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{method}: {message}")]
-    Rpc { method: &'static str, message: String },
+    Rpc {
+        method: &'static str,
+        message: String,
+    },
     #[error("{0} not found")]
     NotFound(String),
     #[error("transaction {0} failed: the bridge proves only a successful receipt")]
@@ -45,7 +48,11 @@ pub enum Error {
     #[error("the header of block {0} does not encode to its hash")]
     Header(B256),
     #[error("log {index} of transaction {tx}: {reason}")]
-    NotDeposit { tx: B256, index: usize, reason: String },
+    NotDeposit {
+        tx: B256,
+        index: usize,
+        reason: String,
+    },
     #[error("{what} {value} does not fit the bridge's uint16")]
     TooLarge { what: &'static str, value: usize },
 }
@@ -128,7 +135,10 @@ pub fn receipt_proof(values: &[Vec<u8>], index: usize) -> (B256, Vec<Bytes>) {
 /// `bridge`'s `Deposit` with three topics and four data words.
 pub fn check_deposit_log(log: &RpcLog, bridge: Address) -> Result<B256, String> {
     if log.address != bridge {
-        return Err(format!("emitted by {}, not the bridge {bridge}", log.address));
+        return Err(format!(
+            "emitted by {}, not the bridge {bridge}",
+            log.address
+        ));
     }
     if log.topics.first() != Some(&DEPOSIT_TOPIC0) {
         return Err("not the bridge's Deposit event".into());
@@ -157,7 +167,8 @@ pub struct DepositWitness {
 }
 
 impl DepositWitness {
-    /// The `finalizeDeposit` call input, in the JSON form the TVM ABI encoder takes.
+    /// The `finalizeDeposit` call input, in the JSON form the TVM ABI encoder
+    /// takes.
     pub fn finalize_params(&self) -> serde_json::Value {
         json!({
             "chainId": self.chain_id.to_string(),
@@ -178,20 +189,31 @@ impl DepositWitness {
     }
 }
 
-async fn rpc<N, P, R>(provider: &P, method: &'static str, params: serde_json::Value) -> Result<R, Error>
+async fn rpc<N, P, R>(
+    provider: &P,
+    method: &'static str,
+    params: serde_json::Value,
+) -> Result<R, Error>
 where
     N: Network,
     P: Provider<N>,
     R: serde::de::DeserializeOwned,
 {
-    let out: serde_json::Value = provider
-        .raw_request(method.into(), params)
-        .await
-        .map_err(|e| Error::Rpc { method, message: e.to_string() })?;
+    let out: serde_json::Value =
+        provider
+            .raw_request(method.into(), params)
+            .await
+            .map_err(|e| Error::Rpc {
+                method,
+                message: e.to_string(),
+            })?;
     if out.is_null() {
         return Err(Error::NotFound(method.to_string()));
     }
-    serde_json::from_value(out).map_err(|e| Error::Rpc { method, message: e.to_string() })
+    serde_json::from_value(out).map_err(|e| Error::Rpc {
+        method,
+        message: e.to_string(),
+    })
 }
 
 /// The `finalizeDeposit` arguments for log `log_index` (counted within the
@@ -208,35 +230,52 @@ pub async fn fetch<N: Network, P: Provider<N>>(
     if !receipt.succeeded() {
         return Err(Error::Failed(tx_hash));
     }
-    let log = receipt.logs.get(log_index).ok_or_else(|| Error::NotDeposit {
+    let log = receipt
+        .logs
+        .get(log_index)
+        .ok_or_else(|| Error::NotDeposit {
+            tx: tx_hash,
+            index: log_index,
+            reason: format!("the receipt has {} logs", receipt.logs.len()),
+        })?;
+    check_deposit_log(log, bridge).map_err(|reason| Error::NotDeposit {
         tx: tx_hash,
         index: log_index,
-        reason: format!("the receipt has {} logs", receipt.logs.len()),
+        reason,
     })?;
-    check_deposit_log(log, bridge).map_err(|reason| Error::NotDeposit { tx: tx_hash, index: log_index, reason })?;
 
     let block_hash = receipt.block_hash;
     let header: Header = rpc(provider, "eth_getBlockByHash", json!([block_hash, false])).await?;
     if header.hash != block_hash {
-        return Err(Error::BlockChanged(block_hash, "eth_getBlockByHash returned another block"));
+        return Err(Error::BlockChanged(
+            block_hash,
+            "eth_getBlockByHash returned another block",
+        ));
     }
     let header_rlp = alloy::rlp::encode(&header.inner);
     if keccak256(&header_rlp) != block_hash {
         return Err(Error::Header(block_hash));
     }
 
-    let mut receipts: Vec<RpcReceipt> = rpc(provider, "eth_getBlockReceipts", json!([block_hash])).await?;
+    let mut receipts: Vec<RpcReceipt> =
+        rpc(provider, "eth_getBlockReceipts", json!([block_hash])).await?;
     receipts.sort_by_key(|r| r.transaction_index);
     let in_order = receipts
         .iter()
         .enumerate()
         .all(|(i, r)| r.transaction_index == U64::from(i) && r.block_hash == block_hash);
     if !in_order {
-        return Err(Error::BlockChanged(block_hash, "eth_getBlockReceipts is not this block's"));
+        return Err(Error::BlockChanged(
+            block_hash,
+            "eth_getBlockReceipts is not this block's",
+        ));
     }
     let tx_index: usize = receipt.transaction_index.to();
     if receipts.get(tx_index).map(|r| r.transaction_hash) != Some(tx_hash) {
-        return Err(Error::BlockChanged(block_hash, "the transaction is not at its index"));
+        return Err(Error::BlockChanged(
+            block_hash,
+            "the transaction is not at its index",
+        ));
     }
     let values: Vec<Vec<u8>> = receipts.iter().map(RpcReceipt::trie_value).collect();
     let (root, proof) = receipt_proof(&values, tx_index);
@@ -249,9 +288,15 @@ pub async fn fetch<N: Network, P: Provider<N>>(
         block_number: header.inner.number,
         block_hash,
         header: header_rlp.into(),
-        tx_index: u16::try_from(tx_index).map_err(|_| Error::TooLarge { what: "txIndex", value: tx_index })?,
+        tx_index: u16::try_from(tx_index).map_err(|_| Error::TooLarge {
+            what: "txIndex",
+            value: tx_index,
+        })?,
         receipt_proof: proof,
-        log_index: u16::try_from(log_index).map_err(|_| Error::TooLarge { what: "logIndex", value: log_index })?,
+        log_index: u16::try_from(log_index).map_err(|_| Error::TooLarge {
+            what: "logIndex",
+            value: log_index,
+        })?,
     })
 }
 

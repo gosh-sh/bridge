@@ -36,11 +36,10 @@
 # --- Ethereum side (Sepolia) --------------------------------------------------
 # Must serve `eth_getLogs` back to the bridge's oldest held anchor (the
 # window-heights read of `withdraw`, in preflight and at stage 4b) AND
-# `eth_getRawTransactionByHash` plus every receipt of a block (`deposit`'s
-# prover). The EF DevOps public endpoint serves both with full history.
-# Tenderly's gateway (`https://sepolia.gateway.tenderly.co`) has the history
-# but no raw transactions, so `deposit` is refused on it; publicnode keeps
-# only the newest ~10 000 blocks of logs and receipts, so on it `withdraw`
+# `eth_getBlockReceipts` (`deposit` proves its receipt against the block's
+# receiptsRoot, so it reads every receipt of that block). The EF DevOps
+# public endpoint serves both with full history; publicnode keeps only the
+# newest ~10 000 blocks of logs and receipts, so on it `withdraw`
 # is refused once the bridge's oldest held anchor is older than that.
 RPC_URL=https://rpc.sepolia.ethpandaops.io
 
@@ -114,10 +113,6 @@ BRIDGE_AGGREGATOR_DIR=../bridge-evm-aggregator
 BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
 # --- Deposit (EVM → Acki Nacki) -----------------------------------------------
-# The deposit prover directory: its tools, configs/circuit_params.json and
-# data/ (the Hermez k=18 SRS and the proving key it builds on first use).
-# In a source checkout, lay it out with scripts/stage_deposit_prover.sh.
-BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover
 # Deposit operations, their locks and claims. Keep one directory per sender:
 # operations in another directory are invisible to --resume and to the
 # checks that stop a second deposit while the first one's outcome is unknown.
@@ -126,7 +121,7 @@ BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
 # Set both values for your fresh deployment. This build uses
-# deposit(address,uint256,bytes32) and requires eccBridge 1.16.0 for deposits;
+# deposit(address,uint256,bytes32) and requires eccBridge 1.17.0 for deposits;
 # earlier workchain-bearing EVM deployments cannot accept its deposit calls.
 # Keep USDC_BRIDGE_ACCOUNT_ID above paired with this EVM contract.
 # BRIDGE_ADDRESS=0x<new-AckiNackiBridge-address>

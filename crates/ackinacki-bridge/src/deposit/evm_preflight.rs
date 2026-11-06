@@ -119,9 +119,9 @@ pub async fn check_bridge(
 }
 
 /// After `check_bridge`, checks the deposited token's precision, the
-/// depositor's balance in that token and that the RPC can serve what the prover
-/// fetches. The per-token caps are the caller's: it read the listing to resolve
-/// `token` and `listed_decimals`.
+/// depositor's balance in that token and that the RPC can serve what the
+/// receipt proof reads. The per-token caps are the caller's: it read the
+/// listing to resolve `token` and `listed_decimals`.
 pub async fn run(
     evm: &dyn EvmRead,
     ui: &dyn Ui,
@@ -182,8 +182,9 @@ pub async fn run(
     .map_err(|e| {
         refuse(
             format!(
-                "--rpc-url cannot serve what the prover needs (every receipt and raw transaction \
-                 of a block): {e}"
+                "--rpc-url cannot serve what the receipt proof needs (eth_getBlockReceipts for a \
+                 whole block, matching its receiptsRoot): {e}. Use an RPC endpoint that serves \
+                 eth_getBlockReceipts"
             ),
             None,
         )
@@ -339,7 +340,7 @@ mod tests {
         );
         let no_probe = healthy();
         *no_probe.probe_error.lock().unwrap() =
-            Some("eth_getRawTransactionByHash not supported".into());
+            Some("eth_getBlockReceipts: the method does not exist".into());
         let paused = healthy();
         *paused.paused.lock().unwrap() = Some(true);
         for (fake, needle) in [
@@ -347,7 +348,7 @@ mod tests {
             (no_code, "no contract"),
             (relisted, "the bridge listed it with 6"),
             (poor, "balance too low"),
-            (no_probe, "eth_getRawTransactionByHash"),
+            (no_probe, "eth_getBlockReceipts"),
             (
                 paused,
                 "the EVM bridge is paused by its owner: deposit() would revert",

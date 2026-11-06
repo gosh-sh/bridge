@@ -1,4 +1,4 @@
-# Standalone package (own [workspace]), like `deposit-prover`: it pulls the
+# Standalone package (own [workspace]): it pulls the
 # heavy gosh halo2 stack (halo2-ecc bls12_381 + gosh-bls-verification) and must
 # not force those deps onto the main Cargo workspace. Excluded from CI's
 # `cargo test --workspace`; built/tested on n14 (see docs/m1_notes.md).
@@ -33,11 +33,11 @@ gosh-bls-verification = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-li
 # unused in M1 code but keeps the dependency graph stable across milestones.
 gosh-sha256-chip = { git = "https://github.com/gosh-sh/gosh-halo2-crypto-lib", branch = "bump-halo2-lib-v0.4.1" }
 
-# SNARK verifier — gosh fork, same rev deposit-prover pins (164bd42). Only pulled
+# SNARK verifier — gosh fork (164bd42). Only pulled
 # under the `aggregation` feature (the M6 recursive-rotate RotateAggregationCircuit),
 # so the default crate + its MockProver tests stay lean. Must be the gosh fork so it
 # shares the one gosh halo2-base backend the [patch] block unifies (mixing axiom's
-# v0.1.7 would fork the graph). Features mirror deposit-prover/Cargo.toml.
+# v0.1.7 would fork the graph).
 snark-verifier = { git = "https://github.com/gosh-sh/snark-verifier", rev = "164bd42e300b382239e63b16532faca539d6b324", default-features = false, features = [
   "loader_evm",
   "loader_halo2",
@@ -98,7 +98,7 @@ pse-poseidon = { git = "https://github.com/axiom-crypto/pse-poseidon.git" }
 
 # Collapse the halo2 backend to a single instance: any transitive
 # axiom-crypto/halo2-lib or crates.io halo2-axiom reference is redirected to the
-# gosh fork. Mirrors crates/an-bridge-prover/Cargo.toml and deposit-prover.
+# gosh fork.
 [patch.crates-io]
 halo2-base = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }
 halo2-ecc = { git = "https://github.com/gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381", branch = "bump-halo2-lib-v0.4.1" }

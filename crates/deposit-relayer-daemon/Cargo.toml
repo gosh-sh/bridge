@@ -2,12 +2,9 @@
 name = "deposit-relayer-daemon"
 version = "0.2.0"
 edition = "2021"
-description = "Relayer for the EVM→Acki Nacki deposit bridge: listens for `Deposit` events on Ethereum, generates the AN-consumable Halo2 proof triple, and submits it to the AN `TokenBridge.finalizeDeposit` entry point."
+description = "Relayer for the EVM→Acki Nacki deposit bridge: listens for `Deposit` events on Ethereum, collects the deposit's block header and receipt proof, and submits them to the AN `eccBridge.finalizeDeposit` entry point."
 
 [dependencies]
-# Core async + alloy (event listening + receipt/log decode — no halo2 here;
-# the heavy deposit-prover circuit lives in its own cargo workspace and is
-# invoked out-of-process by `SubprocessProofGenerator`).
 tokio = { version = "1.42", features = ["full"] }
 async-trait = "0.1"
 alloy = { version = "2.0", features = [
@@ -36,11 +33,12 @@ clap = { version = "4", features = ["derive", "env"] }
 # versions as `bridge-relayer-daemon`, so one scrape config fits both.
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
-tempfile = "3"
 fs2 = "0.4"
 acki-nacki-interface = { path = "../acki-nacki-interface", features = ["tvm-sdk"] }
-# Deposit-source allowlist, shared verbatim with `deposit-prover`.
+# Deposit-source allowlist, shared with the end-user CLI.
 deposit-chain-ids = { path = "../deposit-chain-ids" }
+# The header and receipt proof `finalizeDeposit` takes.
+deposit-receipt = { path = "../deposit-receipt" }
 tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",
     "rustls-tls-webpki-roots",

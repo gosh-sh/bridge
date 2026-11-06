@@ -19,8 +19,7 @@ import { MockAaveLib } from "./helpers/MockAaveLib.sol";
  *      them. What remains here:
  *
  *      1. `FuzzHalo2VerifierTest`: random calldata against the bare Halo2 Yul
- *         verifier (kept as a sanity check on the deposit-prover Halo2 output;
- *         independent of the deleted Groth16 chain).
+ *         verifier (independent of the deleted Groth16 chain).
  *      2. `FuzzAckiNackiBridgeDepositTest`: deposit-side invariants under
  *         fuzzed amounts / multi-user sequences.
  */

@@ -16,8 +16,10 @@ fn a_live_arbitrum_block_rebuilds_its_receipts_root_and_hash() {
     let header: Header = serde_json::from_str(BLOCK).unwrap();
     let mut receipts: Vec<RpcReceipt> = serde_json::from_str(RECEIPTS).unwrap();
     receipts.sort_by_key(|r| r.transaction_index);
-    let types: std::collections::BTreeSet<u64> =
-        receipts.iter().map(|r| r.ty.map_or(0, |t| t.to())).collect();
+    let types: std::collections::BTreeSet<u64> = receipts
+        .iter()
+        .map(|r| r.ty.map_or(0, |t| t.to()))
+        .collect();
     assert_eq!(types, [0, 2, 0x6a].into());
 
     let values: Vec<Vec<u8>> = receipts.iter().map(RpcReceipt::trie_value).collect();
@@ -26,9 +28,16 @@ fn a_live_arbitrum_block_rebuilds_its_receipts_root_and_hash() {
     let index = fd["txIndex"].as_u64().unwrap() as usize;
     let (root, proof) = receipt_proof(&values, index);
     assert_eq!(root, header.inner.receipts_root);
-    let expected: Vec<Vec<u8>> =
-        fd["receiptProof"].as_array().unwrap().iter().map(|p| unhex(p.as_str().unwrap())).collect();
-    assert_eq!(proof.iter().map(|p| p.to_vec()).collect::<Vec<_>>(), expected);
+    let expected: Vec<Vec<u8>> = fd["receiptProof"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| unhex(p.as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        proof.iter().map(|p| p.to_vec()).collect::<Vec<_>>(),
+        expected
+    );
 
     let rlp = alloy::rlp::encode(&header.inner);
     assert_eq!(keccak256(&rlp), header.hash);
@@ -40,10 +49,17 @@ fn only_the_bridges_six_field_deposit_passes_the_shape_check() {
     let bridge = Address::repeat_byte(0x42);
     let deposit = RpcLog {
         address: bridge,
-        topics: vec![DEPOSIT_TOPIC0, B256::with_last_byte(7), B256::with_last_byte(0xab)],
+        topics: vec![
+            DEPOSIT_TOPIC0,
+            B256::with_last_byte(7),
+            B256::with_last_byte(0xab),
+        ],
         data: vec![0u8; DEPOSIT_DATA_LEN].into(),
     };
-    assert_eq!(check_deposit_log(&deposit, bridge), Ok(B256::with_last_byte(7)));
+    assert_eq!(
+        check_deposit_log(&deposit, bridge),
+        Ok(B256::with_last_byte(7))
+    );
     assert!(check_deposit_log(&deposit, Address::repeat_byte(0x43)).is_err());
 
     // The five-field event the bridge emitted before the token was added.
@@ -63,7 +79,10 @@ fn only_the_bridges_six_field_deposit_passes_the_shape_check() {
 
 #[test]
 fn the_topic_is_the_events_signature() {
-    assert_eq!(keccak256("Deposit(uint256,address,uint256,bytes32,uint256,address)"), DEPOSIT_TOPIC0);
+    assert_eq!(
+        keccak256("Deposit(uint256,address,uint256,bytes32,uint256,address)"),
+        DEPOSIT_TOPIC0
+    );
 }
 
 #[test]

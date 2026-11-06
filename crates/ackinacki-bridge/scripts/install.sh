@@ -23,34 +23,32 @@
 #                         one too old to take `--slot-report` counts as missing
 #   3. verifier files     the bytecode stage 1 compares with the chain, and the
 #                         source the proof is self-checked against, ~400 KB
-#   4. kzg_bn254_21.srs   the Hermez ceremony, ~257 MB
-#   5. deposit-prover/    the deposit prover's tools and circuit config, ~26 MB;
-#                         `deposit` runs them with it as their working directory
-#   6. kzg_params_18.srs  the same ceremony at degree 18, for deposits, ~33 MB;
-#                         it goes into deposit-prover/data/
-#   7. a profile          with absolute paths into the prefix. A profile from
+#   4. kzg_bn254_21.srs   the Hermez ceremony, ~257 MB, for withdrawals
+#   5. a profile          with absolute paths into the prefix. A profile from
 #                         before deposits gets the deposit settings appended;
 #                         nothing else in it is changed
 #
-# Every release asset is checked against the release's SHA256SUMS, and the
-# deposit SRS also against the Hermez ceremony's [s]·G2. No compiler is
-# installed: the self-check compares verifier source, not bytecode.
+# Deposits need nothing beyond the CLI: it builds the deposit's receipt proof
+# from the EVM RPC in seconds. A CLI that still runs the retired deposit
+# prover counts as missing and is replaced.
+#
+# Every release asset is checked against the release's SHA256SUMS. No
+# compiler is installed: the self-check compares verifier source, not
+# bytecode.
 
 set -euo pipefail
 
 readonly RELEASE_BASE="${BRIDGE_RELEASE_BASE:-https://github.com/gosh-sh/bridge/releases/latest/download}"
 readonly BUNDLE="ackinacki-bridge-linux-x86_64.tar.gz"
 readonly CEREMONY="kzg_bn254_21.srs"
-readonly DEPOSIT_CEREMONY="kzg_params_18.srs"
 readonly SUMS="SHA256SUMS"
 # Withdrawals: ceremony, binaries and keygen headroom, ~10.5 GB; later
-# withdrawals reuse the keys. Deposits: the prover's data/ after its first
-# proof (SRS and proving key), ~3.4 GB; the prover deletes a rotated-out key
-# once the new one is written. Not counted: the first withdrawal after an
-# upgrade that changes aggregate-proof writes a new ~6.85 GB aggregator key
-# beside the old one, and one that also changes the Circuit-4 key reserves
-# 3 GiB more for that key (README, Step 0).
-readonly DISK_NEED_KB=$((13 * 1024 * 1024))
+# withdrawals reuse the keys. Deposits keep a few kilobytes per operation.
+# Not counted: the first withdrawal after an upgrade that changes
+# aggregate-proof writes a new ~6.85 GB aggregator key beside the old one,
+# and one that also changes the Circuit-4 key reserves 3 GiB more for that
+# key (README, Step 0).
+readonly DISK_NEED_KB=$((11 * 1024 * 1024))
 readonly RAM_WARN_GB=24                      # a cold withdrawal peaked near 19 GB (README)
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -98,8 +96,7 @@ CLI_BIN="$BIN_DIR/ackinacki-bridge"
 VERIFIERS="$PREFIX/verifiers"
 PARAMS="$PREFIX/params"
 SRS="$PARAMS/$CEREMONY"
-DEPOSIT_PROVER="$PREFIX/deposit-prover"
-DEPOSIT_SRS="$DEPOSIT_PROVER/data/$DEPOSIT_CEREMONY"
+OLD_DEPOSIT_PROVER="$PREFIX/deposit-prover"
 PROFILE="$PREFIX/bridge_config"
 WITHDRAW_VERIFIER="$VERIFIERS/BridgeWithdrawalAggregatorVerifier.bin"
 WITHDRAW_VERIFIER_SOL="$VERIFIERS/BridgeWithdrawalAggregatorVerifier.sol"
@@ -128,7 +125,24 @@ can_run() {   # can_run <binary> <arg...>
   return 0
 }
 
-have_cli()       { can_run "$CLI_BIN" --version; }
+# A CLI from before the receipt proof takes `--deposit-prover-dir` and sends
+# a Halo2 proof the Acki Nacki bridge no longer accepts. It runs, so it
+# counts as missing here, and the bundle replaces it. One without the
+# `deposit` subcommand at all is missing too.
+have_cli() {
+  can_run "$CLI_BIN" --version || return 1
+  local help
+  if ! help=$("$CLI_BIN" deposit --help 2>&1); then
+    LAST_RUN_ERROR="$CLI_BIN has no deposit subcommand"
+    return 1
+  fi
+  case "$help" in
+    *--deposit-prover-dir*)
+      LAST_RUN_ERROR="$CLI_BIN proves deposits with the retired deposit prover, whose proofs the bridge no longer accepts"
+      return 1 ;;
+  esac
+  return 0
+}
 # The CLI passes the aggregator `--slot-report`, and its preflight refuses an
 # aggregate-proof whose `--help` does not name it (preflight.rs). One that
 # runs but predates the flag counts as missing here, so the bundle replaces it
@@ -150,25 +164,7 @@ have_verifiers() {
 have_ceremony()  { [ -s "$SRS" ]; }
 have_profile()   { [ -s "$PROFILE" ]; }
 
-# `deposit` refuses a prover directory without both tools and the circuit
-# config. Like the binaries above, the tools are run rather than only looked
-# at (see can_run); `--help` returns before any proving work.
-have_deposit_prover() {
-  can_run "$DEPOSIT_PROVER/fetch_deposit_data" --help &&
-    can_run "$DEPOSIT_PROVER/export_blake2b_proof" --help &&
-    [ -s "$DEPOSIT_PROVER/configs/circuit_params.json" ]
-}
-have_deposit_srs()      { [ -s "$DEPOSIT_SRS" ] && check_hermez "$DEPOSIT_SRS"; }
-have_deposit_settings() { grep -q '^BRIDGE_DEPOSIT_PROVER_DIR=' "$PROFILE"; }
-
-# [s]·G2 is the last 128 bytes of a raw halo2 SRS; these are its first and
-# last six bytes for the Hermez ceremony the bridge's verifying key is keyed on.
-check_hermez() {
-  local head tail
-  head=$(tail -c 128 "$1" | head -c 6 | od -An -tx1 | tr -d ' \n')
-  tail=$(tail -c 6 "$1" | od -An -tx1 | tr -d ' \n')
-  [ "$head" = "928fafb3d0cc" ] && [ "$tail" = "b3be595c6900" ]
-}
+have_deposit_settings() { grep -q '^BRIDGE_DEPOSIT_STATE_DIR=' "$PROFILE"; }
 
 printf 'ackinacki-bridge — install\n'
 printf '  mode        %s\n' "$MODE"
@@ -247,19 +243,15 @@ fetch_verified() {   # fetch_verified <asset> <destination>
 }
 
 # ---------------------------------------------------------------------------
-step "Binaries, verifier files and the deposit prover"
+step "Binaries and verifier files"
 # ---------------------------------------------------------------------------
-# The deposit prover counts too: an installation made before deposits has
-# everything else, and the bundle that brings the prover also brings a CLI
-# that has the `deposit` subcommand.
-if have_cli && have_agg && have_verifiers && have_deposit_prover; then
+if have_cli && have_agg && have_verifiers; then
   ok "$CLI_BIN"
   ok "$AGG_BIN"
   ok "$VERIFIERS"
-  ok "$DEPOSIT_PROVER"
 else
   gap "$BUNDLE"
-  note "the CLI, the aggregator subprocess, the verifier .bin and .sol files, the deposit prover and a profile"
+  note "the CLI, the aggregator subprocess, the verifier .bin and .sol files and a profile"
   if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
   if confirm "download $BUNDLE (~60 MB) from $RELEASE_BASE?"; then
     if [ -z "$WORK" ]; then WORK=$(mktemp -d); fi
@@ -277,24 +269,12 @@ else
         warn "the release bundle has no verifier .sol files — it predates the verifier-source self-check"
         note "no compatible release may be published yet; point BRIDGE_RELEASE_BASE at a bundle built from a newer revision"
       fi
-      # Merged into an existing directory: data/ is empty in the bundle, so
-      # the SRS and the proving key already there are left alone.
-      if [ -d "$unpack/deposit-prover" ]; then
-        cp -R "$unpack/deposit-prover" "$PREFIX/"
-        mkdir -p "$DEPOSIT_PROVER/data"
-      else
-        warn "the release bundle has no deposit prover — it predates the deposit subcommand"
-        note "withdrawals work; for deposits point BRIDGE_RELEASE_BASE at a release that ships it"
-      fi
       cp "$unpack/bridge_config" "$PROFILE.release"
       ok "unpacked into $PREFIX"
       if have_cli && have_agg; then
         ok "both binaries run on this system"
       else
         warn "unpacked, but a binary does not run here: ${LAST_RUN_ERROR:-unknown}"
-      fi
-      if [ -d "$unpack/deposit-prover" ] && ! have_deposit_prover; then
-        warn "unpacked, but the deposit prover is incomplete or does not run here: ${LAST_RUN_ERROR:-a tool or its circuit config is missing}"
       fi
     fi
   fi
@@ -310,33 +290,6 @@ else
   note "the Hermez Perpetual Powers of Tau at degree 21; lower degrees derive from it"
   if confirm "download $CEREMONY (~257 MB)?"; then
     if fetch_verified "$CEREMONY" "$SRS"; then ok "$SRS"; fi
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-step "Deposit prover SRS"
-# ---------------------------------------------------------------------------
-# A checksum only says the file is the one the release lists. The [s]·G2
-# check says it is the ceremony the bridge's verifying key was made with:
-# a proof made with another one is refused on chain, after the deposit.
-if have_deposit_srs; then
-  ok "$DEPOSIT_SRS"
-else
-  if [ -s "$DEPOSIT_SRS" ]; then
-    gap "$DEPOSIT_SRS: not the Hermez ceremony; a proof keyed on it is rejected by the bridge"
-  else
-    gap "$DEPOSIT_SRS"
-  fi
-  note "the same Hermez ceremony at degree 18; deposits are proved with it"
-  if confirm "download $DEPOSIT_CEREMONY (Hermez k=18, ~33 MB)?"; then
-    if fetch_verified "$DEPOSIT_CEREMONY" "$DEPOSIT_SRS"; then
-      if check_hermez "$DEPOSIT_SRS"; then
-        ok "$DEPOSIT_SRS"
-      else
-        rm -f "$DEPOSIT_SRS"
-        gap "$DEPOSIT_SRS: not the Hermez ceremony; a proof keyed on it is rejected by the bridge"
-      fi
-    fi
   fi
 fi
 
@@ -363,7 +316,6 @@ elif [ -s "$PROFILE.release" ]; then
     -e "s#^BRIDGE_WITHDRAW_STATE_DIR=.*#BRIDGE_WITHDRAW_STATE_DIR=$PREFIX/withdraw-state#" \
     -e "s#^BRIDGE_AGGREGATOR_DIR=.*#BRIDGE_AGGREGATOR_DIR=$AGG_DIR#" \
     -e "s#^BRIDGE_VERIFIERS_DIR=.*#BRIDGE_VERIFIERS_DIR=$VERIFIERS#" \
-    -e "s#^BRIDGE_DEPOSIT_PROVER_DIR=.*#BRIDGE_DEPOSIT_PROVER_DIR=$DEPOSIT_PROVER#" \
     -e "s#^BRIDGE_DEPOSIT_STATE_DIR=.*#BRIDGE_DEPOSIT_STATE_DIR=$PREFIX/deposit-state#" \
     "$PROFILE.release" > "$PROFILE"
   ok "$PROFILE"
@@ -387,12 +339,20 @@ if have_profile && ! have_deposit_settings; then
     fi
     {
       printf '\n# --- Deposit (EVM → Acki Nacki), added by install.sh ---\n'
-      printf 'BRIDGE_DEPOSIT_PROVER_DIR=%s\n' "$DEPOSIT_PROVER"
       printf 'BRIDGE_DEPOSIT_STATE_DIR=%s\n' "$PREFIX/deposit-state"
       printf 'BRIDGE_DEPOSIT_CONFIRMATIONS=12\n'
     } >> "$PROFILE"
     ok "$PROFILE: deposit settings added; your other settings are unchanged"
   fi
+fi
+
+# What the retired deposit prover left: nothing reads it any more. Not
+# deleted here, since the prefix is the user's; only pointed out.
+if [ -d "$OLD_DEPOSIT_PROVER" ]; then
+  note "$OLD_DEPOSIT_PROVER is no longer used (deposits need no prover); delete it to free its space"
+fi
+if have_profile && grep -q '^BRIDGE_DEPOSIT_PROVER_DIR=' "$PROFILE"; then
+  note "$PROFILE: BRIDGE_DEPOSIT_PROVER_DIR is no longer read; the line can go"
 fi
 
 # ---------------------------------------------------------------------------
@@ -401,12 +361,13 @@ step "Result"
 missing=0
 if ! have_cli; then
   gap "$CLI_BIN"
-  if [ -n "$LAST_RUN_ERROR" ]; then
-    note "$LAST_RUN_ERROR"
-    note "the published binary is newer than this system's C library; use a"
-    note "distribution release at least as new as the build host, or build"
-    note "from source"
-  fi
+  if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
+  case "$LAST_RUN_ERROR" in
+    *"GLIBC_"*|*"error while loading shared libraries"*)
+      note "the published binary is newer than this system's C library; use a"
+      note "distribution release at least as new as the build host, or build"
+      note "from source" ;;
+  esac
   missing=$((missing + 1))
 fi
 if ! have_agg; then
@@ -416,12 +377,6 @@ if ! have_agg; then
 fi
 have_verifiers || { gap "$WITHDRAW_VERIFIER, $WITHDRAW_VERIFIER_SOL and $WITHDRAW_VERIFIER_CALLDATA"; missing=$((missing + 1)); }
 have_ceremony  || { gap "$SRS"; missing=$((missing + 1)); }
-if ! have_deposit_prover; then
-  gap "$DEPOSIT_PROVER"
-  if [ -n "$LAST_RUN_ERROR" ]; then note "$LAST_RUN_ERROR"; fi
-  missing=$((missing + 1))
-fi
-have_deposit_srs || { gap "$DEPOSIT_SRS"; missing=$((missing + 1)); }
 if ! have_profile; then
   gap "$PROFILE"
   missing=$((missing + 1))
@@ -445,7 +400,7 @@ EOF
   exit 0
 fi
 
-printf '  %d of 7 still missing.\n' "$missing"
+printf '  %d of 5 still missing.\n' "$missing"
 if [ "$MODE" = check ]; then
   printf '  Re-run without --check to download them.\n'
 fi

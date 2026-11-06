@@ -1,6 +1,5 @@
 //! One real deposit from Sepolia to shellnet: the driver with the live EVM
-//! and Acki Nacki clients and the deposit prover from its release layout.
-//! The wallet is a key the test is given.
+//! and Acki Nacki clients. The wallet is a key the test is given.
 //!
 //! It spends testnet USDC and ETH, and on a bridge anchored by its owner it
 //! waits until the owner accepts the deposit's block by hand. It is compiled
@@ -13,7 +12,6 @@
 //! BRIDGE_DEPLOY_BLOCK=<new-bridge-deployment-block> \
 //! E2E_SEPOLIA_KEY=<hex private key> \
 //! E2E_AN_TO=<dapp_id>::<account_id> \
-//! E2E_PROVER_DIR=<absolute path of the unpacked deposit prover> \
 //! E2E_AMOUNT=0.01 \
 //!   cargo test -p ackinacki-bridge --features e2e,dev-unfixed-bridge \
 //!   e2e::one_real_deposit -- --ignored --nocapture
@@ -22,10 +20,9 @@
 //! The test runs in `crates/ackinacki-bridge`, which the profile's relative
 //! paths are written for. `E2E_AMOUNT` is in USDC and defaults to 0.01.
 //! Use a fresh paired deployment with `deposit(address,uint256,bytes32)` on EVM
-//! and AN bridge 1.16.0 or newer with this build's deposit key.
-//! `dev-unfixed-bridge` is needed while this build names no minimum bridge
-//! version. The operation is kept in the profile's state directory, so a run
-//! that stops continues with the CLI's own `--resume <op-id>`.
+//! and AN bridge 1.17.0. The operation is kept in the profile's state
+//! directory, so a run that stops continues with the CLI's own `--resume
+//! <op-id>`.
 //!
 //! It prints the operation id, the depositId, the voucher address and the
 //! `confirmDeposit` transaction. The voucher address is the reference value
@@ -75,8 +72,6 @@ async fn one_real_deposit_from_sepolia_is_credited_on_shellnet() {
         &amount,
         "--to",
         &var("E2E_AN_TO"),
-        "--deposit-prover-dir",
-        &var("E2E_PROVER_DIR"),
         "--qr-mode",
         "eip681",
         "--from-address",

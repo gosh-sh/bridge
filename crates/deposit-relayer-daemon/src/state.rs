@@ -1,9 +1,9 @@
 //! On-disk relayer state for crash-recovery.
 //!
 //! The authoritative "was this deposit finalized?" record lives on the AN
-//! side as the `usedDepositIds` nullifier set; the local state is a *cache*
-//! plus a *retry log* so the relayer can resume near where it left off
-//! without re-proving everything from `depositId = 0`:
+//! side as the deposit's `DepositVoucher`; the local state is a *cache* plus a
+//! *retry log* so the relayer can resume near where it left off without
+//! resubmitting everything from `depositId = 0`:
 //!
 //! - `last_processed_deposit_id` is the high-water mark of deposits that are
 //!   done (finalized, parked, or unprovable).
@@ -20,8 +20,8 @@
 //!
 //! Concurrency note: like the AN→ETH relayer, this is a single-process
 //! daemon. The file is overwritten atomically (write-temp-then-rename + fsync).
-//! A deployment binding (`chain_id`, `bridge_address`, `dapp_id`) prevents
-//! reusing state across bridge redeploys. An advisory lock blocks two daemons
+//! A deployment binding (`chain_id`, `bridge_address`) prevents reusing
+//! state across bridge redeploys. An advisory lock blocks two daemons
 //! from sharing one state file.
 
 use std::{
@@ -46,20 +46,22 @@ pub fn unix_now_secs() -> u64 {
 }
 
 /// Deployment identity stamped into `state.json` so a cursor cannot be reused
-/// after a bridge redeploy or dappId change.
+/// after a bridge redeploy.
+///
+/// Files written while the relayer took `--dapp-id` also carry a `dapp_id`.
+/// The AN bridge always pinned it to 0, so it never told two deployments
+/// apart; it is ignored on load and dropped on the next save.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentIdentity {
     pub chain_id: u64,
     pub bridge_address: String,
-    pub dapp_id: String,
 }
 
 impl DeploymentIdentity {
-    pub fn new(chain_id: u64, bridge_address: Address, dapp_id: impl Into<String>) -> Self {
+    pub fn new(chain_id: u64, bridge_address: Address) -> Self {
         Self {
             chain_id,
             bridge_address: format!("{bridge_address:#x}"),
-            dapp_id: dapp_id.into(),
         }
     }
 }
@@ -139,7 +141,8 @@ pub struct RelayerState {
     /// stay parked across restarts; they are not loaded back as outstanding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked_deposit_ids: Vec<u64>,
-    /// Deposit ids the circuit cannot prove, advanced past at once.
+    /// Deposit ids that cannot be finalized from their receipt, advanced past
+    /// at once. The name dates from the off-chain prover.
     /// `finalize-one` cannot help these; only the EVM bridge operator can
     /// return their funds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -211,14 +214,9 @@ impl RelayerState {
                 Ok(Some(std::mem::replace(self, fresh)))
             },
             Some(stored) => Err(RelayerError::other(format!(
-                "state.json deployment mismatch (stored chain={} bridge={} dapp_id={}; expected \
-                 chain={} bridge={} dapp_id={}). Use --force-state to override.",
-                stored.chain_id,
-                stored.bridge_address,
-                stored.dapp_id,
-                expected.chain_id,
-                expected.bridge_address,
-                expected.dapp_id,
+                "state.json deployment mismatch (stored chain={} bridge={}; expected chain={} \
+                 bridge={}). Use --force-state to override.",
+                stored.chain_id, stored.bridge_address, expected.chain_id, expected.bridge_address,
             ))),
         }
     }
@@ -284,7 +282,8 @@ impl RelayerState {
         self.remove_outstanding(deposit_id);
     }
 
-    /// Mark an attempt that failed the deposit (proof failure, AN rejection).
+    /// Mark an attempt that failed the deposit (receipt proof failure, AN
+    /// rejection).
     /// The id stays outstanding with a per-id backoff; the high-water mark
     /// does not move, so a later id can be tried while this one waits.
     pub fn record_attempt(&mut self, deposit_id: u64, now: u64, backoff_secs: u64) {
@@ -413,8 +412,9 @@ impl RelayerState {
         self.advance_past(deposit_id);
     }
 
-    /// Record a deposit the circuit cannot prove and advance the cursor past
-    /// it. The id goes to `unprovable_deposit_ids`, not `parked_deposit_ids`.
+    /// Record a deposit that cannot be finalized from its receipt and advance
+    /// the cursor past it. The id goes to `unprovable_deposit_ids`, not
+    /// `parked_deposit_ids`.
     pub fn record_unprovable(&mut self, deposit_id: u64) {
         if !self.unprovable_deposit_ids.contains(&deposit_id) {
             self.unprovable_deposit_ids.push(deposit_id);
@@ -701,7 +701,7 @@ mod tests {
     }
 
     fn deployment(chain: u64) -> DeploymentIdentity {
-        DeploymentIdentity::new(chain, Address::repeat_byte(0x99), "0x1a1a1a1a1a")
+        DeploymentIdentity::new(chain, Address::repeat_byte(0x99))
     }
 
     #[test]
@@ -721,6 +721,37 @@ mod tests {
         assert_eq!(loaded.last_processed_deposit_id, Some(7));
         assert_eq!(loaded.deployment, Some(deployment(11155111)));
         assert!(loaded.outstanding_deposits.is_empty());
+    }
+
+    #[test]
+    fn a_state_file_with_the_old_dapp_id_still_belongs_to_its_deployment() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bridge = Address::repeat_byte(0x99);
+        for dapp_id in ["0", "0x0"] {
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"deployment":{{"chain_id":11155111,"bridge_address":"{bridge:#x}",
+                        "dapp_id":"{dapp_id}"}},"last_processed_deposit_id":4,
+                        "last_attempt_deposit_id":4,"attempts_since_progress":0,
+                        "scan_done_through_block":900}}"#
+                ),
+            )
+            .unwrap();
+            let mut loaded = RelayerState::load(&path).unwrap().unwrap();
+            assert_eq!(
+                loaded
+                    .ensure_deployment(&DeploymentIdentity::new(11155111, bridge), false)
+                    .unwrap(),
+                None
+            );
+            assert_eq!(loaded.next_target_at(0, 0), 5);
+            assert_eq!(loaded.scan_done_through_block, Some(900));
+            loaded.save(&path).unwrap();
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(!raw.contains("dapp_id"), "{raw}");
+        }
     }
 
     #[test]

@@ -1,10 +1,10 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.16.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.17.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
-- `eccBridge` — premined into the zerostate. Mints USDC on a proven
+- `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
   `confirmDeposit`) once the deposit's block is in its anchor set, and burns
   USDC on `initiateWithdrawal`. A withdrawal without enough bridged or destination-chain inventory
@@ -38,12 +38,24 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   has already admitted, and pushes the block's hash into the anchor set. See
   *Arbitrum blocks* below.
 
-`finalizeDeposit` is permissionless — the proof is the authorization. It
-rejects a deposit whose proven `(chainId, contractAddress)` pair is not a
-trusted L1 bridge (`setTrustedL1Bridge`; the zerostate seeds one, see below),
-verifies the proof against the embedded `VK_BLOB` with `ZKHALO2VERIFYWITHVK`,
-and then requires the proven block hash in the anchor set: the proof places the
-event in a block, but cannot show that the block is canonical. Three writers
+`finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex)` is
+permissionless — the receipt is the authorization. It hashes the RLP block
+`header` with `KECCAK256` and requires that hash in the anchor set of `chainId`
+(224 otherwise): the receipt places the event in a block, but cannot show that
+the block is canonical, and the anchor set is per chain, so a block of one chain
+does not prove a deposit on another. Only then does it accept the message and
+prove, with `EthTrie`, the receipt of transaction `txIndex` against the header's
+`receiptsRoot` (`receiptProof` is the receipts-trie path, root first; errors
+300–305). The transaction must have succeeded (308). The deposit is read from
+log `logIndex` of that receipt — counted within the receipt, not the block-wide
+`logIndex` an RPC reports (307 if there is none) — and that log must be exactly
+`Deposit(uint256 indexed depositId, address indexed sender, uint256 amount,
+bytes32 anAccount, uint256 timestamp, address token)`: three topics, four data
+words, nothing more (244 otherwise). Its emitter must be a trusted L1 bridge
+for `chainId` (`setTrustedL1Bridge`; the zerostate seeds one, see below; 222
+otherwise). A deposit costs the bridge 130 000 to 230 000 gas, more when many
+logs precede the `Deposit` in its receipt (about 380 000 with 60), and the
+message stays well under the 64 KiB a Block Manager takes. Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
@@ -80,9 +92,8 @@ flags. Both owner keys therefore remain trusted after a flip.
 |------|----------|
 | `exchange/` | Sources and a `Makefile` that builds them in place |
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
-| `0.80.0_compiled/exchange/` | `eccBridge.tvc`, `eccBridge.abi.json` |
 | `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json` |
-| `0.81.1_compiled/exchange/` | `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
+| `0.81.1_compiled/exchange/` | `eccBridge.tvc`, `eccBridge.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 | `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
@@ -119,10 +130,9 @@ the deposit switch, retaining outstanding
 inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
 `getTokenDepositConfig(chainId, evmToken)` and `getTokenWithdrawalConfig(chainId, tokenId)` expose
 the configuration and per-chain outstanding amount. Closing or throttling deposits does not
-lower the withdrawal allowance. `finalizeDeposit` reads the proven token, and DepositVoucher
+lower the withdrawal allowance. `finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
 1.5.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
 burns the attached currency and decrements only that currency's destination-chain inventory.
-The existing `finalizeDeposit`, `confirmDeposit` and `initiateWithdrawal` signatures are preserved.
 
 For an upgrade from 1.15.0, build `userCell` with
 `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)` and pass it to the old `updateCode`.
@@ -263,7 +273,7 @@ AN keeps the same 10,000 USDC ceiling separately for every EIP-155 chain id.
 base units. `confirmDeposit` increases that chain's outstanding amount;
 a successful `initiateWithdrawal` decreases the destination chain's amount.
 There are no deposit reservations or permanent voucher registry. A repeated
-proof deploys the same voucher, whose consumed constructor prevents another
+finalization deploys the same voucher, whose consumed constructor prevents another
 confirmation. Trust only one funded L1 bridge per chain for this accounting.
 For that pair,
 `L1 treasuryBalance = AN outstanding + unconfirmed deposits + unpaid burns`.
@@ -276,8 +286,9 @@ to L1, so an owner who writes a figure other than the measured L1 principal
 breaks both — see *Restoring a chain's outstanding amount* below.
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
-with 235; the latter is retryable after withdrawals. Both checks precede proof
-verification and are repeated on confirmation. A withdrawal to a chain with no
+with 235; the latter is retryable after withdrawals. Both checks follow the
+receipt proof, since the amount and token come from it, so the bridge pays for
+the proof of a deposit it refuses; they are repeated on confirmation. A withdrawal to a chain with no
 EVM bridge set, or one that is oversized, that would burn more than bridged
 minted less bridged burned, or that exceeds its destination chain's outstanding
 amount returns the attached ECC without burning it and emits `WithdrawalRefused`
@@ -380,7 +391,7 @@ not symmetrical:
 - a new deposit fails `finalizeDeposit` with 235, which is retryable;
 - a deposit already between finalization and confirmation aborts in
   `confirmDeposit` with 235 **after** its voucher's constructor has run, so
-  re-proving it deploys the same voucher and cannot confirm again. That USDC is
+  finalizing it again deploys the same voucher and cannot confirm again. That USDC is
   locked on L1 with nothing minted on AN until the owner lowers the counter;
 - `mintAndSendBridged`, the owner's recovery path for exactly that case, is
   capped by the same check and throws 235 too.
@@ -435,24 +446,22 @@ AN identity/history. That migration is not implemented. Amounts above
 
 ## Rebuilding
 
-    make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
-        SOLD_0_81_1=/path/to/sold-0.81.1
+    make -C contracts/an/exchange SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
 
-The `.tvc` metadata of the tracked artefacts records `sold` 0.80.0 for
-`eccBridge.tvc`, 0.81.0 for `DepositVoucher.tvc` and 0.81.1 for
-`EthBeaconLightClient.tvc` and `ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
+The `.tvc` metadata of the tracked artefacts records `sold` 0.81.0 for
+`DepositVoucher.tvc` and 0.81.1 for `eccBridge.tvc`, `EthBeaconLightClient.tvc` and
+`ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
 Any other compiler changes the code hash, so the `Makefile` builds each contract
-with its own compiler, `SOLD_0_80`, `SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is
+with its own compiler, `SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is
 unset or the binary reports a different version.
 
-`sold` 0.81.0 reproduces `DepositVoucher.tvc` and all three ABIs byte for byte,
-but not `eccBridge.tvc`. `EthBeaconLightClient.tvc` and
-`ArbitrumBlockVerifier.tvc` call `gosh.keccak256`, which release
+The three contracts built with 0.81.1 call `gosh.keccak256`, which release
 [`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1) is the first to
-assemble. The bridge does not import the verifier,
+assemble. `DepositVoucher` stays on 0.81.0 because its code is part of every voucher's address:
+it reaches the bridge through an interface, not by importing `eccBridge.sol`, so 0.81.0 still
+builds it. The bridge does not import the verifier,
 only `ArbitrumBlockVerifierDeploy.sol`, a contract with the verifier's state
-variables and the two calls the bridge makes: importing the verifier would
-compile `EthTrie` into the bridge, which `sold` 0.80.0 cannot build. Keep the
+variables and the two calls the bridge makes. Keep the
 two contracts' state variables identical: the bridge lays out the verifier's
 initial data, and so its address, from the deploy surface. `sold` 0.82.0 does not
 compile the bridge. The bridge keeps the voucher's code in its data, and the
@@ -468,8 +477,12 @@ and its rebuilt `.tvc` / `.abi.json` are committed too.
 Before committing new artefacts:
 
     scripts/check_voucher_abi_consistency.py
-    scripts/embed_deposit_vk_blob.py --check contracts/an/exchange/eccBridge.sol
     scripts/check_zerostate_data_encoder.py
+
+`scripts/test_an_bridge_limits.py` runs the bridge on `tvm-debugger` (`TVM_DEBUGGER`, a build
+with `KECCAK256`): `finalizeDeposit` against real Arbitrum Sepolia receipts and synthetic blocks
+from `scripts/deposit-receipt/vectors.py`, including foreign emitters, other events, altered
+logs, unanchored blocks, failed transactions and tampered proofs.
 
 ## Two pause domains
 
@@ -496,12 +509,12 @@ The voucher's code can be changed. But replay protection rests on the voucher's
 address, and that address is derived from its code: the moment the code
 changes, every deposit finalized so far gets a new, unoccupied address. Anyone
 can finalize them again — the deposit event is still in its Ethereum block, and
-a proof of it can be built afresh at any time.
+its receipt proof can be built afresh at any time.
 
 **So an upgrade that changes the voucher's code also makes past deposits stop
 going through.** The restriction ships in the upgraded code itself: a block
 cutoff, where deposits from blocks older than the upgrade are refused. What is
-rejected is the deposit, not the shape of its proof.
+rejected is the deposit, not the shape of its receipt.
 
 **The current contracts carry no such restriction, and none is needed here:**
 the voucher's code is not changed, it is installed by the zerostate, and
@@ -539,7 +552,7 @@ network.
 AN `maxTvl` cannot decrease after registration: a lower ceiling could abort a confirmation
 whose voucher has already been consumed. To restrict new deposits, close them on EVM
 (`setTokenDepositsEnabled`) or lower the EVM TVL cap; earlier deposits stay payable.
-`finalizeDeposit` reads the AN deposit switch and `maxTransfer` when the proof arrives,
+`finalizeDeposit` reads the AN deposit switch and `maxTransfer` when the receipt arrives,
 not when the deposit was made. Closing the switch or lowering `maxTransfer` therefore also
 refuses deposits already locked on EVM, with 243 or 234, until it is reopened or raised.
 Change them only after those deposits are finalized.

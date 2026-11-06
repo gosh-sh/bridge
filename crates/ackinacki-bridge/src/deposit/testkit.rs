@@ -98,6 +98,13 @@ pub struct FakeEvm {
     pub probe_error: Mutex<Option<String>>,
     /// `probe_block` fails this many more times, then answers.
     pub probe_failures: AtomicU32,
+    /// What `deposit_witness` answers for a transaction; one it lacks is a
+    /// retryable failure.
+    pub witnesses: Mutex<HashMap<B256, DepositWitness>>,
+    /// Failures `deposit_witness` answers first, in order.
+    pub witness_errors: Mutex<VecDeque<WitnessError>>,
+    /// How many times `deposit_witness` was called.
+    pub witness_builds: AtomicU32,
     /// What `revert_reason` answers.
     pub revert: Mutex<Option<String>>,
     /// What `bridge_paused` answers; `None` is a bridge without `paused()`.
@@ -163,6 +170,9 @@ impl Default for FakeEvm {
             logs: Mutex::default(),
             probe_error: Mutex::default(),
             probe_failures: AtomicU32::default(),
+            witnesses: Mutex::default(),
+            witness_errors: Mutex::default(),
+            witness_builds: AtomicU32::default(),
             revert: Mutex::default(),
             paused: Mutex::new(Some(false)),
             estimate_revert: Mutex::default(),
@@ -494,6 +504,25 @@ impl EvmRead for FakeEvm {
         }
     }
 
+    async fn deposit_witness(
+        &self,
+        _: u64,
+        _: Address,
+        tx: B256,
+        _: u64,
+    ) -> Result<DepositWitness, WitnessError> {
+        self.witness_builds.fetch_add(1, Ordering::SeqCst);
+        if let Some(e) = self.witness_errors.lock().unwrap().pop_front() {
+            return Err(e);
+        }
+        self.witnesses
+            .lock()
+            .unwrap()
+            .get(&tx)
+            .cloned()
+            .ok_or_else(|| WitnessError::Retry(format!("transaction {tx} not found")))
+    }
+
     async fn estimate_gas_at(
         &self,
         _: Address,
@@ -593,28 +622,20 @@ pub fn deposit_receipt(tx: B256, block: &Header, status: bool, logs: Vec<LogLite
         tx_hash: tx,
         block_hash: block.hash,
         block_number: block.number,
+        tx_index: Some(0),
         status,
         logs,
     }
 }
 
 /// A pending transaction from `from` to `bridge`.
-pub fn deposit_tx(
-    hash: B256,
-    from: Address,
-    bridge: Address,
-    nonce: u64,
-    tx_type: u8,
-    input: Bytes,
-) -> TxLite {
+pub fn deposit_tx(hash: B256, from: Address, bridge: Address, nonce: u64, input: Bytes) -> TxLite {
     TxLite {
         hash,
         from,
         to: Some(bridge),
         nonce,
-        tx_type,
         input,
-        access_list_rlp_len: 1,
         block_number: None,
     }
 }
@@ -1323,6 +1344,8 @@ pub struct FakeAn {
     pub sends: Mutex<VecDeque<FinalizeSend>>,
     /// How many times `send_finalize` was called.
     pub sent: Mutex<u32>,
+    /// The arguments of every `send_finalize`, in order.
+    pub sent_witnesses: Mutex<Vec<DepositWitness>>,
     /// How long each send takes before it answers.
     pub send_delay: Mutex<std::time::Duration>,
     /// External messages that appear once a send was made: `(account,
@@ -1552,8 +1575,9 @@ impl AnRead for FakeAn {
 
 #[async_trait]
 impl AnSend for FakeAn {
-    async fn send_finalize(&self, _: [u8; 32], _: [u8; 32], _: &[u8], _: &[u8]) -> FinalizeSend {
+    async fn send_finalize(&self, _: [u8; 32], _: [u8; 32], w: &DepositWitness) -> FinalizeSend {
         *self.sent.lock().unwrap() += 1;
+        self.sent_witnesses.lock().unwrap().push(w.clone());
         for (acc, m) in self.on_send_ext_out.lock().unwrap().drain(..) {
             self.ext_out
                 .lock()
@@ -1593,87 +1617,21 @@ pub fn msg(hash: &str, kind: &str, src: &str, dst: &str, body: Option<&str>) -> 
     }
 }
 
-/// The temporary directory of a [`fake_prover_dir`], deleted when this is
-/// dropped, and the hold on [`crate::test_forks::spawning`] that its test
-/// keeps for as long as it can start the fake tools.
-pub struct FakeProverHome {
-    /// The directory.
-    _dir: tempfile::TempDir,
-    /// Taken before the tools were written.
-    _spawning: crate::test_forks::Hold,
-}
-
-/// A prover directory that passes `check_prover_dir` and whose
-/// `export_blake2b_proof` copies `expected_pi.bin` (written by the test,
-/// the `proof_00` fixture's public inputs until then) into place. `extra`
-/// runs inside `export_blake2b_proof` before it writes. Each run of it
-/// appends a line to `data/runs.log`. The fetcher exits 7 without
-/// `ETH_RPC_URL` in its environment. Both tools answer `--help` with exit
-/// 0 before anything else, as the preflight's probe expects.
-///
-/// Whoever has one may start its tools, so it holds
-/// [`crate::test_forks::spawning`] until it is dropped: its test runs
-/// while no other test starts a subprocess or takes a released lock again.
-pub fn fake_prover_dir(extra: &str) -> (FakeProverHome, crate::deposit::prover_files::ProverDir) {
-    use std::os::unix::fs::PermissionsExt;
-    let spawning = crate::test_forks::spawning();
-    let d = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(d.path().join("configs")).unwrap();
-    std::fs::create_dir_all(d.path().join("data")).unwrap();
-    std::fs::write(
-        d.path().join(crate::deposit::prover_files::CIRCUIT_PARAMS),
-        include_str!("../../../../deposit-prover/configs/circuit_params.json"),
-    )
-    .unwrap();
-    let mut srs = vec![0u8; 4096];
-    let mut tail = [0u8; 128];
-    tail[..6].copy_from_slice(&crate::deposit::prover_files::HERMEZ_SG2_HEAD);
-    tail[122..].copy_from_slice(&crate::deposit::prover_files::HERMEZ_SG2_TAIL);
-    srs.extend_from_slice(&tail);
-    std::fs::write(d.path().join(crate::deposit::prover_files::SRS_FILE), srs).unwrap();
-    std::fs::write(
-        d.path().join("expected_pi.bin"),
-        crate::deposit::pi::tests_support::fixture_pi(),
-    )
-    .unwrap();
-    // `--help` answers at once, as a clap tool does, and is no run.
-    let help = "[ \"$1\" = --help ] && { echo usage; exit 0; }";
-    let fetch = format!(
-        "#!/bin/sh\n{help}\nwhile [ $# -gt 0 ]; do case $1 in --output) out=$2; shift;; esac; \
-         shift; done\n[ -n \"$ETH_RPC_URL\" ] || exit 7\necho '{{}}' > \"$out\"\n"
-    );
-    let prove = format!(
-        "#!/bin/sh\n{help}\nwhile [ $# -gt 0 ]; do case $1 in --proof-out) p=$2; shift;; \
-         --pubin-out) i=$2; shift;; esac; shift; done\n{extra}\nprintf proof > \"$p\"\ncp \
-         expected_pi.bin \"$i\"\necho run >> data/runs.log\n"
-    );
-    for (name, body) in [
-        (crate::deposit::prover_files::FETCH_BIN, fetch),
-        (crate::deposit::prover_files::PROVE_BIN, prove),
-    ] {
-        let p = d.path().join(name);
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+/// `finalizeDeposit` arguments for a deposit in `block`, at `log_index`
+/// in its receipt. The header and the proof node are stand-ins: nothing
+/// but the bridge reads them.
+pub fn fake_witness(chain_id: u64, block: &Header, log_index: u16) -> DepositWitness {
+    DepositWitness {
+        chain_id,
+        block_number: block.number,
+        block_hash: block.hash,
+        header: Bytes::from([&[0xf9u8, 0x02, 0x1c][..], block.hash.as_slice()].concat()),
+        tx_index: 0,
+        receipt_proof: vec![Bytes::from(
+            [&[0xf8u8, 0x51][..], block.hash.as_slice()].concat(),
+        )],
+        log_index,
     }
-    let dir = crate::deposit::prover_files::ProverDir {
-        root: d.path().to_path_buf(),
-    };
-    let home = FakeProverHome {
-        _dir: d,
-        _spawning: spawning,
-    };
-    (home, dir)
-}
-
-/// Makes the prover of `dir` write both its files, as the exporter does
-/// before it checks the proof itself, and then exit 1 as when that check
-/// fails. Each run still appends a line to `data/runs.log`.
-pub fn prover_fails_after_writing(dir: &crate::deposit::prover_files::ProverDir) {
-    let body = "#!/bin/sh\n[ \"$1\" = --help ] && { echo usage; exit 0; }\nwhile [ $# -gt 0 ]; do \
-                case $1 in --proof-out) p=$2; shift;; --pubin-out) i=$2; shift;; esac; shift; \
-                done\nprintf proof > \"$p\"\ncp expected_pi.bin \"$i\"\necho run >> \
-                data/runs.log\necho 'the proof does not verify' >&2\nexit 1\n";
-    std::fs::write(dir.bin(crate::deposit::prover_files::PROVE_BIN), body).unwrap();
 }
 
 // ---- the world of the end-to-end driver tests ----
@@ -1707,18 +1665,15 @@ pub struct Mined {
     pub from: Address,
 }
 
-/// One set of scripted chains, prover directory, state and work
-/// directories and wallet for the end-to-end tests of the driver. Its
-/// deposit uses the `W_*` values. The fake prover answers with the public
-/// inputs `World` writes for every deposit it mines (`expected_pi.bin`),
-/// so the check of the prover's inputs runs for real.
+/// One set of scripted chains, state and work directories and wallet for
+/// the end-to-end tests of the driver. Its deposit uses the `W_*` values.
+/// Every deposit it mines gets its receipt proof
+/// ([`FakeEvm::witnesses`]), for the block that holds it.
 pub struct World {
     /// The EVM node.
     pub evm: std::sync::Arc<FakeEvm>,
     /// The Acki Nacki node.
     pub an: std::sync::Arc<FakeAn>,
-    /// The prover directory and what `check_prover_dir` made of it.
-    pub prover: (FakeProverHome, crate::deposit::prover_files::ProverDir),
     /// `--state-dir`.
     pub state: tempfile::TempDir,
     /// `--work-dir`.
@@ -1772,7 +1727,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.13.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.17.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1825,7 +1780,7 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
             serde_json::json!({"listed": true, "tokenId": "3", "depositsEnabled": true,
@@ -1865,7 +1820,6 @@ impl World {
         World {
             evm: std::sync::Arc::new(evm),
             an: std::sync::Arc::new(an),
-            prover: fake_prover_dir(""),
             state: tempfile::tempdir().unwrap(),
             work: tempfile::tempdir().unwrap(),
             wallet: FakeWallet::eoa(),
@@ -1899,12 +1853,9 @@ impl World {
             bridge: Some(W_BRIDGE),
             gql_endpoint: Some("http://gql.invalid/graphql".into()),
             usdc_bridge_account: Some(W_BRIDGE_ACC),
-            prover_dir: Some(self.prover.1.root.clone()),
             confirmations: 12,
             state_dir: self.state.path().to_path_buf(),
             work_dir: Some(self.work.path().to_path_buf()),
-            log_dir: None,
-            prover_timeout: Duration::from_secs(10),
             anchor_timeout: Some(Duration::from_secs(3600)),
             relayer_grace: Duration::from_secs(1),
             recovery_window: Duration::from_secs(60),
@@ -1958,11 +1909,11 @@ impl World {
         ]);
     }
 
-    /// The bridge as a 1.15.0 one with an Arbitrum verifier for the deposit
+    /// The bridge with an Arbitrum verifier for the deposit
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -2105,21 +2056,14 @@ impl World {
         h
     }
 
-    /// Makes the fake prover answer with the public inputs of `m`.
-    fn write_expected_pi(&self, m: &Mined) {
-        let e = crate::deposit::pi::ExpectedInputs {
-            deposit_id: m.deposit_id,
-            sender: m.from,
-            amount: W_AMOUNT,
-            token: W_USDC,
-            contract: W_BRIDGE,
-            chain_id: 11_155_111,
-            dapp_id: [0; 32],
-            account_id: W_ACC,
-            block_hash: m.block.hash,
-        };
-        let bytes = crate::deposit::pi::DepositPublicInputs::from_expected(&e).encode();
-        std::fs::write(self.prover.1.root.join("expected_pi.bin"), bytes).unwrap();
+    /// Makes the EVM node build the receipt proof of `m`, whose `Deposit`
+    /// is the second log of its receipt.
+    fn register_witness(&self, m: &Mined) {
+        self.evm
+            .witnesses
+            .lock()
+            .unwrap()
+            .insert(m.tx, fake_witness(11_155_111, &m.block, 1));
     }
 
     /// Puts a deposit transaction from the wallet's account at `nonce` in
@@ -2128,7 +2072,6 @@ impl World {
     fn mine(
         &mut self,
         nonce: u64,
-        tx_type: u8,
         status: bool,
         block: Header,
         deposit_id: U256,
@@ -2154,7 +2097,7 @@ impl World {
             .txs
             .lock()
             .unwrap()
-            .insert(tx, deposit_tx(tx, from, W_BRIDGE, nonce, tx_type, calldata));
+            .insert(tx, deposit_tx(tx, from, W_BRIDGE, nonce, calldata));
         self.evm
             .script_receipt(tx, vec![Some(deposit_receipt(tx, &block, status, logs))]);
         self.evm
@@ -2183,7 +2126,7 @@ impl World {
             deposit_id,
             from,
         };
-        self.write_expected_pi(&m);
+        self.register_witness(&m);
         self.mined = Some(m);
         tx
     }
@@ -2199,51 +2142,40 @@ impl World {
     ) -> B256 {
         self.next_id += 1;
         let id = U256::from(self.next_id);
-        self.mine(nonce, 2, true, world_header(number, tag), id, amount)
+        self.mine(nonce, true, world_header(number, tag), id, amount)
     }
 
     /// A successful deposit at `nonce` with the next deposit id.
     pub fn mined_deposit(&mut self, nonce: u64) -> B256 {
         self.next_id += 1;
         let id = U256::from(self.next_id);
-        self.mine(nonce, 2, true, world_header(900, 0x90), id, W_AMOUNT)
+        self.mine(nonce, true, world_header(900, 0x90), id, W_AMOUNT)
     }
 
     /// A deposit in the slot with another amount, as a wallet that changed
     /// it would send.
     pub fn mined_deposit_of_amount(&mut self, nonce: u64, amount: u64) -> B256 {
-        self.mine(
-            nonce,
-            2,
-            true,
-            world_header(900, 0x90),
-            U256::from(6),
-            amount,
-        )
+        self.mine(nonce, true, world_header(900, 0x90), U256::from(6), amount)
     }
 
-    /// A successful deposit at `nonce` of transaction type `tx_type`.
-    pub fn mined_deposit_of_type(&mut self, nonce: u64, tx_type: u8) -> B256 {
-        self.mine(
-            nonce,
-            tx_type,
-            true,
-            world_header(900, 0x90),
-            U256::from(6),
-            W_AMOUNT,
-        )
+    /// A successful deposit at `nonce` whose transaction sits past position
+    /// 65535 of its block, where the bridge's `uint16` `txIndex` cannot
+    /// reach it.
+    pub fn mined_deposit_out_of_reach(&mut self, nonce: u64) -> B256 {
+        let tx = self.mined_deposit(nonce);
+        let block = self.mined.as_ref().unwrap().block.clone();
+        let mut r = deposit_receipt(tx, &block, true, vec![
+            transfer_log(W_USDC),
+            self.evm.logs.lock().unwrap().last().unwrap().log.clone(),
+        ]);
+        r.tx_index = Some(70_000);
+        self.evm.script_receipt(tx, vec![Some(r)]);
+        tx
     }
 
     /// A deposit at `nonce` that reverted.
     pub fn reverted_deposit_finalized(&mut self, nonce: u64) -> B256 {
-        self.mine(
-            nonce,
-            2,
-            false,
-            world_header(900, 0x90),
-            U256::ZERO,
-            W_AMOUNT,
-        )
+        self.mine(nonce, false, world_header(900, 0x90), U256::ZERO, W_AMOUNT)
     }
 
     /// The mined deposit's block turns accepted after `polls` reads.
@@ -2296,7 +2228,7 @@ impl World {
             deposit_id: U256::from(8),
             from,
         };
-        self.write_expected_pi(&m);
+        self.register_witness(&m);
         self.an.accepted.lock().unwrap().insert(m.block.hash, polls);
         self.mined = Some(m);
     }
@@ -2541,7 +2473,6 @@ impl World {
             block_hash: m.block.hash,
             block_log_index: 41,
             receipt_log_index: 1,
-            access_list_rlp_len: 1,
             voucher_account: hex::encode(voucher),
         }
     }
@@ -2565,7 +2496,7 @@ impl World {
         self.save(&mut r)
     }
 
-    /// Finalize sent earlier, no proof left on disk.
+    /// Finalize sent earlier, no receipt proof left on disk.
     pub fn finalizing_operation(&mut self) -> String {
         self.mined_deposit(7);
         let m = self.mined.clone().unwrap();
@@ -2606,12 +2537,12 @@ impl World {
         self.stopped_operation(crate::deposit::store::OpStage::Confirmed)
     }
 
-    /// Stopped after the anchor, before a proof was written.
+    /// Stopped after the anchor, before the receipt proof was written.
     pub fn anchored_operation(&mut self) -> String {
         self.stopped_operation(crate::deposit::store::OpStage::Anchored)
     }
 
-    /// Proved, with the proof and its public inputs in the work directory.
+    /// Proved, with the receipt proof in the work directory.
     pub fn proved_operation(&mut self) -> String {
         self.mined_deposit(7);
         let m = self.mined.clone().unwrap();
@@ -2623,12 +2554,7 @@ impl World {
         r.deposit = Some(self.deposit_info(&m));
         let work = self.work.path().join(&r.op_id);
         std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(work.join("proof.bin"), b"proof").unwrap();
-        std::fs::copy(
-            self.prover.1.root.join("expected_pi.bin"),
-            work.join("public_inputs.bin"),
-        )
-        .unwrap();
+        crate::deposit::witness::save(&work, &fake_witness(11_155_111, &m.block, 1)).unwrap();
         r.work_dir = Some(work);
         self.save(&mut r)
     }
@@ -2712,11 +2638,9 @@ impl World {
         });
     }
 
-    /// How many times the fake prover ran.
-    pub fn prover_runs(&self) -> usize {
-        std::fs::read_to_string(self.prover.1.root.join("data/runs.log"))
-            .map(|s| s.lines().count())
-            .unwrap_or(0)
+    /// How many times the receipt proof was built.
+    pub fn witness_builds(&self) -> u32 {
+        self.evm.witness_builds.load(Ordering::SeqCst)
     }
 }
 
@@ -2743,9 +2667,6 @@ pub fn deposit_args(argv: &[&str]) -> crate::deposit::args::DepositArgs {
     }
     if !given("--usdc-bridge-account") {
         a.usdc_bridge_account = None;
-    }
-    if !given("--deposit-prover-dir") {
-        a.deposit_prover_dir = None;
     }
     if !given("--state-dir") {
         a.state_dir = None;
@@ -2783,7 +2704,7 @@ mod tests {
 
     /// What the world recorded for its deposit block, everywhere a
     /// deposit's block hash is read: the chain, the log, the anchor and
-    /// the prover's public inputs.
+    /// the receipt proof.
     fn assert_one_hash_everywhere(w: &World) {
         let m = w.mined.as_ref().unwrap();
         let h = m.block.hash;
@@ -2791,9 +2712,7 @@ mod tests {
         assert_ne!(halves_swapped(h), h, "halves swapped");
         assert_eq!(w.evm.by_hash.lock().unwrap().get(&h), Some(&m.block));
         assert!(w.an.accepted.lock().unwrap().contains_key(&h));
-        let pi = std::fs::read(w.prover.1.root.join("expected_pi.bin")).unwrap();
-        let pi = crate::deposit::pi::DepositPublicInputs::decode(&pi).unwrap();
-        assert_eq!(pi.block_hash(), h);
+        assert_eq!(w.evm.witnesses.lock().unwrap()[&m.tx].block_hash, h);
     }
 
     #[test]

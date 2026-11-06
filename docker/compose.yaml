@@ -98,9 +98,9 @@ services:
     # A tick may be inside a multi-minute proof; let it finish on stop.
     stop_grace_period: 20m
 
-  # EVM -> Acki Nacki: proves Deposit events and finalizes them on
-  # eccBridge. The deposit-prover tools are in the image; the SRS and the
-  # proving key they read and write are /data/params.
+  # EVM -> Acki Nacki: finalizes Deposit events on eccBridge with each
+  # deposit's receipt proof, read from the source chain's RPC. Nothing to
+  # prove, so no params.
   deposit-relayer:
     <<: *service
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-deposit-relayer:${BRIDGE_IMAGE_TAG:?}
@@ -123,18 +123,8 @@ services:
         target: /data/state
         bind: { create_host_path: false }
       - type: bind
-        source: ${BRIDGE_DATA}/deposit-relayer/work
-        target: /data/work
-        bind: { create_host_path: false }
-      - type: bind
         source: ${BRIDGE_DATA}/deposit-relayer/logs
         target: /data/logs
-        bind: { create_host_path: false }
-      # Writable: export_blake2b_proof generates the proving key into data/
-      # on the first proof.
-      - type: bind
-        source: ${BRIDGE_DATA}/params/deposit-prover
-        target: /data/params
         bind: { create_host_path: false }
     ports:
       - "${METRICS_LISTEN_ADDR:?}:${DEPOSIT_RELAYER_METRICS_PORT:-9467}:9467"

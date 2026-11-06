@@ -17,8 +17,9 @@ that tree. When code and this text disagree, the code wins.
 
 ## 1. What it is
 
-The ETH → AN deposit path proves that a `Deposit` receipt sits in an Ethereum block with a given
-hash, but a proof cannot say whether that block is on Ethereum's canonical, finalized chain.
+On the ETH → AN deposit path, `finalizeDeposit` proves on Acki Nacki that a `Deposit` receipt sits
+in the block whose header the caller supplies, and hashes that header itself, but a receipt proof
+cannot say whether that block is on Ethereum's canonical, finalized chain.
 `USDCBridge.finalizeDeposit` therefore only accepts deposits whose block hash is already in its
 `_acceptedBlockHash` map. Today that map has three writers: a trusted key (the owner,
 `setAcceptedBlockHash`), the light client for Ethereum, and the Arbitrum block verifier for an
@@ -86,7 +87,7 @@ flowchart LR
   LC -- "zkhalo2VerifyWithVK(VK_BLOB, pi, proof)" --> N
   LC -- "acceptBlockHashFromLightClient<br/>(internal message)" --> UB
   UB ~~~ DR
-  DR -- "finalizeDeposit(proof, pi)" --> UB
+  DR -- "finalizeDeposit(chainId, header,<br/>txIndex, receiptProof, logIndex)" --> UB
 ```
 
 Data moves left to right. Ethereum is never written to. Acki Nacki is written to only through
@@ -281,15 +282,15 @@ The push is `bounce: true`; a bounce (bridge not yet configured, wrong address) 
 before calling `rePushAnchor`. Calling either with the explorer's order silently misses the map:
 `ERR_UNKNOWN_CHECKPOINT` / `ERR_NOT_PROVEN` (compute phase, exit 252).
 
-The bridge is keyed differently. The deposit public inputs carry the block hash in Ethereum byte
-order (`hi << 128 | lo` of its two big-endian halves), and that is the word `finalizeDeposit` looks
-up in `_acceptedBlockHash`. `_piForm` is its own inverse, so `acceptBlockHashFromLightClient` and
+The bridge is keyed differently. `finalizeDeposit` computes the block hash on Acki Nacki as
+`keccak256(header)` of the RLP header it is given, which is the hash in Ethereum byte order, and
+that is the word it looks up in `_acceptedBlockHash`. `_piForm` is its own inverse, so `acceptBlockHashFromLightClient` and
 `forgetBlockHashFromLightClient` are sent `_piForm(stored)`, the Ethereum-order hash. Everything
 on the light client itself — `rePushAnchor`, `getHead`, `isProvenExecutionBlockHash` and its own
 `isAcceptedBlockHash` — still speaks the stored key. For the same block, the light client's
 `isAcceptedBlockHash` is asked the stored key and the bridge's the Ethereum-order hash.
 
-`finalizeDeposit` on `USDCBridge` is unchanged: it still reads `_acceptedBlockHash`. Only the
+The light client does not change `finalizeDeposit`: it still reads `_acceptedBlockHash`. Only the
 writer of that map changes.
 
 ### 3.5 The trust switches
@@ -475,7 +476,7 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    (`setLightClientCode`). The address follows per chain from `deployLightClient`, not from
    the code alone. Note the bridge owner key.
 3. With the owner key, call `deployLightClient(pubkey, l1ChainId, 0, 0)` on the bridge (ABI in
-   `contracts/an/0.80.0_compiled/exchange/`). The light client's constructor accepts only the
+   `contracts/an/0.81.1_compiled/exchange/`). The light client's constructor accepts only the
    bridge as sender, so a copy deployed with `sold` or `tvm-cli deploy` is not the one the bridge
    listens to. The getter returns `0:<account>`; set `AN_LIGHT_CLIENT` to `<account>::<account>`
    (§4.4). `deployLightClient` sends it 10 vmshell; keep it funded (§5).

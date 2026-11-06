@@ -1,12 +1,12 @@
-//! RPC `logIndex` counts logs across the whole block; the prover reads
+//! RPC `logIndex` counts logs across the whole block; the bridge reads
 //! `receipt.logs[i]`. The two differ whenever an earlier transaction in
 //! the block emitted logs, so both are kept and only the receipt-local
-//! one is passed to `fetch_deposit_data --log-index`.
+//! one is sent as `finalizeDeposit`'s `logIndex`.
 
 /// Map a block-wide log index to its position within the receipt.
 ///
 /// The RPC provides `logIndex` which counts logs across the entire block,
-/// but the prover needs the position within the receipt. This function finds
+/// but the bridge needs the position within the receipt. This function finds
 /// the receipt-local index by searching for the block index in the slice of
 /// receipt logs.
 pub fn receipt_log_index(

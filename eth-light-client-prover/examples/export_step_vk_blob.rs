@@ -107,7 +107,7 @@ use halo2_base::{
 
 const FIXTURE: &str = include_str!("../fixtures/mainnet/finality_update.json");
 
-/// Frozen `VkBlob` magic (see `deposit-prover/src/halo2_tvm_bundle.rs`).
+/// Frozen `VkBlob` magic (see `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`).
 const VK_BLOB_MAGIC: &[u8; 8] = b"VKBLOB\x00\x00";
 /// Hermez `[s]·G2` raw-bytes head — the ceremony the opcode embeds.
 const HERMEZ_SG2_HEAD: [u8; 4] = [0x92, 0x8f, 0xaf, 0xb3];
@@ -149,7 +149,7 @@ fn build_witness() -> anyhow::Result<StepWitness> {
 }
 
 // ---------------------------------------------------------------------------
-// Base v1 VkBlob writer (byte-identical to deposit-prover's
+// Base v1 VkBlob writer (byte-identical to bridge-snark-utils'
 // `VkBlob::from_native(..).to_bytes()` for the Base shape).
 // ---------------------------------------------------------------------------
 

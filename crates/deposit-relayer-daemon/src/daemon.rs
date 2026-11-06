@@ -24,10 +24,10 @@ use tracing::{debug, info, warn};
 use crate::{
     error::RelayerError,
     metrics as prom,
-    prover::ProofGenerator,
     relayer::{Relayer, TickOutcome},
     source::DepositSource,
     submitter::AnSubmitter,
+    witness::WitnessBuilder,
 };
 
 // ──────────────────────────────────────────────────────────────────────
@@ -155,7 +155,7 @@ pub struct DaemonRunSummary {
 }
 
 /// Tag for [`DaemonRunSummary::last_outcome`]. Avoids embedding the full
-/// `TickOutcome` (which can carry large proof bytes) in a log line.
+/// `TickOutcome` (which carries free-form reasons) in a log line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LastOutcome {
     Finalized { deposit_id: u64 },
@@ -174,7 +174,7 @@ pub enum LastOutcome {
 // Relayer::run_until_shutdown
 // ──────────────────────────────────────────────────────────────────────
 
-impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
+impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     /// Drive `tick()` forever (or until `shutdown` resolves), applying
     /// exponential backoff on idle polls and failures. A new anchor wait
     /// resets the delay; repeated waits preserve failure backoff but reset
@@ -290,7 +290,7 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                         m.proof_failed_total.fetch_add(1, Ordering::Relaxed);
                     }
                     summary.proof_failed += 1;
-                    warn!(deposit_id, reason = %reason, "daemon: proof generation failed");
+                    warn!(deposit_id, reason = %reason, "daemon: building the receipt proof failed");
                     (false, LastOutcome::ProofFailed {
                         deposit_id,
                     })
@@ -346,9 +346,9 @@ impl<S: DepositSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
                     warn!(
                         deposit_id,
                         reason = %reason,
-                        "daemon: deposit cannot be proven; recorded in unprovable_deposit_ids. \
-                         finalize-one cannot help; only the EVM bridge operator can return its \
-                         funds",
+                        "daemon: deposit cannot be finalized from its receipt; recorded in \
+                         unprovable_deposit_ids. finalize-one cannot help; only the EVM bridge \
+                         operator can return its funds",
                     );
                     (true, LastOutcome::Unprovable {
                         deposit_id,
@@ -454,14 +454,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        prover::MockProofGenerator,
         relayer::{Relayer, RelayerConfig},
         source::InMemoryDepositSource,
         submitter::MockAnSubmitter,
         types::DepositEvent,
+        witness::MockWitnessBuilder,
     };
 
-    type R = Relayer<InMemoryDepositSource, MockProofGenerator, MockAnSubmitter>;
+    type R = Relayer<InMemoryDepositSource, MockWitnessBuilder, MockAnSubmitter>;
 
     fn deposit(id: u64) -> DepositEvent {
         DepositEvent {
@@ -496,7 +496,7 @@ mod tests {
             anchor_wait_warn_after_secs: 0,
             scan_cursor: None,
         };
-        Relayer::new(cfg, source, Arc::new(MockProofGenerator::new()), submitter).unwrap()
+        Relayer::new(cfg, source, Arc::new(MockWitnessBuilder::new()), submitter).unwrap()
     }
 
     fn fast_backoff() -> BackoffConfig {
@@ -647,7 +647,7 @@ mod tests {
         let mut relayer = Relayer::new(
             cfg,
             source,
-            Arc::new(MockProofGenerator::unprovable_on(0)),
+            Arc::new(MockWitnessBuilder::unprovable_on(0)),
             Arc::new(MockAnSubmitter::accepting()),
         )
         .unwrap();

@@ -102,9 +102,7 @@ impl TxRequest {
     }
 
     /// `eth_sendTransaction` params. Type 2 with explicit EIP-1559 fees
-    /// and no access list: the only shape the deposit circuit proves. A
-    /// wallet may still ignore these fields, which is why the shape is
-    /// checked again after the broadcast.
+    /// and no access list.
     pub fn to_json(&self) -> serde_json::Value {
         json!({
             "from": format!("{:#x}", self.from),

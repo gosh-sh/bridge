@@ -8,7 +8,6 @@ members = [
 ]
 
 exclude = [
-    "deposit-prover",
     "frontend",
     "crates/bridge-snark-utils",
     "crates/bridge-relayer-daemon",

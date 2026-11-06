@@ -5,29 +5,37 @@
 > Supersedes the trusted-attester MVP (`_acceptedBlockHash` / `setAcceptedL1Block`).
 > The team has **not** accepted an attester/oracle trust assumption; this plan removes
 > it entirely by proving Ethereum finality in-circuit.
+>
+> **Since bridge-audit#139** there is no deposit circuit: `eccBridge` 1.17.0 checks the deposit's
+> receipt-trie proof itself in `finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex)`
+> (`contracts/an/exchange/eccBridge.sol:949-993`, `contracts/an/exchange/EthTrie.sol`), and
+> `deposit-prover/` is gone. Where this plan describes the deposit side, it has been updated to
+> that flow; the light-client part is unaffected — the gate is still `_acceptedBlockHash`.
 
 ---
 
 ## 1. Problem
 
-The deposit circuit (`deposit-prover/src/circuit_v2.rs`) proves:
+`finalizeDeposit` proves on Acki Nacki that:
 
-- a `Deposit` log sits in a receipt, the receipt sits under `receiptsRoot`,
-- the receipt/tx bind `chainId` (PI[4]) and the emitting `contractAddress` (PI[3]),
-- the block header hashes to `blockHashHigh‖blockHashLow` (PI[9]/PI[10]).
+- the RLP block header it is given hashes (`keccak256`, computed on AN) to `blockHash`,
+- a receipt sits under that header's `receiptsRoot` at key `rlp(txIndex)`, and its transaction
+  succeeded,
+- log `logIndex` of that receipt is a `Deposit` event emitted by a bridge trusted for `chainId`.
 
 It does **not** prove that this `blockHash` belongs to Ethereum's **canonical, finalized**
-chain. A valid Halo2 proof over a **self-fabricated** header + receipt trie (attacker-authored,
-carrying a `Deposit` log that names a trusted bridge address) passes `ZKHALO2VERIFYWITHVK`
-and `finalizeDeposit` — **mint-from-nothing**. Canonicity is currently an out-of-circuit trust
-input. This plan makes it an **in-circuit** statement.
+chain. A **self-fabricated** header + receipt trie (attacker-authored, carrying a `Deposit` log
+that names a trusted bridge address) passes the receipt proof — **mint-from-nothing** — unless
+`blockHash` is already one the bridge has accepted (`_acceptedBlockHash`, else
+`ERR_UNKNOWN_BLOCK`, 224). Canonicity is an anchor-writer trust input. This plan makes it an
+**in-circuit** statement.
 
 ## 2. Goal & non-goals
 
 **Goal.** A Halo2/BN254 SHPLONK proof, verified natively on AN by the existing
 `ZKHALO2VERIFYWITHVK` opcode, that advances a trustless Ethereum beacon-chain **light-client
 head** and marks finalized **execution block hashes** canonical. `finalizeDeposit` then only
-accepts a deposit whose proven `blockHash` is one the light client already finalized.
+accepts a deposit whose header hashes to a `blockHash` the light client already finalized.
 
 **Non-goals.**
 - Not a full Casper-FFG validator-set client (~1M validators — infeasible in-circuit). We use the
@@ -73,8 +81,8 @@ Three moving parts, mirroring how real zk light clients are deployed:
                           advances finalized head + committee,
                           records finalized exec blockHash canonical
                                            │
- deposit-prover proof ──────────────────▶ finalizeDeposit:
-                        require blockHash ∈ light-client-finalized set
+ header + receipt proof ────────────────▶ finalizeDeposit:
+                        require keccak256(header) ∈ light-client-finalized set
 ```
 
 **Design choice — separate header-oracle circuit, two proofs cross-checked on-contract**
@@ -83,8 +91,8 @@ Three moving parts, mirroring how real zk light clients are deployed:
 - The light-client update circuit is expensive and cadence-driven (~1 update / finality period,
   or per-deposit at most a few/hour). Coupling it to every deposit would re-prove BLS on each
   deposit — wasteful.
-- Keep `deposit-prover` ~unchanged; the AN contract binds `deposit.blockHash` to the light-client's
-  finalized set. This **replaces the attester write path** (`setAcceptedL1Block`) with a ZK write
+- Keep the deposit check unchanged; the AN contract binds the deposit's `keccak256(header)` to the
+  light-client's finalized set. This **replaces the attester write path** (`setAcceptedL1Block`) with a ZK write
   path — same `_acceptedL1Block`-style gate, now trustless.
 - In-circuit aggregation (via `bridge-evm-aggregator`/snark-verifier) is a **later optimization**
   (M-agg), not required for correctness.
@@ -148,9 +156,9 @@ transition. (Design item; do not hardcode a single fork.)
 | BLS12-381 pairing, hash-to-curve (RFC 9380) | `halo2-lib-zkevm-sha256-and-bls12-381` (gosh fork of halo2-lib) + `gosh-halo2-crypto-lib/bls-verification` |
 | SHA-256 (SSZ hash-tree-root, branches) | `gosh-halo2-crypto-lib/sha256-chip` (or axiom-eth keccak/sha) |
 | Poseidon (internal commitments) | `bridge-poseidon` / crypto-lib |
-| BN254 Halo2 SHPLONK + VkBlob export | `deposit-prover` prover/export tooling (`export_vk_blob.rs`, `export_blake2b_proof.rs`) |
+| BN254 Halo2 SHPLONK + VkBlob export | the VkBlob writer in `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs` and the light client's own exporters (`eth-light-client-prover/examples/export_step_vk_blob.rs`) |
 | Native AN verify | existing `ZKHALO2VERIFYWITHVK` (0xC7 0x4A) — **no opcode change**, new VkBlob only |
-| SRS | chain KZG ceremony (`params/kzg_bn254_*.srs`); downsize as in `deposit-prover/examples/downsize_srs.rs` |
+| SRS | chain KZG ceremony (`params/kzg_bn254_*.srs`); downsize with `eth-light-client-prover/examples/downsize_srs.rs` |
 | Aggregation (optional M-agg) | `crates/bridge-evm-aggregator` (snark-verifier) |
 
 **Note:** all BLS12-381 arithmetic is **non-native** inside the BN254 circuit (halo2-ecc). Expect
@@ -182,8 +190,8 @@ State: `genesisValidatorsRoot`, `currentSyncCommitteeRoot`, `nextSyncCommitteeRo
 
 ## 9. Deposit-side changes (minimal)
 
-- `deposit-prover`: **no circuit change** (already exposes `blockHashHigh/Low`). Optionally also
-  expose the beacon `finalized_slot`/state-root binding if we later want single-proof aggregation.
+- `finalizeDeposit`: **no change** — it already hashes the header and looks the hash up in
+  `_acceptedBlockHash`, which the light client writes.
 - `deposit-relayer-daemon`: before submit, ensure the target block is light-client-finalized
   (poll `EthBeaconLightClient`), else wait/trigger a light-client update. Decode unchanged.
 
@@ -217,7 +225,7 @@ months** with two engineers. M-agg and hardening extend from there.
   self-fabricated exec header (must fail on-contract binding).
 - **Contract:** `applyUpdate` monotonicity/rotation/replay; `finalizeDeposit` rejects
   non-finalized blockHash.
-- **CI:** add the new crate to a nightly/heavy job (like deposit-prover, out of the fast lane).
+- **CI:** add the new crate to a nightly/heavy job, out of the fast lane.
 
 ## 12. Risks & open questions
 
@@ -252,6 +260,6 @@ months** with two engineers. M-agg and hardening extend from there.
   gindices, `compute_domain`, `hash_tree_root`).
 - consensus-spec-tests `tests/.../light_client/`.
 - Existing prior art: Succinct Telepathy / SP1-Helios, Electron zk light client.
-- In-repo: `deposit-prover/src/circuit_v2.rs` (12-PI layout, `blockHashHigh/Low` at 9/10),
-  `docs/zkhalo2verifywithvk_reference.md`, `docs/bridge_deposit_chain_binding_fix_proposal_2026_07_20.md`,
+- In-repo: `contracts/an/exchange/eccBridge.sol` `finalizeDeposit` (the block hash is
+  `keccak256(header)`), `docs/zkhalo2verifywithvk_reference.md`, `docs/bridge_deposit_chain_binding_fix_proposal_2026_07_20.md`,
   AN-side `USDCBridge`/`eccBridge` `_acceptedBlockHash` (attester MVP being replaced).

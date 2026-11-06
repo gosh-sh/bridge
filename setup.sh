@@ -46,12 +46,10 @@ else
     print_info "Rust is already installed: $(rustc --version)"
 fi
 
-# Install the pinned toolchains with their components: rust-toolchain.toml at
-# the root, and deposit-prover's own, older pin. The global default toolchain
-# is left alone.
-print_info "Installing the pinned Rust toolchains..."
+# Install the pinned toolchain with its components (rust-toolchain.toml). The
+# global default toolchain is left alone.
+print_info "Installing the pinned Rust toolchain..."
 rustup toolchain install
-(cd deposit-prover && rustup toolchain install)
 
 # 2. Check and install Foundry (for Solidity development)
 print_info "Checking Foundry installation..."

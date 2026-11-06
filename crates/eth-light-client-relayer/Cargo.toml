@@ -43,7 +43,7 @@ alloy = { version = "2.0", features = [
     "trie",
 ] }
 acki-nacki-interface = { path = "../acki-nacki-interface" }
-# The Arbitrum chain ids, shared verbatim with `deposit-prover`.
+# The Arbitrum chain ids, shared verbatim with the deposit relayer.
 deposit-chain-ids = { path = "../deposit-chain-ids" }
 tvm_client = { git = "https://github.com/tvmlabs/tvm-sdk.git", tag = "v3.0.6.an", default-features = false, features = [
     "std",

@@ -83,7 +83,7 @@ def test_10_local_network_bridge_active(an):
     """The zerostate bridge is up at the version this commit ships."""
     got = an("bridge")
     assert got.get("BRIDGE_ACTIVE") == "true", f"eccBridge is not Active: {got}"
-    assert got.get("BRIDGE_VERSION") == "1.16.0", f"eccBridge is {got.get('BRIDGE_VERSION')}, not 1.16.0"
+    assert got.get("BRIDGE_VERSION") == "1.17.0", f"eccBridge is {got.get('BRIDGE_VERSION')}, not 1.17.0"
 
 
 def test_11_build_on_prover_host(ph, sha):
@@ -405,8 +405,8 @@ def test_61_deposit_block_anchored(run, an):
 
 
 def test_62_deposit_proof_generated(run):
-    """The deposit prover builds the proof."""
-    step_done(run, "prove", "the deposit proof is generated", 3600)
+    """The CLI builds the deposit's receipt proof from the block's receipts."""
+    step_done(run, "prove", "the deposit's receipt proof is built", 600)
 
 
 def test_63_deposit_finalized_on_acki_nacki(run):

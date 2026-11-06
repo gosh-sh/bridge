@@ -1,6 +1,6 @@
 //! Regression test for the production discovery glue: mapping a block-global
-//! `logIndex` (from `eth_getLogs`) to the receipt-local index `deposit-prover`
-//! consumes.
+//! `logIndex` (from `eth_getLogs`) to the receipt-local index
+//! `finalizeDeposit` takes.
 //!
 //! Fixture: real Sepolia `depositId=0` tx
 //! `0x9ac341666f70d55780f289187c11a0537a52f7381e5c4b1ebe6f671314552adf`.

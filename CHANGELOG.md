@@ -23,6 +23,87 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `eccBridge` 1.17.0 checks a deposit against its Ethereum receipt itself instead of verifying a
+  deposit ZK proof (bridge-audit#139: the 1.16.0 deposit circuit took the keccak hashes it relied
+  on without checking them, so its proof did not bind the deposit to a block). The method is now
+  `finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)`:
+  the RLP block header, the transaction's position in the block, the receipts-trie proof of its
+  receipt (root first) and the position of the `Deposit` log in that receipt. The bridge hashes the
+  header, requires that hash to be an accepted anchor for `chainId`, proves the receipt against
+  the header's `receiptsRoot`, requires the transaction to have succeeded, and reads the deposit
+  from that one log, which must be the six-field `Deposit` of a trusted EVM bridge with nothing
+  added or missing. `logIndex` counts the logs of the receipt only — not the block-wide `logIndex`
+  an RPC returns. Every caller, the CLI and `deposit-relayer` included, must switch to the new ABI
+  (`contracts/an/0.81.1_compiled/exchange/eccBridge.abi.json`); a deposit not yet finalized
+  is finalized with the new input after the upgrade. Its voucher address is unchanged, so a
+  deposit already finalized stays finalized and is not credited twice.
+- There is no deposit circuit and no deposit verification key any more. 1.17.0 embeds no VK and
+  accepts no deposit proof or public inputs; the 13-input circuit, its VK
+  (`f09aa7fa…`) and error 220 (`ERR_INVALID_ZKPROOF`) are gone with `deposit-prover/`.
+- New refusals of `finalizeDeposit`: 244 (`ERR_NOT_DEPOSIT_LOG`, the log at `logIndex` is not a
+  `Deposit` of the expected shape), and the receipt-proof errors of `EthTrie`: 300 (the data
+  ends inside an item), 301 (wrong RLP kind or size), 302 (a proof node does not hash to its
+  parent), 303 (the proof does not follow the key), 304 (an inline trie node), 305 (no receipt at
+  `txIndex`), 307 (no log at `logIndex`) and 308 (the transaction failed). 224
+  (`ERR_UNKNOWN_BLOCK`) now means the header's hash is not an accepted anchor for `chainId`.
+- `finalizeDeposit` accepts the message once the block is known to be anchored (about 10 000
+  gas), then proves the receipt: 130 000 to 230 000 gas for a typical deposit, more for a
+  receipt with many logs before the `Deposit` (about 380 000 with 60). Refusals after that point —
+  the token and limit checks 241, 243, 234 and 235 among them — are paid by the bridge, so a
+  deposit retried while a token is unregistered or closed now costs the bridge gas on every try.
+- `eccBridge` is built with `sold` 0.81.1 (it needs the KECCAK256 instruction, which
+  `EthBeaconLightClient` and `ArbitrumBlockVerifier` already use). Its artefacts move from
+  `contracts/an/0.80.0_compiled/exchange/` to `contracts/an/0.81.1_compiled/exchange/`, and
+  `contracts/an/place.json` places them in acki-nacki at `contracts/0.81.0_compiled/exchange/`.
+  `DepositVoucher` is unchanged, byte for byte. Upgrade a 1.16.0 bridge with `updateCode` and an
+  empty `userCell`: the token registry, outstanding inventory and voucher code are carried over;
+  as with every `updateCode`, the trusted EVM bridges, anchors and light clients are not, and the
+  blocks of deposits still to finalize have to be anchored again.
+- The release no longer ships a deposit prover: the tarball has no `deposit-prover/` directory,
+  `kzg_params_18.srs` is no longer a release asset, and the installer of this release does not
+  download it. The `bridge-deposit-relayer` and `bridge-cli` images carry no prover tools and no
+  `circuit_params.json`; the deposit relayer's `params/deposit-prover` mount and its params are
+  gone, and a deposit no longer takes the 10–12 GB of memory its proof did. `BRIDGE_DEPOSIT_PROVER_DIR`,
+  `DEPOSIT_PROVER_DIR`, `DEPOSIT_FETCH_DEPOSIT_DATA_BIN`, `DEPOSIT_EXPORT_VK_BLOB_BIN`,
+  `DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN` and `AN_DAPP_ID` are no longer read; drop them from env
+  files and units.
+- `deposit-relayer` sends the receipt proof instead of running a prover. Its `--deposit-prover-dir`,
+  `--fetch-deposit-data-bin`, `--export-vk-blob-bin`, `--export-blake2b-proof-bin`,
+  `--prover-rpc-url`, `--degree`, `--max-data-byte-len`, `--max-log-num`, `--dapp-id` and
+  `--work-dir` (`DEPOSIT_RELAYER_WORK_DIR`) are gone, as is `--log-dir` on `prove-one`; a
+  command line that still passes one is refused at start, so update units and compose files
+  before upgrading. `prove-one --out-dir` writes one `witness.json` (the `finalizeDeposit`
+  input) instead of `vk_blob.bin`, `public_inputs.bin` and `proof.bin`, and `finalize-one
+  --bundle-dir` reads it. An existing `deposit-relayer-state.json` still loads; its `dapp_id` is
+  ignored. A deposit that cannot be finalized from its receipt — the transaction failed, the log
+  has another shape, or the call would exceed 48 KiB — is skipped as before under
+  `unprovable_deposit_ids` and `deposit_relayer_unprovable_deposits`. The metrics
+  `deposit_relayer_prover_stage_duration_seconds` and `deposit_relayer_prover_stage_failures_total`
+  are removed. Exit-code hints cover 214, 244, 300–305, 307 and 308; 220 is gone.
+- `ackinacki-bridge` requires an AN bridge at exactly 1.17.0 (`MIN_BRIDGE_VERSION`; code hash
+  `dfee328984a5945cf17e275fff4c5bb9dbe5dc9a79f48635860ab348d2df4ba2`): an older bridge is refused,
+  and so is a newer one in release builds, since its `finalizeDeposit` may take other arguments.
+  Upgrade the AN bridge, the CLI and `deposit-relayer` together. `deposit` loses
+  `--deposit-prover-dir`, `--log-dir` and `--prover-timeout-s` (passing one is an argument error)
+  and no longer reads `BRIDGE_DEPOSIT_PROVER_DIR` or `BRIDGE_DEPOSIT_LOG_DIR`. Step 7 (`prove`)
+  takes seconds and needs no SRS, proving key, `data/.prove.lock` or spare memory; it writes
+  `<work-dir>/<op-id>/receipt_proof.json` instead of `proof.bin` / `public_inputs.bin`, and a
+  `--resume` of a deposit an older CLI left at `Proved` rebuilds it (the old files can be deleted).
+  Any transaction type is now accepted, legacy included. Exit code 32 means the receipt proof
+  could not be built and is retryable with `--resume`; 35 means the bridge cannot finalize the
+  deposit from its receipt (another log shape, transaction or log index above 65535, or header
+  and proof over 48 KiB); 33 names bridge refusals 244, 300–305, 307 and 308, which are not
+  retried. The success JSON drops `tx.access_list_len`. `install.sh` no longer installs
+  `deposit-prover/` or `kzg_params_18.srs`, needs 11 GB of disk instead of 13, replaces a CLI
+  that still has `--deposit-prover-dir`, and names a leftover `deposit-prover/` or
+  `BRIDGE_DEPOSIT_PROVER_DIR` line for you to remove.
+- The EVM RPC the CLI and `deposit-relayer` use for deposits must serve `eth_getBlockByHash` and
+  `eth_getBlockReceipts`: the receipt proof is built from every receipt of the deposit's block.
+  `eth_getRawTransactionByHash` is no longer needed.
+- `scripts/deposit_anchor_params.py` takes the `witness.json` of a deposit (its header must hash
+  to its `blockHash`), or `--chain-id` with `--block-hash`, instead of a proof directory or
+  `public_inputs.bin`.
+
 - Only USDC can be bridged: Acki Nacki has no other currency for the bridge to mint. `eccBridge`
   `setBridgeToken` refuses any ECC id but `3` with exit code 242, and `AckiNackiBridge` lists USDC
   in its constructor and has no `listToken` or `delistToken`. A new currency takes new versions of
@@ -38,6 +119,7 @@ assigns it when the release is tagged.
   VK (SHA-256 `f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9`).
   Deploy `eccBridge` 1.16.0 and the matching prover/CLI together. Old-event receipts cannot
   be re-proven with this key: finalize pending deposits on the old pair before switching.
+  `eccBridge` 1.17.0 drops the circuit again (see above).
 - After the upgrade to `eccBridge` 1.16.0, and on a fresh zerostate, the AN token registry
   is empty: every deposit, USDC included, is refused with 241 until `setBridgeToken` registers
   USDC as ECC `3` for each source chain. Pause the AN bridge and let pending vouchers confirm
@@ -59,15 +141,16 @@ assigns it when the release is tagged.
   and such a proof does not slow other payouts or `verifyBlock` with `--backoff-max-secs`.
 - `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
   (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
-  parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and
-  234 and 235, before `accept`, so a retry costs the bridge no gas.
+  parked while a token is unregistered or closed on AN. From `eccBridge` 1.17.0 each such retry
+  costs the bridge gas (see above).
 - `eccBridge` 1.16.0 (code hash `e6810f06…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register USDC under ECC id `3` on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
   token base units. AN refuses unregistered tokens and the CLI refuses mismatched currency ids.
   `DepositVoucher` 1.5.0 carries the token to `confirmTokenDeposit`; the existing
-  `finalizeDeposit`, `initiateWithdrawal` and `confirmDeposit` signatures are preserved.
+  `initiateWithdrawal` and `confirmDeposit` signatures are preserved (`finalizeDeposit` changes
+  in 1.17.0, see above).
   Upgrading from 1.15.0 requires the structured `userCell` returned by
   `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)`, followed by token registration
   and restoration of the trusted bridge, EVM bridge (`setEvmBridge`) and anchor configuration. Subsequent upgrades preserve

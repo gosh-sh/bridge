@@ -11,8 +11,6 @@ logs go to stderr.
                             VERIFIER, VERIFIER_PARENT, VERIFIER_L2/L1/ROLLUP (its getConfig)
   trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true) and setEvmBridge(421614,
                             bridge); TRUSTED=true|false and EVM_BRIDGE (0x-hex) read back
-  token <evm token>         setBridgeToken(421614, token, 4, ...) with deposits open:
-                            TOKEN_REGISTERED=true|false and TOKEN_ID read back
   lightclient               deployLightClient(owner pubkey, 11155111, 0, 0): the Sepolia light
                             client, its committee unset (lc-bootstrap sets it once); LC (as
                             dapp::account), LC_L1, LC_OWNER and OWNER_PUBKEY read back
@@ -26,10 +24,8 @@ logs go to stderr.
   msig-funded <amount>      deploy a multisig and have the owner mint <amount> base units of
                             USDC to it with mintAndSendBridged for 421614, so the withdrawal
                             does not wait for the deposit: MSIG, MSIG_ACCOUNT, MSIG_KEYS
-  msig-token <amount>       the same with <amount> base units of the second token, minted with
-                            mintAndSendTokenBridged, and its own keys
   accepted <chain> <hash>   ACCEPTED=true|false
-  ecc <dapp::account>       ECC3=<base units of USDC on the account>, ECC4=<of the second token>
+  ecc <dapp::account>       ECC3=<base units of USDC on the account>
 
 Env: as test_deploy_and_withdraw_only.py (MODE=local, NETWORK, WORK_DIR, PROVER_DIR,
 ACKI_NACKI_ROOT).
@@ -58,9 +54,6 @@ from helper.msig import deploy_multisig, mint_usdc  # noqa: E402
 
 ARB_SEPOLIA = 421614
 SEPOLIA = 11155111
-SECOND_TOKEN_ID = 4
-SECOND_TOKEN_MAX_TRANSFER = 10 * 10**18
-SECOND_TOKEN_MAX_TVL = 100 * 10**18
 PROVER_DIR = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, "work-local"))
 GRAPHQL_URL = os.environ.get("GRAPHQL_URL", "http://localhost/graphql")
@@ -119,11 +112,6 @@ def recorded_verifier(l2, parent):
     return got if uint(got.get("parentChainId")) == int(parent) and got.get("verifier") else None
 
 
-def ecc_balance(address, currency):
-    account = common.get_account(address) or {}
-    return int((account.get("ecc_balance") or {}).get(str(currency), 0))
-
-
 def deployed(address):
     """`0:<account>` when an address getter names an account; None for addr_none or zero."""
     a = str(address or "")
@@ -142,15 +130,6 @@ def lc_getter(target, method):
 def verifier_config(target, l2):
     cfg = common.run_getter(target, VERIFIER_ABI, "getConfig", {})
     return cfg if isinstance(cfg, dict) and uint(cfg.get("l2ChainId")) == int(l2) else None
-
-
-def deploy_withdrawal_msig(tracer, gql, keys):
-    address, _abi = deploy_multisig(
-        tracer, gql, work_dir=WORK_DIR, msig_key_path=keys,
-        usdc_bridge_key_path=USDC_BRIDGE_KEYS, is_shellnet=False,
-        verbose_faucet=False, mint=False,
-    )
-    return address if "::" in address else common.to_dapp_address(address)
 
 
 def main():
@@ -194,15 +173,6 @@ def main():
                 uint(getter("getEvmBridge", {"dstChainId": str(ARB_SEPOLIA)}).get("value0"))))
             answer = [f"TRUSTED={str(bool(trusted)).lower()}", "TOKEN_REGISTERED=true",
                       f"EVM_BRIDGE={bound or 0:#042x}"]
-        elif cmd == "token" and len(args) == 1:
-            token = str(int(args[0], 16))
-            owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": token,
-                                          "tokenId": SECOND_TOKEN_ID,
-                                          "maxTransfer": str(SECOND_TOKEN_MAX_TRANSFER),
-                                          "maxTvl": str(SECOND_TOKEN_MAX_TVL), "depositsEnabled": True})
-            config = until(lambda: (lambda c: c if truth(c.get("listed")) else None)(
-                getter("getTokenDepositConfig", {"chainId": str(ARB_SEPOLIA), "evmToken": token}))) or {}
-            answer = [f"TOKEN_REGISTERED={str(bool(config)).lower()}", f"TOKEN_ID={uint(config.get('tokenId'))}"]
         elif cmd == "msig" and not args:
             gql = be.GqlClient(GRAPHQL_URL)
             keys = os.path.join(WORK_DIR, "msig_arbitrum_e2e.keys.json")
@@ -217,19 +187,14 @@ def main():
         elif cmd == "msig-funded" and len(args) == 1:
             gql = be.GqlClient(GRAPHQL_URL)
             keys = os.path.join(WORK_DIR, "msig_arbitrum_withdraw.keys.json")
-            ext = deploy_withdrawal_msig(tracer, gql, keys)
+            address, _abi = deploy_multisig(
+                tracer, gql, work_dir=WORK_DIR, msig_key_path=keys,
+                usdc_bridge_key_path=USDC_BRIDGE_KEYS, is_shellnet=False,
+                verbose_faucet=False, mint=False,
+            )
+            ext = address if "::" in address else common.to_dapp_address(address)
             mint_usdc(tracer, gql, "0:" + ext.split("::")[1], int(args[0]),
                       usdc_bridge_key_path=USDC_BRIDGE_KEYS, bridged=True)
-            answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
-        elif cmd == "msig-token" and len(args) == 1:
-            gql = be.GqlClient(GRAPHQL_URL)
-            keys = os.path.join(WORK_DIR, "msig_arbitrum_withdraw_token.keys.json")
-            ext = deploy_withdrawal_msig(tracer, gql, keys)
-            nonce = int(getter("getNonces", {})["mintNonce"]) + 1
-            owner_call("mintAndSendTokenBridged", {"recipient": "0:" + ext.split("::")[1], "value": args[0],
-                                                   "nonce": str(nonce), "chainId": str(ARB_SEPOLIA),
-                                                   "tokenId": SECOND_TOKEN_ID})
-            until(lambda: ecc_balance(ext, SECOND_TOKEN_ID) == int(args[0]))
             answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
         elif cmd == "lightclient" and not args:
             with open(USDC_BRIDGE_KEYS) as f:
@@ -259,7 +224,8 @@ def main():
         elif cmd == "accepted" and len(args) == 2:
             answer = [f"ACCEPTED={str(accepted(args[0], args[1])).lower()}"]
         elif cmd == "ecc" and len(args) == 1:
-            answer = [f"ECC3={ecc_balance(args[0], 3)}", f"ECC{SECOND_TOKEN_ID}={ecc_balance(args[0], SECOND_TOKEN_ID)}"]
+            account = common.get_account(args[0]) or {}
+            answer = [f"ECC3={int((account.get('ecc_balance') or {}).get('3', 0))}"]
         else:
             raise SystemExit(__doc__)
     print("\n".join(answer))

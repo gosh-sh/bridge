@@ -140,8 +140,8 @@ pub async fn run(
         return Err(refuse(
             format!(
                 "{token} answers {dec} decimals, but the bridge listed it with {listed_decimals}: \
-                 the amount would be scaled wrongly. The owner relists the token with its real \
-                 precision"
+                 the amount would be scaled wrongly. This bridge has to be redeployed with the \
+                 token's real precision"
             ),
             None,
         ));

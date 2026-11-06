@@ -17,6 +17,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockPredecessorBridge.sol";
+import "./mocks/MultiTokenBridge.sol";
 import { MockAaveLib } from "./helpers/MockAaveLib.sol";
 import { OptionalReturnERC20 } from "./AckiNackiBridgeTokenRegistry.t.sol";
 
@@ -75,7 +76,7 @@ contract AckiNackiBridgePredecessorTest is Test {
         internal
         returns (AckiNackiBridge)
     {
-        return new AckiNackiBridge(
+        return new MultiTokenBridge(
             address(oracle),
             address(usdc),
             MockAaveLib.pool(address(usdc)),
@@ -411,7 +412,7 @@ contract AckiNackiBridgePredecessorTest is Test {
     uint256 internal constant SECOND_AMOUNT = 1e18;
 
     function _listSecond(AckiNackiBridge b, MockERC20 token, uint256 maxTransfer) internal {
-        b.listToken(address(token), SECOND_ID, 18, maxTransfer, 10e18);
+        MultiTokenBridge(address(b)).listToken(address(token), SECOND_ID, 18, maxTransfer, 10e18);
     }
 
     function _secondOnOldBridge() internal returns (AckiNackiBridge oldBridge, MockERC20 second) {
@@ -466,7 +467,6 @@ contract AckiNackiBridgePredecessorTest is Test {
             )
         );
         oldBridge.withdrawByProof(hex"c4", _secondPub(address(next), 992));
-        oldBridge.delistToken(SECOND_ID);
     }
 
     function test_migrateToken_movesSeveralTokensAndUsdcInOneCutover() public {
@@ -474,7 +474,7 @@ contract AckiNackiBridgePredecessorTest is Test {
         oldBridge.unpause();
         MockERC20 third = new MockERC20("Third", "THIRD", 8);
         uint32 thirdId = 5;
-        oldBridge.listToken(address(third), thirdId, 8, 2e8, 20e8);
+        MultiTokenBridge(address(oldBridge)).listToken(address(third), thirdId, 8, 2e8, 20e8);
         oldBridge.setTokenDepositsEnabled(thirdId, true);
         third.mint(address(this), 2e8);
         third.approve(address(oldBridge), 2e8);
@@ -484,7 +484,7 @@ contract AckiNackiBridgePredecessorTest is Test {
 
         AckiNackiBridge next = _liveBridge(address(oldBridge));
         _listSecond(next, second, SECOND_AMOUNT);
-        next.listToken(address(third), thirdId, 8, 2e8, 20e8);
+        MultiTokenBridge(address(next)).listToken(address(third), thirdId, 8, 2e8, 20e8);
         uint256 oldBook = oldBridge.treasuryBalance();
         uint256 newBook = next.treasuryBalance();
 
@@ -620,14 +620,14 @@ contract AckiNackiBridgePredecessorTest is Test {
     function test_migrateToken_movesTokenThatReturnsNothing() public {
         AckiNackiBridge oldBridge = _liveBridge(address(0));
         OptionalReturnERC20 quiet = new OptionalReturnERC20();
-        oldBridge.listToken(address(quiet), SECOND_ID, 6, 1e6, 10e6);
+        MultiTokenBridge(address(oldBridge)).listToken(address(quiet), SECOND_ID, 6, 1e6, 10e6);
         oldBridge.setTokenDepositsEnabled(SECOND_ID, true);
         quiet.mint(address(this), 1e6);
         quiet.approve(address(oldBridge), 1e6);
         oldBridge.deposit(address(quiet), 1e6, bytes32(uint256(1)));
         oldBridge.pause();
         AckiNackiBridge next = _liveBridge(address(oldBridge));
-        next.listToken(address(quiet), SECOND_ID, 6, 1e6, 10e6);
+        MultiTokenBridge(address(next)).listToken(address(quiet), SECOND_ID, 6, 1e6, 10e6);
 
         oldBridge.migrateToken(SECOND_ID, address(next));
 
@@ -659,7 +659,7 @@ contract AckiNackiBridgePredecessorTest is Test {
     function test_fundToken_ownerCoversAboveTvlCapAndDepositsStayCapped() public {
         (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
         AckiNackiBridge next = _liveBridge(address(oldBridge));
-        next.listToken(address(second), SECOND_ID, 18, 1e18, 1e18);
+        MultiTokenBridge(address(next)).listToken(address(second), SECOND_ID, 18, 1e18, 1e18);
         next.setTokenDepositsEnabled(SECOND_ID, true);
         second.mint(address(this), 3e18);
         second.approve(address(next), 3e18);

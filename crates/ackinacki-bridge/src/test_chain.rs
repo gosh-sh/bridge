@@ -343,8 +343,9 @@ fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
     )
 }
 
-/// Register a lane through the production owner method, then seed its bridged
-/// inventory.
+/// A lane for a currency the production bridge refuses to register: register
+/// USDC through the owner method, move that entry to `token_id` in storage and
+/// seed its bridged inventory. The CLI is token-agnostic; this keeps that covered.
 async fn bridge_with_token_lane(
     boc: &str,
     account_id: &str,
@@ -356,8 +357,8 @@ async fn bridge_with_token_lane(
     let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
         abi, address: Some(format!("0:{account_id}")),
         call_set: Some(CallSet { function_name: "setBridgeToken".into(),
-            input: Some(json!({"chainId": "11155111", "evmToken": "85", "tokenId": token_id,
-                "maxTransfer": amount.to_string(), "maxTvl": (amount * 10).to_string(), "depositsEnabled": true})),
+            input: Some(json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
+                "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true})),
             ..Default::default() }),
         signer: Signer::Keys { keys: KeyPair { public: PAIR_PUBLIC.into(), secret: PAIR_SECRET.into() } },
         ..Default::default()
@@ -407,22 +408,39 @@ async fn bridge_with_token_lane(
             else {
                 panic!("token map");
             };
-            let tvm_abi::TokenValue::Tuple(config) = tokens
+            let mut entry = tokens.remove(&3u32.to_string()).expect("registered USDC");
+            let tvm_abi::TokenValue::Tuple(config) = &mut entry else {
+                panic!("token config");
+            };
+            for (name, value) in [
+                ("maxTransfer", amount),
+                ("maxTvl", amount * 10),
+                ("maxWithdrawal", amount),
+                ("outstanding", amount),
+            ] {
+                config.iter_mut().find(|f| f.name == name).unwrap().value =
+                    tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(value, 128));
+            }
+            tokens.insert(token_id.to_string(), entry);
+        }
+        if field.name == "_bridgeTokenIds" {
+            let tvm_abi::TokenValue::Map(_, _, chains) = &mut field.value else {
+                panic!("chain map");
+            };
+            let tvm_abi::TokenValue::Map(_, _, ids) = chains
                 .iter_mut()
                 .find(|(key, _)| {
                     key.parse::<alloy::primitives::U256>().ok()
-                        == Some(alloy::primitives::U256::from(token_id))
+                        == Some(alloy::primitives::U256::from(11_155_111u64))
                 })
-                .expect("registered token")
+                .expect("registered chain")
                 .1
             else {
-                panic!("token config");
+                panic!("token id map");
             };
-            config
-                .iter_mut()
-                .find(|f| f.name == "outstanding")
-                .unwrap()
-                .value = tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(amount, 128));
+            for id in ids.values_mut() {
+                *id = tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(u128::from(token_id), 32));
+            }
         }
     }
     let data = tvm_abi::TokenValue::pack_values_into_chain(
@@ -1251,7 +1269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_1_15_upgrade_preserves_usdc_and_installs_a_separate_token_lane() {
+    async fn production_1_15_upgrade_preserves_usdc_and_registers_only_usdc() {
         use tvm_client::{
             abi::{encode_boc, AbiParam, ParamsOfAbiEncodeBoc},
             boc::{get_code_from_tvc, ParamsOfGetCodeFromTvc},
@@ -1330,15 +1348,21 @@ mod tests {
             .await["outstanding"],
             "1000000"
         );
-        let second = json!({"recipient": format!("0:{}", "ab".repeat(32)), "value": "1000000000000000000", "nonce": "1", "chainId": "11155111", "tokenId": 4});
-        boc = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 4,
-            "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000", "depositsEnabled": true})).await.unwrap().account;
+        let refused = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 4,
+            "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000", "depositsEnabled": true}))
+        .await
+        .expect("a special account records the refused call")
+        .transaction;
+        assert_eq!(refused["compute"]["exit_code"].as_i64(), Some(242), "{refused}");
+        let recovery = json!({"recipient": format!("0:{}", "ab".repeat(32)), "value": "1000000", "nonce": "1", "chainId": "11155111", "tokenId": 3});
+        boc = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
+            "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true})).await.unwrap().account;
         let reused_nonce = owner_call_for_upgrade(
             &ctx,
             &address,
             &boc,
             "mintAndSendTokenBridged",
-            second.clone(),
+            recovery.clone(),
         )
         .await
         .expect("a special account records the refused call")
@@ -1348,7 +1372,7 @@ mod tests {
             Some(215),
             "{reused_nonce}"
         );
-        let mut next = second;
+        let mut next = recovery;
         next["nonce"] = json!("2");
         boc = owner_call_for_upgrade(&ctx, &address, &boc, "mintAndSendTokenBridged", next)
             .await
@@ -1356,20 +1380,16 @@ mod tests {
             .account;
         assert_eq!(
             getter(boc.clone(), "getTotalBridged", json!({"tokenId": 3})).await["minted"],
-            "1000000"
-        );
-        assert_eq!(
-            getter(boc.clone(), "getTotalBridged", json!({"tokenId": 4})).await["minted"],
-            "1000000000000000000"
+            "2000000"
         );
         assert_eq!(
             getter(
                 boc,
                 "getTokenWithdrawalConfig",
-                json!({"chainId": "11155111", "tokenId": 4})
+                json!({"chainId": "11155111", "tokenId": 3})
             )
             .await["outstanding"],
-            "1000000000000000000"
+            "2000000"
         );
     }
 
@@ -1433,10 +1453,10 @@ mod tests {
             .expect("an Active bridge has a code hash")
             .as_hex_string();
         // sold 0.80.0 build of eccBridge 1.16.0: 1.15.0 plus per-token
-        // accounting.
+        // accounting, with USDC the only currency it registers.
         assert_eq!(
             &hash[..8],
-            "8047924b",
+            "e6810f06",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

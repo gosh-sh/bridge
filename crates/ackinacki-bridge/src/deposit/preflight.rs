@@ -192,8 +192,7 @@ pub async fn check(
     .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
     .ok_or_else(|| {
         refuse(format!(
-            "{token} is not listed on bridge {bridge}; the owner lists a token with \
-             listToken(token, tokenId, decimals, maxTransfer, tvlCap)"
+            "{token} is not listed on bridge {bridge}; only USDC can be bridged today"
         ))
     })?;
     if !listing.deposits_enabled {

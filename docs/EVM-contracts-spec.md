@@ -189,10 +189,10 @@ relying on them for a storage-level migration.
 |---:|---:|---|---|---:|---|
 | 0 | 0 | `depositCounter` | `uint256` | 116 | `deposit` |
 | 1 | 0 | `treasuryBalance` | `uint256` | 125 | `deposit` (+ USDC only), `fundTreasury` (+), `withdrawByProof` (− USDC only), `migrateTreasury` (→ 0) |
-| 2 | — | `_tokens` | `mapping(uint32 ⇒ TokenInfo)` | 159 | constructor, `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`, `delistToken`, `_creditLiabilities`, `_debitLiabilities` |
-| 3 | — | `_tokenIdOf` | `mapping(address ⇒ uint32)` | 163 | `listToken`, `delistToken` |
-| 4 | — | `_tokenRegistered` | `mapping(address ⇒ bool)` | 166 | `listToken`, `delistToken` |
-| 5 | 0 | `_listedTokenIds` | `uint32[]` | 170 | `listToken`, `delistToken` |
+| 2 | — | `_tokens` | `mapping(uint32 ⇒ TokenInfo)` | 159 | constructor, `setTokenLimits`, `setTokenDepositsEnabled`, `_creditLiabilities`, `_debitLiabilities` |
+| 3 | — | `_tokenIdOf` | `mapping(address ⇒ uint32)` | 163 | constructor |
+| 4 | — | `_tokenRegistered` | `mapping(address ⇒ bool)` | 166 | constructor |
+| 5 | 0 | `_listedTokenIds` | `uint32[]` | 170 | constructor |
 | 6 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 176 | constructor only |
 | 6 | 20 | `aaveEnabled` | `bool` | 192 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
 | 7 | 0 | `suppliedPrincipal` | `uint256` | 195 | `deposit` (+, through `_supplyAboveTarget`), `withdrawByProof` and `withdrawFromAave` (−, through `_bookPull`), `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
@@ -735,8 +735,8 @@ principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1963`, `B − S` floor
 | `setYieldRecipient(addr)` | 1914 | Non-zero. |
 | `fundTreasury(amount)` | 1828 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
 | `migrateTreasury(successor)` | 1847 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
-| `fundToken(tokenId, token, amount)` | 2276 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Not for USDC (`CannotMigrateUsdc`). `token` must be what this bridge lists under `tokenId` (`FundedTokenMismatch`). Pulls exactly `amount` from the caller and adds it to the listing's liabilities, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `tvlCap`, which gates `deposit` only; allowed while paused. |
-| `migrateToken(tokenId, successor)` | 2296 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's `maxWithdrawalAmount(tokenId)` must not be below this listing's (`SuccessorWithdrawalCapTooLow`). The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. |
+| `fundToken(tokenId, token, amount)` | 2204 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Not for USDC (`CannotMigrateUsdc`). `token` must be what this bridge lists under `tokenId` (`FundedTokenMismatch`). Pulls exactly `amount` from the caller and adds it to the listing's liabilities, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `tvlCap`, which gates `deposit` only; allowed while paused. |
+| `migrateToken(tokenId, successor)` | 2224 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's `maxWithdrawalAmount(tokenId)` must not be below this listing's (`SuccessorWithdrawalCapTooLow`). The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. |
 | `transferOwnership(addr)` | 1922 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_pullFromAave(amount)` (`:2035`), called with `amount ≤ A` only, withdraws exactly `amount` and books it with `_bookPull` (`:2043`), which requires the

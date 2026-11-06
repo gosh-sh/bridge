@@ -5,8 +5,10 @@ Set SOLD_0_80 to sold 0.80.0. Halo2 verification is stubbed in a temporary
 source copy. Directed events are omitted because tvm-debugger tries to decode
 them as function return values; `WithdrawalRefused` is replaced by a hook that
 records its reason, so a refusal's cause is still asserted. Test hooks seed
-balances and derive voucher addresses. The accounting, sender checks, refunds and upgrade code execute
-unchanged. The production voucher is executed unchanged for its replay test.
+balances and derive voucher addresses. The bridge registers USDC alone; a test hook lifts that check
+for one case so the per-token accounting stays covered, and `test_only_usdc_can_be_registered` runs
+with it in place. The accounting, sender checks, refunds and upgrade code execute unchanged. The
+production voucher is executed unchanged for its replay test.
 """
 
 import base64
@@ -53,6 +55,10 @@ class BridgeLimits(unittest.TestCase):
         verification = "gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)"
         assert source.count(verification) == 1
         source = source.replace(verification, "testVerifyProof()")
+        usdc_only = "require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);"
+        assert source.count(usdc_only) == 1
+        source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || "
+                                "(_testAllowOtherTokens && tokenId > USDC_ECC_ID), ERR_TOKEN_CONFIG);")
         accept = "tvm.accept();\n        require(\n            testVerifyProof(),"
         assert source.count(accept) == 1
         source = source.replace(accept, f"require(!_testStopAtAccept, {ACCEPT_REACHED});\n        " + accept)
@@ -76,6 +82,8 @@ class BridgeLimits(unittest.TestCase):
     function testLastRefusal() public view returns (uint16 reason) {
         reason = _testLastRefusal;
     }
+    bool _testAllowOtherTokens;
+    function testAllowOtherTokens() public { tvm.accept(); _testAllowOtherTokens = true; }
     bool _testStopAtAccept;
     function testStopAtAccept() public { tvm.accept(); _testStopAtAccept = true; }
     bool _testRejectProof;
@@ -201,6 +209,11 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(decoded["bounce"], "false")
 
     def register(self, token, token_id, max_transfer, max_tvl, *, chain=1, enabled=True, expect=0):
+        if token_id != 3:
+            self.call("testAllowOtherTokens")
+        return self.set_bridge_token(token, token_id, max_transfer, max_tvl, chain, enabled, expect)
+
+    def set_bridge_token(self, token, token_id, max_transfer, max_tvl, chain=1, enabled=True, expect=0):
         return self.call("setBridgeToken", {
             "chainId": str(chain), "evmToken": str(token), "tokenId": token_id,
             "maxTransfer": str(max_transfer), "maxTvl": str(max_tvl),
@@ -220,6 +233,15 @@ class BridgeLimits(unittest.TestCase):
     def withdraw_token(self, amount, token_id=4, chain=1):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
                          source=SENDER, ecc={str(token_id): str(amount)})
+
+    def test_only_usdc_can_be_registered(self):
+        for token, token_id in ((SECOND_TOKEN, 4), (THIRD_TOKEN, 5), (SECOND_TOKEN, 2), (SECOND_TOKEN, 0)):
+            self.set_bridge_token(token, token_id, 100, 1000, expect=242)
+            self.assertFalse(self.token_limits(token_id)["listed"])
+        self.call("testRejectProof")
+        self.finalize(token=SECOND_TOKEN, expect=241)
+        self.confirm_token(expect=241)
+        self.assertTrue(self.token_limits(3)["listed"])
 
     def test_unregistered_proven_token_cannot_mint_usdc(self):
         before = self.call("getTotalBridged", {"tokenId": 3})["response"]

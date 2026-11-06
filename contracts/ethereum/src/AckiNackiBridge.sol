@@ -56,12 +56,12 @@ contract AckiNackiBridge {
     /// @notice Amount-width ceiling for every token, not an AN policy limit.
     ///         `gosh.mintecc` takes a uint64 (~18.44 tokens at 18 decimals).
     ///         The current AN bridge additionally enforces 50 USDC per transfer
-    ///         and does not yet credit non-USDC. Match AN policy before opening a listing.
+    ///         and credits USDC alone.
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
     /// @notice Default per-tx cap applied to USDC when the constructor lists
     ///         it. The owner can change it afterwards with `setTokenLimits`;
-    ///         other tokens get their limits from `listToken`.
+    ///         the constructor lists no other token.
     uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
 
     /// @notice Default outstanding-liability cap applied to USDC when the
@@ -406,7 +406,7 @@ contract AckiNackiBridge {
         address token
     );
 
-    /// @notice Owner listed `token` under Acki Nacki ECC currency id `tokenId`.
+    /// @notice `token` was listed under Acki Nacki ECC currency id `tokenId`.
     event TokenListed(
         uint32 indexed tokenId,
         address indexed token,
@@ -420,8 +420,6 @@ contract AckiNackiBridge {
     /// @notice Owner opened or closed deposits for a listed id. Withdrawals
     ///         are unaffected either way.
     event TokenDepositsEnabledSet(uint32 indexed tokenId, bool enabled);
-    /// @notice Owner removed a listing. Only possible at zero liabilities.
-    event TokenDelisted(uint32 indexed tokenId, address indexed token);
 
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event WithdrawnFromAave(uint256 amountRequested, uint256 amountReceived);
@@ -664,7 +662,6 @@ contract AckiNackiBridge {
     error InvalidPredecessor(address predecessor);
     /// @notice The proof's `pub.tokenId` is not listed on this bridge, or does
     ///         not fit a uint32 (the width AN encodes the ECC currency id in).
-    ///         List it with `listToken` before such a proof can be paid.
     error UnsupportedTokenId(uint256 tokenId);
     /// @notice Circuit 4 withdraw is wired but the verifyBlock triple is
     ///         not. Without `verifyBlock`, no anchors ever land and every
@@ -698,7 +695,7 @@ contract AckiNackiBridge {
     error TokenNotListed(address token);
     /// @notice Deposits are closed for this listing; withdrawals still pay.
     error TokenDepositsDisabled(uint32 tokenId);
-    /// @notice `listToken` was given `address(0)`.
+    /// @notice A listing was given `address(0)`.
     error InvalidTokenAddress();
     /// @notice That ERC-20 is already listed, under `existingTokenId`. One
     ///         token answers to one id.
@@ -711,13 +708,6 @@ contract AckiNackiBridge {
     ///         the Acki Nacki mint instruction accepts. Per-token policy limits
     ///         must also match the receiving AN deployment.
     error TokenLimitExceedsMintCeiling(uint256 maxTransfer, uint256 ceiling);
-    /// @notice `delistToken` refuses while the bridge still owes this token
-    ///         to depositors — removing the listing would strand their
-    ///         withdrawals. Let the liabilities drain first.
-    error TokenStillHasLiabilities(uint32 tokenId, uint256 liabilities);
-    /// @notice USDC cannot be delisted: AAVE, the yield book and the solvency
-    ///         checks are wired to it at construction.
-    error CannotDelistUsdc();
     /// @notice The AAVE aToken cannot be listed for deposits. Its balance is
     ///         the yield book's own measure (`aUsdcBalance`, `_backedPrincipal`,
     ///         `accruedYield`), so deposits of it would read back as interest
@@ -838,8 +828,7 @@ contract AckiNackiBridge {
         ///         whose AN side reports `0` passes `0`.
         /// @dev Replaces the former `altTokenId` alias, which accepted `0`
         ///      *or* the alias and so let one deployment answer to two ids.
-        ///      Exactly one id now pays out USDC. Further tokens are added
-        ///      after deployment with `listToken`.
+        ///      Exactly one id now pays out USDC, and no other token is listed.
         uint32 usdcTokenId;
         /// @notice The `AckiNackiBridge` this deployment replaces on the same
         ///         chain whose treasury it may take over, or zero. Must have
@@ -1034,42 +1023,6 @@ contract AckiNackiBridge {
     // Token registry
     // ---------------------------------------------------------------------
 
-    /// @notice Accept `token` for deposits, paid out against Acki Nacki ECC
-    ///         currency id `tokenId`.
-    /// @dev The id is the one AN's bridge burns and Circuit 4 reports in
-    ///      `pub.tokenId`; it is assigned on the Acki Nacki side, not here, so
-    ///      a listing under the wrong id simply never matches a proof. The
-    ///      mapping is one-to-one in both directions.
-    ///
-    ///      Listing is deliberately not enough to make a token usable
-    ///      end to end: AN's `setBridgeToken` must register the same token and
-    ///      id for this chain, or AN refuses to finalize its deposits. A new
-    ///      listing therefore starts with **deposits closed**; withdrawals by
-    ///      proof work from the moment it exists. Open deposits with
-    ///      `setTokenDepositsEnabled(tokenId, true)` only once AN registers
-    ///      the token.
-    /// @param token       The ERC-20. Must not be already listed.
-    /// @param tokenId     AN ECC currency id. Must not be already used.
-    /// @param decimals    Token decimals, metadata only — see `TokenInfo`.
-    /// @param maxTransfer Per-tx cap in base units, at most
-    ///                    `MAX_DEPOSIT_AMOUNT`.
-    /// @param tvlCap      Outstanding-liability cap in base units, at least
-    ///                    `maxTransfer`.
-    function listToken(
-        address token,
-        uint32 tokenId,
-        uint8 decimals,
-        uint256 maxTransfer,
-        uint256 tvlCap
-    ) external onlyOwner {
-        // Deposits start closed. Acki Nacki refuses to finalize a token it has
-        // not registered, so a token listed open would take permissionless
-        // deposits the moment the listing transaction lands, before Acki Nacki
-        // could credit them. The owner opens it with `setTokenDepositsEnabled`
-        // once the token is registered there.
-        _listToken(tokenId, token, decimals, maxTransfer, tvlCap, false);
-    }
-
     /// @notice Change the deposit caps on an already listed id.
     /// @dev Lowering `tvlCap` below the current liabilities is allowed: it
     ///      stops new deposits without touching what is already owed.
@@ -1092,36 +1045,11 @@ contract AckiNackiBridge {
 
     /// @notice Open or close deposits for a listed id.
     /// @dev Withdrawals are unaffected, so this is the safe way to retire a
-    ///      token: close deposits, let the liabilities drain, then delist.
+    ///      token: close deposits and let the liabilities drain.
     function setTokenDepositsEnabled(uint32 tokenId, bool enabled) external onlyOwner {
         TokenInfo storage info = _requireListedId(tokenId);
         info.depositsEnabled = enabled;
         emit TokenDepositsEnabledSet(tokenId, enabled);
-    }
-
-    /// @notice Remove a listing entirely. Only at zero liabilities, and never
-    ///         for USDC.
-    function delistToken(uint32 tokenId) external onlyOwner {
-        TokenInfo storage info = _requireListedId(tokenId);
-        if (tokenId == usdcTokenId) revert CannotDelistUsdc();
-        uint256 owed = liabilitiesOf(tokenId);
-        if (owed != 0) revert TokenStillHasLiabilities(tokenId, owed);
-
-        address token = info.token;
-        delete _tokenIdOf[token];
-        delete _tokenRegistered[token];
-        delete _tokens[tokenId];
-
-        uint256 len = _listedTokenIds.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (_listedTokenIds[i] == tokenId) {
-                _listedTokenIds[i] = _listedTokenIds[len - 1];
-                _listedTokenIds.pop();
-                break;
-            }
-        }
-
-        emit TokenDelisted(tokenId, token);
     }
 
     /// @notice The listing behind an ECC currency id. `token == address(0)`
@@ -1177,9 +1105,9 @@ contract AckiNackiBridge {
         return _tokens[tokenId].liabilities;
     }
 
-    /// @dev Shared by `listToken` and the constructor. The constructor runs
-    ///      before `owner` is set, so the access check lives on the external
-    ///      entrypoint rather than here.
+    /// @dev The constructor lists USDC through this and nothing else calls it:
+    ///      a token Acki Nacki cannot credit would take deposits that never
+    ///      finalize, so no owner call adds one.
     function _listToken(
         uint32 tokenId,
         address token,

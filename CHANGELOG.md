@@ -23,8 +23,12 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- The Acki Nacki bridge contract `eccUSDCBridge` is now `eccBridge`, since it carries any
-  registered ERC-20. Its source, `.tvc` and `.abi.json` are renamed, including their placed paths
+- Only USDC can be bridged: Acki Nacki has no other currency for the bridge to mint. `eccBridge`
+  `setBridgeToken` refuses any ECC id but `3` with exit code 242, and `AckiNackiBridge` lists USDC
+  in its constructor and has no `listToken` or `delistToken`. A new currency takes new versions of
+  both contracts, but no circuit or verification key change.
+- The Acki Nacki bridge contract `eccUSDCBridge` is now `eccBridge`, since its accounting is
+  per token. Its source, `.tvc` and `.abi.json` are renamed, including their placed paths
   in `contracts/an/place.json`, and `getVersion` returns `eccBridge`. The rename changes nothing in the ABI. Anything
   that reads these files by path must follow. `USDC_BRIDGE_*` settings and `USDCBridge.keys.json`
   keep their names.
@@ -57,9 +61,9 @@ assigns it when the release is tagged.
   (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
   parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and
   234 and 235, before `accept`, so a retry costs the bridge no gas.
-- `eccBridge` 1.16.0 (code hash `8047924b…`) credits the proven ERC-20 to its registered
+- `eccBridge` 1.16.0 (code hash `e6810f06…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
-  Before opening deposits on EVM, register the same token and ECC id on AN with
+  Before opening deposits on EVM, register USDC under ECC id `3` on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
   token base units. AN refuses unregistered tokens and the CLI refuses mismatched currency ids.
   `DepositVoucher` 1.5.0 carries the token to `confirmTokenDeposit`; the existing
@@ -78,19 +82,18 @@ assigns it when the release is tagged.
   The successor must list the same token under the same id, with a withdrawal cap no lower than the
   old one. When replacing a bridge, call it for every such token before `setEvmBridge` reopens
   withdrawals: both bridges can refuse a later burn of a token left behind, with the ECC already burned.
-- The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
-  `delistToken`, `tokenInfo`, `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and
-  `maxWithdrawalAmount`. Liabilities and limits use each token's base units; AAVE stays USDC-only.
-- New non-USDC listings start with deposits closed. Register the same token and ECC id on AN
-  before opening the EVM listing; withdrawals require a listed id and outstanding liabilities.
-- `--token` (`DEPOSIT_TOKEN`) defaults to the EVM bridge's `usdc()`. Amounts use the listing's
-  decimals, checked against the ERC-20. Deposits retain exact-balance and uint64 width checks.
+  With USDC the only listed token, it has nothing to hand over today.
+- The EVM token registry exposes `setTokenLimits`, `setTokenDepositsEnabled`, `tokenInfo`,
+  `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and `maxWithdrawalAmount`. Liabilities and limits
+  use each token's base units; AAVE stays USDC-only. Withdrawals require a listed id and outstanding
+  liabilities.
+- `--token` (`DEPOSIT_TOKEN`) defaults to the EVM bridge's `usdc()` and refuses a token the bridge
+  does not list. Amounts use the listing's decimals, checked against the ERC-20. Deposits retain
+  exact-balance and uint64 width checks.
 
-- Registry changes emit `TokenListed`, `TokenLimitsSet`, `TokenDepositsEnabledSet` and
-  `TokenDelisted`. Deposits can revert with `TokenNotListed` or `TokenDepositsDisabled`;
-  registry administration can return `InvalidTokenAddress`, `TokenAlreadyListed`,
-  `TokenIdAlreadyUsed`, `TokenLimitsInvalid`, `TokenLimitExceedsMintCeiling`,
-  `TokenStillHasLiabilities`, `CannotDelistUsdc` or `CannotListAToken`.
+- The constructor emits `TokenListed` for USDC; owner changes emit `TokenLimitsSet` and
+  `TokenDepositsEnabledSet`. Deposits can revert with `TokenNotListed` or `TokenDepositsDisabled`;
+  `setTokenLimits` can revert with `TokenLimitsInvalid` or `TokenLimitExceedsMintCeiling`.
 - AN `setBridgeToken` refuses a lower `maxTvl`. `finalizeDeposit` does not reserve capacity, so two
   deposits finalized against the same headroom can still leave the later confirmation refused with
   `ERR_TVL_CAP`. Close deposits on EVM or lower the EVM TVL cap to throttle intake. Closing the AN

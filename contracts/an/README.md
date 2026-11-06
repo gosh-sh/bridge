@@ -110,10 +110,10 @@ pin is moved.
 
 ### Registering bridged currencies
 
-Before enabling an EVM token listing, call
+Before opening deposits from a source chain, call
 `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)` as the AN owner.
-Register USDC too, using ECC id `3`; other ids must be at least `4`. Both sides must use the same
-ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
+Only USDC can be registered, under ECC id `3`: Acki Nacki has no other currency for the bridge to
+mint, so any other id is refused with `242`. Both sides must use the same ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
 immutable; subsequent calls can raise the TVL ceiling, change the deposit transfer limit and
 the deposit switch, retaining outstanding
 inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
@@ -126,7 +126,7 @@ The existing `finalizeDeposit`, `confirmDeposit` and `initiateWithdrawal` signat
 
 For an upgrade from 1.15.0, build `userCell` with
 `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)` and pass it to the old `updateCode`.
-Register every token lane afterward and restore trusted bridge, EVM bridge (`setEvmBridge`) and
+Register USDC for every source chain afterward and restore trusted bridge, EVM bridge (`setEvmBridge`) and
 anchor configuration before opening deposits and withdrawals. Newer `updateCode` calls preserve the token registry and outstanding balances.
 Voucher-code rotation still requires the historical deposit cutoff described below.
 
@@ -314,8 +314,9 @@ bridge pays the burns bound to it, and `setEvmBridge` with the new bridge reopen
 them once the principal has moved — the order is in `docs/aave-yield.md`,
 "Replacing a bridge on the same chain".
 
-On the EVM side `migrateTreasury` moves USDC, and `migrateToken(tokenId, successor)`
-moves each other listed token, its custody and its liabilities together, with
+On the EVM side `migrateTreasury` moves USDC. USDC is the only token listed today, so
+`migrateToken(tokenId, successor)` has nothing to move: it is for a later bridge version that
+lists another token, and moves its custody and liabilities together, with
 nothing minted here. Both run on the paused old bridge, and the registry here does
 not change. The new bridge must list the token under the same id, with a withdrawal
 cap no lower than the old listing's (`FundedTokenMismatch`,

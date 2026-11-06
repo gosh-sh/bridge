@@ -86,8 +86,9 @@ covering one genre for one audience. The archive exists so that step loses no kn
 **Known traps in the source material** — carry these into the rewrite, they are verified against the
 code and were wrong in the old docs:
 
-* Deposits take **any listed ERC-20** via `transferFrom`, signature
-  `deposit(address,uint256,bytes32)`; the per-transaction cap is the owner's per-token
+* Deposits take **a listed ERC-20** via `transferFrom`, signature
+  `deposit(address,uint256,bytes32)`. USDC is the only token listed, by the constructor, and no
+  owner call adds another. The per-transaction cap is the owner's per-token
   `maxTransfer` (USDC is listed with 50 USDC), and `type(uint64).max` is retained as a width
   guard — it is the ceiling `gosh.mintecc` imposes. Any archive text with `msg.value`, ETH
   deposits, a `100 ether` cap or a USDC-only deposit path is dead.

@@ -184,11 +184,8 @@ class Arbitrum:
     def eth(self, address):
         return int(self.rpc("eth_getBalance", [address, "latest"]), 16)
 
-    def balance_of(self, token, address):
-        return self.call(token, "balanceOf(address)", bytes(12) + bytes.fromhex(address[2:]))
-
     def usdc(self, address):
-        return self.balance_of(ARB_USDC, address)
+        return self.call(ARB_USDC, "balanceOf(address)", bytes(12) + bytes.fromhex(address[2:]))
 
 
 # ── secp256k1, to tie the deployer key to its address ───────────────────────
@@ -263,8 +260,7 @@ def run(ph, an, sha):
     threading.Thread(target=heartbeat, daemon=True).start()
     yield r
     stop.set()
-    for job in ("lc-prove", "lc-bootstrap", "lc-relayer", "relayer", "anchors", "cli-deposit", "cli-deposit-token",
-                "cli-withdraw", "cli-withdraw-token"):
+    for job in ("lc-prove", "lc-bootstrap", "lc-relayer", "relayer", "anchors", "cli-deposit", "cli-withdraw"):
         text = r.log(job, 80)
         if text:
             print(f"\n----- {job} (last 80 lines)\n{text}")

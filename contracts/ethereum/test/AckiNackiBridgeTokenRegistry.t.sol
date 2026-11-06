@@ -20,6 +20,7 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockAave.sol";
+import "./mocks/MultiTokenBridge.sol";
 
 /// @notice A token that keeps a cut of every transfer. The bridge must refuse
 ///         it: the custody delta would not match the booked amount.
@@ -111,7 +112,7 @@ contract OptionalReturnERC20 {
 ///         must satisfy, how liabilities are tracked per token, and which
 ///         token a withdrawal proof is paid in.
 contract AckiNackiBridgeTokenRegistryTest is Test {
-    AckiNackiBridge internal bridge;
+    MultiTokenBridge internal bridge;
     MockBlockHeaderOracle internal oracle;
     MockERC20 internal usdc;
     MockERC20 internal dai;
@@ -173,7 +174,7 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         layerHashesVerifier.setShouldAccept(true);
         withdrawalVerifier.setShouldAccept(true);
 
-        bridge = new AckiNackiBridge(
+        bridge = new MultiTokenBridge(
             address(oracle),
             address(usdc),
             MockAaveLib.pool(address(usdc)),
@@ -238,12 +239,6 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     // listToken: access and validation
     // -----------------------------------------------------------------
 
-    function test_listToken_onlyOwner() public {
-        vm.prank(nonOwner);
-        vm.expectRevert(AckiNackiBridge.NotOwner.selector);
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
-    }
-
     function test_listToken_rejectsZeroAddress() public {
         vm.expectRevert(AckiNackiBridge.InvalidTokenAddress.selector);
         bridge.listToken(address(0), DAI_TOKEN_ID, 18, 1e18, 10e18);
@@ -257,7 +252,7 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     function test_listToken_rejectsTheAaveAToken() public {
         MockAUSDC aUsdc = new MockAUSDC();
         MockAavePool pool = new MockAavePool(address(usdc), address(aUsdc));
-        AckiNackiBridge aaveBridge = new AckiNackiBridge(
+        MultiTokenBridge aaveBridge = new MultiTokenBridge(
             address(oracle),
             address(usdc),
             address(pool),
@@ -342,7 +337,7 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     ///      deposits in its own transaction would leave a permissionless lane
     ///      open until a second transaction closed it — and a deposit made in
     ///      that window stays provable afterwards.
-    function test_listToken_startsWithDepositsClosed() public {
+    function test_closedListing_refusesDepositsAndStillPays() public {
         bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
 
         (,, bool depositsEnabled,,,) = bridge.tokenInfo(DAI_TOKEN_ID);
@@ -381,6 +376,58 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     // -----------------------------------------------------------------
     // deposit
     // -----------------------------------------------------------------
+
+    function test_deployedBridge_takesUsdcAlone() public {
+        AckiNackiBridge deployed = new AckiNackiBridge(
+            address(oracle),
+            address(usdc),
+            MockAaveLib.pool(address(usdc)),
+            MockAaveLib.aToken(address(usdc)),
+            VerifyBlockConfigLib.with(
+                IPrimaryVerifier(address(primaryVerifier)),
+                IFallbackVerifier(address(fallbackVerifier)),
+                ILayerHashesMovementVerifier(address(layerHashesVerifier)),
+                BK_SET,
+                GENESIS_PREV_ANCHOR
+            ),
+            VerifyBlockConfigLib.withWithdraw(
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR
+            )
+        );
+        assertEq(deployed.owner(), address(this));
+
+        uint32[] memory ids = deployed.listedTokenIds();
+        assertEq(ids.length, 1);
+        assertEq(ids[0], deployed.usdcTokenId());
+        (address token,,,,,) = deployed.tokenInfo(ids[0]);
+        assertEq(token, address(usdc));
+
+        (bool listed,) = address(deployed)
+            .call(
+                abi.encodeWithSignature(
+                    "listToken(address,uint32,uint8,uint256,uint256)",
+                    address(dai),
+                    DAI_TOKEN_ID,
+                    uint8(18),
+                    uint256(1e18),
+                    uint256(10e18)
+                )
+            );
+        assertFalse(listed, "the owner has no call that lists a token");
+        (bool delisted,) =
+            address(deployed).call(abi.encodeWithSignature("delistToken(uint32)", ids[0]));
+        assertFalse(delisted, "the owner has no call that removes USDC");
+        assertEq(deployed.listedTokenIds().length, 1);
+
+        dai.mint(funder, 1e18);
+        vm.startPrank(funder);
+        dai.approve(address(deployed), 1e18);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.TokenNotListed.selector, address(dai))
+        );
+        deployed.deposit(address(dai), 1e18, bytes32(uint256(1)));
+        vm.stopPrank();
+    }
 
     function test_deposit_unlistedTokenReverts() public {
         dai.mint(funder, 1e18);
@@ -603,48 +650,6 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(bridge.suppliedPrincipal(), supplied, "a DAI payout leaves the pool alone");
     }
 
-    function test_delistToken_refusesWhileLiabilitiesRemain() public {
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
-        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
-        _depositDai(funder, 1e18);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.TokenStillHasLiabilities.selector, DAI_TOKEN_ID, 1e18
-            )
-        );
-        bridge.delistToken(DAI_TOKEN_ID);
-    }
-
-    function test_delistToken_refusesForUsdc() public {
-        uint32 id = bridge.usdcTokenId();
-        vm.expectRevert(AckiNackiBridge.CannotDelistUsdc.selector);
-        bridge.delistToken(id);
-    }
-
-    function test_delistToken_clearsBothDirections() public {
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
-        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
-        assertEq(bridge.listedTokenIds().length, 2);
-
-        bridge.delistToken(DAI_TOKEN_ID);
-
-        (address token,,,,,) = bridge.tokenInfo(DAI_TOKEN_ID);
-        assertEq(token, address(0));
-        (bool listed,) = bridge.tokenIdOf(address(dai));
-        assertFalse(listed);
-
-        uint32[] memory ids = bridge.listedTokenIds();
-        assertEq(ids.length, 1);
-        assertEq(ids[0], bridge.usdcTokenId());
-
-        // The same token can be listed again afterwards, under any free id.
-        bridge.listToken(address(dai), DAI_TOKEN_ID + 1, 18, 1e18, 10e18);
-        (bool relisted, uint32 id) = bridge.tokenIdOf(address(dai));
-        assertTrue(relisted);
-        assertEq(id, DAI_TOKEN_ID + 1);
-    }
-
     // -----------------------------------------------------------------
     // withdrawByProof
     // -----------------------------------------------------------------
@@ -794,15 +799,12 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), 3e18);
     }
 
-    function test_severalTokens_closingOrDelistingOneLeavesTheOthers() public {
+    function test_severalTokens_closingOneLeavesTheOthers() public {
         MockERC20 wbtc = new MockERC20("Mock WBTC", "mWBTC", 8);
-        MockERC20 gone = new MockERC20("Gone", "GONE", 18);
         _listAndDeposit(dai, DAI_TOKEN_ID, 18, 1e18);
         _listAndDeposit(wbtc, 5, 8, 1e8);
-        bridge.listToken(address(gone), 6, 18, 1e18, 10e18);
 
         bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, false);
-        bridge.delistToken(6);
 
         dai.mint(funder, 1e18);
         vm.startPrank(funder);

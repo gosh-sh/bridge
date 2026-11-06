@@ -142,7 +142,7 @@ make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/
 The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
 `contracts/an/0.80.0_compiled/exchange/eccBridge.tvc` and check the ABI before
 deployment. This build's bridge version is 1.16.0 and its code hash starts with
-`8047924b`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
+`e6810f06`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
 them apart.
 
 ## Build gotchas

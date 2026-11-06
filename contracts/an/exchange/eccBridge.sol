@@ -901,7 +901,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _paused = paused;
     }
 
-    /// @notice Register a source ERC-20 once, then update its deposit limits.
+    /// @notice Register USDC for a source chain once, then update its deposit limits.
+    ///         ECC id 3 is the only id accepted: Acki Nacki has no other currency
+    ///         for the bridge to mint, and a new one takes a new version of this code.
     ///         The token/id association is immutable; TVL can only increase.
     ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
     function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
@@ -909,7 +911,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(chainId != 0 && evmToken != 0 && evmToken < (uint256(1) << 160), ERR_TOKEN_CONFIG);
-        require(tokenId >= USDC_ECC_ID, ERR_TOKEN_CONFIG);
+        require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);
         require(maxTransfer > 0 && maxTransfer <= uint128(type(uint64).max)
                 && maxTvl >= maxTransfer, ERR_TOKEN_CONFIG);
         if (tokenId == USDC_ECC_ID) {

@@ -79,23 +79,21 @@ The other nodes' APIs are no way around this: they want the token `nginx0` adds.
 
 After `run-test`, the pytest suite in `tests/e2e/local-net/arbitrum/` deploys a fresh
 `AckiNackiBridge` on Arbitrum Sepolia (421614) and sends 2 USDC from it to this network with
-`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. A second
-ERC-20 (18 decimals, deployed and listed as ECC id 4 by the run) makes the same round trip next to
-USDC. Each test is one step and asserts what the step must have produced, from the chains or from the
+`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. Each
+test is one step and asserts what the step must have produced, from the chains or from the
 log of the job that did it; `-x` stops at the first failure, which names the step, what it
 waited for and the tail of the log.
 
 | Tests | Step |
 |---|---|
-| `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 3 hours |
+| `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 2 hours |
 | `test_10`–`12` | The zerostate bridge is Active at 1.16.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the zerostate's keepers); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
-| `test_24` | The second token: `list-token` deploys it, lists it as id 4 and opens its deposits; `setBridgeToken` registers it on Acki Nacki |
-| `test_40`–`44` | `deposit`: sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated. The second token alongside: its deposit in the same job once USDC's is on chain, a third multisig funded with `mintAndSendTokenBridged`, its own burn |
+| `test_40`–`44` | `deposit`: sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
-| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig; then the second token's deposit, in its own currency on the same multisig |
-| `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), 2 USDC back on the deployer; then the second token's `withdrawByProof` from the same bundle, its liabilities at zero and both multisigs' balances of each currency as expected |
+| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
+| `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), 2 USDC back on the deployer |
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain
@@ -139,14 +137,8 @@ logs `run-logs/<run>/<job>.log` in the CI directory, an external volume every jo
 | `ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY` | the deployer and depositor on Arbitrum Sepolia; the relayer and burner keys are derived from it. Its address, `ARBITRUM_SEPOLIA_E2E_ADDRESS`, is public and set in the pipeline itself; `test_01` checks the key against it |
 
 The deployer needs Arbitrum Sepolia ETH and USDC (https://faucet.circle.com, network
-Arbitrum Sepolia): each run deploys a bridge (~0.0013 ETH) and a second token, funds the three
-derived senders and moves 2 USDC there and back. The second token is minted by the run.
-
-`ci-entry` caps a job's memory by its name, and the copy on the prover host is installed by hand.
-That is why both withdrawals run inside the `cli-withdraw` job and both deposits inside the
-`cli-deposit` job, the second of each logging to `cli-withdraw-token.log` and
-`cli-deposit-token.log`: a job under a new name gets 8 GB, too little for Circuit 4 or a deposit
-proof (`export_blake2b_proof` is killed).
+Arbitrum Sepolia): each run deploys a bridge (~0.0013 ETH), funds the two derived senders and
+moves 2 USDC there and back.
 
 ## Knobs (one place each; the future ansible role takes them over)
 

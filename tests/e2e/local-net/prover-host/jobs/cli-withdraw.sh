@@ -33,5 +33,5 @@ withdraw withdraw-burner cli "$FROM" "$WORK/msig.keys.json" &
 withdraw withdraw-burner-token cli-token "$TOKEN_FROM" "$WORK/msig-token.keys.json" --token-id "$TOKEN_ID" \
   >/logs/cli-withdraw-token.log 2>&1 &
 for _ in 1 2; do
-  wait -n || { code=$?; log "a withdrawal exited $code; stopping the other"; kill $(jobs -p) 2>/dev/null; exit "$code"; }
+  wait -n || { code=$?; log "a withdrawal exited $code; stopping the other"; kill $(jobs -p) 2>/dev/null || true; exit "$code"; }
 done

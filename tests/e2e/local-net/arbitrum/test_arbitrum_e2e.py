@@ -261,20 +261,21 @@ def steps(run, job):
     return out
 
 
-def step_done(run, step, what, timeout, job="cli-deposit"):
+def step_done(run, step, what, timeout, log="cli-deposit"):
+    """Both deposits are one job, cli-deposit; `log` names the one to watch."""
     def check():
-        state = steps(run, job).get(step, ("", ""))
-        assert state[0] != "failed", f"deposit step {step} failed: {state[1]}\n" + tail(run.log(job))
-        code = run.wait(job, 1)
-        assert code in (None, 0), f"ackinacki-bridge deposit exited {code} before {step}\n" + tail(run.log(job))
+        state = steps(run, log).get(step, ("", ""))
+        assert state[0] != "failed", f"deposit step {step} failed: {state[1]}\n" + tail(run.log(log))
+        code = run.wait("cli-deposit", 1)
+        assert code in (None, 0), f"ackinacki-bridge deposit exited {code} before {step}\n" + tail(run.log(log))
         return state if state[0] in ("done", "skipped") else None
-    return wait_for(what, check, timeout, log=lambda: run.log(job))
+    return wait_for(what, check, timeout, log=lambda: run.log(log))
 
 
 def test_40_deposit_sent(run, ctx):
     """The CLI sends approve and deposit from ARBITRUM_SEPOLIA_E2E_ADDRESS."""
     run.job("cli-deposit", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
-            FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2")
+            FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2", TOKEN=ctx["token"])
     state = step_done(run, "deposit", "the deposit transaction is sent", 900)
     print(f"  deposit https://sepolia.arbiscan.io/tx/{state[1]}")
 
@@ -293,11 +294,9 @@ def test_41_deposit_event_received(run, arb, ctx):
 
 
 def test_41a_second_token_deposit_sent(run, arb, ctx):
-    """The CLI deposits 2 of the second token from the same address once USDC's deposit is on
+    """The same job deposits 2 of the second token from the same address once USDC's deposit is on
     chain, so the two never share a nonce. The bridge books it under its own id and keeps it
     liquid: only USDC goes to AAVE."""
-    run.job("cli-deposit-token", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
-            FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2", TOKEN=ctx["token"])
     state = step_done(run, "evm_confirm", "the second token's Deposit event is received", 900, "cli-deposit-token")
     assert state[1].startswith("depositId"), state
     bridge = ctx["bridge"]
@@ -473,11 +472,15 @@ def test_64_deposit_minted(run):
 
 
 def test_65_deposit_delivered(run, an, ctx):
-    """The CLI ends well, and the 2 USDC are on the multisig."""
-    run.finish("cli-deposit", 600)
-    summary = [json.loads(line) for line in run.log("cli-deposit").splitlines()
-               if line.startswith("{") and '"confirmation"' in line]
-    assert summary and summary[-1]["confirmation"].get("delivery_tx"), \
+    """The CLI prints its summary, and the 2 USDC are on the multisig. The job ends with the
+    second token's deposit, in test_66."""
+    def summary():
+        code = run.wait("cli-deposit", 1)
+        assert code in (None, 0), f"ackinacki-bridge deposit exited {code} before its summary\n" + tail(run.log("cli-deposit"))
+        return [json.loads(line) for line in run.log("cli-deposit").splitlines()
+                if line.startswith("{") and '"confirmation"' in line]
+    rows = wait_for("the CLI prints the deposit's summary", summary, 600, log=lambda: run.log("cli-deposit"))
+    assert rows[-1]["confirmation"].get("delivery_tx"), \
         "no delivery transaction in the CLI's summary\n" + tail(run.log("cli-deposit"))
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the multisig does not hold the 2 USDC"
 
@@ -485,13 +488,13 @@ def test_65_deposit_delivered(run, an, ctx):
 def test_66_second_token_deposit_delivered(run, an, ctx):
     """The second token's deposit goes the same way, through its own anchor, proof and
     finalizeDeposit, and lands in its own currency on the same multisig."""
-    job = "cli-deposit-token"
-    state = step_done(run, "anchor", "the second token's deposit block is accepted", ANCHOR_SECS, job)
+    log = "cli-deposit-token"
+    state = step_done(run, "anchor", "the second token's deposit block is accepted", ANCHOR_SECS, log)
     assert an("accepted", ARB_CHAIN, state[1]).get("ACCEPTED") == "true", f"isAcceptedBlockHash({ARB_CHAIN}, {state[1]})"
-    step_done(run, "prove", "the second token's deposit proof is generated", 3600, job)
-    step_done(run, "finalize", "the second token's finalizeDeposit is confirmed", 900, job)
-    step_done(run, "credit", "the second token is minted", 900, job)
-    run.finish(job, 600)
+    step_done(run, "prove", "the second token's deposit proof is generated", 3600, log)
+    step_done(run, "finalize", "the second token's finalizeDeposit is confirmed", 900, log)
+    step_done(run, "credit", "the second token is minted", 900, log)
+    run.finish("cli-deposit", 600)
     balances = an("ecc", ctx["msig"])
     assert int(balances["ECC4"]) == TOKEN_AMOUNT, "the multisig does not hold the 2 of the second token"
     assert int(balances["ECC3"]) == AMOUNT, "the second token's deposit moved the multisig's USDC"

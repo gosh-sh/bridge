@@ -18,7 +18,7 @@ TVM_VERSION ?= gosh
 build: BridgeZerostateData.tvc
 
 BridgeZerostateData.tvc BridgeZerostateData.abi.json: BridgeZerostateData.sol
-	$(SOLD) --tvm-version $(TVM_VERSION) $< -o .
+	$(SOLD) --tvm-version $(TVM_VERSION) --base-path .. $< -o .
 	rm -f BridgeZerostateData.debug.json BridgeZerostateData.code
 
 clean:

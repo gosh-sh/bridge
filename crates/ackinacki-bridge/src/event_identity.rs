@@ -72,6 +72,26 @@ pub(crate) fn check_captured_event(
     an_tx: &str,
     record: Option<&Path>,
 ) -> CliResult<()> {
+    check_captured_event_for_token(
+        event_boc_b64,
+        from,
+        to,
+        amount,
+        crate::burn::USDC_ECC_ID,
+        an_tx,
+        record,
+    )
+}
+
+pub(crate) fn check_captured_event_for_token(
+    event_boc_b64: &str,
+    from: &FromAddress,
+    to: &ToAddress,
+    amount: &UsdcAmount,
+    token_id: u32,
+    an_tx: &str,
+    record: Option<&Path>,
+) -> CliResult<()> {
     let event = bridge_event_witness::decode_event_boc_base64(event_boc_b64).map_err(|e| {
         CliError::ProofFailed {
             reason: format!(
@@ -117,11 +137,10 @@ pub(crate) fn check_captured_event(
             to.chain_id,
         ));
     }
-    if event.token_id != crate::burn::USDC_ECC_ID {
+    if event.token_id != token_id {
         differ.push(format!(
-            "token: the event's ECC[{}], this withdrawal's ECC[{}] (USDC)",
-            event.token_id,
-            crate::burn::USDC_ECC_ID
+            "token: the event's ECC[{}], this withdrawal's ECC[{}]",
+            event.token_id, token_id
         ));
     }
     let ours = hex::decode(&from.account_id_hex).ok();
@@ -185,7 +204,7 @@ pub(crate) mod tests {
 
     /// `WithdrawalInitiated` of a 1.000000 USDC withdrawal from the multisig
     /// `0:826403c9…` to `0x400b…46B3` on Sepolia, bound to [`EVM_BRIDGE`] —
-    /// emitted by the shipped `eccUSDCBridge.tvc` under `tvm-debugger`.
+    /// emitted by the shipped `eccBridge.tvc` under `tvm-debugger`.
     pub(crate) const EVENT_1_000000: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAAAAAAAABgAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9CQAAAAAM/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEEyAeT6OXEmObJbnyw/0rjTbaYJRgWFyzBToko8IAiZQAChAC7glypyn3d/LJfOcHsBzqRJGsw==";
     /// The same multisig and recipient, 0.999995 USDC.
     const EVENT_0_999995: &str = "te6ccgEBBAEA3QABn+AA0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmoAAAAAAAAAAAAAAABgAQKYcogE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqjanAAAAAAAAAAAAAAAAAA9COwAAAAM/sIKpBaiVFRIk9tk70HToFjOGOAMCAEOAEEyAeT6OXEmObJbnyw/0rjTbaYJRgWFyzBToko8IAiZQAChAC7glypyn3d/LJfOcHsBzqRJGsw==";
@@ -297,6 +316,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_usdc_event_cannot_resume_a_selected_second_currency() {
+        check_captured_event_for_token(
+            EVENT_1_000000,
+            &from(),
+            &to(),
+            &amount("1.000000"),
+            3,
+            AN_TX,
+            None,
+        )
+        .unwrap();
+        let error = check_captured_event_for_token(
+            EVENT_1_000000,
+            &from(),
+            &to(),
+            &amount("1.000000"),
+            4,
+            AN_TX,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code().as_i32(), 10);
+        assert!(error.to_string().contains("ECC[4]"), "{error}");
+    }
+
+    #[test]
     fn a_token_other_than_usdc_is_refused() {
         let msg = refusal(EVENT_TOKEN_2, &from(), &to(), "1.000000");
         assert!(msg.contains("token"), "{msg}");
@@ -320,8 +365,9 @@ pub(crate) mod tests {
 
     #[test]
     fn an_event_bound_to_another_bridge_names_the_one_that_pays_it() {
-        let other: alloy::primitives::Address =
-            "0x0000000000000000000000000000000000000b0b".parse().unwrap();
+        let other: alloy::primitives::Address = "0x0000000000000000000000000000000000000b0b"
+            .parse()
+            .unwrap();
         let err = check_event_bridge(EVENT_1_000000, other, AN_TX)
             .expect_err("the event names another bridge");
         assert_eq!(err.exit_code().as_i32(), 13, "{err}");
@@ -356,7 +402,7 @@ pub(crate) mod tests {
             include_str!("orchestrator.rs"),
         );
         let check = src
-            .find("event_identity::check_captured_event(")
+            .find("event_identity::check_captured_event_for_token(")
             .expect("the check is wired");
         let captured = src.find("Status::Captured").expect("the capture write");
         assert!(

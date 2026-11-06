@@ -92,7 +92,7 @@ abstract contract AaveBridgeFixture is Test {
         usdc.mint(who, amount);
         vm.startPrank(who);
         usdc.approve(address(bridge), amount);
-        bridge.deposit(amount, bytes32(uint256(uint160(who))));
+        bridge.deposit(address(usdc), amount, bytes32(uint256(uint160(who))));
         vm.stopPrank();
     }
 

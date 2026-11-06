@@ -53,12 +53,19 @@ contract AckiNackiBridge {
     /// @notice One USDC base unit (USD Coin uses 6 decimals on Ethereum).
     uint256 public constant USDC_UNIT = 10 ** 6;
 
-    /// @notice Maximum per-tx deposit amount. Capped at `type(uint64).max` so the
-    ///         amount fits AN `USDCBridge` mint path (`fr[2]` as uint64). Not a
-    ///         global TVL limit (QC-A1-1 / QC-AN-J1).
+    /// @notice Amount-width ceiling for every token, not an AN policy limit.
+    ///         `gosh.mintecc` takes a uint64 (~18.44 tokens at 18 decimals).
+    ///         The current AN bridge additionally enforces 50 USDC per transfer
+    ///         and credits USDC alone.
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
 
+    /// @notice Default per-tx cap applied to USDC when the constructor lists
+    ///         it. The owner can change it afterwards with `setTokenLimits`;
+    ///         the constructor lists no other token.
     uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
+
+    /// @notice Default outstanding-liability cap applied to USDC when the
+    ///         constructor lists it. See `MAX_TRANSFER_AMOUNT`.
     uint256 public constant MAX_BRIDGE_TVL = 10_000 * USDC_UNIT;
 
     /// @notice Basis-point denominator
@@ -110,7 +117,57 @@ contract AckiNackiBridge {
 
     /// @notice Total user principal currently held by the bridge (USDC + aUSDC principal)
     /// @dev Yield accrued in AAVE is *not* reflected here — see `accruedYield()`.
+    ///      This is the USDC liability specifically: AAVE, the yield book and
+    ///      the solvency checks are USDC-only, so USDC keeps its own slot
+    ///      rather than sharing the generic registry counter. Every other
+    ///      listed token accrues into `TokenInfo.liabilities`; read either
+    ///      through `liabilitiesOf`.
     uint256 public treasuryBalance;
+
+    // ---------------------------------------------------------------------
+    // Storage: token registry
+    // ---------------------------------------------------------------------
+
+    /// @notice A listed ERC-20 and the limits that apply to it.
+    /// @dev Keyed by the Acki Nacki ECC currency id, which is what Circuit 4
+    ///      carries in `pub.tokenId` and what the AN bridge burns. One id maps
+    ///      to exactly one ERC-20 and back.
+    struct TokenInfo {
+        /// @notice The ERC-20 this id pays out. `address(0)` means the id is
+        ///         not listed.
+        address token;
+        /// @notice Decimals as declared by the owner when listing. Metadata
+        ///         for indexers and front-ends only: every limit below is in
+        ///         token base units and no contract math reads this field.
+        uint8 decimals;
+        /// @notice Whether `deposit` accepts this token. `withdrawByProof`
+        ///         ignores it, so closing deposits never strands funds that
+        ///         are already paid in.
+        bool depositsEnabled;
+        /// @notice Per-deposit cap, token base units.
+        uint256 maxTransfer;
+        /// @notice Cap on outstanding liabilities for this token, base units.
+        uint256 tvlCap;
+        /// @notice Outstanding liabilities, base units. Unused for USDC,
+        ///         whose liabilities live in `treasuryBalance`.
+        uint256 liabilities;
+        /// @notice Highest deposit cap accepted for this listing; never decreases.
+        uint256 maxWithdrawal;
+    }
+
+    /// @notice ECC currency id → listing.
+    mapping(uint32 => TokenInfo) private _tokens;
+
+    /// @notice ERC-20 → ECC currency id. Only meaningful together with
+    ///         `_tokenRegistered`, because id `0` is a legal listing.
+    mapping(address => uint32) private _tokenIdOf;
+
+    /// @notice Whether an ERC-20 is listed under some id.
+    mapping(address => bool) private _tokenRegistered;
+
+    /// @notice Every currently listed id, for enumeration by off-chain
+    ///         callers. Delisting removes the id from this array.
+    uint32[] private _listedTokenIds;
 
     /// @notice Oracle providing canonical Ethereum block hashes.
     /// @dev Currently unused by the public surface; preserved for the future
@@ -266,7 +323,7 @@ contract AckiNackiBridge {
     ///         `(dappFr, accFr)` pair via its public inputs — pinning these
     ///         on Ethereum at deploy time prevents a caller from substituting
     ///         an event emitted by a different AN contract (e.g. a malicious
-    ///         lookalike `eccUSDCBridge`).
+    ///         lookalike `eccBridge`).
     uint256 public immutable bridgeWithdrawalDappFr;
 
     /// @notice Fr-encoded AN-side bridge account identifier (see `bridgeWithdrawalDappFr`).
@@ -279,8 +336,10 @@ contract AckiNackiBridge {
     ///         Zero disables the alias even when `altDstChainId` is set.
     uint256 public immutable bridgeWithdrawalAltDstHostChainId;
 
-    /// @notice See `BridgeWithdrawConfig.altTokenId`.
-    uint256 public immutable bridgeWithdrawalAltTokenId;
+    /// @notice See `BridgeWithdrawConfig.usdcTokenId`. The id the constructor
+    ///         lists `usdc` under, and the only id whose liabilities live in
+    ///         `treasuryBalance` and whose idle balance AAVE may hold.
+    uint32 public immutable usdcTokenId;
 
     /// @notice The bridge this one replaces on the same chain, or zero. It
     ///         only authorizes the treasury handover: the predecessor may call
@@ -332,13 +391,35 @@ contract AckiNackiBridge {
     ///         destination: it is carried as ZK public inputs and credited on the
     ///         AN side (the EVM `sender` is kept only for provenance, since a
     ///         20-byte EVM address is not a valid AN recipient).
+    /// @dev `token` is appended last on purpose: the deposit circuit reads
+    ///      `amount`, `anAccount` and `timestamp` at fixed offsets into the
+    ///      log's non-indexed data, and appending leaves those three offsets
+    ///      where they were. The circuit binds `token` to this field, so the
+    ///      destination ERC-20 is proven from the receipt rather than chosen
+    ///      by whoever generates the proof.
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
         uint256 amount,
         bytes32 anAccount,
-        uint256 timestamp
+        uint256 timestamp,
+        address token
     );
+
+    /// @notice `token` was listed under Acki Nacki ECC currency id `tokenId`.
+    event TokenListed(
+        uint32 indexed tokenId,
+        address indexed token,
+        uint8 decimals,
+        uint256 maxTransfer,
+        uint256 tvlCap,
+        bool depositsEnabled
+    );
+    /// @notice Owner changed the caps on an already listed id.
+    event TokenLimitsSet(uint32 indexed tokenId, uint256 maxTransfer, uint256 tvlCap);
+    /// @notice Owner opened or closed deposits for a listed id. Withdrawals
+    ///         are unaffected either way.
+    event TokenDepositsEnabledSet(uint32 indexed tokenId, bool enabled);
 
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event WithdrawnFromAave(uint256 amountRequested, uint256 amountReceived);
@@ -373,6 +454,12 @@ contract AckiNackiBridge {
     /// @notice `migrateTreasury`: this paused bridge handed its whole
     ///         `treasuryBalance` to `successor`.
     event TreasuryMigrated(address indexed successor, uint256 amount);
+    /// @notice A non-USDC listing took over liabilities through `fundToken`.
+    event TokenFunded(
+        address indexed from, uint32 indexed tokenId, uint256 amount, uint256 liabilitiesAfter
+    );
+    /// @notice `migrateToken` handed a listing's liabilities to `successor`.
+    event TokenMigrated(address indexed successor, uint32 indexed tokenId, uint256 amount);
 
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     event Paused(address indexed by);
@@ -410,9 +497,7 @@ contract AckiNackiBridge {
     /// @param recipient The 20-byte EVM address reconstructed from
     ///        `(recipientHi, recipientLo)`.
     /// @param amount Amount of USDC transferred to `recipient`.
-    /// @param tokenId Token id from the event body (only `tokenId == 0` =
-    ///        bridged USDC is currently supported; non-zero reserved for
-    ///        multi-token wiring in a future milestone).
+    /// @param tokenId Listed AN ECC currency id from the event body.
     /// @param submitter `msg.sender` of the `withdrawByProof` call (typically
     ///        a relayer; the payout goes to `recipient`, not `submitter`).
     event WithdrawalByProofExecuted(
@@ -504,6 +589,13 @@ contract AckiNackiBridge {
     /// @notice `migrateTreasury`: part of `treasuryBalance` is still in AAVE;
     ///         `withdrawFromAave` or `emergencyWithdrawAll` first.
     error TreasuryNotLiquid(uint256 liquid, uint256 treasuryBalance);
+    /// @notice USDC moves with `migrateTreasury` and `fundTreasury`.
+    error CannotMigrateUsdc();
+    /// @notice `fundToken`: this bridge lists another token under `tokenId`.
+    error FundedTokenMismatch(uint32 tokenId, address token);
+    /// @notice `migrateToken`: the successor would refuse a withdrawal this
+    ///         listing accepts. Raise the successor's limits first.
+    error SuccessorWithdrawalCapTooLow(uint256 cap, uint256 required);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -568,9 +660,8 @@ contract AckiNackiBridge {
     ///         on this chain wired to the same AN-side `(dappFr, accFr)`, or
     ///         it was set while `withdrawByProof` is disabled.
     error InvalidPredecessor(address predecessor);
-    /// @notice Only `tokenId == 0` (bridged USDC) is currently supported.
-    ///         Non-zero token ids are reserved for multi-token wiring in a
-    ///         future milestone.
+    /// @notice The proof's `pub.tokenId` is not listed on this bridge, or does
+    ///         not fit a uint32 (the width AN encodes the ECC currency id in).
     error UnsupportedTokenId(uint256 tokenId);
     /// @notice Circuit 4 withdraw is wired but the verifyBlock triple is
     ///         not. Without `verifyBlock`, no anchors ever land and every
@@ -598,6 +689,30 @@ contract AckiNackiBridge {
     /// @notice User-facing entrypoints are paused. Owner-only AAVE
     ///         management remains available.
     error BridgePaused();
+
+    // Token registry errors
+    /// @notice `deposit` was called with an ERC-20 this bridge does not list.
+    error TokenNotListed(address token);
+    /// @notice Deposits are closed for this listing; withdrawals still pay.
+    error TokenDepositsDisabled(uint32 tokenId);
+    /// @notice A listing was given `address(0)`.
+    error InvalidTokenAddress();
+    /// @notice That ERC-20 is already listed, under `existingTokenId`. One
+    ///         token answers to one id.
+    error TokenAlreadyListed(address token, uint32 existingTokenId);
+    /// @notice That id is already taken by `existingToken`.
+    error TokenIdAlreadyUsed(uint32 tokenId, address existingToken);
+    /// @notice `maxTransfer` must be non-zero and must not exceed `tvlCap`.
+    error TokenLimitsInvalid(uint256 maxTransfer, uint256 tvlCap);
+    /// @notice `maxTransfer` exceeds `MAX_DEPOSIT_AMOUNT`, the uint64 ceiling
+    ///         the Acki Nacki mint instruction accepts. Per-token policy limits
+    ///         must also match the receiving AN deployment.
+    error TokenLimitExceedsMintCeiling(uint256 maxTransfer, uint256 ceiling);
+    /// @notice The AAVE aToken cannot be listed for deposits. Its balance is
+    ///         the yield book's own measure (`aUsdcBalance`, `_backedPrincipal`,
+    ///         `accruedYield`), so deposits of it would read back as interest
+    ///         the owner may harvest.
+    error CannotListAToken();
     error AlreadyInThatPauseState();
 
     // ---------------------------------------------------------------------
@@ -705,12 +820,16 @@ contract AckiNackiBridge {
         ///         destined for logical chain `1` from replaying on Arbitrum or
         ///         mainnet even if those deployments misconfigure `altDstChainId`.
         uint256 altDstHostChainId;
-        /// @notice Optional shellnet alias for `pub.tokenId` (e.g. AN
-        ///         `USDC_ECC_ID = 3`). Zero accepts only `tokenId == 0`.
-        ///         Production mainnet deploys must leave this zero
-        ///         (see `DeployRealBridge`); not enforced here because
-        ///         Foundry tests `vm.chainId(1)` to bind Circuit 4 `dstChainId`.
-        uint256 altTokenId;
+        /// @notice The Acki Nacki ECC currency id that carries bridged USDC,
+        ///         i.e. the id the constructor lists `_usdc` under and the id
+        ///         Circuit 4 must report in `pub.tokenId` to be paid in USDC.
+        ///         AN's `eccBridge` emits its `USDC_ECC_ID` (`3`), so a
+        ///         deployment against that AN side passes `3`; a deployment
+        ///         whose AN side reports `0` passes `0`.
+        /// @dev Replaces the former `altTokenId` alias, which accepted `0`
+        ///      *or* the alias and so let one deployment answer to two ids.
+        ///      Exactly one id now pays out USDC, and no other token is listed.
+        uint32 usdcTokenId;
         /// @notice The `AckiNackiBridge` this deployment replaces on the same
         ///         chain whose treasury it may take over, or zero. Must have
         ///         code here and carry the same `(dappFr, accFr)`; else
@@ -773,7 +892,6 @@ contract AckiNackiBridge {
                 // revert permanently — same invariant as the genesis anchors.
                 _requireCanonicalFr(_bw.dappFr);
                 _requireCanonicalFr(_bw.accFr);
-                _requireCanonicalFr(_bw.altTokenId);
             }
             // Genesis anchors enter the same slots `applyBkSetUpdate`
             // guards, so they answer to the same invariant. Without this a
@@ -813,11 +931,16 @@ contract AckiNackiBridge {
         bridgeWithdrawalAccFr = _bw.accFr;
         bridgeWithdrawalAltDstChainId = _bw.altDstChainId;
         bridgeWithdrawalAltDstHostChainId = _bw.altDstHostChainId;
-        bridgeWithdrawalAltTokenId = _bw.altTokenId;
+        usdcTokenId = _bw.usdcTokenId;
         if (address(_bw.predecessor) != address(0)) {
             _requirePredecessor(_bw);
         }
         predecessor = _bw.predecessor;
+
+        // List USDC up front so a deployment that never makes an owner call
+        // behaves exactly as the single-token bridge did: the same per-tx cap,
+        // the same TVL cap, deposits open.
+        _listToken(_bw.usdcTokenId, _usdc, 6, MAX_TRANSFER_AMOUNT, MAX_BRIDGE_TVL, true);
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -854,13 +977,15 @@ contract AckiNackiBridge {
     // User-facing: deposit
     // ---------------------------------------------------------------------
 
-    /// @notice Deposit USDC to be bridged to Acki Nacki.
+    /// @notice Deposit a listed ERC-20 to be bridged to Acki Nacki.
     /// @dev Caller must `approve` this contract for `amount` before calling.
     ///      Emits a `Deposit` event that is later proven by a ZK circuit.
-    ///      The deposit that lifts the liquid principal to the supply
-    ///      threshold supplies everything above the target to AAVE
+    ///      Funds stay in custody; only USDC can be supplied to AAVE. The USDC
+    ///      deposit that lifts the liquid principal to the supply threshold
+    ///      supplies everything above the target to AAVE
     ///      (`_supplyAboveTarget`); a refusing pool never reverts it.
-    /// @param amount      USDC amount (6 decimals) to bridge.
+    /// @param token       Listed ERC-20 to transfer.
+    /// @param amount      Amount in the token's base units.
     /// @param anAccount   Acki Nacki destination account (256-bit TVM address).
     ///                    Must be non-zero (`InvalidAnAccount`). AN
     ///                    `finalizeDeposit` / `confirmDeposit` also reject zero
@@ -868,21 +993,202 @@ contract AckiNackiBridge {
     ///                    fail-fast — do not drop it. Carried as ZK public
     ///                    inputs; an EVM address cannot be an AN recipient.
     ///                    A wrong non-zero destination is one-way (no refund).
-    function deposit(uint256 amount, bytes32 anAccount) external nonReentrant whenNotPaused {
+    function deposit(address token, uint256 amount, bytes32 anAccount)
+        external
+        nonReentrant
+        whenNotPaused
+    {
         if (amount == 0) revert InvalidAmount();
-        if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
-        if (amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
         if (anAccount == bytes32(0)) revert InvalidAnAccount();
-        if (treasuryBalance > MAX_BRIDGE_TVL || amount > MAX_BRIDGE_TVL - treasuryBalance) {
+
+        uint32 tokenId = _requireDepositableToken(token);
+        TokenInfo storage info = _tokens[tokenId];
+
+        if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
+        if (amount > info.maxTransfer) revert TransferTooLarge();
+        uint256 owed = liabilitiesOf(tokenId);
+        if (owed > info.tvlCap || amount > info.tvlCap - owed) {
             revert TvlCapReached();
         }
-        uint256 credited = _pullExactUsdc(amount);
+        uint256 credited = _pullExact(IERC20(token), amount);
 
         uint256 depositId = depositCounter++;
-        treasuryBalance += credited;
+        _creditLiabilities(tokenId, credited);
 
-        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp);
-        _supplyAboveTarget();
+        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token);
+        if (tokenId == usdcTokenId) _supplyAboveTarget();
+    }
+
+    // ---------------------------------------------------------------------
+    // Token registry
+    // ---------------------------------------------------------------------
+
+    /// @notice Change the deposit caps on an already listed id.
+    /// @dev Lowering `tvlCap` below the current liabilities is allowed: it
+    ///      stops new deposits without touching what is already owed.
+    function setTokenLimits(uint32 tokenId, uint256 maxTransfer, uint256 tvlCap)
+        external
+        onlyOwner
+    {
+        TokenInfo storage info = _requireListedId(tokenId);
+        _requireSaneLimits(maxTransfer, tvlCap);
+        if (
+            tokenId == usdcTokenId && (maxTransfer > MAX_TRANSFER_AMOUNT || tvlCap > MAX_BRIDGE_TVL)
+        ) {
+            revert TokenLimitsInvalid(maxTransfer, tvlCap);
+        }
+        if (maxTransfer > info.maxWithdrawal) info.maxWithdrawal = maxTransfer;
+        info.maxTransfer = maxTransfer;
+        info.tvlCap = tvlCap;
+        emit TokenLimitsSet(tokenId, maxTransfer, tvlCap);
+    }
+
+    /// @notice Open or close deposits for a listed id.
+    /// @dev Withdrawals are unaffected, so this is the safe way to retire a
+    ///      token: close deposits and let the liabilities drain.
+    function setTokenDepositsEnabled(uint32 tokenId, bool enabled) external onlyOwner {
+        TokenInfo storage info = _requireListedId(tokenId);
+        info.depositsEnabled = enabled;
+        emit TokenDepositsEnabledSet(tokenId, enabled);
+    }
+
+    /// @notice The listing behind an ECC currency id. `token == address(0)`
+    ///         means the id is not listed.
+    /// @dev `liabilities` is reported through `liabilitiesOf`, so USDC reads
+    ///      correctly here too.
+    function tokenInfo(uint32 tokenId)
+        external
+        view
+        returns (
+            address token,
+            uint8 decimals,
+            bool depositsEnabled,
+            uint256 maxTransfer,
+            uint256 tvlCap,
+            uint256 liabilities
+        )
+    {
+        TokenInfo storage info = _tokens[tokenId];
+        return (
+            info.token,
+            info.decimals,
+            info.depositsEnabled,
+            info.maxTransfer,
+            info.tvlCap,
+            liabilitiesOf(tokenId)
+        );
+    }
+
+    /// @notice Per-withdrawal cap in base units. Lowering deposit limits leaves this unchanged.
+    function maxWithdrawalAmount(uint32 tokenId) external view returns (uint256) {
+        return _tokens[tokenId].maxWithdrawal;
+    }
+
+    /// @notice The ECC currency id `token` is listed under.
+    /// @dev `listed` is the answer to check: id `0` is a legal listing, so a
+    ///      zero `tokenId` alone does not mean "absent".
+    function tokenIdOf(address token) external view returns (bool listed, uint32 tokenId) {
+        return (_tokenRegistered[token], _tokenIdOf[token]);
+    }
+
+    /// @notice Every currently listed ECC currency id.
+    function listedTokenIds() external view returns (uint32[] memory) {
+        return _listedTokenIds;
+    }
+
+    /// @notice Outstanding liabilities for a listed id, in token base units.
+    /// @dev USDC keeps its liabilities in `treasuryBalance` because the AAVE
+    ///      and yield accounting is written against that single slot; every
+    ///      other token uses the registry counter. Both are read here.
+    function liabilitiesOf(uint32 tokenId) public view returns (uint256) {
+        if (tokenId == usdcTokenId) return treasuryBalance;
+        return _tokens[tokenId].liabilities;
+    }
+
+    /// @dev The constructor lists USDC through this and nothing else calls it:
+    ///      a token Acki Nacki cannot credit would take deposits that never
+    ///      finalize, so no owner call adds one.
+    function _listToken(
+        uint32 tokenId,
+        address token,
+        uint8 decimals,
+        uint256 maxTransfer,
+        uint256 tvlCap,
+        bool depositsEnabled
+    ) internal {
+        if (token == address(0)) revert InvalidTokenAddress();
+        // The aToken is the yield book's unit of account: `aUsdcBalance()`
+        // feeds `_backedPrincipal`, `accruedYield` and `harvestYield`. A
+        // deposit of it would raise that balance without raising
+        // `suppliedPrincipal`, which reads back as interest the owner may
+        // harvest — user principal paid out as yield.
+        if (address(aUSDC) != address(0) && token == address(aUSDC)) {
+            revert CannotListAToken();
+        }
+        if (_tokenRegistered[token]) {
+            revert TokenAlreadyListed(token, _tokenIdOf[token]);
+        }
+        address taken = _tokens[tokenId].token;
+        if (taken != address(0)) revert TokenIdAlreadyUsed(tokenId, taken);
+        _requireSaneLimits(maxTransfer, tvlCap);
+
+        _tokens[tokenId] = TokenInfo({
+            token: token,
+            decimals: decimals,
+            depositsEnabled: depositsEnabled,
+            maxTransfer: maxTransfer,
+            tvlCap: tvlCap,
+            liabilities: 0,
+            maxWithdrawal: maxTransfer
+        });
+        _tokenIdOf[token] = tokenId;
+        _tokenRegistered[token] = true;
+        _listedTokenIds.push(tokenId);
+
+        emit TokenListed(tokenId, token, decimals, maxTransfer, tvlCap, depositsEnabled);
+    }
+
+    /// @dev Caps must be usable and must not promise more than AN can mint.
+    function _requireSaneLimits(uint256 maxTransfer, uint256 tvlCap) internal pure {
+        if (maxTransfer == 0 || maxTransfer > tvlCap) {
+            revert TokenLimitsInvalid(maxTransfer, tvlCap);
+        }
+        if (maxTransfer > MAX_DEPOSIT_AMOUNT) {
+            revert TokenLimitExceedsMintCeiling(maxTransfer, MAX_DEPOSIT_AMOUNT);
+        }
+    }
+
+    /// @dev The listing behind an id, or revert `UnsupportedTokenId`.
+    function _requireListedId(uint32 tokenId) internal view returns (TokenInfo storage info) {
+        info = _tokens[tokenId];
+        if (info.token == address(0)) revert UnsupportedTokenId(tokenId);
+    }
+
+    /// @dev The id behind an ERC-20 that is listed *and* open for deposits.
+    function _requireDepositableToken(address token) internal view returns (uint32 tokenId) {
+        if (!_tokenRegistered[token]) revert TokenNotListed(token);
+        tokenId = _tokenIdOf[token];
+        if (!_tokens[tokenId].depositsEnabled) revert TokenDepositsDisabled(tokenId);
+    }
+
+    /// @dev Add to what the bridge owes for `tokenId`. Routes USDC to
+    ///      `treasuryBalance` — see `liabilitiesOf`.
+    function _creditLiabilities(uint32 tokenId, uint256 amount) internal {
+        if (tokenId == usdcTokenId) {
+            treasuryBalance += amount;
+        } else {
+            _tokens[tokenId].liabilities += amount;
+        }
+    }
+
+    /// @dev Subtract from what the bridge owes for `tokenId`. The caller has
+    ///      already checked the amount against `liabilitiesOf`.
+    function _debitLiabilities(uint32 tokenId, uint256 amount) internal {
+        if (tokenId == usdcTokenId) {
+            treasuryBalance -= amount;
+        } else {
+            _tokens[tokenId].liabilities -= amount;
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1518,17 +1824,17 @@ contract AckiNackiBridge {
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
     ///   5. `pub.nullifier` has not been used before (replay protection).
-    ///   6. `pub.tokenId == 0` (only bridged USDC is currently supported;
-    ///      non-zero token ids reserved for multi-token in a future milestone).
+    ///   6. `pub.tokenId` names a listed ERC-20 and the amount fits its withdrawal cap.
     ///   7. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
     ///
     /// State updates (CEI):
-    ///   - **Effects**: mark `nullifier` used; decrement `treasuryBalance`.
-    ///   - **Interactions**: when the liquid principal is short, a pull from
-    ///     AAVE (`_refillFromAave`) — required for what the USDC on hand
-    ///     cannot pay, best effort up to the target of the new book;
-    ///     `usdc.transfer(recipient, amount)` to pay out.
+    ///   - **Effects**: mark `nullifier` used; debit the listing's liabilities
+    ///     (and `treasuryBalance` for USDC).
+    ///   - **Interactions**: for a USDC payout whose liquid principal is short,
+    ///     a pull from AAVE (`_refillFromAave`) — required for what the USDC on
+    ///     hand cannot pay, best effort up to the target of the new book; then
+    ///     pay the listed ERC-20 through `_pushExact`.
     ///
     /// @dev Permissionless. The caller pays gas but the payout goes to
     ///      `recipient` (reconstructed from `recipientHi`/`recipientLo`).
@@ -1547,7 +1853,16 @@ contract AckiNackiBridge {
             revert WithdrawByProofDisabled();
         }
 
-        if (pub.amount > MAX_TRANSFER_AMOUNT) revert TransferTooLarge();
+        // Which ERC-20 this proof is owed in. The id is assigned on the AN
+        // side and burned there; an id this bridge does not list cannot be
+        // paid, and one that does not fit a uint32 was never a valid AN ECC
+        // currency id to begin with.
+        if (pub.tokenId > type(uint32).max) revert UnsupportedTokenId(pub.tokenId);
+        uint32 payoutTokenId = uint32(pub.tokenId);
+        TokenInfo storage payoutInfo = _tokens[payoutTokenId];
+        if (payoutInfo.token == address(0)) revert UnsupportedTokenId(pub.tokenId);
+
+        if (pub.amount > payoutInfo.maxWithdrawal) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
         if (pub.dstBridge != uint256(uint160(address(this)))) {
@@ -1563,11 +1878,6 @@ contract AckiNackiBridge {
                 && pub.dstChainId == bridgeWithdrawalAltDstChainId);
         if (!dstOk) {
             revert DstChainIdMismatch(pub.dstChainId, block.chainid);
-        }
-        bool tokenOk = pub.tokenId == 0
-            || (bridgeWithdrawalAltTokenId != 0 && pub.tokenId == bridgeWithdrawalAltTokenId);
-        if (!tokenOk) {
-            revert UnsupportedTokenId(pub.tokenId);
         }
         if (pub.recipientHi > RECIPIENT_HALF_MASK) {
             revert RecipientHalfOutOfRange(pub.recipientHi);
@@ -1607,8 +1917,9 @@ contract AckiNackiBridge {
         if (!ok) revert WithdrawalProofRejected();
 
         // ---- Treasury check (must happen before the AAVE pull). ----
-        if (pub.amount > treasuryBalance) {
-            revert WithdrawTreasuryShortfall(pub.amount, treasuryBalance);
+        uint256 owed = liabilitiesOf(payoutTokenId);
+        if (pub.amount > owed) {
+            revert WithdrawTreasuryShortfall(pub.amount, owed);
         }
 
         // Measured before the debit: the USDC on hand and the part of it
@@ -1620,15 +1931,17 @@ contract AckiNackiBridge {
 
         // ---- Effects (CEI: mutate state before any external call). ----
         _nullifiers[nullifierKey] = true;
-        treasuryBalance -= pub.amount;
+        _debitLiabilities(payoutTokenId, pub.amount);
 
         // ---- Interactions ----
-        // Only what the USDC on hand cannot pay has to come from AAVE. The
-        // pull also tries to leave the target of the new book liquid and to
-        // bring `suppliedPrincipal` back within the book, so it is attempted
-        // whenever the liquid principal falls short. It may reach aUSDC
-        // above `suppliedPrincipal`: user principal is paid before yield.
-        if (liquid < pub.amount) {
+        // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
+        // pull; every other token sits liquid in the contract. Only what the
+        // USDC on hand cannot pay has to come from AAVE. The pull also tries to
+        // leave the target of the new book liquid and to bring
+        // `suppliedPrincipal` back within the book, so it is attempted whenever
+        // the liquid principal falls short. It may reach aUSDC above
+        // `suppliedPrincipal`: user principal is paid before yield.
+        if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
             _refillFromAave(
                 onHand < pub.amount ? pub.amount - onHand : 0,
                 pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
@@ -1636,7 +1949,7 @@ contract AckiNackiBridge {
         }
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        _pushExactUsdc(recipient, pub.amount);
+        _pushExact(IERC20(payoutInfo.token), recipient, pub.amount);
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
@@ -1660,30 +1973,52 @@ contract AckiNackiBridge {
         if (value >= BN254_R) revert FieldElementOutOfRange(value);
     }
 
-    /// @dev Credit exactly `amount` USDC. A fee-on-transfer or rebasing token
-    ///      that moves a different custody delta reverts.
-    function _pullExactUsdc(uint256 amount) internal returns (uint256 credited) {
-        uint256 before = usdc.balanceOf(address(this));
-        if (!usdc.transferFrom(msg.sender, address(this), amount)) {
+    /// @dev Credit exactly `amount` of `token`. A fee-on-transfer or rebasing
+    ///      token that moves a different custody delta reverts. Applied to
+    ///      every listed token, not just USDC: the check is what keeps such
+    ///      tokens out, so listing one does not quietly make the books wrong.
+    function _pullExact(IERC20 token, uint256 amount) internal returns (uint256 credited) {
+        uint256 before = token.balanceOf(address(this));
+        if (!_callToken(
+                token, abi.encodeCall(IERC20.transferFrom, (msg.sender, address(this), amount))
+            )) {
             revert TransferFromFailed();
         }
-        uint256 afterBal = usdc.balanceOf(address(this));
+        uint256 afterBal = token.balanceOf(address(this));
         if (afterBal < before || afterBal - before != amount) {
             revert TransferAmountMismatch();
         }
         return amount;
     }
 
-    /// @dev Debit exactly `amount` USDC. Same FoT/rebase fail-closed.
-    function _pushExactUsdc(address recipient, uint256 amount) internal {
-        uint256 before = usdc.balanceOf(address(this));
-        if (!usdc.transfer(recipient, amount)) {
+    /// @dev Debit exactly `amount` of `token`. Same FoT/rebase fail-closed.
+    function _pushExact(IERC20 token, address recipient, uint256 amount) internal {
+        uint256 before = token.balanceOf(address(this));
+        if (!_callToken(token, abi.encodeCall(IERC20.transfer, (recipient, amount)))) {
             revert WithdrawTransferFailed(recipient, amount);
         }
-        uint256 afterBal = usdc.balanceOf(address(this));
+        uint256 afterBal = token.balanceOf(address(this));
         if (before < afterBal || before - afterBal != amount) {
             revert WithdrawTransferFailed(recipient, amount);
         }
+    }
+
+    /// @dev Accept both standard ERC-20 success and legacy empty-return success.
+    ///      A false or malformed return is a failure; token reverts keep their reason.
+    function _callToken(IERC20 token, bytes memory callData) private returns (bool) {
+        (bool success, bytes memory result) = address(token).call(callData);
+        if (!success) {
+            assembly ("memory-safe") {
+                revert(add(result, 32), mload(result))
+            }
+        }
+        if (result.length == 0) return true;
+        if (result.length != 32) return false;
+        uint256 returned;
+        assembly ("memory-safe") {
+            returned := mload(add(result, 32))
+        }
+        return returned == 1;
     }
 
     /// @dev Recombine a split-α `recipient` (10/10 byte halves) back into the
@@ -1830,7 +2165,7 @@ contract AckiNackiBridge {
             revert NotOwnerOrPredecessor();
         }
         if (amount == 0) revert InvalidAmount();
-        treasuryBalance += _pullExactUsdc(amount);
+        treasuryBalance += _pullExact(usdc, amount);
         emit TreasuryFunded(msg.sender, amount, treasuryBalance);
     }
 
@@ -1845,15 +2180,7 @@ contract AckiNackiBridge {
     ///      take the approved USDC in its `fundTreasury`, so this is an owner
     ///      power over the whole book.
     function migrateTreasury(address successor) external onlyOwner nonReentrant {
-        if (!paused) revert NotPaused();
-        if (successor == address(this) || successor.code.length == 0) {
-            revert NotSuccessor(successor);
-        }
-        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
-            if (address(p) != address(this)) revert NotSuccessor(successor);
-        } catch {
-            revert NotSuccessor(successor);
-        }
+        _requirePausedForSuccessor(successor);
         uint256 amount = treasuryBalance;
         if (amount == 0) revert NothingToMigrate();
         uint256 liquid = usdc.balanceOf(address(this));
@@ -1866,6 +2193,69 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(successor, amount);
         }
         emit TreasuryMigrated(successor, amount);
+    }
+
+    /// @notice Add `amount` of a listed non-USDC token to its liabilities
+    ///         without a `Deposit`, so nothing is minted on Acki Nacki. For ECC
+    ///         already backed by a predecessor's custody: `predecessor` calls it
+    ///         from `migrateToken`, and the owner calls it for a predecessor
+    ///         that cannot migrate. Caller must `approve` first. Not capped by
+    ///         `tvlCap` (that cap gates `deposit` only) and allowed while paused.
+    function fundToken(uint32 tokenId, address token, uint256 amount) external nonReentrant {
+        if (msg.sender != owner && msg.sender != address(predecessor)) {
+            revert NotOwnerOrPredecessor();
+        }
+        if (tokenId == usdcTokenId) revert CannotMigrateUsdc();
+        if (amount == 0) revert InvalidAmount();
+        TokenInfo storage info = _requireListedId(tokenId);
+        if (info.token != token) revert FundedTokenMismatch(tokenId, token);
+        info.liabilities += _pullExact(IERC20(token), amount);
+        emit TokenFunded(msg.sender, tokenId, amount, info.liabilities);
+    }
+
+    /// @notice Hand a non-USDC listing's whole liabilities and the tokens behind
+    ///         them to `successor`, the bridge that names this one as its
+    ///         `predecessor`. The successor must list the same token under the
+    ///         same id, with a withdrawal cap no lower than this listing's.
+    ///         Tokens above the liabilities stay here.
+    /// @dev Paused only, for the same reason as `migrateTreasury`. The same
+    ///      `predecessor()` caveat applies: this is an owner power over the
+    ///      listing's whole custody.
+    function migrateToken(uint32 tokenId, address successor) external onlyOwner nonReentrant {
+        _requirePausedForSuccessor(successor);
+        if (tokenId == usdcTokenId) revert CannotMigrateUsdc();
+        TokenInfo storage info = _requireListedId(tokenId);
+        uint256 amount = info.liabilities;
+        if (amount == 0) revert NothingToMigrate();
+        uint256 cap = AckiNackiBridge(successor).maxWithdrawalAmount(tokenId);
+        if (cap < info.maxWithdrawal) {
+            revert SuccessorWithdrawalCapTooLow(cap, info.maxWithdrawal);
+        }
+        IERC20 token = IERC20(info.token);
+        uint256 liquid = token.balanceOf(address(this));
+        if (liquid < amount) revert TreasuryNotLiquid(liquid, amount);
+
+        info.liabilities = 0;
+        if (!_callToken(token, abi.encodeCall(IERC20.approve, (successor, amount)))) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        AckiNackiBridge(successor).fundToken(tokenId, address(token), amount);
+        if (token.balanceOf(address(this)) != liquid - amount) {
+            revert WithdrawTransferFailed(successor, amount);
+        }
+        emit TokenMigrated(successor, tokenId, amount);
+    }
+
+    function _requirePausedForSuccessor(address successor) private view {
+        if (!paused) revert NotPaused();
+        if (successor == address(this) || successor.code.length == 0) {
+            revert NotSuccessor(successor);
+        }
+        try AckiNackiBridge(successor).predecessor() returns (IPredecessorBridge p) {
+            if (address(p) != address(this)) revert NotSuccessor(successor);
+        } catch {
+            revert NotSuccessor(successor);
+        }
     }
 
     /// @notice Pause user-facing entrypoints (`deposit`, `verifyBlock`,

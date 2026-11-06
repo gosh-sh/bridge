@@ -27,6 +27,9 @@ The CLI, relayers and web form take their addresses from configuration.
 | AAVE V3 pool | `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff` |
 | aUSDC | `0x460b97BD498E1157530AEb3086301d5225b91216` |
 
+This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.16.0
+for deposits. The deployment addresses below describe the existing shellnet pair.
+
 ### Acki Nacki (shellnet)
 
 | | |
@@ -54,7 +57,7 @@ public endpoints do not (`crates/deposit-relayer-daemon/docs/operator_runbook.md
 ## The two directions
 
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
-`deposit(uint256 amount, bytes32 anAccount)`. The contract takes custody via
+`deposit(address token, uint256 amount, bytes32 anAccount)`. The contract takes custody via
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
 the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
 (receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
@@ -97,7 +100,7 @@ Every component and the interface each connection goes through, with its call si
                                   │                                 ▼
                             AAVE V3 (optional)          deposit-prover (Halo2, off-chain)
                                                                     │
-                                                        SHPLONK proof + 12 public inputs
+                                                        SHPLONK proof + 13 public inputs
                                                                     ▼
                                                     AN USDCBridge.finalizeDeposit
                                                     (ZKHALO2VERIFYWITHVK opcode)

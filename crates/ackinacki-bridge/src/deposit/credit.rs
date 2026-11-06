@@ -42,6 +42,7 @@ pub struct Identity {
     pub chain_id: u64,
     /// The amount, in micro-USDC.
     pub amount: u128,
+    pub token_id: u32,
     /// The Acki Nacki recipient's account id.
     pub account: [u8; 32],
 }
@@ -118,7 +119,9 @@ pub async fn bridge_tx_verdict(
     });
     let transfer = tx.out.iter().find(|m| {
         is_recipient(&m.dst, &id.account)
-            && m.ecc.iter().any(|(c, v)| *c == 3 && *v == id.amount)
+            && m.ecc
+                .iter()
+                .any(|(c, v)| *c == id.token_id && *v == id.amount)
             && m.bounce == Some(false)
     });
     let (true, Some(t)) = (event_ok, transfer) else {
@@ -136,7 +139,7 @@ pub async fn bridge_tx_verdict(
     if !dtx
         .ecc_delta
         .iter()
-        .any(|(c, v)| *c == 3 && *v == id.amount as i128)
+        .any(|(c, v)| *c == id.token_id && *v == id.amount as i128)
     {
         return Ok(Credit::NotYet);
     }
@@ -184,7 +187,9 @@ pub async fn by_voucher(
             .body
             .as_deref()
             .and_then(|b| an.decode(BRIDGE_ABI, b, true))
-            .is_some_and(|(n, v)| n == "confirmDeposit" && id.matches(&v));
+            .is_some_and(|(n, v)| {
+                matches!(n.as_str(), "confirmDeposit" | "confirmTokenDeposit") && id.matches(&v)
+            });
         if !ours {
             continue;
         }
@@ -436,6 +441,16 @@ pub async fn confirm(
                     bridge_tx,
                 },
             ) => {
+                let recovery = if id.token_id == 3 {
+                    "mintAndSendBridged"
+                } else {
+                    "mintAndSendTokenBridged"
+                };
+                let units = if id.token_id == 3 {
+                    "USDC units".to_owned()
+                } else {
+                    format!("base units of ECC[{}]", id.token_id)
+                };
                 return Err(CliError::deposit(
                     ExitCode::CreditAborted,
                     Stage::Credit,
@@ -444,13 +459,13 @@ pub async fn confirm(
                         "the deposit voucher exists, but the bridge transaction {bridge_tx} that \
                          should have minted the credit aborted. The voucher is spent and the \
                          deposit cannot be finalized again; only the bridge operator can pay it \
-                         out (mintAndSendBridged, CLI exit 37). That call credits bridged \
-                         inventory the way confirmDeposit would have; ordinary mintAndSend does \
-                         not. It is not bound to this deposit: paying twice or the wrong amount \
-                         invents headroom the Ethereum treasury does not hold. Match the aborted \
+                         out ({recovery}, CLI exit 37). That call credits bridged inventory the \
+                         way deposit confirmation would have; ordinary mintAndSend does not. It \
+                         is not bound to this deposit: paying twice or the wrong amount invents \
+                         headroom the Ethereum treasury does not hold. Match the aborted \
                          deposit's recipient, amount and source chainId, once. Give them \
-                         depositId {}, {} USDC units to account {:#x}, EVM bridge {:#x}, chain \
-                         {}, operation {op_id}, Acki Nacki transaction {bridge_tx}",
+                         depositId {}, {} {units} to account {:#x}, EVM bridge {:#x}, chain {}, \
+                         operation {op_id}, Acki Nacki transaction {bridge_tx}",
                         id.deposit_id,
                         id.amount,
                         B256::from(id.account),
@@ -503,6 +518,7 @@ mod tests {
             contract: U256::from(0xcdfdu64),
             chain_id: 11_155_111,
             amount: 1_000_000,
+            token_id: 3,
             account: ACC,
         }
     }
@@ -568,7 +584,7 @@ mod tests {
             &format!("0:{}", hex::encode(ACC)),
             None,
         );
-        transfer.ecc = vec![(3, i.amount)];
+        transfer.ecc = vec![(i.token_id, i.amount)];
         transfer.bounce = Some(false);
         let mut event = msg(
             "ev",
@@ -616,7 +632,7 @@ mod tests {
                 account: String::new(),
                 now: 4,
                 out: vec![],
-                ecc_delta: vec![(3, i.amount as i128)],
+                ecc_delta: vec![(i.token_id, i.amount as i128)],
             });
         let mut ev_full = event;
         ev_full.src_tx = Some("btx".into());
@@ -653,6 +669,32 @@ mod tests {
             by_voucher(&an, VOUCHER, BRIDGE, &id(0)).await.unwrap(),
             Credit::Confirmed(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_second_token_requires_delivery_of_the_registered_currency() {
+        let an = FakeAn::default();
+        let mut deposit = id(0);
+        deposit.token_id = 4;
+        chain(&an, &deposit, false, false);
+        an.bodies.lock().unwrap().insert(
+            "B-confirm".into(),
+            ("confirmTokenDeposit".into(), fields(&deposit, "0")),
+        );
+        assert!(matches!(
+            by_voucher(&an, VOUCHER, BRIDGE, &deposit).await.unwrap(),
+            Credit::Confirmed(_)
+        ));
+        an.transactions
+            .lock()
+            .unwrap()
+            .get_mut("rtx")
+            .unwrap()
+            .ecc_delta = vec![(3, deposit.amount as i128)];
+        assert_eq!(
+            by_voucher(&an, VOUCHER, BRIDGE, &deposit).await.unwrap(),
+            Credit::NotYet
+        );
     }
 
     #[tokio::test]
@@ -974,6 +1016,7 @@ mod tests {
             contract: U256::from_be_slice(&[0xcd; 20]),
             chain_id: 11_155_111,
             amount: 25_000_000,
+            token_id: 3,
             account: ACC,
         };
         // Decoding is local: nothing is contacted.
@@ -1028,6 +1071,7 @@ mod tests {
             contract: u("contractAddr"),
             chain_id: u("chainId").to::<u64>(),
             amount: u("amount").to::<u128>(),
+            token_id: 3,
             account: u("anAccount").to_be_bytes(),
         };
         assert!(i.matches(&v));

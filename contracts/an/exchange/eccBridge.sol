@@ -13,7 +13,7 @@ interface IShellAccumulator {
     function buyShellFor(address buyer) external;
 }
 
-/// @title eccUSDCBridge
+/// @title eccBridge
 /// @notice The name covers three distinct flows that share storage / owner key
 ///         but are otherwise independent:
 ///
@@ -35,7 +35,7 @@ interface IShellAccumulator {
 ///            mint after a voucher-consumed `confirmDeposit` abort (CLI
 ///            exit 37). Do not use it for ordinary owner mint.
 ///
-///         3. Cross-chain bridge — USDC-only (tokenId == USDC_ECC_ID)
+///         3. Cross-chain bridge — registered ERC-20 / ECC currency pairs
 ///            `initiateWithdrawal` (burn ECC + emit `WithdrawalInitiated`) and
 ///            `finalizeDeposit` / `confirmDeposit` (verify proof, deploy
 ///            deterministic `DepositVoucher` for anti-replay, mint ECC).
@@ -50,8 +50,8 @@ interface IShellAccumulator {
 ///            the bridged counters; `mintAndSendBridged` does.
 ///
 ///         Deployed at fixed address in zerostate.
-contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.15.0";
+contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
+    string constant version = "1.16.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -91,6 +91,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         uint256 chainId;       // fr[4] — source chain id (typed-tx field 0, proof-bound)
         uint256 dappId;        // pinned to 0 — see _parsePublicInputs
         uint256 anAccount;     // fr[7]<<128 | fr[8] — AN recipient (256-bit, proof-bound)
+        uint256 evmToken;      // fr[11] — deposited ERC-20 address
     }
 
     uint256 _ownerPubkey;
@@ -112,6 +113,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     mapping(uint32 => uint128) _totalMintedBridgeByToken;
     mapping(uint32 => uint128) _totalBurnedBridgeByToken;
     mapping(uint256 => uint128) _outstandingByChain;
+    mapping(uint256 => mapping(uint32 => BridgeTokenConfig)) _bridgeTokens;
+    mapping(uint256 => mapping(uint256 => uint32)) _bridgeTokenIds;
 
     // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
     TvmCell _depositVoucherCode;
@@ -191,7 +194,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // anyway until the owner re-seeds them.
     bool _paused;
 
-    // ZK verifying key (VkBlob) for the ETH-deposit circuit (12 public
+    // ZK verifying key (VkBlob) for the ETH-deposit circuit (13 public
     // inputs, chainId at instance index 4): type 1 and 2 enclosing
     // transactions, 2048 B calldata, 2048 B per receipt log, keccak 128.
     // Keyed on the Hermez Perpetual Powers of Tau SRS (s_g2 = 928fafb3…).
@@ -199,10 +202,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     // `export_deposit_proof_set`:
     //   deposit-prover/fixtures/deposit_10proofs/deposit_vk_blob.bin
     // Magic "VKBLOB\x00\x00" + version 2, shape "Rlc". 13071 bytes;
-    // sha256 = 0180ee5af41ba3f408d38bf0c10c005c6618ad379d38da97a7ccc07ab1c3efa1.
+    // sha256 = f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9.
     // To rotate: regenerate the fixture above, then rewrite the constant
     // below and the sha256 above with
-    //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol
+    //   scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccBridge.sol
     // — never by hand; CI runs the same script with --check. The fixtures
     // under tests/exchange/fixtures follow the new blob.
     bytes constant VK_BLOB =
@@ -262,8 +265,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"66b91f8eaa063b1dcb8263572e565a392762af7e10c1a75f60adcaab233e81d4577b02051aed3a59139e595f0fee4df313cb9e32a57d8cd3be419442"
         hex"c219636bbede02b7584519a3f203f288fecab4cd3589be5de2b8ce1b739668b15e0a39267337188a16a452596d540bcc309b374d6a1c879da69d3093"
         hex"0a763aaa7cd640741495170cd8977572f2eb7c9c4ab0ed27e774ee6599ee29d4bfb2c90cb63926aeab7e134070fade585255c8c481ae77e7f1d3cf95"
-        hex"fa8b84842d2a1dd7e74ab627f620240a867967f5c37d58de35fe349547563c2e62422bdf337e9886d9fc3c20d9612b5be025f10381ca2c870ccc3813"
-        hex"8d34b3458a4dd39bf2bdebb89a5ba6943639307a14f2386df5e65efaeea8d550bb3abdd45acc4ed5f2a396bc776f9b6c2dd107983c910153fb861095"
+        hex"fa8b84842d2a1dd7e74ab627f620240a867967f5c37d58de35fe349547563c2e62422bdf337e9886d9fc3c20d9612b631c36a63d749dc8ce40b126b9"
+        hex"bd5d8f40cdd2e84d83122f979763b18757bb0d9a66b1df416482e868648b611f629529665b6f294d81e08405c890a04adb071c983c910153fb861095"
         hex"216c8581742d360343a4369294de9bfe9b3dfefbe05821072e19499fed491d7d84261ffac9a40273033a83d14278cd2be543f40f6e8c07983c910153"
         hex"fb861095216c8581742d360343a4369294de9bfe9b3dfefbe05821072e19499fed491d7d84261ffac9a40273033a83d14278cd2be543f40f6e8c0701"
         hex"38047bef994ac89b33d2d22877e299b4b953e117a595c963f014988a6df023137f3d82569ee78160eda14f861989cccb81b5bd09499e45547d589ba2"
@@ -309,22 +312,22 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"8b13047c959483a42bf42773c145af3b2560ad3a59fafb06b2436a299d8005ee2b537d356a9a7fde0a98c3898f839c18f596249ae78e4711a78069e8"
         hex"61ae027c21fbbb7cf089485974df19440fc85eeed0ce89c85ff4d1de5a3a2e8bab1914bd465b5daa8814d9dac1d849034b4963492ed0959e06811c1d"
         hex"77530d35e30e1b3d92719ecfed99a60e0409a768270a27a77936b19249ff52c9ad47b72855900dea38d68353dc4f0bbc88d27496312e1381962af702"
-        hex"f079bb0468f1f628c5e72227b45e9baafbdad7e47552f1cb2f3fbc5f7a65c112311710940794f8e48c4a23da3f0c3b24c1d6ac27d4113944e7365beb"
-        hex"de52dedbdeef4a05e826bc1886ff19d145d38314eace47377b514427185de0f1595909c06c9511e92db0bae350751f19c9bffae66ab757783261a72b"
+        hex"f079bb0468f1f628c5e72227b45e9baafbdad7e47552f1cb2f3fbc5f7a65c112311710940794f8e48c4a23bc86fe6e8e80055299006af6fe3b4f058c"
+        hex"697eed86122cf206fd73b10e1db10fa38bcc14c75cff1e3d19b270316a805caeaa851c37485fb365e881bd40c7410c19c9bffae66ab757783261a72b"
         hex"ee496613ce11bd33acde9a00fc649ca9e8120e54a4c280b68062953be8357771215a1ee257286bf60f23cc963ee40feeb4552a2f97c7f77bccfb41b1"
         hex"1377ca4ecc290f0d318c4ec7926530168add94603f0b0caef62ffbb14bac7876f835cc98a5afe7310125dc961bb3c5412c7d00ef19191fdb5812f977"
         hex"f08666c3a71f02bd19460c1c7c3ba4e3b086b2bae3f8667861e621ad78dec8f77c8d5d90de8af113f652766e170af9c064abc9884c94a749e3ce2e59"
         hex"22d00a7c29dac6456000e7f9e7bd3a170e8869a951cce817f8543a7e289714c64c52befff5c7c3a536cecd7919508c0f972e9805f0b149289ccf3ad8"
         hex"bb6114d31e29efd3a7e2a0a5d4280fa122df22cc658f0be9f8377bd2710a020a08b329d7482da8182e039f960fb00432c97839b5aa4ac146655cfce1"
-        hex"28eb06b783871de66b196f555eef7404fae9bee37681e50b5d4561310e0af56a55421c30f0961ce209af5d81cdb4e66e9f2b0e35e3d83cb27faf3c59"
-        hex"dd56342fd53e1261a7b10f0abe06b740f731b579fccc903632faf7f8931ff2f582cca23533172e3a124607eb8dc9da549f8eac94550d8c7bb3d96111"
+        hex"28eb06b783871d3463db686d48f75db0d7b94958d0974b14b72f4b89f658f0d9c1268c4ce71d277357c6ab366ea5c21ba528ab8c912b61ddd4edd187"
+        hex"49c41bf2acad139a0b830d0abe06b740f731b579fccc903632faf7f8931ff2f582cca23533172e3a124607eb8dc9da549f8eac94550d8c7bb3d96111"
         hex"8b9d2cf51101bf9a4a8532ec87ee27d4623d45171d711e90c3c2511e0c035e3fb9c58cef960e6e509dcc18d3f06c25a061407752ca6df979dd80fd1d"
         hex"46fc9617a9f3c965440ecf1e254f81ad66702a281f1bb7e64b22ac8f50e38784ff19c32a10e05ea8a58ffa297415cb3c9b720d12c1fc75c1f55aefc8"
         hex"836c93c22ea32eff0e902d7ebc52bfa30ece20b4260816d029cb5d84d0aaa3fc735bcd743ee2af3e1aba03feceeed928c1c71ac14ec02fea416c9591"
         hex"026099029b9a942736fd83d108358b00a718193ca83b767a4058271d2a69a1601c197de486dca412aa4f935f697bf09e4e52a4205efa591034c20cf9"
         hex"be6a5fa397c85103f66377376f5ed488303d7649cefe49b68f6d9d6914e922e2a0ea13f8acd7c3a02df4ccfc89d7ea260ed0e706eee819f7166d7b85"
-        hex"c4602e479808271e10ffb881b49801cc41c85b2a05b073ee8352166c65cf46d31efe1138c2710da7c5e670b29275566500638029bbf7a1097cda6572"
-        hex"d2131551d6f61fc06da01a1150988cd000454f40c18dffeb06ec8e424bb3c9e32d02b7a4d58629076d3b73308444214bd6c0f04d52586d15a438607c"
+        hex"c4602e479808271e10ffb881b49801cc41c85b2a05b073ee8352166c65cf46d31efe11e331b82817601d1221f6b1e40f3f9db58b4c06345a5675719f"
+        hex"5f29638790432985bb5bfaeac993323628bc53b36255018b6876259bbdb9e7d64fbac5eb13ad21076d3b73308444214bd6c0f04d52586d15a438607c"
         hex"c4457d6fbd886fcc3cbb2c6d12d90c5fde8fc55c277abd3ec5c921d65508990ec4a820939cfcdd028c40246cfbf5d04d5c4116259993b92dfa492c35"
         hex"9b105f25b8f64359fba41941eb541e976b4a33decca5ea60351f0fa5e91bc76036feaf7466c39ee76076541426402746d234868875a13f37ca016e8f"
         hex"a5e0e3a25e7743b8f90eb07cb57cd3842547271bda27e0dc5e6099216ecd59eb8bffc52352c5477784f441575aa08f4cc32426aa4a1d8417bf0bc281"
@@ -359,15 +362,15 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"2c1cb84450c329387ccabd4b438bd5f14d47fb552f5161af7ce44ccac8370c32914ebb500e961d6a034aa3ba0bb407ca4141813c560ba450b7677bea"
         hex"c937567a4e0bc38864f127b8a625002a7545f9d52a5e4c3f793faeddf3d7bbef60e25e38fcc9986aa6c701a01f93edf508914a41df954482110521e8"
         hex"f9ce26a048ad53b1798202a41ddf1c55116fc79d38814b6a130657ac956febd1c1314513b1dfec1296fafe833b75049726f717a6c8a85cea8ffb9b9b"
-        hex"c0609d2207d167f8a7256aa0e5e6f1509c8115c790c745f609da4e2f530a91b2dd7313588d01e6ed049261d9822e4b3a993e2c2ead8df6db5a9e5cc7"
-        hex"e2299ccdb28e98f67e2f0c0cb3c14802f49f484c7a76077881f00b8d8242ac305426db16e6ddc007fa2f354bd4245f90064e7c1fe9e627dde36b2feb"
+        hex"c0609d2207d167f8a7256aa0e5e6f1509c8115c790c745f609da4e2f530a91b2dd7313588d01e6ed049261d9822e4b3a993e2cf8246b8245e296d3a7"
+        hex"5e6907342354823365c8a594f2fad722bcfd7f052762130e8009b6da2577788a2a9ee54a763915a776e11e85a4ab68c85b06ffe1a74d1ddde36b2feb"
         hex"ba8e3b26fcc98cb7da744a58bf4812f97147ef2fd91326db33211e290ae71096724237558a869a554e85481aeae4e4e761668a92cfd3c3d7b1d604d8"
         hex"eed396409cea570ce176fbd4375d58072ef64cc56e13b46bf4f26a90a6f92724d9fb9b9cc3b440d6f1a145f8cc75f152caf45bc31788c2110dc46ff8"
         hex"4d4c1769aa78d729cba3c4dba49bffbc23914fc10165b2af51a30132371e15051b120e9055c36e5dc14dc076dc58a84de7f66e7d9aeb1663dddb92db"
         hex"3f80c3ce1bdb0722f7def545ad07c1097d7131f5d52ca54e8363877d2acbf12998e5ac1314241d896775bb506426a0f1ca42a7ac370f658daf51fb61"
-        hex"c6d024170a488fde8e2a30dd07f27b61acf881ee1754315448da55089e5d4626a5e29ae5c6af57504cf11da09733da8d159c2108a39c108364ddf6f3"
-        hex"3e78bb7396a5c8c409d5cebfa7d00d2918172fe471773aea7ceae20f7c8c2caa27e0c50f2e935ffbfbff350bd7ce04ae4dd4f35e60ae6ee9c2f994e3"
-        hex"eaa601f3f9f588fc0666da73157b8bbc488d29435da78ece60b9cb75e5b580578d089ab56dad740a02582faf40afff2c87162b64b87406dc182cee61"
+        hex"c6d024170a488fde8e2a306208558b989daaea987dc78d9e8078f463029b3e748de23d09cfd9a62fae5e2400c5d9a2b42cd01fa7cdf3d36a5f66ad86"
+        hex"16f30369ccfc95429513cd04ab1a02a178447495fbd9149459cc2ac6c3749e782bc1c48e6da9ef5bdf18698679d92d298eb2eb953e67b31830ae29c0"
+        hex"3849d9ea9b251c6c534e3404e2c0f1c88fb00a435da78ece60b9cb75e5b580578d089ab56dad740a02582faf40afff2c87162b64b87406dc182cee61"
         hex"d330071a3c33a71ffc4acf6b55aaf3cecd40fc922ace1633fbcb5fbd70e94f5ce63ec4d1ae4ab80233d14fb118970cb9b0404fa594a60141498ec1ca"
         hex"8ce5118f520d50a691f5fa302b4d765c39febcb0e511c5e384f02dced05c7c3196414b285851c00f6783df72eb2e9729fd935536e70c76aa51522af0"
         hex"d45002b51af308e68a16ed27a32bd97b780a3ac79220d1d0b56be97b1b031a55e1708f472ee01844c9ccc5d22192f2fafa057216eff5b461b5185076"
@@ -412,11 +415,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         hex"d84eceb02b47e2601a60a6d68a08862f003fb3ce589bef87acba0204fa2fc43509b3486dba281d9595692f0645e92857219db2991b3d481f0da01553"
         hex"4b2a53ba784bb34c29311b827a8188c8334380d2abf3a1c3bcb39ff621a90ed8f53a069d3ad23ced2e46b4df9b1f08063cbd2a9094b3008d14106d2e"
         hex"0da820c68f7c36e9ee4d5e2db0e064c51ecb9a70a9c201835907c14bbf6e7d960b6325ac131cf65b8449ca44f71934cf8b72df7fa403ee2565032d36"
-        hex"fc2e5a323ea0274b682fd30d3cd5242398fec5efaa3485aa80772cac5e3f8ea388596145e932021dbb988e00221d3f6869b53ce3165e6c022f89ccdd"
-        hex"b62ceb5d5eca6eff670b13984f26834cd7c115a01c1e38de8eb4dd523d1d434f7ef1f079c8eea06eeaa52f02131fd98ced959705bcd57e8a788648d5"
-        hex"78b7f7884e0818b8109a5aad6b6511ffaee0c9ab1f4015758710dbaa380c0be46b1e06dd2f9b4d31cdbbe4ec037f065461d06173cbeb0a7e1d5a9ff7"
-        hex"5e8d155d69d3cd26314060a0f0a8f8b517f90c758ce1ea61c8d877913d4475a27adc25bd206cfa6107786bda9b71c3a0c81c27e3ff58bb08268cbaec"
-        hex"b8fb98e48f41744a059785b0068fc2aa41cbe3a553690edb0fe34eec06e875bddc319f962b743a77361b940343f7eb552e64356bc8652d036464628c"
+        hex"fc2e5a323ea027f439041b39b4be99124ed94aad2349d33cc114b2e62fff3eec0b191090dc8412c6f3489d48b86a49aa621ce22f6a79983e3bc38a79"
+        hex"3f1dbd798392b20677f21396959cec6110d2fdf4e0fcf9ea6ad57a8a531722954cf5fbf9cb61fc38096f0da3d8889a5402c80f2449e4368cfedea7d2"
+        hex"4ed5bb03f434b2140f3850c9ffdf03ffaee0c9ab1f4015758710dbaa380c0be46b1e06dd2f9b4d31cdbbe4ec037f065461d06173cbeb0a7e1d5a9ff7"
+        hex"5e8d155d69d3cd26314060a0f0a8f8b517f90cd510105effb57389a5a3bd8f6024fe4644505a6c053872f8858a63f972b23b022bf1d356cfbeedd2bc"
+        hex"759a514a5cead10a32535539fcf6e2cf47319177e32028db0fe34eec06e875bddc319f962b743a77361b940343f7eb552e64356bc8652d036464628c"
         hex"0b940aa594e1f7c65fe9d8dfbd8229ef50601a7d5840b9f00f0f2b81867cc2ba295c607e48d86f84ba289122cc18bcc9d4758664d78cb3c1416e018e"
         hex"4a2bbf39cd75262d286dfc295a63629105ec51297fdc40e70473280c31df1c21f4cd8178df9f24a09653effa15d6b9380ae30f72fac78bae7a2aa154"
         hex"5b042a38d2583972c4c44b799a858a616c7a5cd86dd696ad80892f23aab1cc881ee012719ca5c118067ea6024211c712b71940d55405455554cd59da"
@@ -431,7 +434,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///       `updateCode` upgrade) the voucher code arrives via the
     ///       `onCodeUpgrade` payload. There is no standalone setter (B2 fix),
     ///       so the only way to populate / rotate `_depositVoucherCode` is a
-    ///       full `updateCode` upgrade of eccUSDCBridge.
+    ///       full `updateCode` upgrade of eccBridge.
     /// @param pubkey — owner public key for admin operations
     /// @param usdcWallet — address of the Exchange's TIP-3 USDC TokenWallet (subscriber target)
     constructor(
@@ -552,6 +555,26 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         emit UsdcMinted{dest: addrExtern}(recipient, value);
     }
 
+    /// @notice Owner recovery for an aborted registered-token deposit.
+    ///         Match the source receipt, currency, recipient and amount exactly once.
+    function mintAndSendTokenBridged(address recipient, uint128 value, uint64 nonce,
+                                     uint256 chainId, uint32 tokenId)
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
+    {
+        require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
+        require(value > 0 && value <= uint128(type(uint64).max), ERR_OVERFLOW);
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        require(_requireDepositToken(chainId, config.evmToken, value, false) == tokenId,
+                ERR_TOKEN_CONFIG);
+        _mintNonce = nonce;
+        ensureBalance();
+        gosh.mintecc(uint64(value), tokenId);
+        _creditToken(chainId, tokenId, value);
+        mapping(uint32 => varuint32) ecc;
+        ecc[tokenId] = varuint32(value);
+        recipient.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: ecc});
+    }
+
     // ========================================================
     // Mint USDC and send to Accumulator for a buyer
     // ========================================================
@@ -602,14 +625,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(keys.length == 1, ERR_MULTIPLE_ECC);
 
         uint32 tokenId = keys[0];
-        require(tokenId == USDC_ECC_ID, ERR_UNSUPPORTED_TOKEN);
+        BridgeTokenConfig config = _bridgeTokens[dstChainId][tokenId];
+        if (config.evmToken == 0 && tokenId != USDC_ECC_ID) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_TOKEN_UNREGISTERED);
+            return;
+        }
         uint160 dstBridge = _evmBridgeByChain[dstChainId];
         if (dstBridge == 0) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                               ERR_NO_EVM_BRIDGE);
             return;
         }
-        if (currencies[tokenId] > varuint32(MAX_TRANSFER_AMOUNT)) {
+        uint128 payoutCap = config.evmToken == 0 ? MAX_TRANSFER_AMOUNT : config.maxWithdrawal;
+        if (currencies[tokenId] > varuint32(payoutCap)) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                               ERR_TRANSFER_TOO_LARGE);
             return;
@@ -624,7 +652,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
                               ERR_BURN_EXCEEDS_BRIDGED);
             return;
         }
-        if (amount > _outstandingByChain[dstChainId]) {
+        if (amount > _tokenOutstanding(dstChainId, tokenId)) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                               ERR_CHAIN_BALANCE_EXCEEDED);
             return;
@@ -635,7 +663,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
         gosh.burnecc(uint64(amount), tokenId);
         _totalBurnedBridgeByToken[tokenId] += amount;
-        _outstandingByChain[dstChainId] -= amount;
+        if (tokenId == USDC_ECC_ID) {
+            _outstandingByChain[dstChainId] -= amount;
+        } else {
+            _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+        }
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
         emit WithdrawalInitiated{dest: addrExtern}(dstChainId, recipient, amount, tokenId,
@@ -645,8 +677,9 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     /// @dev Returns the ECC and says why on `WithdrawalRefused`, so a refusal
     ///      leaves a record a relayer or a UI can read: `reason` is the error
     ///      code the call would have thrown if a refusal threw —
-    ///      `ERR_NO_EVM_BRIDGE` (239) when no EVM bridge is set for the
-    ///      destination chain, `ERR_TRANSFER_TOO_LARGE` (234) over the
+    ///      `ERR_TOKEN_UNREGISTERED` (241) when the currency is not registered
+    ///      for the destination chain, `ERR_NO_EVM_BRIDGE` (239) when no EVM
+    ///      bridge is set for it, `ERR_TRANSFER_TOO_LARGE` (234) over the
     ///      per-transfer cap,
     ///      `ERR_BURN_EXCEEDS_BRIDGED` (233) when the burn would take bridged
     ///      burned above bridged minted, `ERR_CHAIN_BALANCE_EXCEEDED` (236)
@@ -868,6 +901,84 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _paused = paused;
     }
 
+    /// @notice Register USDC for a source chain once, then update its deposit limits.
+    ///         ECC id 3 is the only id accepted: Acki Nacki has no other currency
+    ///         for the bridge to mint, and a new one takes a new version of this code.
+    ///         The token/id association is immutable; TVL can only increase.
+    ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
+    function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
+                            uint128 maxTransfer, uint128 maxTvl, bool depositsEnabled)
+        public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
+    {
+        require(chainId != 0 && evmToken != 0 && evmToken < (uint256(1) << 160), ERR_TOKEN_CONFIG);
+        require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);
+        require(maxTransfer > 0 && maxTransfer <= uint128(type(uint64).max)
+                && maxTvl >= maxTransfer, ERR_TOKEN_CONFIG);
+        if (tokenId == USDC_ECC_ID) {
+            require(maxTransfer <= MAX_TRANSFER_AMOUNT && maxTvl <= MAX_BRIDGE_TVL, ERR_TOKEN_CONFIG);
+        }
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        require(maxTvl >= config.maxTvl, ERR_TOKEN_CONFIG);
+        require(config.evmToken == 0 || config.evmToken == evmToken, ERR_TOKEN_CONFIG);
+        uint32 previousId = _bridgeTokenIds[chainId][evmToken];
+        require(previousId == 0 || previousId == tokenId, ERR_TOKEN_CONFIG);
+        config.evmToken = evmToken;
+        config.maxTransfer = maxTransfer;
+        config.maxTvl = maxTvl;
+        uint128 payoutFloor = tokenId == USDC_ECC_ID ? MAX_TRANSFER_AMOUNT : maxTransfer;
+        config.maxWithdrawal = math.max(config.maxWithdrawal, payoutFloor);
+        config.depositsEnabled = depositsEnabled;
+        _bridgeTokens[chainId][tokenId] = config;
+        _bridgeTokenIds[chainId][evmToken] = tokenId;
+        ensureBalance();
+    }
+
+    function _requireDepositToken(uint256 chainId, uint256 evmToken, uint128 amount,
+                                  bool newDeposit) private view returns (uint32 tokenId) {
+        tokenId = _bridgeTokenIds[chainId][evmToken];
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        require(evmToken != 0 && config.evmToken == evmToken, ERR_TOKEN_UNREGISTERED);
+        require(!newDeposit || config.depositsEnabled, ERR_TOKEN_DEPOSITS_DISABLED);
+        uint128 cap = newDeposit ? config.maxTransfer : config.maxWithdrawal;
+        require(amount <= cap, ERR_TRANSFER_TOO_LARGE);
+        uint128 outstanding = _tokenOutstanding(chainId, tokenId);
+        require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding, ERR_TVL_CAP);
+    }
+
+    function _creditToken(uint256 chainId, uint32 tokenId, uint128 amount) private {
+        _totalMintedBridgeByToken[tokenId] += amount;
+        if (tokenId == USDC_ECC_ID) {
+            _outstandingByChain[chainId] += amount;
+        } else {
+            _bridgeTokens[chainId][tokenId].outstanding += amount;
+        }
+    }
+
+    function _tokenOutstanding(uint256 chainId, uint32 tokenId) private view returns (uint128) {
+        return tokenId == USDC_ECC_ID ? _outstandingByChain[chainId]
+                                     : _bridgeTokens[chainId][tokenId].outstanding;
+    }
+
+    function getTokenDepositConfig(uint256 chainId, uint256 evmToken) external view returns (
+        bool listed, uint32 tokenId, uint128 maxTransfer, uint128 maxTvl,
+        uint128 outstanding, bool depositsEnabled, uint128 maxWithdrawal
+    ) {
+        tokenId = _bridgeTokenIds[chainId][evmToken];
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        listed = evmToken != 0 && config.evmToken == evmToken;
+        return (listed, tokenId, config.maxTransfer, config.maxTvl,
+                _tokenOutstanding(chainId, tokenId), config.depositsEnabled, config.maxWithdrawal);
+    }
+
+    function getTokenWithdrawalConfig(uint256 chainId, uint32 tokenId) external view returns (
+        bool listed, uint256 evmToken, uint128 maxTransfer, uint128 maxTvl,
+        uint128 outstanding, bool depositsEnabled, uint128 maxWithdrawal
+    ) {
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        return (config.evmToken != 0, config.evmToken, config.maxTransfer, config.maxTvl,
+                _tokenOutstanding(chainId, tokenId), config.depositsEnabled, config.maxWithdrawal);
+    }
+
     /// @notice States how much of one chain's principal this bridge still
     ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
     ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
@@ -1046,19 +1157,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     /// @param proof         — SHPLONK proof bytes (no header), fed verbatim as the
     ///                         `proof_cell` operand of TVM opcode
     ///                         ZKHALO2VERIFYWITHVK (0xC7 0x4A).
-    /// @param publicInputs  — the circuit instance column: 12 × 32-byte LE Fr
+    /// @param publicInputs  — the circuit instance column: 13 × 32-byte LE Fr
     ///                         (deposit_id, sender, amount, contract, chain_id,
     ///                         dapp_hi, dapp_lo, an_account_hi, an_account_lo,
-    ///                         + 2 block-hash halves + promise commit). Verified
-    ///                         verbatim; business fields read at fixed offsets —
-    ///                         see `_parsePublicInputs`.
+    ///                         + 2 block-hash halves + token + promise commit).
+    ///                         Verified verbatim; business fields read at fixed
+    ///                         offsets — see `_parsePublicInputs`. `token` is
+    ///                         appended at Fr #11. The owner registry maps the
+    ///                         proven token to the ECC currency credited here.
     function finalizeDeposit(bytes proof, bytes publicInputs) public {
         // Cheap parse + sanity BEFORE accept (within the pre-accept gas budget).
         require(!_paused, ERR_PAUSED);
         DepositPI f = _parsePublicInputs(publicInputs);
         require(f.amount > 0, ERR_ZERO_AMOUNT);
-        require(f.amount <= MAX_TRANSFER_AMOUNT, ERR_TRANSFER_TOO_LARGE);
-        require(_outstandingByChain[f.chainId] + f.amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
         // The proof binds (chainId, contractAddr) to the L1 event; the allowlist
         // pins which (chain, bridge contract) pairs this side trusts. The deposit
         // passes if its proven address is in the chain's trusted set — an absent
@@ -1068,6 +1179,8 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
                 ERR_UNSUPPORTED_SRC_CHAIN);
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
+        f.evmToken = _parseToken(publicInputs);
+        _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -1112,24 +1225,35 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
             stateInit: stateInit,
             value: 2 vmshell,
             flag: 1
-        }(f.depositId, f.contractAddr, f.dappId, f.chainId, f.amount, f.anAccount);
+        }(f.depositId, f.contractAddr, f.dappId, f.chainId, f.amount, f.anAccount, f.evmToken);
     }
 
     /// @notice Internal callback from a freshly deployed `DepositVoucher`. Mints
-    ///         USDC ECC and sends it to the proof-bound AN recipient. The caller
+    ///         registered ECC and sends it to the proof-bound AN recipient. The caller
     ///         must be the deterministic voucher address derived from the
     ///         deposit identity — replay attempts hit the existing voucher
     ///         account whose constructor was already consumed. If this call
     ///         aborts after that constructor has run, the voucher is spent
-    ///         and the owner pays the recipient with `mintAndSendBridged`.
+    ///         and the owner pays the recipient with the matching recovery mint.
     function confirmDeposit(
-        uint256 depositId,
-        uint256 contractAddr,
-        uint256 dappId,
-        uint256 chainId,
-        uint128 amount,
-        uint256 anAccount
+        uint256 depositId, uint256 contractAddr, uint256 dappId,
+        uint256 chainId, uint128 amount, uint256 anAccount
     ) public {
+        _confirmTokenDeposit(depositId, contractAddr, dappId, chainId, amount,
+                             anAccount, _bridgeTokens[chainId][USDC_ECC_ID].evmToken);
+    }
+
+    function confirmTokenDeposit(
+        uint256 depositId, uint256 contractAddr, uint256 dappId,
+        uint256 chainId, uint128 amount, uint256 anAccount, uint256 evmToken
+    ) public {
+        _confirmTokenDeposit(depositId, contractAddr, dappId, chainId, amount, anAccount, evmToken);
+    }
+
+    function _confirmTokenDeposit(
+        uint256 depositId, uint256 contractAddr, uint256 dappId,
+        uint256 chainId, uint128 amount, uint256 anAccount, uint256 evmToken
+    ) private {
         uint256 depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId));
         TvmCell stateInit = abi.encodeStateInit({
             contr: DepositVoucher,
@@ -1139,18 +1263,16 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
         require(amount > 0, ERR_ZERO_AMOUNT);
-        require(amount <= MAX_TRANSFER_AMOUNT, ERR_TRANSFER_TOO_LARGE);
-        require(_outstandingByChain[chainId] + amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
+        uint32 tokenId = _requireDepositToken(chainId, evmToken, amount, false);
 
         tvm.accept();
         ensureBalance();
 
-        gosh.mintecc(uint64(amount), USDC_ECC_ID);
-        _totalMintedBridgeByToken[USDC_ECC_ID] += amount;
-        _outstandingByChain[chainId] += amount;
+        gosh.mintecc(uint64(amount), tokenId);
+        _creditToken(chainId, tokenId, amount);
 
         mapping(uint32 => varuint32) ecc;
-        ecc[USDC_ECC_ID] = varuint32(amount);
+        ecc[tokenId] = varuint32(amount);
         address.makeAddrStd(0, anAccount).transfer({
             value: 1 vmshell,
             bounce: false,
@@ -1166,7 +1288,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     // DepositVoucher code rotation is intentionally not exposed as a
     // standalone setter. The only way to change `_depositVoucherCode` is via
-    // a full `updateCode` upgrade of eccUSDCBridge (the new code+layout pass
+    // a full `updateCode` upgrade of eccBridge (the new code+layout pass
     // through `onCodeUpgrade`). This removes the "owner can swap voucher
     // logic in one tx and free-mint" backdoor flagged in PR2112 review (B2).
 
@@ -1200,17 +1322,17 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///         the owner-anchor flags and recorded clients; operators must
     ///         restore configuration and repeat each intended chain's flip.
     /// @param newcode — new contract code TvmCell
-    /// @param userCell — reserved passthrough for future upgrade payloads.
-    ///        Currently unused (the new code receives a cell built purely
-    ///        from snapshot of current storage). Future upgrades can read
-    ///        this slot once `onCodeUpgrade` is extended; today it lets the
-    ///        ABI stay stable.
+    /// @param userCell — replacement voucher code, or an empty cell to retain
+    ///        the current code. Registry configuration is preserved separately.
     function updateCode(TvmCell newcode, TvmCell userCell) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
+        TvmCell registryState = abi.encode(
+            userCell.toSlice().empty() ? _depositVoucherCode : userCell,
+            _bridgeTokens, _bridgeTokenIds);
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
-            userCell, _outstandingByChain, _messages
+            registryState, _outstandingByChain, _messages
         );
         tvm.commit();
         tvm.setcode(newcode);
@@ -1232,13 +1354,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     ///                  TvmCell userCell,
     ///                  mapping(uint256 => uint128) outstandingByChain,
     ///                  mapping(uint32 => mapping(uint256 => bool)) messages)
-    ///         `depositVoucherCode` is the voucher code carried by the
-    ///         zerostate path. `userCell` is `updateCode`'s passthrough: on a
-    ///         code-bumping on-chain upgrade it carries the INTENDED NEW voucher
-    ///         code (so a code bump can swap the voucher logic atomically — the
-    ///         only way to rotate `_depositVoucherCode` post-deploy, per B2); it
-    ///         is empty on the zerostate path. When non-empty it takes
-    ///         precedence over `depositVoucherCode`.
+    ///         `depositVoucherCode` supplies the zerostate voucher code.
+    ///         A non-empty `userCell` contains abi.encode(voucherCode,
+    ///         bridgeTokens, bridgeTokenIds). For an upgrade from 1.15.0,
+    ///         construct it with BridgeZerostateData.getTokenUpgradeData;
+    ///         subsequent updateCode calls construct it automatically.
     ///
     ///         `_trustedL1Bridge` is deliberately absent from the tuple. After
     ///         an upgrade the allowlist starts empty (deposits fail closed)
@@ -1273,7 +1393,12 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
         _totalMintedBridgeByToken = totalMintedBridgeByToken;
         _outstandingByChain = outstandingByChain;
         _messages = messages;
-        _depositVoucherCode = userCell.toSlice().empty() ? depositVoucherCode : userCell;
+        _depositVoucherCode = depositVoucherCode;
+        if (!userCell.toSlice().empty()) {
+            (_depositVoucherCode, _bridgeTokens, _bridgeTokenIds) = abi.decode(userCell, (
+                TvmCell, mapping(uint256 => mapping(uint32 => BridgeTokenConfig)),
+                mapping(uint256 => mapping(uint256 => uint32))));
+        }
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
         // on for every chain until the owner re-deploys the light client
@@ -1313,7 +1438,10 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
     function getDepositLimits(uint256 chainId) external view returns (
         uint128 maxTransfer, uint128 maxTvl, uint128 outstanding
     ) {
-        return (MAX_TRANSFER_AMOUNT, MAX_BRIDGE_TVL, _outstandingByChain[chainId]);
+        BridgeTokenConfig config = _bridgeTokens[chainId][USDC_ECC_ID];
+        return (config.evmToken == 0 ? MAX_TRANSFER_AMOUNT : config.maxTransfer,
+                config.evmToken == 0 ? MAX_BRIDGE_TVL : config.maxTvl,
+                _outstandingByChain[chainId]);
     }
 
     /// @notice Returns the hash of the currently installed DepositVoucher code.
@@ -1328,7 +1456,7 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     /// @notice Returns contract version and name.
     function getVersion() external pure returns (string, string) {
-        return (version, "eccUSDCBridge");
+        return (version, "eccBridge");
     }
 
     // ========================================================
@@ -1337,11 +1465,11 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
 
     /// @dev Read the deposit fields out of the PROVEN public-inputs blob (the
     ///      contract verified the proof over this exact blob, so every value
-    ///      here is proof-bound). Layout = 12 × 32-byte LE Fr; offsets per the
+    ///      here is proof-bound). Layout = 13 × 32-byte LE Fr; offsets per the
     ///      final ETH-deposit circuit: 0=deposit_id, 1=sender, 2=amount,
     ///      3=contract, 4=chain_id, 5..6=dapp_id(hi..lo),
-    ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=promise commit
-    ///      (9..11 ignored on the AN side). Only the first 9 Fr are needed.
+    ///      7..8=an_account(hi..lo), 9..10=block hash halves, 11=token, 12=promise commit
+    ///      (9..12 ignored by this parser). Only the first 9 Fr are needed.
     function _parsePublicInputs(bytes publicInputs) private pure returns (DepositPI f) {
         TvmSlice s = TvmSlice(publicInputs);
         uint256[] fr;
@@ -1392,5 +1520,19 @@ contract eccUSDCBridge is eccUSDCBridgeModifiers, BridgeReplayProtection, ISubsc
             }
         }
         return (hi << 128) | lo;
+    }
+
+    /// @dev Read ONLY the deposited ERC-20 (Fr #11) out of the same proven blob.
+    function _parseToken(bytes publicInputs) private pure returns (uint256 token) {
+        TvmSlice s = TvmSlice(publicInputs);
+        for (uint k = 0; k < 12; k++) {
+            for (uint i = 0; i < 32; i++) {
+                if (s.bits() < 8) { s = s.loadRef().toSlice(); }
+                uint256 b = uint256(uint8(s.loadUint(8)));   // little-endian
+                if (k == 11) {
+                    token |= b << (8 * i);
+                }
+            }
+        }
     }
 }

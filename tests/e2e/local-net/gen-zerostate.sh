@@ -60,20 +60,20 @@ sed -i -E "s/^BRIDGE_COMMIT = \"[0-9a-f]{40}\"/BRIDGE_COMMIT = \"$BSHA\"/" contr
 grep -q "^BRIDGE_COMMIT = \"$BSHA\"" contracts/scripts/bridge_contracts.py || { echo "!! could not move BRIDGE_COMMIT in contracts/scripts/bridge_contracts.py"; exit 1; }
 export BRIDGE_REPO="$BRIDGE"
 python3 contracts/scripts/bridge_contracts.py
-want=$(git -C "$BRIDGE" show "$BSHA:contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc" | sha256sum | cut -c1-64)
-have=$(sha256sum contracts/0.80.0_compiled/exchange/eccUSDCBridge.tvc | cut -c1-64)
-[ "$want" = "$have" ] || { echo "!! placed eccUSDCBridge.tvc differs from $BSHA"; exit 1; }
+want=$(git -C "$BRIDGE" show "$BSHA:contracts/an/0.80.0_compiled/exchange/eccBridge.tvc" | sha256sum | cut -c1-64)
+have=$(sha256sum contracts/0.80.0_compiled/exchange/eccBridge.tvc | cut -c1-64)
+[ "$want" = "$have" ] || { echo "!! placed eccBridge.tvc differs from $BSHA"; exit 1; }
 
 echo "== compile_contracts (giver + test contracts)"
 make compile_contracts >/dev/null
 
 echo "== generate_zerostate (BRIDGE_ZS_L1_BRIDGE=$BRIDGE_ZS_L1_BRIDGE, DISABLE_BLACKLIST=${DISABLE_BLACKLIST-unset})"
 python3 contracts/scripts/generate_zerostate.py > zerostate-gen.log 2>&1 || { tail -40 zerostate-gen.log; exit 1; }
-[ "$(sha256sum contracts/0.80.0_compiled/exchange/eccUSDCBridge.tvc | cut -c1-64)" = "$want" ] || { echo "!! eccUSDCBridge.tvc was replaced during generation"; exit 1; }
+[ "$(sha256sum contracts/0.80.0_compiled/exchange/eccBridge.tvc | cut -c1-64)" = "$want" ] || { echo "!! eccBridge.tvc was replaced during generation"; exit 1; }
 # tests/dexdo/up.sh (DEXDO_SKIP_GEN=1) insists on the DEX seed-notes file even when
 # no notes are baked (DEX_TEST_NOTES_CNT unset/0): an empty list is the truthful value.
 [ -f config/dex_test_notes.keys.json ] || echo '[]' > config/dex_test_notes.keys.json
 for f in config/zerostate config/block_manager1_signing.keys.json config/USDCBridge.keys.json config/LicenseRoot.keys.json docker/.env; do
   [ -s "$f" ] || { echo "!! $f missing after generation"; exit 1; }
 done
-echo "== zerostate ready: $(wc -c < config/zerostate) bytes, bridge owner key config/USDCBridge.keys.json, eccUSDCBridge.tvc $have"
+echo "== zerostate ready: $(wc -c < config/zerostate) bytes, bridge owner key config/USDCBridge.keys.json, eccBridge.tvc $have"

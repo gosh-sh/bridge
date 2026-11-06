@@ -134,6 +134,7 @@ pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
         pi.an_account_low,
         pi.block_hash_high,
         pi.block_hash_low,
+        pi.token,
         pi.promise_commit,
     ] {
         out.extend_from_slice(&scalar.to_be_bytes::<32>());
@@ -500,7 +501,7 @@ const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
 /// whose `_depositVoucherCode` predates the voucher's constructor ABI.
 const EXIT_CELL_UNDERFLOW: i32 = 9;
 
-// eccUSDCBridge `modifiers/errors.sol`.
+// eccBridge `modifiers/errors.sol`.
 const EXIT_ZERO_AMOUNT: i32 = 204;
 const EXIT_INVALID_SENDER: i32 = 207;
 const EXIT_HASH_MISMATCH: i32 = 219;
@@ -511,6 +512,8 @@ const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
 const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
 const EXIT_TVL_CAP: i32 = 235;
+const EXIT_TOKEN_UNREGISTERED: i32 = 241;
+const EXIT_TOKEN_DEPOSITS_DISABLED: i32 = 243;
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -589,6 +592,18 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
             reason: format!(
                 "ERR_TVL_CAP — source-chain deposit capacity is full; waiting for withdrawals \
                  (exit_code={code}): {detail}"
+            ),
+        },
+        EXIT_TOKEN_UNREGISTERED => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TOKEN_UNREGISTERED — this token is not registered for the source chain; \
+                 retrying until the owner calls setBridgeToken (exit_code={code}): {detail}"
+            ),
+        },
+        EXIT_TOKEN_DEPOSITS_DISABLED => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_TOKEN_DEPOSITS_DISABLED — deposits of this token are closed on AN; retrying \
+                 until setBridgeToken reopens them (exit_code={code}): {detail}"
             ),
         },
         400 | 402 => SubmitOutcome::Pending {
@@ -799,6 +814,7 @@ mod tests {
     fn event(id: u64) -> DepositEvent {
         DepositEvent {
             deposit_id: id,
+            token: Address::repeat_byte(0x7c),
             sender: Address::repeat_byte(0x11),
             amount: U256::from(42u64),
             an_account: B256::repeat_byte(0x77),
@@ -838,6 +854,12 @@ mod tests {
         assert_eq!(dapp_id, b.parsed.dapp_id());
         let reconstructed = (scalars[7] << 128) | scalars[8];
         assert_eq!(reconstructed, U256::from_be_slice(ev.an_account.as_slice()));
+        // The token is appended at slot 11 and the promise commitment moves
+        // to 12: the AN side reads these positionally, so the order the body
+        // is written in is part of the ABI.
+        assert_eq!(scalars[11], U256::from_be_slice(ev.token.as_slice()));
+        assert_eq!(scalars[11], b.parsed.token);
+        assert_eq!(scalars[12], b.parsed.promise_commit);
         assert_eq!(proof, b.proof.to_vec());
     }
 
@@ -1071,7 +1093,7 @@ mod tests {
 
     #[test]
     fn capacity_and_message_retries_do_not_park_a_deposit() {
-        for code in [235, 400, 402] {
+        for code in [235, 241, 243, 400, 402] {
             for result in [
                 classify_reverted(Some(code), "Reverted"),
                 classify_call_error(&format!("exit_code={code}")),
@@ -1119,6 +1141,7 @@ mod tests {
     fn shellnet_deposit() -> DepositEvent {
         DepositEvent {
             deposit_id: 1,
+            token: Address::repeat_byte(0x7c),
             source_contract: "0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38"
                 .parse()
                 .unwrap(),

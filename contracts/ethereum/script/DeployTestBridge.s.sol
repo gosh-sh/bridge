@@ -44,7 +44,7 @@ contract DeployTestBridge is Script {
             accFr: 0,
             altDstChainId: 0,
             altDstHostChainId: 0,
-            altTokenId: 0,
+            usdcTokenId: 0,
             predecessor: IPredecessorBridge(address(0))
         });
         MockAUSDC aUsdc = new MockAUSDC();
@@ -61,6 +61,8 @@ contract DeployTestBridge is Script {
         console.log("Network: anvil");
         console.log("Bridge:", address(bridge));
         console.log("Mock AAVE pool:", address(pool));
-        console.log("\nTo make a test deposit: approve + deposit(amount, anAccount) on the bridge");
+        console.log(
+            "\nTo make a test deposit: approve + deposit(address token, uint256 amount, bytes32 anAccount) on the bridge"
+        );
     }
 }

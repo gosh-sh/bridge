@@ -1,14 +1,16 @@
 pragma gosh-solidity >=0.80;
 pragma AbiHeader expire;
 
+import "../exchange/modifiers/modifiers.sol";
+
 /// @title BridgeZerostateData
-/// @notice Builds the data cell a premined eccUSDCBridge is upgraded with.
-///         The tuple below is the one `eccUSDCBridge.onCodeUpgrade` decodes; the
+/// @notice Builds the data cell a premined eccBridge is upgraded with.
+///         The tuple below is the one `eccBridge.onCodeUpgrade` decodes; the
 ///         two must be changed together, and `scripts/check_zerostate_data_encoder.py`
 ///         fails if they drift apart.
 /// @dev Never deployed: it is executed in tvm-debugger at an arbitrary address,
 ///      which is why it carries no constructor and its code hash does not matter.
-contract BridgeZerostateData {
+contract BridgeZerostateData is eccBridgeModifiers {
     function getBridgeData(
         uint256 pubkey, address usdcWallet,
         uint128 totalMinted, uint64 mintNonce, uint64 mintAccumulatorNonce,
@@ -24,7 +26,7 @@ contract BridgeZerostateData {
         for (uint i = 0; i < burnedKeys.length; i++) {
             totalBurnedBridgeByToken[burnedKeys[i]] = burnedValues[i];
         }
-        // The ninth field mirrors eccUSDCBridge.updateCode's `userCell`
+        // The ninth field mirrors eccBridge.updateCode's `userCell`
         // passthrough, so onCodeUpgrade decodes one shape on both paths. Empty
         // here: the zerostate carries the voucher code in `depositVoucherCode`.
         TvmCell userCell;
@@ -33,5 +35,12 @@ contract BridgeZerostateData {
         return abi.encode(pubkey, usdcWallet, totalMinted, mintNonce, mintAccumulatorNonce,
                           totalMintedBridgeByToken, totalBurnedBridgeByToken, depositVoucherCode,
                           userCell, outstandingByChain, messages);
+    }
+    /// @notice Upgrade payload for a pre-registry bridge: install the new
+    ///         voucher code with an empty token registry, then register each lane.
+    function getTokenUpgradeData(TvmCell voucherCode) public pure returns (TvmCell) {
+        mapping(uint256 => mapping(uint32 => BridgeTokenConfig)) bridgeTokens;
+        mapping(uint256 => mapping(uint256 => uint32)) bridgeTokenIds;
+        return abi.encode(voucherCode, bridgeTokens, bridgeTokenIds);
     }
 }

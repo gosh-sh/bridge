@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check that the zerostate data encoder still matches the bridge's upgrade decode.
 
-`eccUSDCBridge.onCodeUpgrade` decodes one fixed tuple out of the cell that
+`eccBridge.onCodeUpgrade` decodes one fixed tuple out of the cell that
 `updateCode` carries, and `BridgeZerostateData.getBridgeData` is what builds that
 cell for a zerostate. The two lists are written by hand in two files; a field
 added to one and not the other is not a compile error — the premined bridge
@@ -20,7 +20,7 @@ import re
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_BRIDGE = REPO / "contracts/an/exchange/eccUSDCBridge.sol"
+DEFAULT_BRIDGE = REPO / "contracts/an/exchange/eccBridge.sol"
 DEFAULT_ENCODER = REPO / "contracts/an/zerostate/BridgeZerostateData.sol"
 
 

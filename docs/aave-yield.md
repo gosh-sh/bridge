@@ -40,10 +40,9 @@ FOUNDRY_PROFILE=fork FORK_URL=https://sepolia-rollup.arbitrum.io/rpc \
 `Axiom oracle not supported on Arbitrum Sepolia` and does not fall back to the mock. The bridge stores
 the oracle address and does not call it on the deposit path.
 
-A shellnet withdrawal of this bridge also needs `WITHDRAW_ALT_TOKEN_ID=3` (`USDC_ECC_ID` on Acki
-Nacki). `DeployRealBridge` defaults that value to 0. It is immutable, so a bridge deployed without
-it rejects every shellnet withdrawal with `UnsupportedTokenId(3)` and has to be deployed again.
-The shellnet e2e deploy sets 3; this script does not.
+A shellnet withdrawal of this bridge names `USDC_TOKEN_ID` (`USDC_ECC_ID` on Acki Nacki, `3`), which
+`DeployRealBridge` defaults to 3. It is immutable, so a bridge deployed under another id rejects every
+shellnet USDC withdrawal with `UnsupportedTokenId(3)` and has to be deployed again.
 
 The bridge already recorded for Arbitrum Sepolia,
 `0x3FB082a905a895151224F6d93bD074E816338638` (`README.md`), has no pool, so the AAVE bridge
@@ -89,11 +88,11 @@ the deploying account becomes the owner, and preflight requires the owner to be
   `GENESIS_BK_SET_COMMITMENT`.
 * `EXPECTED_WITHDRAW_DAPP_FR` and `EXPECTED_WITHDRAW_ACC_FR`: the `WITHDRAW_DAPP_FR` and
   `WITHDRAW_ACC_FR` of the deploy.
-* `EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID`, `EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID` and
-  `EXPECTED_WITHDRAW_ALT_TOKEN_ID`: the `WITHDRAW_ALT_*` values of the deploy. The example's
-  1, 11155111 and 3 are the Ethereum Sepolia bridge's. The chain id alias applies only where
-  `block.chainid` is the host chain id, and a burn towards this bridge names 421614 itself, so
-  a deploy that sets only `WITHDRAW_ALT_TOKEN_ID=3` needs 0, 0 and 3.
+* `EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID` and `EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID`: the
+  `WITHDRAW_ALT_DST_*` values of the deploy; `EXPECTED_USDC_TOKEN_ID`: its `USDC_TOKEN_ID`. The
+  example's 1, 11155111 and 3 are the Ethereum Sepolia bridge's. The chain id alias applies only
+  where `block.chainid` is the host chain id, and a burn towards this bridge names 421614 itself,
+  so a deploy that sets neither alias needs 0, 0 and 3.
 
 ## How money moves in and out of the pool
 
@@ -283,7 +282,7 @@ available, so funds can be moved out of AAVE during a pause (`EVM-contracts-spec
 
 ## Replacing a bridge on the same chain
 
-A withdrawal proof names the one EVM bridge that may pay it. `eccUSDCBridge` on Acki Nacki writes
+A withdrawal proof names the one EVM bridge that may pay it. `eccBridge` on Acki Nacki writes
 the bridge its owner set for the destination chain (`setEvmBridge(dstChainId, evmBridge)`, read back
 with `getEvmBridge`) into every `WithdrawalInitiated` event; Circuit 4 publishes it as `dstBridge`;
 `withdrawByProof` refuses any other address with `WrongDstBridge`. A new bridge on a chain that
@@ -303,9 +302,9 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    protection. Leave the new bridge unpaused: a paused bridge reverts `verifyBlock`, so it would
    anchor nothing. Start its `verifyBlock` relayer, its withdrawal relayer and a
    `deposit-relayer daemon` with `--bridge-address <new>` and its own state directory, and call
-   `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccUSDCBridge`, so that deposits into the new
+   `setTrustedL1Bridge(<chainId>, <new>, true)` on `eccBridge`, so that deposits into the new
    bridge are finalized. Deposits into the old bridge still are too.
-2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccUSDCBridge`. From that
+2. **Close withdrawals to the chain**: `setEvmBridge(<chainId>, 0)` on `eccBridge`. From that
    message on, `initiateWithdrawal` to the chain returns the attached eccUSDC with reason 239
    (`ERR_NO_EVM_BRIDGE`) and burns nothing, and `ackinacki-bridge withdraw` stops before the burn
    because `getEvmBridge` is unset. The burns made before this message are bound to the old bridge,
@@ -339,10 +338,15 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    Acki Nacki. Only the owner and `predecessor` may call it. A deposit the old bridge took before
    its pause is in the `treasuryBalance` that moves, and Acki Nacki still finalizes it: the old
    bridge stays trusted until step 6.
-5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccUSDCBridge`.
+
+   Then call `migrateToken(<tokenId>, <new bridge>)` on the old bridge for every other listed token
+   with liabilities; there are none while USDC is the only one listed. It hands over the listing's liabilities and the tokens behind them, through the
+   new bridge's `fundToken`. A token left behind strands later burns of it, with the ECC already
+   burned (`contracts/an/README.md`, "Which EVM bridge pays a withdrawal").
+5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccBridge`.
    Point `ackinacki-bridge withdraw --bridge-address` at the new bridge.
 6. **Stop trusting the old bridge** (`setTrustedL1Bridge(<chainId>, <old>, false)`) and stop its
    relayers, only after every deposit it took has been finalized: every deposit id below its
-   `depositCounter`, which the pause froze. `eccUSDCBridge` refuses a deposit from an untrusted
+   `depositCounter`, which the pause froze. `eccBridge` refuses a deposit from an untrusted
    bridge (`ERR_UNSUPPORTED_SRC_CHAIN`), and step 4 moved that deposit's USDC to the new bridge, so
    a deposit refused here has no way back.

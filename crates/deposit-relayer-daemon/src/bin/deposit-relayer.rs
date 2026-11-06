@@ -166,7 +166,7 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
+        /// `eccBridge` pins the deposit's dappId to 0 and ignores this
         /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,
@@ -227,7 +227,7 @@ enum Cmd {
         max_log_num: usize,
         /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
         /// bound as the dappId public inputs (not part of the deposit event).
-        /// `eccUSDCBridge` pins the deposit's dappId to 0 and ignores this
+        /// `eccBridge` pins the deposit's dappId to 0 and ignores this
         /// value, so the default `0` is correct (QC-OFF-09).
         #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
         dapp_id: String,

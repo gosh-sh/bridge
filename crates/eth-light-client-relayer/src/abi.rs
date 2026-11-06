@@ -9,7 +9,7 @@
 pub const LIGHT_CLIENT_ABI_JSON: &str =
     include_str!("../../../contracts/an/0.81.1_compiled/exchange/EthBeaconLightClient.abi.json");
 
-/// `eccUSDCBridge`: the flip (`getLightClient`, `isOwnerAnchorsEnabled`,
+/// `eccBridge`: the flip (`getLightClient`, `isOwnerAnchorsEnabled`,
 /// `disableOwnerAnchorsOn`) and the anchors (`getL2Verifier`,
 /// `isAcceptedBlockHash`). The full ABI, shared with the CLI and kept in
 /// sync with the contract by `scripts/check_bridge_abi_in_sync.sh`.

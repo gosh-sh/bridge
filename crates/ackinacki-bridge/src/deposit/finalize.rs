@@ -490,6 +490,7 @@ mod tests {
                 bridge: Default::default(),
                 to: "x".into(),
                 amount_units: 1,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: "1a".repeat(32),
                 an_network: "https://shellnet.ackinacki.org:443".into(),
             },
@@ -555,6 +556,7 @@ mod tests {
             contract: alloy_primitives::U256::from(0xcdfdu64),
             chain_id: 1,
             amount: 1,
+            token_id: 3,
             account: [0xa3; 32],
         }
     }
@@ -633,6 +635,7 @@ mod tests {
                 bridge: Default::default(),
                 to: "x".into(),
                 amount_units: 1,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: "1a".repeat(32),
                 an_network: "https://shellnet.ackinacki.org:443".into(),
             },

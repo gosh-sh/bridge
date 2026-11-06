@@ -216,6 +216,7 @@ async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
             signer.address(),
             TxPurpose::Deposit {
                 bridge,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 amount: 1_000_000,
                 account: acc,
             },

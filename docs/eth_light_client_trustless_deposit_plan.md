@@ -254,4 +254,4 @@ months** with two engineers. M-agg and hardening extend from there.
 - Existing prior art: Succinct Telepathy / SP1-Helios, Electron zk light client.
 - In-repo: `deposit-prover/src/circuit_v2.rs` (12-PI layout, `blockHashHigh/Low` at 9/10),
   `docs/zkhalo2verifywithvk_reference.md`, `docs/bridge_deposit_chain_binding_fix_proposal_2026_07_20.md`,
-  AN-side `USDCBridge`/`eccUSDCBridge` `_acceptedBlockHash` (attester MVP being replaced).
+  AN-side `USDCBridge`/`eccBridge` `_acceptedBlockHash` (attester MVP being replaced).

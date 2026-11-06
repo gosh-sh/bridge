@@ -3,7 +3,7 @@ pragma AbiHeader expire;
 pragma AbiHeader pubkey;
 
 import "./EthKeccak.sol";
-import "./eccUSDCBridge.sol";
+import "./eccBridge.sol";
 
 /// @notice Sink for the canonicality anchor the light client proves. The
 ///         `USDCBridge` implements this so a proven finalized execution block
@@ -675,7 +675,7 @@ contract EthBeaconLightClient {
         // bounce: true so a rejected sink returns the 1 vmshell and
         // `onBounce` emits. The hash stays proven locally — `rePushAnchor`
         // is the retry (submitUpdate would hit ERR_STALE_UPDATE).
-        eccUSDCBridge(USDC_BRIDGE_ADDRESS).acceptBlockHashFromLightClient{
+        eccBridge(USDC_BRIDGE_ADDRESS).acceptBlockHashFromLightClient{
             value: SINK_VALUE,
             bounce: true,
             flag: 1
@@ -683,7 +683,7 @@ contract EthBeaconLightClient {
     }
 
     function _forgetSink(uint256 h) private {
-        eccUSDCBridge(USDC_BRIDGE_ADDRESS).forgetBlockHashFromLightClient{
+        eccBridge(USDC_BRIDGE_ADDRESS).forgetBlockHashFromLightClient{
             value: SINK_VALUE,
             bounce: true,
             flag: 1

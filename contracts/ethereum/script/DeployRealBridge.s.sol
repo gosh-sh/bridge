@@ -54,7 +54,7 @@ contract DeployRealBridge is Script {
         uint256 withdrawAccFr;
         uint256 altDstChainId;
         uint256 altDstHostChainId;
-        uint256 altTokenId;
+        uint32 usdcTokenId;
         address predecessor;
     }
 
@@ -142,7 +142,9 @@ contract DeployRealBridge is Script {
         w.withdrawDappFr = vm.envOr("WITHDRAW_DAPP_FR", uint256(0));
         w.altDstChainId = vm.envOr("WITHDRAW_ALT_DST_CHAIN_ID", uint256(0));
         w.altDstHostChainId = vm.envOr("WITHDRAW_ALT_DST_HOST_CHAIN_ID", uint256(0));
-        w.altTokenId = vm.envOr("WITHDRAW_ALT_TOKEN_ID", uint256(0));
+        uint256 tokenId = vm.envOr("USDC_TOKEN_ID", uint256(3));
+        require(tokenId <= type(uint32).max, "USDC_TOKEN_ID exceeds uint32");
+        w.usdcTokenId = uint32(tokenId);
         w.predecessor = PredecessorEnv.read();
     }
 
@@ -158,7 +160,7 @@ contract DeployRealBridge is Script {
             w.withdrawAccFr,
             w.altDstChainId,
             w.altDstHostChainId,
-            w.altTokenId,
+            w.usdcTokenId,
             w.predecessor
         );
 
@@ -257,7 +259,7 @@ contract DeployRealBridge is Script {
         uint256 accFr,
         uint256 altDstChainId,
         uint256 altDstHostChainId,
-        uint256 altTokenId,
+        uint32 usdcTokenId,
         address predecessor
     ) internal returns (AckiNackiBridge.BridgeWithdrawConfig memory bw) {
         console.log("Deploying Shplonk BridgeWithdrawalAggregatorVerifier...");
@@ -271,7 +273,7 @@ contract DeployRealBridge is Script {
             accFr: accFr,
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
-            altTokenId: altTokenId,
+            usdcTokenId: usdcTokenId,
             predecessor: IPredecessorBridge(predecessor)
         });
     }

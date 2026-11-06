@@ -360,7 +360,7 @@ contract AckiNackiBridgeEthFieldCongruenceTest is Test {
             "AckiNackiBridge.sol:AckiNackiBridge",
             _withdrawBridgeArgs(
                 VerifyBlockConfigLib.withWithdrawShellnet(
-                    verifier, pub.dappFr, pub.accFr, 0, 0, pub.tokenId
+                    verifier, pub.dappFr, pub.accFr, 0, 0, uint32(pub.tokenId)
                 )
             ),
             at

@@ -52,6 +52,11 @@ const MULTISIG_ABI_JSON: &str = include_str!("../abi/UpdateCustodianMultisigWall
 /// the repo's deploy script sets the dapp id equal to the account id
 /// (`msig.py`), and the CLI's own address parsing accepts that.
 pub(crate) async fn deployed_multisig(ecc3: u128) -> (String, String) {
+    deployed_multisig_for_token(ecc3, 3).await
+}
+
+/// Deploy the production multisig with balance in the selected ECC currency.
+async fn deployed_multisig_for_token(ecc3: u128, token_id: u32) -> (String, String) {
     // No endpoints: nothing here talks to a node, and giving it one
     // would let a mistake reach the network from a unit test.
     let ctx =
@@ -111,7 +116,7 @@ pub(crate) async fn deployed_multisig(ecc3: u128) -> (String, String) {
     if ecc3 > 0 {
         let mut funds = CurrencyCollection::default();
         funds
-            .set_other_ex(3, &ecc3.into())
+            .set_other_ex(token_id, &ecc3.into())
             .expect("ECC[3] fits the collection");
         account
             .add_funds(&funds)
@@ -136,7 +141,7 @@ pub(crate) async fn deployed_multisig(ecc3: u128) -> (String, String) {
 /// the one the CLI ships (`abi/USDCBridge.abi.json`, kept identical to the
 /// compiled one by CI).
 const USDC_BRIDGE_TVC: &[u8] =
-    include_bytes!("../../../contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc");
+    include_bytes!("../../../contracts/an/0.80.0_compiled/exchange/eccBridge.tvc");
 
 /// The EVM bridge [`deployed_usdc_bridge`] binds Sepolia withdrawals to, and
 /// the `--bridge-address` of [`fake_world`].
@@ -159,9 +164,28 @@ pub(crate) async fn deployed_usdc_bridge_with(
     bridged_minted: u128,
     bridged_burned: u128,
 ) -> (String, String) {
+    deployed_bridge_artifact(
+        USDC_BRIDGE_TVC,
+        crate::burn::USDC_BRIDGE_ABI_JSON,
+        paused,
+        bridged_minted,
+        bridged_burned,
+    )
+    .await
+}
+
+/// Deploy the specified bridge artifact using its unchanged constructor
+/// interface.
+async fn deployed_bridge_artifact(
+    tvc: &[u8],
+    abi_json: &str,
+    paused: bool,
+    bridged_minted: u128,
+    bridged_burned: u128,
+) -> (String, String) {
     let ctx =
         Arc::new(ClientContext::new(ClientConfig::default()).expect("an offline client context"));
-    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let abi = Abi::Json(abi_json.to_owned());
     let owner = || Signer::Keys {
         keys: KeyPair {
             public: PAIR_PUBLIC.to_string(),
@@ -171,7 +195,7 @@ pub(crate) async fn deployed_usdc_bridge_with(
     let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
         abi: abi.clone(),
         deploy_set: Some(DeploySet {
-            tvc: Some(tvm_types::base64_encode(USDC_BRIDGE_TVC)),
+            tvc: Some(tvm_types::base64_encode(tvc)),
             initial_data: Some(json!({ "_pubkey": format!("0x{PAIR_PUBLIC}") })),
             ..Default::default()
         }),
@@ -317,6 +341,118 @@ fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
             .write_to_bytes()
             .expect("the account serialises back"),
     )
+}
+
+/// A lane for a currency the production bridge refuses to register: register
+/// USDC through the owner method, move that entry to `token_id` in storage and
+/// seed its bridged inventory. The CLI is token-agnostic; this keeps that covered.
+async fn bridge_with_token_lane(
+    boc: &str,
+    account_id: &str,
+    token_id: u32,
+    amount: u128,
+) -> String {
+    let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+    let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi, address: Some(format!("0:{account_id}")),
+        call_set: Some(CallSet { function_name: "setBridgeToken".into(),
+            input: Some(json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
+                "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true})),
+            ..Default::default() }),
+        signer: Signer::Keys { keys: KeyPair { public: PAIR_PUBLIC.into(), secret: PAIR_SECRET.into() } },
+        ..Default::default()
+    }).await.unwrap();
+    let result = run_executor(ctx, ParamsOfRunExecutor {
+        message: encoded.message,
+        account: AccountForExecutor::Account {
+            boc: boc.to_owned(),
+            unlimited_balance: Some(true),
+        },
+        return_updated_account: Some(true),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let mut account = Account::construct_from_base64(&result.account).unwrap();
+    let contract = tvm_abi::Contract::load(crate::burn::USDC_BRIDGE_ABI_JSON.as_bytes()).unwrap();
+    let mut fields = contract
+        .decode_storage_fields(
+            tvm_types::SliceData::load_cell(account.get_data().unwrap()).unwrap(),
+            false,
+        )
+        .unwrap();
+    for field in &mut fields {
+        if field.name == "_totalMintedBridgeByToken" {
+            if let tvm_abi::TokenValue::Map(_, _, map) = &mut field.value {
+                map.insert(
+                    token_id.to_string(),
+                    tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(amount, 128)),
+                );
+            } else {
+                panic!("minted totals must be a map");
+            }
+        }
+        if field.name == "_bridgeTokens" {
+            let tvm_abi::TokenValue::Map(_, _, chains) = &mut field.value else {
+                panic!("chain map");
+            };
+            let tvm_abi::TokenValue::Map(_, _, tokens) = chains
+                .iter_mut()
+                .find(|(key, _)| {
+                    key.parse::<alloy::primitives::U256>().ok()
+                        == Some(alloy::primitives::U256::from(11_155_111u64))
+                })
+                .expect("registered chain")
+                .1
+            else {
+                panic!("token map");
+            };
+            let mut entry = tokens.remove(&3u32.to_string()).expect("registered USDC");
+            let tvm_abi::TokenValue::Tuple(config) = &mut entry else {
+                panic!("token config");
+            };
+            for (name, value) in [
+                ("maxTransfer", amount),
+                ("maxTvl", amount * 10),
+                ("maxWithdrawal", amount),
+                ("outstanding", amount),
+            ] {
+                config.iter_mut().find(|f| f.name == name).unwrap().value =
+                    tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(value, 128));
+            }
+            tokens.insert(token_id.to_string(), entry);
+        }
+        if field.name == "_bridgeTokenIds" {
+            let tvm_abi::TokenValue::Map(_, _, chains) = &mut field.value else {
+                panic!("chain map");
+            };
+            let tvm_abi::TokenValue::Map(_, _, ids) = chains
+                .iter_mut()
+                .find(|(key, _)| {
+                    key.parse::<alloy::primitives::U256>().ok()
+                        == Some(alloy::primitives::U256::from(11_155_111u64))
+                })
+                .expect("registered chain")
+                .1
+            else {
+                panic!("token id map");
+            };
+            for id in ids.values_mut() {
+                *id = tvm_abi::TokenValue::Uint(tvm_abi::Uint::new(u128::from(token_id), 32));
+            }
+        }
+    }
+    let data = tvm_abi::TokenValue::pack_values_into_chain(
+        &fields,
+        Vec::new(),
+        &tvm_abi::contract::ABI_VERSION_2_4,
+    )
+    .unwrap()
+    .into_cell()
+    .unwrap();
+    assert!(account.set_data(data));
+    tvm_types::base64_encode(account.write_to_bytes().unwrap())
 }
 
 /// A `mapping(uint32 => uint128)` with ECC[3] set to `value`, or empty when
@@ -672,6 +808,7 @@ fn answer(fixture: &NodeFixture, request_line: &str, body: &str) -> serde_json::
 /// takes the state directory or the key file out from under a run that
 /// is still going.
 pub(crate) struct FakeWorld {
+    decimals: u8,
     args: Option<crate::args::WithdrawArgs>,
     pub node: FakeNode,
     pub state_dir: tempfile::TempDir,
@@ -692,7 +829,12 @@ impl FakeWorld {
         (
             crate::args::parse_from(&args.from).expect("the fixture's --from parses"),
             crate::args::parse_to(&args.to, args.to_chain).expect("the fixture's --to parses"),
-            crate::args::parse_amount(&args.amount).expect("the fixture's --amount parses"),
+            if args.token_id == 3 {
+                crate::args::parse_amount(&args.amount)
+            } else {
+                crate::args::parse_token_amount(&args.amount, self.decimals)
+            }
+            .expect("the fixture's --amount parses"),
         )
     }
 
@@ -708,9 +850,15 @@ impl FakeWorld {
     /// measured against.
     pub(crate) fn leave_a_hash_less_reservation(&self) -> std::path::PathBuf {
         let (from, to, amount) = self.identity();
-        let (record, _) =
-            crate::idempotency::reserve(self.state_dir.path(), &from, &to, &amount, false)
-                .expect("the first reservation is uncontested");
+        let (record, _) = crate::idempotency::reserve_for_token(
+            self.state_dir.path(),
+            &from,
+            &to,
+            &amount,
+            self.args.as_ref().unwrap().token_id,
+            false,
+        )
+        .expect("the first reservation is uncontested");
         assert!(
             record.an_tx_hash.is_none(),
             "a fresh reservation has no hash"
@@ -731,9 +879,15 @@ impl FakeWorld {
     /// record `read_record` accepts.
     pub(crate) fn leave_a_burned_record(&self) -> std::path::PathBuf {
         let (from, to, amount) = self.identity();
-        let (mut record, _) =
-            crate::idempotency::reserve(self.state_dir.path(), &from, &to, &amount, false)
-                .expect("the first reservation is uncontested");
+        let (mut record, _) = crate::idempotency::reserve_for_token(
+            self.state_dir.path(),
+            &from,
+            &to,
+            &amount,
+            self.args.as_ref().unwrap().token_id,
+            false,
+        )
+        .expect("the first reservation is uncontested");
         record.status = crate::idempotency::Status::Burned;
         record.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
         crate::idempotency::update(
@@ -754,9 +908,15 @@ impl FakeWorld {
     /// reopen.
     pub(crate) fn leave_a_paid_out_record(&self) -> std::path::PathBuf {
         let (from, to, amount) = self.identity();
-        let (mut record, _) =
-            crate::idempotency::reserve(self.state_dir.path(), &from, &to, &amount, false)
-                .expect("the first reservation is uncontested");
+        let (mut record, _) = crate::idempotency::reserve_for_token(
+            self.state_dir.path(),
+            &from,
+            &to,
+            &amount,
+            self.args.as_ref().unwrap().token_id,
+            false,
+        )
+        .expect("the first reservation is uncontested");
         record.status = crate::idempotency::Status::Confirmed;
         record.an_tx_hash = Some(format!("0x{}", "ab".repeat(32)));
         record.eth_tx_hash = Some(format!("0x{}", "cd".repeat(32)));
@@ -908,13 +1068,29 @@ pub(crate) struct WorldKnobs {
 
 /// [`fake_world`], with the bridges in the state `knobs` names.
 pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs) -> FakeWorld {
+    fake_world_for_token(ecc3, amount, knobs, 3, 6).await
+}
+
+/// Drive the real CLI preflight against a selected token's production AN
+/// account state.
+pub(crate) async fn fake_world_for_token(
+    ecc3: u128,
+    amount: &str,
+    knobs: WorldKnobs,
+    token_id: u32,
+    decimals: u8,
+) -> FakeWorld {
     use crate::preflight::tests::{full_walk, full_walk_code, mock_rpc_code_for};
 
-    let (account_id, account_boc) = deployed_multisig(ecc3).await;
+    let (account_id, account_boc) = deployed_multisig_for_token(ecc3, token_id).await;
     // Bridged minted must cover the burn: owner/TIP-3 ECC does not add
     // inventory. Seed a round 1_000 USDC so any fixture amount here passes.
-    let (usdc_bridge_account_id, usdc_bridge_boc) =
+    let (usdc_bridge_account_id, mut usdc_bridge_boc) =
         deployed_usdc_bridge_with(knobs.an_paused, 1_000_000_000, 0).await;
+    if token_id != 3 {
+        usdc_bridge_boc =
+            bridge_with_token_lane(&usdc_bridge_boc, &usdc_bridge_account_id, token_id, ecc3).await;
+    }
     let node = fake_node(NodeFixture {
         account_id: account_id.clone(),
         account_boc,
@@ -928,24 +1104,36 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
     let mut id = [0u8; 32];
     hex::decode_to_slice(&usdc_bridge_account_id, &mut id).unwrap();
     let (dapp_fr, acc_fr) = crate::preflight::withdrawal_identity_frs(&id, &id);
-    let rpc = mock_rpc_code_for(
-        &full_walk_code(),
-        full_walk(&[
-            (
-                crate::preflight::tests::SEL_DAPP_FR,
-                format!("0x{dapp_fr:064x}"),
+    let mut answers = full_walk(&[
+        (
+            crate::preflight::tests::SEL_DAPP_FR,
+            format!("0x{dapp_fr:064x}"),
+        ),
+        (
+            crate::preflight::tests::SEL_ACC_FR,
+            format!("0x{acc_fr:064x}"),
+        ),
+        (
+            crate::preflight::tests::SEL_PAUSED,
+            format!("0x{:064x}", u8::from(knobs.evm_paused)),
+        ),
+    ]);
+    if token_id != 3 {
+        answers.insert(
+            "68fb1109",
+            format!(
+                "0x{:064x}{:064x}{:064x}{:064x}{:064x}{:064x}",
+                85u128,
+                decimals,
+                1u8,
+                ecc3,
+                ecc3 * 10,
+                ecc3
             ),
-            (
-                crate::preflight::tests::SEL_ACC_FR,
-                format!("0x{acc_fr:064x}"),
-            ),
-            (
-                crate::preflight::tests::SEL_PAUSED,
-                format!("0x{:064x}", u8::from(knobs.evm_paused)),
-            ),
-        ]),
-    )
-    .await;
+        );
+        answers.insert("aa407e56", format!("0x{ecc3:064x}"));
+    }
+    let rpc = mock_rpc_code_for(&full_walk_code(), answers).await;
 
     let keys_dir = tempfile::TempDir::new().unwrap();
     let keys = keys_dir.path().join("keys.json");
@@ -962,6 +1150,7 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
 
     let state_dir = tempfile::TempDir::new().unwrap();
     let args = crate::args::WithdrawArgs {
+        token_id,
         from: format!("{account_id}::{account_id}"),
         from_keys: keys,
         to: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e".to_string(),
@@ -992,6 +1181,7 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
     };
 
     FakeWorld {
+        decimals,
         args: Some(args),
         node,
         state_dir,
@@ -1003,6 +1193,9 @@ pub(crate) async fn fake_world_with(ecc3: u128, amount: &str, knobs: WorldKnobs)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SPECIAL_ACCOUNT: &str =
+        "04f64c6afbff3dd10d8ba6707790ac9670d540f37a9448b0337baa6a5a92acac";
 
     /// A fixture for the two checks the node makes on what it is asked.
     /// Any BOC serves as the message: the node hashes the bytes that
@@ -1019,6 +1212,185 @@ mod tests {
             },
             boc,
         )
+    }
+
+    /// Execute an owner message without treating ExtOut events as getter
+    /// responses.
+    async fn owner_call_for_upgrade(
+        ctx: &Arc<ClientContext>,
+        address: &str,
+        boc: &str,
+        name: &str,
+        input: serde_json::Value,
+    ) -> Result<tvm_client::tvm::ResultOfRunExecutor, tvm_client::error::ClientError> {
+        let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+            abi: Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.into()),
+            address: Some(address.to_owned()),
+            call_set: Some(CallSet {
+                function_name: name.into(),
+                input: Some(input),
+                ..Default::default()
+            }),
+            signer: Signer::Keys {
+                keys: KeyPair {
+                    public: PAIR_PUBLIC.into(),
+                    secret: PAIR_SECRET.into(),
+                },
+            },
+            ..Default::default()
+        })
+        .await?;
+        run_executor(ctx.clone(), ParamsOfRunExecutor {
+            message: encoded.message,
+            account: AccountForExecutor::Account {
+                boc: boc.into(),
+                unlimited_balance: Some(true),
+            },
+            return_updated_account: Some(true),
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// `boc` moved to an address the client's default config lists as
+    /// special, as the zerostate bridge is: only a special account's
+    /// `mintecc` passes the action phase.
+    fn at_special_address(boc: &str) -> (String, String) {
+        use std::str::FromStr;
+
+        use tvm_block::Serializable;
+
+        let address = format!("0:{SPECIAL_ACCOUNT}");
+        let mut account = Account::construct_from_base64(boc).expect("the fixture BOC parses");
+        account.set_addr(tvm_block::MsgAddressInt::from_str(&address).expect("a std address"));
+        let cell = account.serialize().expect("the account serializes");
+        let boc = tvm_types::base64_encode(tvm_types::write_boc(&cell).expect("the cell writes"));
+        (address, boc)
+    }
+
+    #[tokio::test]
+    async fn production_1_15_upgrade_preserves_usdc_and_registers_only_usdc() {
+        use tvm_client::{
+            abi::{encode_boc, AbiParam, ParamsOfAbiEncodeBoc},
+            boc::{get_code_from_tvc, ParamsOfGetCodeFromTvc},
+        };
+        let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+        let (_, deployed) = deployed_bridge_artifact(
+            include_bytes!("../tests/fixtures/upgrade/eccUSDCBridge-1.15.0.tvc"),
+            include_str!("../tests/fixtures/upgrade/eccUSDCBridge-1.15.0.abi.json"),
+            false,
+            0,
+            0,
+        )
+        .await;
+        let (address, mut boc) = at_special_address(&deployed);
+        let getter = |boc: String, name: &'static str, input: serde_json::Value| {
+            let ctx = ctx.clone();
+            let address = address.clone();
+            async move {
+                crate::preflight::call_bridge_getter(&ctx, &address, &boc, name, input)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            getter(boc.clone(), "getVersion", json!({})).await["value0"],
+            "1.15.0"
+        );
+        boc = owner_call_for_upgrade(&ctx, &address, &boc, "mintAndSendBridged", json!({
+            "recipient": format!("0:{}", "ab".repeat(32)), "value": "1000000", "nonce": "1", "chainId": "11155111"
+        })).await.unwrap().account;
+        let code = |tvc: &[u8]| {
+            get_code_from_tvc(ctx.clone(), ParamsOfGetCodeFromTvc {
+                tvc: tvm_types::base64_encode(tvc),
+            })
+            .unwrap()
+            .code
+        };
+        let abi: serde_json::Value =
+            serde_json::from_str(crate::burn::USDC_BRIDGE_ABI_JSON).unwrap();
+        let field = |name: &str| -> AbiParam {
+            serde_json::from_value(
+                abi["fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == name)
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap()
+        };
+        let payload = encode_boc(ctx.clone(), ParamsOfAbiEncodeBoc {
+            params: vec![AbiParam { name: "voucherCode".into(), param_type: "cell".into(), ..Default::default() }, field("_bridgeTokens"), field("_bridgeTokenIds")],
+            data: json!({"voucherCode": code(include_bytes!("../../../contracts/an/0.81.0_compiled/exchange/DepositVoucher.tvc")), "_bridgeTokens": {}, "_bridgeTokenIds": {}}), boc_cache: None,
+        }).unwrap().boc;
+        boc = owner_call_for_upgrade(
+            &ctx,
+            &address,
+            &boc,
+            "updateCode",
+            json!({"newcode": code(USDC_BRIDGE_TVC), "userCell": payload}),
+        )
+        .await
+        .unwrap()
+        .account;
+        assert_eq!(
+            getter(boc.clone(), "getVersion", json!({})).await["value0"],
+            "1.16.0"
+        );
+        assert_eq!(
+            getter(
+                boc.clone(),
+                "getDepositLimits",
+                json!({"chainId": "11155111"})
+            )
+            .await["outstanding"],
+            "1000000"
+        );
+        let refused = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 4,
+            "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000", "depositsEnabled": true}))
+        .await
+        .expect("a special account records the refused call")
+        .transaction;
+        assert_eq!(refused["compute"]["exit_code"].as_i64(), Some(242), "{refused}");
+        let recovery = json!({"recipient": format!("0:{}", "ab".repeat(32)), "value": "1000000", "nonce": "1", "chainId": "11155111", "tokenId": 3});
+        boc = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
+            "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true})).await.unwrap().account;
+        let reused_nonce = owner_call_for_upgrade(
+            &ctx,
+            &address,
+            &boc,
+            "mintAndSendTokenBridged",
+            recovery.clone(),
+        )
+        .await
+        .expect("a special account records the refused call")
+        .transaction;
+        assert_eq!(
+            reused_nonce["compute"]["exit_code"].as_i64(),
+            Some(215),
+            "{reused_nonce}"
+        );
+        let mut next = recovery;
+        next["nonce"] = json!("2");
+        boc = owner_call_for_upgrade(&ctx, &address, &boc, "mintAndSendTokenBridged", next)
+            .await
+            .unwrap()
+            .account;
+        assert_eq!(
+            getter(boc.clone(), "getTotalBridged", json!({"tokenId": 3})).await["minted"],
+            "2000000"
+        );
+        assert_eq!(
+            getter(
+                boc,
+                "getTokenWithdrawalConfig",
+                json!({"chainId": "11155111", "tokenId": 3})
+            )
+            .await["outstanding"],
+            "2000000"
+        );
     }
 
     #[tokio::test]
@@ -1080,13 +1452,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 build of eccUSDCBridge 1.15.0: 1.14.0 plus the EVM
-        // bridge each withdrawal is bound to (`setEvmBridge`, `getEvmBridge`,
-        // `dstBridge` in `WithdrawalInitiated`), and the refusal to close an
-        // Arbitrum chain to the owner while its parent chain is still open.
+        // sold 0.80.0 build of eccBridge 1.16.0: 1.15.0 plus per-token
+        // accounting, with USDC the only currency it registers.
         assert_eq!(
             &hash[..8],
-            "71074c89",
+            "e6810f06",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

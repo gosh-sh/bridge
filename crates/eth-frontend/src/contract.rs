@@ -6,14 +6,14 @@
 //!
 //! ABI surface — Phase 4.3 (Decision Log 2026-05-17) retired the legacy
 //! refund-style `withdraw()` plus its `processedDeposits`/`Withdrawal`
-//! surface; this client now exposes the USDC deposit + read-only views only.
+//! surface; this client now exposes the ERC-20 deposit + read-only views only.
 //! The relayer (`crates/bridge-relayer-daemon`) holds the AN→ETH
 //! `verifyBlock` ABI; a future burn-proof flow will reintroduce a real
 //! cross-chain withdrawal once the corresponding circuit lands.
 
 use alloy::{
     network::Network,
-    primitives::{Address, U256},
+    primitives::{Address, B256, U256},
     providers::Provider,
     rpc::types::TransactionReceipt,
     sol,
@@ -39,12 +39,12 @@ sol! {
 
     #[sol(rpc)]
     contract AckiNackiBridge {
-        function deposit(uint256 amount) external;
+        function deposit(address token, uint256 amount, bytes32 anAccount) external;
         function treasuryBalance() external view returns (uint256);
         function depositCounter() external view returns (uint256);
         function usdc() external view returns (address);
 
-        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, uint256 timestamp);
+        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp, address token);
     }
 }
 
@@ -104,11 +104,16 @@ where
             .map_err(|e| BridgeError::ContractError(e.to_string()))
     }
 
-    /// Ensure the signer has approved the bridge for `amount` USDC.
-    pub async fn ensure_usdc_approval(&self, owner: Address, amount: U256) -> Result<bool> {
+    /// Ensure the signer has approved the bridge for `amount` of `token`.
+    pub async fn ensure_approval(
+        &self,
+        token: Address,
+        owner: Address,
+        amount: U256,
+    ) -> Result<bool> {
+        let erc20 = IERC20::new(token, self.provider.clone());
         let bridge_addr = *self.contract.address();
-        let current = self
-            .usdc
+        let current = erc20
             .allowance(owner, bridge_addr)
             .call()
             .await
@@ -116,8 +121,7 @@ where
         if current >= amount {
             return Ok(false);
         }
-        let pending = self
-            .usdc
+        let pending = erc20
             .approve(bridge_addr, amount)
             .send()
             .await
@@ -129,12 +133,25 @@ where
         Ok(true)
     }
 
-    /// Approve (if needed) and deposit USDC. Returns the deposit tx receipt.
-    pub async fn deposit(&self, owner: Address, amount: U256) -> Result<N::ReceiptResponse> {
-        self.ensure_usdc_approval(owner, amount).await?;
+    /// Ensure the signer has approved the bridge for `amount` USDC.
+    pub async fn ensure_usdc_approval(&self, owner: Address, amount: U256) -> Result<bool> {
+        self.ensure_approval(self.usdc_address(), owner, amount)
+            .await
+    }
+
+    /// Approve (if needed) and deposit `token` to `an_account`. Returns the
+    /// deposit tx receipt.
+    pub async fn deposit(
+        &self,
+        owner: Address,
+        token: Address,
+        amount: U256,
+        an_account: B256,
+    ) -> Result<N::ReceiptResponse> {
+        self.ensure_approval(token, owner, amount).await?;
         let pending = self
             .contract
-            .deposit(amount)
+            .deposit(token, amount, an_account)
             .send()
             .await
             .map_err(|e| BridgeError::ContractError(e.to_string()))?;
@@ -144,14 +161,16 @@ where
             .map_err(|e| BridgeError::ContractError(e.to_string()))
     }
 
-    /// E2E helper: faucet → approve → deposit.
+    /// E2E helper: faucet → approve → deposit, in the bridge's USDC.
     pub async fn fund_faucet_and_deposit(
         &self,
         recipient: Address,
         amount: U256,
+        an_account: B256,
     ) -> Result<N::ReceiptResponse> {
         self.fund_usdc_from_aave_faucet(recipient, amount).await?;
-        self.deposit(recipient, amount).await
+        self.deposit(recipient, self.usdc_address(), amount, an_account)
+            .await
     }
 
     /// Get the treasury balance.

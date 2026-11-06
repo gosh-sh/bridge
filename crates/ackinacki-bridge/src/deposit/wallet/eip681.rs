@@ -21,10 +21,14 @@ pub fn uri(chain_id: u64, p: &TxPurpose) -> String {
         },
         TxPurpose::Deposit {
             bridge,
+            token,
             amount,
             account,
         } => {
-            format!("ethereum:{bridge:#x}@{chain_id}/deposit?uint256={amount}&bytes32={account:#x}")
+            format!(
+                "ethereum:{bridge:#x}@{chain_id}/deposit?address={token:#x}&uint256={amount}&\
+                 bytes32={account:#x}"
+            )
         },
     }
 }
@@ -37,18 +41,23 @@ pub fn decoded(p: &TxPurpose) -> Vec<(String, String)> {
             spender,
             amount,
         } => vec![
-            ("contract".into(), format!("{token:#x} (USDC)")),
+            (
+                "contract".into(),
+                format!("{token:#x} (the deposited token)"),
+            ),
             ("function".into(), "approve(address,uint256)".into()),
             ("spender".into(), format!("{spender:#x} (the bridge)")),
             ("amount".into(), format!("{amount} units")),
         ],
         TxPurpose::Deposit {
             bridge,
+            token,
             amount,
             account,
         } => vec![
             ("contract".into(), format!("{bridge:#x} (AckiNackiBridge)")),
-            ("function".into(), "deposit(uint256,bytes32)".into()),
+            ("function".into(), "deposit(address,uint256,bytes32)".into()),
+            ("token".into(), format!("{token:#x}")),
             ("amount".into(), format!("{amount} units")),
             ("anAccount".into(), format!("{account:#x}")),
         ],
@@ -73,9 +82,9 @@ impl Eip681Wallet {
 
 /// What the person must accept before this mode is used.
 const RISK: &str = "EIP-681 cannot ask the wallet for a type-2 (EIP-1559) transaction. A wallet \
-                    that sends a legacy transaction makes this deposit unprovable: the USDC stays \
-                    in the bridge on the EVM side and only its operator can return it. The wallet \
-                    will not add the network either, and some wallets drop the call data. \
+                    that sends a legacy transaction makes this deposit unprovable: the deposit \
+                    stays in the bridge on the EVM side and only its operator can return it. The \
+                    wallet will not add the network either, and some wallets drop the call data. \
                     Continue?";
 
 #[async_trait]
@@ -128,13 +137,18 @@ mod tests {
             format!("ethereum:{usdc:#x}@11155111/approve?address={bridge:#x}&uint256=12500000")
         );
         let acc = B256::repeat_byte(0xa3);
+        let token = alloy_primitives::Address::repeat_byte(0x7c);
         assert_eq!(
             uri(11_155_111, &TxPurpose::Deposit {
                 bridge,
+                token,
                 amount: 12_500_000,
                 account: acc
             }),
-            format!("ethereum:{bridge:#x}@11155111/deposit?uint256=12500000&bytes32={acc:#x}")
+            format!(
+                "ethereum:{bridge:#x}@11155111/deposit?address={token:#x}&uint256=12500000&\
+                 bytes32={acc:#x}"
+            )
         );
     }
 
@@ -155,6 +169,7 @@ mod tests {
             },
             purpose: TxPurpose::Deposit {
                 bridge: Default::default(),
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 amount: 1,
                 account: Default::default(),
             },

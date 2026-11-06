@@ -99,7 +99,7 @@ services:
     stop_grace_period: 20m
 
   # EVM -> Acki Nacki: proves Deposit events and finalizes them on
-  # eccUSDCBridge. The deposit-prover tools are in the image; the SRS and the
+  # eccBridge. The deposit-prover tools are in the image; the SRS and the
   # proving key they read and write are /data/params.
   deposit-relayer:
     <<: *service

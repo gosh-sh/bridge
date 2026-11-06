@@ -1377,7 +1377,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(v["value1"], "eccUSDCBridge");
+        assert_eq!(v["value1"], "eccBridge");
     }
 
     /// Every GraphQL read against the live schema: a query naming a field

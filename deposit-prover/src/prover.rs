@@ -683,6 +683,7 @@ pub fn generate_proof(
         input.event_data.amount,
         input.dapp_id,
         input.event_data.an_account,
+        input.event_data.token,
         input.event_data.contract_address,
         block_hash,
         input.event_data.chain_id,
@@ -724,7 +725,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
 
     // Layout: [depositId, sender, amount, contractAddress, chainId,
     //          dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-    //          blockHashHigh, blockHashLow, promiseCommit]
+    //          blockHashHigh, blockHashLow, token, promiseCommit]
     if snark.instances[0].len() != NUM_PUBLIC_INPUTS {
         return Err(format!(
             "Expected {NUM_PUBLIC_INPUTS} public inputs, got {}",
@@ -755,6 +756,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     let an_account_low = bytes_to_field(&proof.an_account[16..32]);
     let block_hash_high = bytes_to_field(&proof.block_hash[0..16]);
     let block_hash_low = bytes_to_field(&proof.block_hash[16..32]);
+    let token_field = bytes_to_field(&proof.token);
 
     let expected = [
         ("depositId", deposit_id_field),
@@ -768,6 +770,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
         ("anAccountLow", an_account_low),
         ("blockHashHigh", block_hash_high),
         ("blockHashLow", block_hash_low),
+        ("token", token_field),
     ];
     for (idx, (name, expected_fr)) in expected.iter().enumerate() {
         if snark.instances[0][idx] != *expected_fr {
@@ -785,7 +788,7 @@ pub fn verify_proof(proof: &DepositProofOutput, config: &CircuitConfig) -> Resul
     println!("  chain_id: {}", proof.chain_id);
     println!(
         "  promise_commit: 0x{}",
-        hex::encode(snark.instances[0][11].to_bytes())
+        hex::encode(snark.instances[0][12].to_bytes())
     );
     println!();
     println!("Note: Full cryptographic verification must be done on-chain via Solidity verifier");
@@ -916,6 +919,7 @@ fn create_keygen_placeholder_input() -> DepositProofInput {
         amount: [0u8; 32], // FIX BC-TYPES-001: Changed from u64 to [u8; 32]
         an_account: [0u8; 32],
         timestamp: 0,
+        token: [0u8; 20],
         contract_address: [0u8; 20],
         chain_id: 0,
     };

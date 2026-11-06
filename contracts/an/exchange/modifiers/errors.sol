@@ -1,6 +1,6 @@
 pragma gosh-solidity >=0.80;
 
-abstract contract eccUSDCBridgeErrors {
+abstract contract eccBridgeErrors {
     uint16 constant ERR_ZERO_AMOUNT = 204;
     uint16 constant ERR_INVALID_SENDER = 207;
     uint16 constant ERR_NOT_OWNER = 209;
@@ -33,4 +33,7 @@ abstract contract eccUSDCBridgeErrors {
     uint16 constant ERR_MESSAGE_IS_EXIST = 400;
     uint16 constant ERR_MESSAGE_WITH_HUGE_EXPIREAT = 401;
     uint16 constant ERR_MESSAGE_EXPIRED = 402;
+    uint16 constant ERR_TOKEN_UNREGISTERED = 241;
+    uint16 constant ERR_TOKEN_CONFIG = 242;
+    uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 243;
 }

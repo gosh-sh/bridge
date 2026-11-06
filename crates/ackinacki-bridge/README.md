@@ -1,5 +1,12 @@
 # ackinacki-bridge
 
+`withdraw --token-id <ECC_ID>` selects a token registered under the same id on AN and the
+EVM bridge; the default is `3` (USDC). The amount is read in that token's registered decimals,
+without rounding. Preflight refuses mismatched token addresses, missing registrations,
+insufficient per-chain inventory and payout limits before burning. Records and locks are
+separate for each ECC id; existing USDC records retain their original keys. The JSON burn
+summary includes `token_id` and displays the token amount at its own precision.
+
 End-user CLI for the Acki Nacki ↔ EVM bridge, one subcommand per direction:
 
 - **`withdraw`** (Acki Nacki → EVM) withdraws USDC from an Acki Nacki
@@ -218,8 +225,8 @@ command itself:
 
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
-   the shipped profile leaves them unset. Deposits require `deposit(uint256,bytes32)`
-   on EVM and `eccUSDCBridge` >= 1.13.0 with this build's deposit key on AN.
+   the shipped profile leaves them unset. Deposits require `deposit(address,uint256,bytes32)`
+   on EVM and `eccBridge` >= 1.16.0 with this build's deposit key on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -480,8 +487,8 @@ export AMOUNT=10000000    # 10.000000 USDC in µUSDC — comfortably covers a 1 
 AN_ACCOUNT_ID="${WITHDRAW_FROM##*::}"  # your own destination, from Step 2
 cast send $USDC 'approve(address,uint256)' $BRIDGE_ADDRESS $AMOUNT \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
-cast send $BRIDGE_ADDRESS 'deposit(uint256,bytes32)' \
-  $AMOUNT "0x${AN_ACCOUNT_ID#0x}" \
+cast send $BRIDGE_ADDRESS 'deposit(address,uint256,bytes32)' \
+  $USDC $AMOUNT "0x${AN_ACCOUNT_ID#0x}" \
   --rpc-url $RPC_URL --private-key $BURNER_PRIVATE_KEY
 cast call $BRIDGE_ADDRESS 'treasuryBalance()(uint256)' --rpc-url $RPC_URL
 ```
@@ -1181,10 +1188,10 @@ under `--json`:
 | 1 | preflight | Every check that can be made before the wallet is asked (below). A refusal is exit 2 and nothing is sent. The run then creates the **operation** and prints its id. |
 | 2 | wallet pairing | You scan the QR code and approve the connection; if the wallet is on another network, the CLI asks it to switch, or to add the network. Then the **account check**: an account holding contract code, other than an EIP-7702 delegation, is refused, and the wallet signs a short message (`personal_sign`) whose signer must be the account itself. A failure is exit 20; nothing is sent. |
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. The read-back and the deposit's gas estimate are made at the block that holds the approve — looked up again by its receipt, so that an approve a reorg moved is followed, or, for an approve from the QR code, the block where the new allowance was seen — and the nonce the deposit is expected at counts the approve: an RPC node that has not caught up with that block is asked again, not taken for a lowered limit or a deposit that would revert. |
-| 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(amount, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
-| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2 or type 1, input exactly the 68 bytes requested, an access list of at most 512 bytes payload (2048 on type 1), sent straight to the bridge; no receipt log whose payload is over 2211 bytes. The receipt must also fit the prover's keccak budget (about six logs at the 2048-byte cap; a plain deposit uses a fraction of it), which the prover checks at step 7. The wallet session is closed after this step. |
+| 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(token, amount, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
+| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2 or type 1, input exactly the 100 bytes requested, an access list of at most 512 bytes payload (2048 on type 1), sent straight to the bridge; no receipt log whose payload is over 2211 bytes. The receipt must also fit the prover's keccak budget (about six logs at the 2048-byte cap; a plain deposit uses a fraction of it), which the prover checks at step 7. The wallet session is closed after this step. |
 | 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
-| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 12 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: an enclosing transaction of any type other than 1 or 2, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
+| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 13 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: an enclosing transaction of any type other than 1 or 2, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
 | 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
 
@@ -1722,10 +1729,10 @@ version is the build constant `MIN_BRIDGE_VERSION`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
 already. Independently of that minimum, preflight also refuses a bridge
-older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.7.0`) with exit 2: this CLI's
+older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.16.0`) with exit 2: this CLI's
 prover makes proofs for that key, and an older bridge rejects them at
 `finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.13.0`) gets a warning.
+than the newest this build was checked against (`1.16.0`) is refused by a released CLI. Development builds may bypass the version-range check, but never the deposit-key minimum.
 
 Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
 build refuses every bridge: `this build does not know which bridge version it

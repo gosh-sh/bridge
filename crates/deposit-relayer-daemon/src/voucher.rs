@@ -1,6 +1,6 @@
 //! Off-chain derivation of a deposit's `DepositVoucher` address.
 //!
-//! `eccUSDCBridge.finalizeDeposit` deploys one voucher per deposit at the
+//! `eccBridge.finalizeDeposit` deploys one voucher per deposit at the
 //! address of
 //! `StateInit { code: _depositVoucherCode, data: { _depositHash } }`, where
 //! `_depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId,

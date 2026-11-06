@@ -15,7 +15,8 @@ contract AckiNackiBridgeAaveBandTest is AaveBridgeFixture {
         address indexed sender,
         uint256 amount,
         bytes32 anAccount,
-        uint256 timestamp
+        uint256 timestamp,
+        address token
     );
     event SuppliedToAave(uint256 amount, uint256 suppliedPrincipalAfter);
     event AaveSupplyRefused(uint256 amount, bytes reason);
@@ -46,7 +47,7 @@ contract AckiNackiBridgeAaveBandTest is AaveBridgeFixture {
         usdc.approve(address(bridge), d);
         vm.expectCall(address(pool), abi.encodeWithSelector(IAavePool.supply.selector), 0);
         vm.prank(user);
-        bridge.deposit(d, bytes32(uint256(1)));
+        bridge.deposit(address(usdc), d, bytes32(uint256(1)));
         assertEq(_liquid() + 1, _threshold(), "one unit below");
         assertEq(bridge.suppliedPrincipal(), 9 * UNIT);
     }
@@ -123,11 +124,11 @@ contract AckiNackiBridgeAaveBandTest is AaveBridgeFixture {
     /// @dev The user is funded and has approved 10 USDC.
     function _expectRefusedDeposit(bytes memory reason) internal {
         vm.expectEmit(true, true, false, true, address(bridge));
-        emit Deposit(0, user, 10 * UNIT, bytes32(uint256(1)), block.timestamp);
+        emit Deposit(0, user, 10 * UNIT, bytes32(uint256(1)), block.timestamp, address(usdc));
         vm.expectEmit(false, false, false, true, address(bridge));
         emit AaveSupplyRefused(9 * UNIT, reason);
         vm.prank(user);
-        bridge.deposit(10 * UNIT, bytes32(uint256(1)));
+        bridge.deposit(address(usdc), 10 * UNIT, bytes32(uint256(1)));
 
         assertEq(usdc.balanceOf(address(bridge)), 10 * UNIT, "U grew by the deposit");
         assertEq(bridge.suppliedPrincipal(), 0, "S unchanged");

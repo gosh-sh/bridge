@@ -23,7 +23,7 @@ relayer does not control; verifying against the same endpoint that produced the
 witness proves nothing.
 
 The arguments printed are for the owner's `setAcceptedBlockHash`, the one anchor
-writer a person calls; `eccUSDCBridge` has no attester path. `--call` stays for
+writer a person calls; `eccBridge` has no attester path. `--call` stays for
 scripts that pass it and takes only `setAcceptedBlockHash`. Run this yourself
 rather than copying a peer's output.
 """
@@ -39,7 +39,7 @@ import urllib.request
 USER_AGENT = "curl/8"  # matches deposit-prover/scripts/recanonicalize_fixture_headers.py
 
 FR_BYTES = 32
-NUM_PI = 12
+NUM_PI = 13
 PI_CHAIN_ID = 4
 PI_BLOCK_HASH_HI = 9
 PI_BLOCK_HASH_LO = 10

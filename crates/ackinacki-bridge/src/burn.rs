@@ -251,7 +251,7 @@ pub async fn compose(
     let params = json!({
         "dest":    bridge_legacy,
         "value":   SEND_TX_VALUE_NANO,
-        "cc":      { USDC_ECC_ID.to_string(): amount.0.to_string() },
+        "cc":      { preflight.token_id.to_string(): amount.0.to_string() },
         "bounce":  bounce,
         "flags":   SEND_TX_FLAGS,
         "payload": payload,
@@ -865,6 +865,8 @@ mod tests {
         let dapp_id = [0u8; 32];
         let account_id = [0x1au8; 32];
         PreflightReport {
+            evm_token: None,
+            token_id: 3,
             from: sample_from(),
             to: sample_to(),
             amount: UsdcAmount(1_000_000),
@@ -998,6 +1000,40 @@ mod tests {
         let kp = load_keypair(&path).unwrap();
         assert_eq!(kp.public, digits, "an all-digit key is hex, not decimal");
         assert_eq!(kp.secret, digits);
+    }
+
+    #[tokio::test]
+    async fn compose_attaches_the_selected_currency_without_changing_the_bridge_payload() {
+        let ctx = offline_ctx();
+        let mut report = sample_preflight();
+        report.token_id = 4;
+        let composed = compose(
+            &ctx,
+            &report,
+            &sample_from(),
+            sample_keys_path(),
+            &sample_to(),
+            &UsdcAmount(1_000_000),
+            true,
+        )
+        .await
+        .unwrap();
+        let input = composed
+            .encode
+            .call_set
+            .as_ref()
+            .unwrap()
+            .input
+            .as_ref()
+            .unwrap();
+        assert_eq!(input["cc"], serde_json::json!({"4": "1000000"}));
+        assert_eq!(
+            input["payload"],
+            encode_initiate_withdrawal_body(&ctx, &sample_to(), &UsdcAmount(1_000_000))
+                .await
+                .unwrap()
+        );
+        assert_eq!(composed.validated_message_id.len(), 64);
     }
 
     #[tokio::test]

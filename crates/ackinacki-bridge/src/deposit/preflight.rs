@@ -15,6 +15,7 @@ use alloy_primitives::{Address, U256};
 use serde_json::json;
 
 use crate::{
+    args::{UsdcAmount, USDC_DECIMALS},
     deposit::{
         an::{AnRead, AnSend},
         an_preflight::{self, AnPreflight},
@@ -89,6 +90,7 @@ pub struct Deps {
 /// run it.
 #[derive(Debug, Clone)]
 pub struct Checked {
+    pub token_id: u32,
     /// The EVM side: the bridge's token, the sender's balance if known,
     /// the head the checks ran at.
     pub evm: EvmPreflight,
@@ -111,6 +113,46 @@ fn refuse(reason: String) -> CliError {
     }
 }
 
+/// `--amount` in the deposited token's base units.
+///
+/// The flag is parsed as a decimal amount with USDC's six places, so the
+/// bridge's own USDC keeps its documented behaviour exactly, a token with
+/// more decimals scales up, and one with fewer has to divide exactly —
+/// an amount its precision cannot hold is refused rather than truncated.
+/// The ceiling is `u64`: `gosh.mintecc` takes a `uint64`, which is also
+/// the contract's `MAX_DEPOSIT_AMOUNT`.
+fn base_units(typed: UsdcAmount, decimals: u8, token: Address) -> CliResult<u64> {
+    let micros = U256::from(typed.0);
+    let listed = u32::from(decimals);
+    let scaled = if listed >= USDC_DECIMALS {
+        let factor = U256::from(10u64).pow(U256::from(listed - USDC_DECIMALS));
+        micros.checked_mul(factor).ok_or_else(|| {
+            refuse(format!(
+                "{} of {token} does not fit in 256 bits at {decimals} decimals",
+                typed.display()
+            ))
+        })?
+    } else {
+        let factor = U256::from(10u64).pow(U256::from(USDC_DECIMALS - listed));
+        if !(micros % factor).is_zero() {
+            return Err(refuse(format!(
+                "{token} has {decimals} decimals and cannot hold {}: give an amount with at most \
+                 {decimals} fractional digits",
+                typed.display()
+            )));
+        }
+        micros / factor
+    };
+    u64::try_from(scaled).map_err(|_| {
+        refuse(format!(
+            "{} of {token} is {scaled} base units, above the bridge's MAX_DEPOSIT_AMOUNT of {} \
+             base units",
+            typed.display(),
+            u64::MAX
+        ))
+    })
+}
+
 /// Every check a new deposit must pass before the wallet is asked, in
 /// order; the first that fails ends the run. `from` is the sender when it
 /// is already known (`--from-address`); without it the balance is checked
@@ -131,15 +173,61 @@ pub async fn check(
     let to = p.to.expect("validated for a fresh run");
     let bridge = p.bridge.expect("validated");
     let bridge_acc = p.usdc_bridge_account.expect("validated");
-    // The bridge takes at most `u64::MAX` micro-USDC in one deposit.
-    let amount = u64::try_from(typed.0).map_err(|_| {
+    evm_preflight::check_bridge(d.evm.as_ref(), d.ui.as_ref(), net, bridge).await?;
+    // Which ERC-20 this deposit moves. `--token` names it; left out, the
+    // bridge's own `usdc()` is deposited, which is what every single-token
+    // invocation meant. Either way it has to be listed and open for
+    // deposits, and the per-token caps are the bridge's, not the USDC
+    // constants.
+    let bridge_usdc = evm_preflight::read(d.ui.as_ref(), "reading the bridge's USDC", || {
+        crate::deposit::evm::read_usdc(d.evm.as_ref(), bridge)
+    })
+    .await
+    .map_err(|e| refuse(format!("cannot read the bridge's usdc(): {e}")))?;
+    let token = p.token.unwrap_or(bridge_usdc);
+    let listing = evm_preflight::read(d.ui.as_ref(), "reading the token's listing", || {
+        crate::deposit::evm::read_token_listing(d.evm.as_ref(), bridge, token)
+    })
+    .await
+    .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
+    .ok_or_else(|| {
         refuse(format!(
-            "{} USDC is above the bridge's MAX_DEPOSIT_AMOUNT of {} micro-USDC",
-            typed.display(),
-            u64::MAX
+            "{token} is not listed on bridge {bridge}; only USDC can be bridged today"
         ))
     })?;
-    let evm = evm_preflight::run(d.evm.as_ref(), d.ui.as_ref(), net, bridge, amount, from).await?;
+    if !listing.deposits_enabled {
+        return Err(refuse(format!(
+            "deposits are closed for {token} (token id {}); withdrawals are unaffected",
+            listing.token_id
+        )));
+    }
+    // `--amount` is the token's own decimal amount, so the listing's
+    // precision — not USDC's six places — decides the base units the
+    // bridge is asked for.
+    let amount = base_units(typed, listing.decimals, token)?;
+    if U256::from(amount) > listing.max_transfer {
+        return Err(refuse(format!(
+            "deposit exceeds the bridge's per-token maxTransfer for {token} ({} base units)",
+            listing.max_transfer
+        )));
+    }
+    if listing.liabilities > listing.tvl_cap
+        || U256::from(amount) > listing.tvl_cap - listing.liabilities
+    {
+        return Err(refuse(format!(
+            "bridge {bridge} would exceed its tvlCap for {token}; wait for withdrawals and retry"
+        )));
+    }
+    let evm = evm_preflight::run(
+        d.evm.as_ref(),
+        d.ui.as_ref(),
+        bridge,
+        token,
+        listing.decimals,
+        amount,
+        from,
+    )
+    .await?;
     let an = an_preflight::run_with(
         d.an.as_ref(),
         bridge_acc,
@@ -152,18 +240,24 @@ pub async fn check(
         false,
     )
     .await?;
-    let limits =
-        an_preflight::read_volume_limits(d.an.as_ref(), bridge_acc, net.chain_id()).await?;
+    let limits = an_preflight::read_token_deposit_limits(
+        d.an.as_ref(),
+        bridge_acc,
+        net.chain_id(),
+        token,
+        listing.token_id,
+    )
+    .await?;
     let requested = U256::from(amount);
     if requested > limits.max_transfer {
         return Err(refuse(format!(
-            "deposit exceeds AN MAX_TRANSFER_AMOUNT ({} micro-USDC)",
+            "deposit exceeds the AN token maxTransfer ({} base units)",
             limits.max_transfer
         )));
     }
     if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
         return Err(refuse(format!(
-            "AN chain {} would exceed MAX_BRIDGE_TVL; wait for withdrawals and retry",
+            "AN chain {} would exceed the AN token maxTvl; wait for withdrawals and retry",
             net.chain_id()
         )));
     }
@@ -178,6 +272,7 @@ pub async fn check(
         bridge,
         to: to.extended(),
         amount_units: amount,
+        token,
         an_bridge: hex::encode(bridge_acc),
         an_network: an_network_id(p.gql_endpoint.as_deref().expect("validated"))?,
     };
@@ -192,6 +287,7 @@ pub async fn check(
         ));
     }
     Ok(Checked {
+        token_id: listing.token_id,
         evm,
         an,
         plan,
@@ -427,8 +523,9 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
         prover,
         rpc_url,
         // Only the steps before the deposit request read the token; a
-        // resumed operation is past them.
-        usdc: Address::ZERO,
+        // resumed operation is past them, and the record names the token
+        // its calldata used.
+        token: rec.params.token,
     })
 }
 
@@ -559,13 +656,15 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
     let net: Network = p.network.expect("validated for a fresh run");
     let to = p.to.expect("validated for a fresh run");
     let amount = c.params.amount_units;
+    let token = c.params.token;
     let approve = TxPurpose::Approve {
-        token: c.evm.usdc,
+        token,
         spender: c.params.bridge,
         amount: U256::from(amount),
     };
     let deposit = TxPurpose::Deposit {
         bridge: c.params.bridge,
+        token,
         amount,
         account: to.account_b256(),
     };
@@ -588,7 +687,7 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         anchor: Some(json!({ "writer": writer, "light_client_ready": light_client_ready })),
         tx: Some(json!({
             "approve_calldata": format!("0x{}", hex::encode(approve_calldata(c.params.bridge, U256::from(amount)))),
-            "deposit_calldata": format!("0x{}", hex::encode(deposit_calldata(amount, to.account_b256()))),
+            "deposit_calldata": format!("0x{}", hex::encode(deposit_calldata(token, amount, to.account_b256()))),
             "eip681": [eip681::uri(net.chain_id(), &approve), eip681::uri(net.chain_id(), &deposit)],
             "walletconnect": "a pairing URI is generated when the deposit runs",
         })),
@@ -612,9 +711,112 @@ mod tests {
         ui::RecordingUi,
     };
 
+    #[tokio::test(start_paused = true)]
+    async fn registry_transport_failures_are_retried_before_the_wallet() {
+        use alloy::sol_types::SolCall;
+
+        use crate::deposit::evm::IDeposit;
+        for selector in [
+            IDeposit::usdcCall::SELECTOR,
+            IDeposit::tokenIdOfCall::SELECTOR,
+            IDeposit::tokenInfoCall::SELECTOR,
+        ] {
+            let world = World::healthy();
+            world
+                .evm
+                .call_failures
+                .lock()
+                .unwrap()
+                .insert((W_BRIDGE, selector), 2);
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let ui = Arc::new(RecordingUi::new(true));
+            let mut deps = world.deps();
+            deps.ui = ui.clone();
+            check(&p, &deps, &store, None).await.unwrap();
+            assert_eq!(
+                ui.events()
+                    .iter()
+                    .filter(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..)))
+                    .count(),
+                2
+            );
+            assert!(store.list().unwrap().is_empty());
+            assert_eq!(*world.an.sent.lock().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unreadable_registry_refuses_without_sending_or_creating_an_operation() {
+        use alloy::sol_types::SolCall;
+        use alloy_primitives::Bytes;
+
+        use crate::deposit::evm::IDeposit;
+        for permanent_transport in [true, false] {
+            let world = World::healthy();
+            if permanent_transport {
+                world
+                    .evm
+                    .call_failures
+                    .lock()
+                    .unwrap()
+                    .insert((W_BRIDGE, IDeposit::tokenInfoCall::SELECTOR), u32::MAX);
+            } else {
+                world
+                    .evm
+                    .set_call(W_BRIDGE, IDeposit::tokenInfoCall::SELECTOR, Bytes::new());
+            }
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let ui = Arc::new(RecordingUi::new(true));
+            let mut deps = world.deps();
+            deps.ui = ui.clone();
+            let error = check(&p, &deps, &store, None).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot read the bridge's listing"),
+                "{error}"
+            );
+            let retries = ui
+                .events()
+                .iter()
+                .filter(|e| matches!(e, crate::deposit::ui::UiEvent::Retry(..)))
+                .count();
+            assert_eq!(retries > 0, permanent_transport);
+            assert!(store.list().unwrap().is_empty());
+            assert_eq!(*world.an.sent.lock().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registry_getters_do_not_mask_wrong_chain_or_missing_contract() {
+        for wrong_chain in [true, false] {
+            let mut world = World::healthy();
+            if wrong_chain {
+                Arc::get_mut(&mut world.evm).unwrap().chain_id = 1;
+            } else {
+                world.evm.codes.lock().unwrap().clear();
+            }
+            // No registry answer is available: the deployment error must win.
+            world.evm.calls.lock().unwrap().clear();
+            let p = world.params(RunMode::DryRun);
+            let store = Store::open(&p.state_dir).unwrap();
+            let error = check(&p, &world.deps(), &store, None).await.unwrap_err();
+            let expected = if wrong_chain {
+                "chain id 1"
+            } else {
+                "no contract"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(store.list().unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn a_dry_run_sends_nothing_and_writes_nothing() {
-        let world = World::healthy(); // FakeEvm + FakeAn + prover dir, see testkit
+        let world = World::healthy(); // FakeEvm + FakeAn + prover dir, see
+                                      // testkit
         let p = world.params(RunMode::DryRun);
         let store = Store::open(&p.state_dir).unwrap();
         let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
@@ -628,7 +830,7 @@ mod tests {
         assert!(j["tx"]["deposit_calldata"]
             .as_str()
             .unwrap()
-            .starts_with("0xc9630cb0"));
+            .starts_with("0x26b3293f"));
         assert!(j["tx"]["approve_calldata"]
             .as_str()
             .unwrap()
@@ -925,6 +1127,7 @@ mod tests {
                 bridge: W_BRIDGE,
                 to: World::target().extended(),
                 amount_units: W_AMOUNT,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: hex::encode(W_BRIDGE_ACC),
                 an_network: "http://gql.invalid:80".into(),
             },
@@ -968,6 +1171,208 @@ mod tests {
         let e = check(&p, &world.deps(), &store, None).await.unwrap_err();
         assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
         assert!(e.to_string().contains("MAX_DEPOSIT_AMOUNT"), "{e}");
+    }
+
+    /// The caps a deposit is refused by are the bridge's listing for the
+    /// token, not the USDC constants. Each refusal is exit 2 and names the
+    /// token; nothing is sent and nothing is written.
+    #[tokio::test]
+    async fn the_listing_decides_every_volume_refusal() {
+        for (set_up, needle) in [
+            (
+                Box::new(|w: &World| w.evm.set_token_unlisted(W_BRIDGE)) as Box<dyn Fn(&World)>,
+                "is not listed",
+            ),
+            (
+                Box::new(|w: &World| {
+                    w.evm.set_token_listing(
+                        W_BRIDGE,
+                        W_USDC,
+                        3,
+                        6,
+                        false,
+                        50_000_000,
+                        10_000_000_000,
+                        0,
+                    )
+                }),
+                "deposits are closed",
+            ),
+            (
+                Box::new(|w: &World| {
+                    w.evm.set_token_listing(
+                        W_BRIDGE,
+                        W_USDC,
+                        3,
+                        6,
+                        true,
+                        u128::from(W_AMOUNT) - 1,
+                        10_000_000_000,
+                        0,
+                    )
+                }),
+                "maxTransfer",
+            ),
+            (
+                Box::new(|w: &World| {
+                    w.evm.set_token_listing(
+                        W_BRIDGE,
+                        W_USDC,
+                        3,
+                        6,
+                        true,
+                        50_000_000,
+                        10_000_000_000,
+                        10_000_000_000 - u128::from(W_AMOUNT) + 1,
+                    )
+                }),
+                "tvlCap",
+            ),
+        ] {
+            let world = World::healthy();
+            set_up(&world);
+            let p = world.params(RunMode::Fresh);
+            let store = Store::open(&p.state_dir).unwrap();
+            let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
+            let e = check(&p, &world.deps(), &store, None).await.unwrap_err();
+            assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+            assert!(e.to_string().contains(needle), "{needle}: {e}");
+            assert_eq!(store.list().unwrap().len(), 0);
+            assert_eq!(*world.an.sent.lock().unwrap(), 0);
+        }
+    }
+
+    /// `--amount` is read in the deposited token's own precision. The USDC
+    /// route keeps its six places exactly; a token with more decimals
+    /// scales up; one with fewer refuses an amount it cannot hold; and the
+    /// `uint64` ceiling `gosh.mintecc` imposes is still the ceiling.
+    #[test]
+    fn an_amount_is_scaled_by_the_tokens_own_precision() {
+        let t = Address::repeat_byte(0x11);
+        assert_eq!(base_units(UsdcAmount(1_000_000), 6, t).unwrap(), 1_000_000);
+        assert_eq!(
+            base_units(UsdcAmount(1_000_000), 18, t).unwrap(),
+            1_000_000_000_000_000_000
+        );
+        assert_eq!(base_units(UsdcAmount(1_500_000), 2, t).unwrap(), 150);
+        let e = base_units(UsdcAmount(1_505_000), 2, t).unwrap_err();
+        assert!(e.to_string().contains("cannot hold"), "{e}");
+        assert_eq!(
+            base_units(UsdcAmount(18_446_744), 18, t).unwrap(),
+            18_446_744_000_000_000_000
+        );
+        let e = base_units(UsdcAmount(18_446_745), 18, t).unwrap_err();
+        assert!(e.to_string().contains("MAX_DEPOSIT_AMOUNT"), "{e}");
+    }
+
+    /// The two chains must agree on the currency before any funds leave L1.
+    #[tokio::test]
+    async fn a_second_token_is_refused_when_an_assigns_a_different_currency() {
+        use alloy::sol_types::{SolCall, SolValue};
+
+        use crate::deposit::evm::IErc20;
+        const DAI: Address = alloy_primitives::address!("68194a729c2450ad26072b3d33adacbcef39d574");
+        const ONE: u128 = 1_000_000_000_000_000_000;
+        let world = World::healthy();
+        world
+            .evm
+            .set_token_listing(W_BRIDGE, DAI, 7, 18, true, ONE * 50, ONE * 10_000, 0);
+        world.evm.set_call(
+            DAI,
+            IErc20::decimalsCall::SELECTOR,
+            U256::from(18u8).abi_encode().into(),
+        );
+        world.evm.set_call(
+            DAI,
+            IErc20::balanceOfCall::SELECTOR,
+            U256::from(ONE * 2).abi_encode().into(),
+        );
+        world.evm.set_call(
+            DAI,
+            IErc20::allowanceCall::SELECTOR,
+            U256::ZERO.abi_encode().into(),
+        );
+        let mut p = world.params(RunMode::Fresh);
+        p.token = Some(DAI);
+        p.amount = Some(UsdcAmount(1_000_000));
+        let store = Store::open(&p.state_dir).unwrap();
+        let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
+        let e = check(&p, &world.deps(), &store, Some(sepolia_sender()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
+        assert!(e.to_string().contains("different currency ids"), "{e}");
+        assert_eq!(store.list().unwrap().len(), 0);
+        assert_eq!(*world.an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_registered_second_token_preserves_its_currency_and_base_units() {
+        use alloy::sol_types::{SolCall, SolValue};
+
+        use crate::deposit::evm::IErc20;
+        const DAI: Address = alloy_primitives::address!("68194a729c2450ad26072b3d33adacbcef39d574");
+        const ONE: u128 = 1_000_000_000_000_000_000;
+        let world = World::healthy();
+        world
+            .evm
+            .set_token_listing(W_BRIDGE, DAI, 7, 18, true, ONE * 50, ONE * 10_000, 0);
+        world.evm.set_call(
+            DAI,
+            IErc20::decimalsCall::SELECTOR,
+            U256::from(18u8).abi_encode().into(),
+        );
+        world.evm.set_call(
+            DAI,
+            IErc20::balanceOfCall::SELECTOR,
+            U256::from(ONE * 2).abi_encode().into(),
+        );
+        world.evm.set_call(
+            DAI,
+            IErc20::allowanceCall::SELECTOR,
+            U256::ZERO.abi_encode().into(),
+        );
+        world.an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
+            serde_json::json!({"listed": true, "tokenId": "7", "depositsEnabled": true,
+                "maxTransfer": ONE.to_string(), "maxTvl": (ONE * 10).to_string(),
+                "outstanding": "0"}),
+        ]);
+        let mut p = world.params(RunMode::DryRun);
+        p.token = Some(DAI);
+        p.amount = Some(UsdcAmount(1_000_000));
+        let store = Store::open(&p.state_dir).unwrap();
+        let checked = check(&p, &world.deps(), &store, Some(sepolia_sender()))
+            .await
+            .unwrap();
+        assert_eq!(checked.params.token, DAI);
+        assert_eq!(checked.params.amount_units, ONE as u64);
+        assert_eq!(checked.evm.decimals, 18);
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(*world.an.sent.lock().unwrap(), 0);
+    }
+
+    /// Naming the bridge's own token explicitly is the same deposit as
+    /// leaving `--token` out: the listing is read either way, and the
+    /// calldata carries the token.
+    #[tokio::test]
+    async fn naming_the_bridges_own_token_is_the_same_deposit() {
+        let world = World::healthy();
+        let mut p = world.params(RunMode::DryRun);
+        p.token = Some(W_USDC);
+        let store = Store::open(&p.state_dir).unwrap();
+        let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
+        let c = check(&p, &world.deps(), &store, None).await.unwrap();
+        assert_eq!(c.params.token, W_USDC);
+        assert_eq!(c.params.amount_units, u64::from(W_AMOUNT));
+        assert_eq!(c.evm.token, W_USDC);
+        assert_eq!(c.evm.decimals, 6);
+        let j = serde_json::to_value(dry_run_summary(&p, &c)).unwrap();
+        let calldata = j["tx"]["deposit_calldata"].as_str().unwrap().to_string();
+        assert!(calldata.starts_with("0x26b3293f"), "{calldata}");
+        assert!(
+            calldata.contains(&format!("{:x}", W_USDC)),
+            "the calldata names the deposited token: {calldata}"
+        );
     }
 
     #[test]

@@ -177,12 +177,15 @@ fn deposit_log(event: &DepositEventData) -> Log {
     deposit_id[24..].copy_from_slice(&event.deposit_id.to_be_bytes());
     let mut sender = [0u8; 32];
     sender[12..].copy_from_slice(&event.sender);
-    let mut data = Vec::with_capacity(96);
+    let mut data = Vec::with_capacity(128);
     data.extend_from_slice(&event.amount);
     data.extend_from_slice(&event.an_account);
     let mut timestamp = [0u8; 32];
     timestamp[24..].copy_from_slice(&event.timestamp.to_be_bytes());
     data.extend_from_slice(&timestamp);
+    let mut token = [0u8; 32];
+    token[12..].copy_from_slice(&event.token);
+    data.extend_from_slice(&token);
     Log {
         address: Address::from(event.contract_address),
         topics: vec![
@@ -264,6 +267,7 @@ fn sample_event() -> DepositEventData {
         amount,
         an_account: [0x22; 32],
         timestamp: 1_700_000_000,
+        token: [0x44; 20],
         contract_address: [0x33; 20],
         chain_id: CHAIN_ID_SEPOLIA,
     }

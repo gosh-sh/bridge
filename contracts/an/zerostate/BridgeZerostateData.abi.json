@@ -20,6 +20,15 @@
 			"outputs": [
 				{"name":"value0","type":"cell"}
 			]
+		},
+		{
+			"name": "getTokenUpgradeData",
+			"inputs": [
+				{"name":"voucherCode","type":"cell"}
+			],
+			"outputs": [
+				{"name":"value0","type":"cell"}
+			]
 		}
 	],
 	"events": [

@@ -46,7 +46,7 @@ recipient through `confirmDeposit`.
 | `DEPOSIT_RELAYER_STATE_DIR`, `DEPOSIT_RELAYER_WORK_DIR`, `DEPOSIT_RELAYER_LOG_DIR` | three absolute directories on persistent disk (`--state-dir`, `--work-dir`, `--log-dir`; bridge-audit#132) | The state directory holds `deposit-relayer-state.json`, its lock and the temporary file of its atomic write; the work directory one subdirectory per proof, removed when the proof is read back; the log directory the daemon's own log (a file per day, beside stdout) and every `deposit-prover` run's transcript. Nothing goes to the system temp directory or `$HOME`. |
 | State file backup | copy it every few minutes, with the keys | The file is replaced atomically (temp file, `fsync`, `rename`, in `RelayerState::save`), so a plain `cp` always reads a complete file. The copy is what keeps `parked_deposit_ids` if the host dies. |
 | bridge ABI | built into the binary (`crates/ackinacki-bridge/abi/USDCBridge.abi.json` at build time) | No ABI file is read (bridge-audit#132); a daemon built from a commit whose ABI lacks a getter the contract has is upgraded, not reconfigured. |
-| `AN_DAPP_ID` | `0` | `eccUSDCBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
+| `AN_DAPP_ID` | `0` | `eccBridge` pins the deposit's dappId to 0 (QC-OFF-09). Changing it later trips the deployment binding (§6). |
 | `RPC_URL` | an endpoint that serves `eth_getLogs` and transaction receipts for at least the last 7 days, 30 preferred, and back to `FROM_BLOCK` while `state.json` has no cursor | The scan finds a deposit with `eth_getLogs`, and `deposit-prover` reads the receipt of every transaction in the deposit's block. A node that keeps ~10 000 blocks, as some public endpoints do, drops them after about a day on Ethereum and within an hour on Arbitrum; a deposit older than that cannot be proven through it. The margin is what lets the relayer catch up after a stall. |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
 | `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not proven again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
@@ -147,6 +147,8 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 - it exited 0, but its voucher deploy and `confirmDeposit` were not both visible within
   that time (`AnInterfaceSubmitter::settle`);
 - the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235);
+- the token is not registered for the source chain (241), or its deposits are closed on AN (243).
+  Both clear once the owner calls `setBridgeToken`;
 - an external message was already recorded or expired (400 / 402). Observe the
   voucher before retrying; this does not establish that its mint succeeded.
 

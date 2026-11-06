@@ -45,7 +45,7 @@ contract AaveBandHandler is AaveBridgeFixture {
         usdc.approve(address(bridge), amount);
         vm.recordLogs();
         vm.prank(USER);
-        try bridge.deposit(amount, bytes32(uint256(1))) { }
+        try bridge.deposit(address(usdc), amount, bytes32(uint256(1))) { }
         catch {
             _break("HL-1: a deposit reverted");
             return;

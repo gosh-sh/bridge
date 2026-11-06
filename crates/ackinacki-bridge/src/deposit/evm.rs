@@ -19,14 +19,21 @@ use crate::errors::{CliError, CliResult};
 alloy::sol! {
     /// The part of the EVM bridge a deposit uses.
     interface IDeposit {
-        function deposit(uint256 amount, bytes32 anAccount) external;
+        function deposit(address token, uint256 amount, bytes32 anAccount) external;
         function usdc() external view returns (address);
+        function usdcTokenId() external view returns (uint32);
         function paused() external view returns (bool);
         function MAX_TRANSFER_AMOUNT() external view returns (uint256);
         function MAX_BRIDGE_TVL() external view returns (uint256);
+        function MAX_DEPOSIT_AMOUNT() external view returns (uint256);
         function treasuryBalance() external view returns (uint256);
-        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp);
+        function tokenIdOf(address token) external view returns (bool listed, uint32 tokenId);
+        function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 maxTransfer, uint256 tvlCap, uint256 liabilities);
+        function liabilitiesOf(uint32 tokenId) external view returns (uint256);
+        event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp, address token);
         error BridgePaused();
+        error TokenNotListed(address token);
+        error TokenDepositsDisabled(uint32 tokenId);
     }
     /// The part of ERC-20 a deposit uses.
     interface IErc20 {
@@ -37,11 +44,11 @@ alloy::sol! {
     }
 }
 
-/// A deposit's calldata: the selector and two words.
-pub const DEPOSIT_CALLDATA_LEN: usize = 68;
+/// A deposit's calldata: the selector and three words.
+pub const DEPOSIT_CALLDATA_LEN: usize = 100;
 /// topic0 of the bridge's `Deposit` event.
 pub const DEPOSIT_TOPIC0: B256 =
-    alloy_primitives::b256!("6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe");
+    alloy_primitives::b256!("935bca73ba823197b8e5564da08c2c294de3811fc4a4cb482e6af4fd08623c0e");
 
 /// Which block a read is made at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,8 +213,9 @@ pub trait EvmRead: Send + Sync {
 }
 
 /// The calldata of `deposit(amount, account)`.
-pub fn deposit_calldata(amount: u64, account: B256) -> Bytes {
+pub fn deposit_calldata(token: Address, amount: u64, account: B256) -> Bytes {
     IDeposit::depositCall {
+        token,
         amount: U256::from(amount),
         anAccount: account,
     }
@@ -260,8 +268,72 @@ pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Add
     Ok(IDeposit::usdcCall::abi_decode_returns(&out)?)
 }
 
+/// What the bridge says about one ERC-20.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// The EVM bridge's transfer ceiling and principal capacity, in micro-USDC.
+pub struct TokenListing {
+    /// The Acki Nacki ECC currency id the bridge pays this token against.
+    pub token_id: u32,
+    /// The decimals the owner listed the token with; what `--amount` is
+    /// read in.
+    pub decimals: u8,
+    /// Whether `deposit` currently accepts it.
+    pub deposits_enabled: bool,
+    /// Per-transaction cap, token base units.
+    pub max_transfer: U256,
+    /// Outstanding-liability cap, token base units.
+    pub tvl_cap: U256,
+    /// What the bridge currently owes in this token.
+    pub liabilities: U256,
+}
+
+/// The bridge's listing for `token`, or `None` when it is not listed.
+///
+/// Two reads: the id, then the entry behind it. `listed` is what decides —
+/// id `0` is a legal listing, so a zero id alone does not mean absent.
+pub async fn read_token_listing(
+    evm: &dyn EvmRead,
+    bridge: Address,
+    token: Address,
+) -> anyhow::Result<Option<TokenListing>> {
+    let out = evm
+        .call(
+            bridge,
+            IDeposit::tokenIdOfCall {
+                token,
+            }
+            .abi_encode()
+            .into(),
+        )
+        .await?;
+    let id = IDeposit::tokenIdOfCall::abi_decode_returns(&out)?;
+    if !id.listed {
+        return Ok(None);
+    }
+    let out = evm
+        .call(
+            bridge,
+            IDeposit::tokenInfoCall {
+                tokenId: id.tokenId,
+            }
+            .abi_encode()
+            .into(),
+        )
+        .await?;
+    let info = IDeposit::tokenInfoCall::abi_decode_returns(&out)?;
+    Ok(Some(TokenListing {
+        token_id: id.tokenId,
+        decimals: info.decimals,
+        deposits_enabled: info.depositsEnabled,
+        max_transfer: info.maxTransfer,
+        tvl_cap: info.tvlCap,
+        liabilities: info.liabilities,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A bridge's transfer ceiling and principal capacity, in base units. The
+/// EVM side reads its caps per listed token (`read_token_listing`); this is
+/// what the Acki Nacki side still reports for the chain as a whole.
 pub struct VolumeLimits {
     /// Maximum amount of one transfer.
     pub max_transfer: U256,
@@ -269,30 +341,6 @@ pub struct VolumeLimits {
     pub max_tvl: U256,
     /// Deposits minus completed payouts.
     pub outstanding: U256,
-}
-
-/// Read every required limit; RPC and ABI errors are propagated.
-pub async fn read_volume_limits(
-    evm: &dyn EvmRead,
-    bridge: Address,
-) -> anyhow::Result<VolumeLimits> {
-    let transfer = evm
-        .call(
-            bridge,
-            IDeposit::MAX_TRANSFER_AMOUNTCall {}.abi_encode().into(),
-        )
-        .await?;
-    let tvl = evm
-        .call(bridge, IDeposit::MAX_BRIDGE_TVLCall {}.abi_encode().into())
-        .await?;
-    let outstanding = evm
-        .call(bridge, IDeposit::treasuryBalanceCall {}.abi_encode().into())
-        .await?;
-    Ok(VolumeLimits {
-        max_transfer: IDeposit::MAX_TRANSFER_AMOUNTCall::abi_decode_returns(&transfer)?,
-        max_tvl: IDeposit::MAX_BRIDGE_TVLCall::abi_decode_returns(&tvl)?,
-        outstanding: IDeposit::treasuryBalanceCall::abi_decode_returns(&outstanding)?,
-    })
 }
 
 /// The token's `decimals()`.
@@ -410,6 +458,16 @@ fn revert_data(e: &TransportError) -> Option<Bytes> {
 fn revert_text(e: &TransportError, data: &Bytes) -> String {
     match IDeposit::IDepositErrors::abi_decode(data) {
         Ok(IDeposit::IDepositErrors::BridgePaused(_)) => "BridgePaused".to_string(),
+        Ok(IDeposit::IDepositErrors::TokenNotListed(t)) => {
+            format!(
+                "TokenNotListed({}) — the bridge does not accept this ERC-20",
+                t.token
+            )
+        },
+        Ok(IDeposit::IDepositErrors::TokenDepositsDisabled(t)) => format!(
+            "TokenDepositsDisabled({}) — deposits are closed for this token; withdrawals are not",
+            t.tokenId
+        ),
         Err(_) => e
             .as_error_resp()
             .map(|p| p.message.to_string())
@@ -682,17 +740,26 @@ mod tests {
     use super::*;
     use crate::deposit::testkit::sepolia_sender;
 
-    /// The selector of `deposit(uint256,bytes32)`.
-    const DEPOSIT_SELECTOR: [u8; 4] = [0xc9, 0x63, 0x0c, 0xb0];
+    /// The selector of `deposit(address,uint256,bytes32)`.
+    const DEPOSIT_SELECTOR: [u8; 4] = [0x26, 0xb3, 0x29, 0x3f];
 
     #[test]
-    fn deposit_calldata_is_the_selector_and_two_words() {
+    fn deposit_calldata_is_the_selector_and_three_words() {
         let acc = B256::repeat_byte(0xa3);
-        let data = deposit_calldata(12_500_000, acc);
+        let token = Address::repeat_byte(0x7c);
+        let data = deposit_calldata(token, 12_500_000, acc);
         assert_eq!(data.len(), DEPOSIT_CALLDATA_LEN);
         assert_eq!(&data[..4], &DEPOSIT_SELECTOR);
-        assert_eq!(U256::from_be_slice(&data[4..36]), U256::from(12_500_000u64));
-        assert_eq!(&data[36..68], acc.as_slice());
+        assert_eq!(
+            &data[16..36],
+            token.as_slice(),
+            "token is left-padded into word 0"
+        );
+        assert_eq!(
+            U256::from_be_slice(&data[36..68]),
+            U256::from(12_500_000u64)
+        );
+        assert_eq!(&data[68..100], acc.as_slice());
     }
 
     #[test]
@@ -700,7 +767,7 @@ mod tests {
         assert_eq!(DEPOSIT_TOPIC0, IDeposit::Deposit::SIGNATURE_HASH);
         assert_eq!(
             format!("{DEPOSIT_TOPIC0:x}"),
-            "6290f2887465dacca909d94425daf1e0065a2b0642990cfb447949ebf098adfe"
+            "935bca73ba823197b8e5564da08c2c294de3811fc4a4cb482e6af4fd08623c0e"
         );
     }
 
@@ -993,7 +1060,11 @@ mod tests {
     async fn a_revert_reason_is_only_what_the_node_calls_a_revert() {
         let (evm, rpc) = mocked();
         let from = sepolia_sender();
-        let data = deposit_calldata(1, B256::repeat_byte(0xa3));
+        let data = deposit_calldata(
+            alloy_primitives::Address::repeat_byte(0x7c),
+            1,
+            B256::repeat_byte(0xa3),
+        );
         rpc.push_success(&Bytes::new());
         assert_eq!(
             evm.revert_reason(from, BRIDGE, data.clone(), 9)
@@ -1037,7 +1108,11 @@ mod tests {
     async fn only_a_reverting_estimate_is_classified_as_a_revert() {
         let (evm, rpc) = mocked();
         let from = sepolia_sender();
-        let data = deposit_calldata(1, B256::repeat_byte(0xa3));
+        let data = deposit_calldata(
+            alloy_primitives::Address::repeat_byte(0x7c),
+            1,
+            B256::repeat_byte(0xa3),
+        );
         let paused = alloy::sol_types::SolError::abi_encode(&IDeposit::BridgePaused {});
         rpc_error(
             &rpc,

@@ -574,7 +574,7 @@ contract AckiNackiBridgeAaveTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(bridge), amount);
         vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.deposit(amount, bytes32(uint256(1)));
+        bridge.deposit(address(usdc), amount, bytes32(uint256(1)));
         vm.stopPrank();
         assertEq(usdc.balanceOf(user1), amount);
         assertEq(usdc.balanceOf(address(bridge)), 0);
@@ -587,14 +587,14 @@ contract AckiNackiBridgeAaveTest is Test {
         vm.startPrank(user1);
         usdc.approve(address(bridge), type(uint256).max);
         for (uint256 i; i < 200; ++i) {
-            bridge.deposit(50 * UsdcTestLib.UNIT, bytes32(uint256(1)));
+            bridge.deposit(address(usdc), 50 * UsdcTestLib.UNIT, bytes32(uint256(1)));
         }
         vm.stopPrank();
         assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
         assertGt(bridge.suppliedPrincipal(), 0);
         vm.prank(user1);
         vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
-        bridge.deposit(1, bytes32(uint256(1)));
+        bridge.deposit(address(usdc), 1, bytes32(uint256(1)));
         assertEq(usdc.balanceOf(user1), 1);
         assertEq(bridge.depositCounter(), 200);
         assertEq(bridge.treasuryBalance(), 10_000 * UsdcTestLib.UNIT);
@@ -609,6 +609,6 @@ contract AckiNackiBridgeAaveTest is Test {
 
     function _depositFunded(address who, uint256 amount) internal {
         vm.prank(who);
-        bridge.deposit(amount, bytes32(uint256(uint160(who))));
+        bridge.deposit(address(usdc), amount, bytes32(uint256(uint160(who))));
     }
 }

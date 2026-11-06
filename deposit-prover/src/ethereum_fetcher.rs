@@ -12,7 +12,6 @@ use anyhow::{anyhow, Result};
 use ethers::{
     providers::{Http, Middleware, Provider},
     types::{TransactionReceipt, H160, H256},
-    utils::keccak256,
 };
 
 use crate::{
@@ -105,11 +104,12 @@ impl EthereumFetcher {
         };
 
         // Parse non-indexed parameters from data.
-        // ABI layout (3 words):
-        // [amount(32)][anAccount(32)][timestamp(32)]
-        if log.data.len() != 96 {
+        // ABI layout (4 words):
+        // [amount(32)][anAccount(32)][timestamp(32)][token(32)]
+        if log.data.len() != 128 {
             return Err(anyhow!(
-                "Expected 96 bytes of Deposit data (amount + anAccount + timestamp), got {}",
+                "Expected 128 bytes of Deposit data (amount + anAccount + timestamp + token), got \
+                 {}",
                 log.data.len()
             ));
         }
@@ -136,6 +136,21 @@ impl EthereumFetcher {
             u64::from_be_bytes(bytes)
         };
 
+        // token (word 3): an ABI-encoded address, left-padded to 32 bytes. The
+        // circuit constrains those 12 leading bytes to zero, so reject a word
+        // that sets them here rather than letting the proof fail later.
+        let token = {
+            if log.data[96..108].iter().any(|&b| b != 0) {
+                return Err(anyhow!(
+                    "Deposit `token` word has non-zero padding: 0x{}",
+                    hex::encode(&log.data[96..128])
+                ));
+            }
+            let mut addr = [0u8; 20];
+            addr.copy_from_slice(&log.data[108..128]);
+            addr
+        };
+
         Ok(DepositEventData {
             block_number: receipt
                 .block_number
@@ -148,6 +163,7 @@ impl EthereumFetcher {
             amount,
             an_account,
             timestamp,
+            token,
             contract_address: contract_address.as_bytes().try_into().unwrap(),
             // `chain_id` is not part of the log — the caller
             // (`fetch_deposit_proof`) stamps the RPC `eth_chainId` on the
@@ -227,10 +243,13 @@ impl EthereumFetcher {
     }
 }
 
-/// Get the Deposit event signature
-/// keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
+/// The `Deposit` event signature the fetcher matches `topics[0]` against.
+///
+/// Deliberately the circuit's own constant rather than a second spelling of
+/// the string: the fetcher and the circuit have to agree on the signature, and
+/// a local copy is a drift waiting to happen the next time a field is added.
 pub fn get_deposit_event_signature() -> [u8; 32] {
-    keccak256("Deposit(uint256,address,uint256,bytes32,uint256)")
+    crate::circuit_v2::get_deposit_event_signature()
 }
 
 #[cfg(test)]
@@ -238,7 +257,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deposit_event_uses_three_data_words() {
+    fn deposit_event_uses_four_data_words() {
         use ethers::types::{Bytes, Log, U256, U64};
 
         let bridge = H160::repeat_byte(0x33);
@@ -247,6 +266,9 @@ mod tests {
         U256::from(12_500_000u64).to_big_endian(&mut amount);
         let mut timestamp = [0u8; 32];
         U256::from(1_700_000_000u64).to_big_endian(&mut timestamp);
+        let token_addr = [0x7cu8; 20];
+        let mut token = [0u8; 32];
+        token[12..].copy_from_slice(&token_addr);
         let mut receipt = TransactionReceipt {
             block_number: Some(U64::from(100)),
             logs: vec![Log {
@@ -256,7 +278,7 @@ mod tests {
                     H256::from_low_u64_be(7),
                     H256::from_low_u64_be(0x1234),
                 ],
-                data: Bytes::from([amount, account, timestamp].concat()),
+                data: Bytes::from([amount, account, timestamp, token].concat()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -267,8 +289,20 @@ mod tests {
         assert_eq!(event.amount, amount);
         assert_eq!(event.an_account, account);
         assert_eq!(event.timestamp, 1_700_000_000);
+        assert_eq!(event.token, token_addr);
 
-        receipt.logs[0].data = Bytes::from([amount, [0u8; 32], account, timestamp].concat());
+        // A shifted payload must not decode: the fields are read at fixed
+        // offsets, so an extra leading word would silently re-point every one.
+        receipt.logs[0].data = Bytes::from([amount, [0u8; 32], account, timestamp, token].concat());
+        assert!(fetcher.parse_deposit_event(&receipt, bridge, 0).is_err());
+
+        // The token word is an ABI-encoded address: set padding is a malformed
+        // event, not an address to truncate. The circuit constrains those
+        // twelve bytes to zero, so the fetcher refuses it here rather than
+        // handing the prover an input that cannot be satisfied.
+        let mut padded = token;
+        padded[0] = 1;
+        receipt.logs[0].data = Bytes::from([amount, account, timestamp, padded].concat());
         assert!(fetcher.parse_deposit_event(&receipt, bridge, 0).is_err());
     }
 

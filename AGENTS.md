@@ -20,7 +20,7 @@ Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/
 multi-threaded). USDC deposited on Ethereum is proven on Acki Nacki and minted there; Acki Nacki
 state is proven on Ethereum, which pays withdrawals out against it. Both directions use Halo2
 proofs. [`README.md`](README.md) walks through both directions and the repository. In more depth:
-the deposit circuit and its 12 public inputs in [`deposit-prover/README.md`](deposit-prover/README.md),
+the deposit circuit and its 13 public inputs in [`deposit-prover/README.md`](deposit-prover/README.md),
 the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
@@ -104,7 +104,7 @@ arrangement while GitLab was canonical, and `.gitlab-ci.yml` is what remains of 
 ```
 contracts/ethereum/        Solidity (Foundry): AckiNackiBridge, SHPLONK verifier adapters, oracles.
                            verifiers/ holds the production Yul bytecode (.bin) and its source (.sol)
-contracts/an/              TVM (gosh-solidity): exchange/ has eccUSDCBridge, DepositVoucher, the
+contracts/an/              TVM (gosh-solidity): exchange/ has eccBridge, DepositVoucher, the
                            Ethereum beacon light client and the Arbitrum block verifier, with the
                            compiled artefacts acki-nacki pins by commit; zerostate/ assembles the bridge account; place.json tells acki-nacki
                            what to place where

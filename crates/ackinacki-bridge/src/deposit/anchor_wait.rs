@@ -939,6 +939,7 @@ mod tests {
                 contract: alloy_primitives::U256::from(0xb1),
                 chain_id: 11_155_111,
                 amount: 12_500_000,
+                token_id: 3,
                 account: [0xa3; 32],
             },
             not_before: 0,

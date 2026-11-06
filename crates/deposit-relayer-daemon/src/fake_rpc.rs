@@ -196,6 +196,7 @@ impl FakeRpc {
             amount: U256::from(1_000 + id),
             anAccount: B256::repeat_byte(0x33),
             timestamp: U256::from(1_700_000_000u64),
+            token: Address::repeat_byte(0x7c),
         };
         rpc_log(self.bridge, event.encode_log_data(), id, block, 2 * id + 1)
     }

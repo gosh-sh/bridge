@@ -39,7 +39,7 @@ fn approve_failed(op_id: &str, why: String) -> CliError {
         ExitCode::ApproveFailed,
         Stage::Approve,
         Some(op_id),
-        format!("{why}; no USDC moved"),
+        format!("{why}; no tokens moved"),
     )
 }
 
@@ -258,7 +258,7 @@ async fn send_approve(
     }
 }
 
-/// Makes sure the bridge may pull `amount` of USDC from `from`: nothing to
+/// Makes sure the bridge may pull `amount` of the token from `from`: nothing to
 /// do when it already may, otherwise an approve (after a reset to zero when
 /// a smaller allowance is set), then a re-read, because the wallet lets the
 /// user edit the limit. Each approve's wait, the re-read after the last one
@@ -414,6 +414,7 @@ pub async fn build_deposit_request(
 ) -> CliResult<TxRequest> {
     let purpose = TxPurpose::Deposit {
         bridge,
+        token: rec.params.token,
         amount,
         account,
     };
@@ -901,7 +902,7 @@ mod tests {
         assert!(took <= Duration::from_secs(60), "{took:?}");
         let m = e.to_string();
         assert!(m.contains("could not be confirmed in time"), "{m}");
-        assert!(m.contains("503") && m.contains("no USDC moved"), "{m}");
+        assert!(m.contains("503") && m.contains("no tokens moved"), "{m}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1014,6 +1015,7 @@ mod tests {
                 bridge: BRIDGE,
                 to: "x".into(),
                 amount_units: 1,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 an_bridge: "1a".repeat(32),
                 an_network: "https://shellnet.ackinacki.org:443".into(),
             },
@@ -1032,6 +1034,7 @@ mod tests {
             },
             purpose: TxPurpose::Deposit {
                 bridge: BRIDGE,
+                token: alloy_primitives::Address::repeat_byte(0x7c),
                 amount: 1,
                 account: B256::ZERO,
             },

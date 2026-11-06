@@ -17,7 +17,9 @@ import "./mocks/MockLayerHashesMovementVerifier.sol";
 import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockPredecessorBridge.sol";
+import "./mocks/MultiTokenBridge.sol";
 import { MockAaveLib } from "./helpers/MockAaveLib.sol";
+import { OptionalReturnERC20 } from "./AckiNackiBridgeTokenRegistry.t.sol";
 
 /// @title AckiNackiBridgePredecessorTest
 /// @notice Two bridges on one chain for the same AN-side identity: a
@@ -74,7 +76,7 @@ contract AckiNackiBridgePredecessorTest is Test {
         internal
         returns (AckiNackiBridge)
     {
-        return new AckiNackiBridge(
+        return new MultiTokenBridge(
             address(oracle),
             address(usdc),
             MockAaveLib.pool(address(usdc)),
@@ -395,5 +397,277 @@ contract AckiNackiBridgePredecessorTest is Test {
         vm.expectRevert(AckiNackiBridge.NotOwnerOrPredecessor.selector);
         b.fundTreasury(1);
         vm.stopPrank();
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // A successor takes over a second token's custody and liabilities
+    // ──────────────────────────────────────────────────────────────────────
+
+    event TokenFunded(
+        address indexed from, uint32 indexed tokenId, uint256 amount, uint256 liabilitiesAfter
+    );
+    event TokenMigrated(address indexed successor, uint32 indexed tokenId, uint256 amount);
+
+    uint32 internal constant SECOND_ID = 4;
+    uint256 internal constant SECOND_AMOUNT = 1e18;
+
+    function _listSecond(AckiNackiBridge b, MockERC20 token, uint256 maxTransfer) internal {
+        MultiTokenBridge(address(b)).listToken(address(token), SECOND_ID, 18, maxTransfer, 10e18);
+    }
+
+    function _secondOnOldBridge() internal returns (AckiNackiBridge oldBridge, MockERC20 second) {
+        oldBridge = _liveBridge(address(0));
+        second = new MockERC20("Second", "SECOND", 18);
+        _listSecond(oldBridge, second, SECOND_AMOUNT);
+        oldBridge.setTokenDepositsEnabled(SECOND_ID, true);
+        second.mint(address(this), SECOND_AMOUNT);
+        second.approve(address(oldBridge), SECOND_AMOUNT);
+        oldBridge.deposit(address(second), SECOND_AMOUNT, bytes32(uint256(1)));
+        oldBridge.pause();
+    }
+
+    function _secondPub(address dstBridge, uint256 nullifier)
+        internal
+        view
+        returns (IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub)
+    {
+        pub = _pubFor(dstBridge, nullifier);
+        pub.tokenId = SECOND_ID;
+        pub.amount = SECOND_AMOUNT;
+    }
+
+    function test_migrateToken_burnAfterTheSwitchPaysOnSuccessor() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        second.mint(address(oldBridge), 3);
+        uint256 countBefore = next.depositCounter();
+
+        vm.expectEmit(true, true, false, true, address(next));
+        emit TokenFunded(address(oldBridge), SECOND_ID, SECOND_AMOUNT, SECOND_AMOUNT);
+        vm.expectEmit(true, true, false, true, address(oldBridge));
+        emit TokenMigrated(address(next), SECOND_ID, SECOND_AMOUNT);
+        oldBridge.migrateToken(SECOND_ID, address(next));
+
+        assertEq(oldBridge.liabilitiesOf(SECOND_ID), 0);
+        assertEq(second.balanceOf(address(oldBridge)), 3);
+        assertEq(second.allowance(address(oldBridge), address(next)), 0);
+        assertEq(next.liabilitiesOf(SECOND_ID), SECOND_AMOUNT);
+        assertEq(second.balanceOf(address(next)), SECOND_AMOUNT);
+        assertEq(next.depositCounter(), countBefore);
+
+        next.withdrawByProof(hex"c4", _secondPub(address(next), 991));
+        assertEq(second.balanceOf(RECIPIENT), SECOND_AMOUNT);
+        assertEq(next.liabilitiesOf(SECOND_ID), 0);
+
+        oldBridge.unpause();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.WrongDstBridge.selector, uint256(uint160(address(next)))
+            )
+        );
+        oldBridge.withdrawByProof(hex"c4", _secondPub(address(next), 992));
+    }
+
+    function test_migrateToken_movesSeveralTokensAndUsdcInOneCutover() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        oldBridge.unpause();
+        MockERC20 third = new MockERC20("Third", "THIRD", 8);
+        uint32 thirdId = 5;
+        MultiTokenBridge(address(oldBridge)).listToken(address(third), thirdId, 8, 2e8, 20e8);
+        oldBridge.setTokenDepositsEnabled(thirdId, true);
+        third.mint(address(this), 2e8);
+        third.approve(address(oldBridge), 2e8);
+        oldBridge.deposit(address(third), 2e8, bytes32(uint256(2)));
+        oldBridge.pause();
+        oldBridge.withdrawFromAave(type(uint256).max);
+
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        MultiTokenBridge(address(next)).listToken(address(third), thirdId, 8, 2e8, 20e8);
+        uint256 oldBook = oldBridge.treasuryBalance();
+        uint256 newBook = next.treasuryBalance();
+
+        oldBridge.migrateTreasury(address(next));
+        oldBridge.migrateToken(SECOND_ID, address(next));
+        oldBridge.migrateToken(thirdId, address(next));
+
+        assertEq(oldBridge.treasuryBalance(), 0);
+        assertEq(oldBridge.liabilitiesOf(SECOND_ID), 0);
+        assertEq(oldBridge.liabilitiesOf(thirdId), 0);
+        assertEq(next.treasuryBalance(), newBook + oldBook);
+        assertEq(next.liabilitiesOf(SECOND_ID), SECOND_AMOUNT);
+        assertEq(next.liabilitiesOf(thirdId), 2e8);
+        assertEq(second.balanceOf(address(next)), SECOND_AMOUNT);
+        assertEq(third.balanceOf(address(next)), 2e8);
+
+        next.withdrawByProof(hex"c4", _secondPub(address(next), 993));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pubFor(address(next), 994);
+        pub.tokenId = thirdId;
+        pub.amount = 2e8;
+        next.withdrawByProof(hex"c4", pub);
+        assertEq(second.balanceOf(RECIPIENT), SECOND_AMOUNT);
+        assertEq(third.balanceOf(RECIPIENT), 2e8);
+    }
+
+    function test_migrateToken_leavesTheUsdcBookAlone() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        uint256 oldBook = oldBridge.treasuryBalance();
+        uint256 newBook = next.treasuryBalance();
+
+        oldBridge.migrateToken(SECOND_ID, address(next));
+
+        assertEq(oldBridge.treasuryBalance(), oldBook);
+        assertEq(next.treasuryBalance(), newBook);
+    }
+
+    function test_migrateToken_requiresPause() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        oldBridge.unpause();
+        vm.expectRevert(AckiNackiBridge.NotPaused.selector);
+        oldBridge.migrateToken(SECOND_ID, address(next));
+    }
+
+    function test_migrateToken_onlyOwner() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        vm.prank(funder);
+        vm.expectRevert();
+        oldBridge.migrateToken(SECOND_ID, address(next));
+        assertEq(oldBridge.liabilitiesOf(SECOND_ID), SECOND_AMOUNT);
+    }
+
+    function test_migrateToken_refusesBridgeThatDoesNotNameIt() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge stranger = _liveBridge(address(0));
+        _listSecond(stranger, second, SECOND_AMOUNT);
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.NotSuccessor.selector, address(stranger))
+        );
+        oldBridge.migrateToken(SECOND_ID, address(stranger));
+    }
+
+    function test_migrateToken_refusesUsdc() public {
+        (AckiNackiBridge oldBridge,) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        uint32 usdcId = oldBridge.usdcTokenId();
+        vm.expectRevert(AckiNackiBridge.CannotMigrateUsdc.selector);
+        oldBridge.migrateToken(usdcId, address(next));
+    }
+
+    function test_migrateToken_refusesUnlistedId() public {
+        (AckiNackiBridge oldBridge,) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.UnsupportedTokenId.selector, uint32(77))
+        );
+        oldBridge.migrateToken(77, address(next));
+    }
+
+    function test_migrateToken_refusesSuccessorThatDidNotListIt() public {
+        (AckiNackiBridge oldBridge,) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector, 0, SECOND_AMOUNT
+            )
+        );
+        oldBridge.migrateToken(SECOND_ID, address(next));
+    }
+
+    function test_migrateToken_refusesLowerWithdrawalCap() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT - 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector,
+                SECOND_AMOUNT - 1,
+                SECOND_AMOUNT
+            )
+        );
+        oldBridge.migrateToken(SECOND_ID, address(next));
+        assertEq(oldBridge.liabilitiesOf(SECOND_ID), SECOND_AMOUNT);
+    }
+
+    function test_migrateToken_refusesAnotherTokenUnderTheSameId() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        MockERC20 other = new MockERC20("Other", "OTHER", 18);
+        _listSecond(next, other, SECOND_AMOUNT);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.FundedTokenMismatch.selector, SECOND_ID, address(second)
+            )
+        );
+        oldBridge.migrateToken(SECOND_ID, address(next));
+    }
+
+    function test_migrateToken_twiceHasNothingToMove() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        oldBridge.migrateToken(SECOND_ID, address(next));
+        vm.expectRevert(AckiNackiBridge.NothingToMigrate.selector);
+        oldBridge.migrateToken(SECOND_ID, address(next));
+    }
+
+    function test_migrateToken_movesTokenThatReturnsNothing() public {
+        AckiNackiBridge oldBridge = _liveBridge(address(0));
+        OptionalReturnERC20 quiet = new OptionalReturnERC20();
+        MultiTokenBridge(address(oldBridge)).listToken(address(quiet), SECOND_ID, 6, 1e6, 10e6);
+        oldBridge.setTokenDepositsEnabled(SECOND_ID, true);
+        quiet.mint(address(this), 1e6);
+        quiet.approve(address(oldBridge), 1e6);
+        oldBridge.deposit(address(quiet), 1e6, bytes32(uint256(1)));
+        oldBridge.pause();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        MultiTokenBridge(address(next)).listToken(address(quiet), SECOND_ID, 6, 1e6, 10e6);
+
+        oldBridge.migrateToken(SECOND_ID, address(next));
+
+        assertEq(next.liabilitiesOf(SECOND_ID), 1e6);
+        assertEq(quiet.balanceOf(address(next)), 1e6);
+        assertEq(quiet.balanceOf(address(oldBridge)), 0);
+    }
+
+    function test_fundToken_refusesOthers() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        vm.prank(funder);
+        vm.expectRevert(AckiNackiBridge.NotOwnerOrPredecessor.selector);
+        next.fundToken(SECOND_ID, address(second), 1);
+    }
+
+    function test_fundToken_refusesUsdcAndZero() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        _listSecond(next, second, SECOND_AMOUNT);
+        uint32 usdcId = next.usdcTokenId();
+        vm.expectRevert(AckiNackiBridge.CannotMigrateUsdc.selector);
+        next.fundToken(usdcId, address(usdc), 1);
+        vm.expectRevert(AckiNackiBridge.InvalidAmount.selector);
+        next.fundToken(SECOND_ID, address(second), 0);
+    }
+
+    function test_fundToken_ownerCoversAboveTvlCapAndDepositsStayCapped() public {
+        (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
+        AckiNackiBridge next = _liveBridge(address(oldBridge));
+        MultiTokenBridge(address(next)).listToken(address(second), SECOND_ID, 18, 1e18, 1e18);
+        next.setTokenDepositsEnabled(SECOND_ID, true);
+        second.mint(address(this), 3e18);
+        second.approve(address(next), 3e18);
+
+        next.fundToken(SECOND_ID, address(second), 2e18);
+        assertEq(next.liabilitiesOf(SECOND_ID), 2e18);
+
+        vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
+        next.deposit(address(second), 1e18, bytes32(uint256(1)));
     }
 }

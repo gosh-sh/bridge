@@ -9,7 +9,7 @@ page exists because those three are easy to conflate, and the labelled rules bel
 and operators quote at each other during an incident.
 
 **Scope: the EVM side only** — `AckiNackiBridge.sol` and the AAVE position it holds. The
-Acki Nacki side keeps per-chain accounting in `contracts/an/exchange/eccUSDCBridge.sol`;
+Acki Nacki side keeps per-chain accounting in `contracts/an/exchange/eccBridge.sol`;
 its limits and deployment requirements are described in `contracts/an/README.md`. Where the two meet is the deposit
 proof, covered in [`EVM-contracts-spec.md`](EVM-contracts-spec.md) §6.
 
@@ -105,7 +105,7 @@ debit before paying.
 
 `AckiNackiBridge.pause()` stops the Ethereum user entry points (`deposit`,
 `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`). It does not call
-`eccUSDCBridge.setPaused`, and `setPaused` does not call `pause()`. Circle can
+`eccBridge.setPaused`, and `setPaused` does not call `pause()`. Circle can
 also freeze the USDC contract on Ethereum; that is a third control, not wired
 to either bridge.
 
@@ -160,7 +160,7 @@ Quote these, not their earlier versions.
 | **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. Apart from `deposit`, only `fundTreasury` (owner or `predecessor`, no `Deposit` event) increases `treasuryBalance`; `withdrawByProof` decreases it, and `migrateTreasury` zeroes it while handing it to a successor bridge. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |
 | **CUST-1** | `treasuryBalance` is book value, not a balance. The solvency invariant is `totalAssets() ≥ treasuryBalance`, never equality. |
-| **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. The exception is `migrateTreasury`: on a paused bridge it sends the whole `treasuryBalance` to a contract whose `predecessor()` returns this bridge, through that contract's `fundTreasury`. The contract cannot tell a real successor bridge from any other contract that gives that answer, so this is an owner power over the whole book, not a guarantee about where it goes. `fundTreasury` (owner or `predecessor`), the other owner function that writes `treasuryBalance`, only raises it by USDC the caller supplies. |
+| **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. The exception is `migrateTreasury`: on a paused bridge it sends the whole `treasuryBalance` to a contract whose `predecessor()` returns this bridge, through that contract's `fundTreasury`. The contract cannot tell a real successor bridge from any other contract that gives that answer, so this is an owner power over the whole book, not a guarantee about where it goes. `fundTreasury` (owner or `predecessor`), the other owner function that writes `treasuryBalance`, only raises it by USDC the caller supplies. `migrateToken` is the same owner power over a non-USDC listing's liabilities and the tokens behind them, through the successor's `fundToken`. |
 | **CEI-1** | `withdrawByProof` mutates state before every external call. `deposit` does not, and does not need to — see above. A blanket "all external interactions follow CEI" claim is false for this contract. |
 
 ## What earlier text got wrong

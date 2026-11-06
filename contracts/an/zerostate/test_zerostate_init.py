@@ -7,6 +7,7 @@
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -190,17 +191,26 @@ class InitializeTest(unittest.TestCase):
             ctx["get_code"](ctx["artefact"](zerostate_init.VOUCHER_TVC)),
         )
 
+    def test_compiled_encoder_abi_lists_every_function_in_its_source(self):
+        here = pathlib.Path(__file__).resolve().parent
+        source = (here / "BridgeZerostateData.sol").read_text()
+        abi = json.loads((here / "BridgeZerostateData.abi.json").read_text())
+        self.assertEqual(
+            sorted(re.findall(r"^\s*function (\w+)\(", source, re.M)),
+            sorted(f["name"] for f in abi["functions"]),
+        )
+
     def test_update_code_carries_the_encoded_cell_and_the_bridge_code(self):
         update = self.run_initialize()[1]
         self.assertIn(CELL, update)
-        self.assertIn("code-of:/placed/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc", update)
+        self.assertIn("code-of:/placed/contracts/an/0.80.0_compiled/exchange/eccBridge.tvc", update)
         self.assertIn("--sign ./config/BlockKeeperContractRoot.keys.json", update)
 
     def test_owner_calls_are_signed_with_the_bridge_key(self):
         commands = self.run_initialize()
         for cmd in commands[2:6]:
             self.assertIn("--sign ./config/USDCBridge.keys.json", cmd)
-            self.assertIn("/placed/contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.abi.json", cmd)
+            self.assertIn("/placed/contracts/an/0.80.0_compiled/exchange/eccBridge.abi.json", cmd)
 
     def test_light_client_code_comes_from_the_placed_artefact(self):
         self.assertIn(

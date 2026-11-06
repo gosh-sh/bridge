@@ -21,7 +21,7 @@ Instance column order — every producer/consumer MUST agree:
 ```
 [ depositId, sender, amount, contractAddress, chainId,
   dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-  blockHashHigh, blockHashLow, promiseCommit ]
+  blockHashHigh, blockHashLow, token, promiseCommit ]
 ```
 
 - `chainId` (slot #4, added 2026-07-23) = the EIP-1559 RLP field-0 value,
@@ -83,7 +83,7 @@ cargo run --release --example export_vk_blob -- \
 Then regenerate the matching proof + public inputs (`export_blake2b_proof`) and
 re-verify the triple (`verify_opcode_triple`). The degree / max-data-byte-len /
 max-log-num MUST match across keygen, prove, and verify. After regeneration, run
-`scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccUSDCBridge.sol`
+`scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccBridge.sol`
 from the repository root to update the embedded key and its checksum.
 
 **Witness-independence (2026-06-25):** the VK no longer depends on the deposit's
@@ -91,10 +91,14 @@ from the repository root to update the embedded key and its checksum.
 (`FIXED_KECCAK_CAPACITY = 128`) and `circuit_v2.rs` no longer loads the address as a
 fixed-column constant (binding preserved via public input #3). Real deposits of
 different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
-the **byte-identical** production VkBlob. Current build VkBlob (12-PI, Hermez,
-13071 B) = **`0180ee5a…b1c3efa1`** — rotated for the five-field
-`Deposit(uint256,address,uint256,bytes32,uint256)` event with 96 data bytes.
-Previously `117f4a65…ad612cc`, rotated for Amsterdam 23-field headers
+the **byte-identical** production VkBlob. Current build VkBlob (13-PI, Hermez,
+13071 B) = **`f09aa7fa…17c007b9`** — rotated for the six-field
+`Deposit(uint256,address,uint256,bytes32,uint256,address)` event with 128 data
+bytes, `token` appended at public input #11. Keygen is reproducible: two runs of
+`export_deposit_proof_set` produced the same blob byte for byte.
+Previously `0180ee5a…b1c3efa1`, for the five-field
+`Deposit(uint256,address,uint256,bytes32,uint256)` event with 96 data bytes;
+before that `117f4a65…ad612cc`, rotated for Amsterdam 23-field headers
 (24-slot table, `MAX_BLOCK_HEADER_BYTES` 717 → 792); before that
 `83747b2e…74127a90`, rotated for type 1/2 enclosing transactions and
 2048-byte / 20-log receipts (Safe and ERC-4337 deposits), with the parsed `Deposit` log
@@ -124,10 +128,10 @@ then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to
 NB: `get_or_create_proving_key` now writes a **shape-fingerprinted** PK filename so a
 circuit-shape change can never silently load a stale PK.
 
-## Recompile eccUSDCBridge
+## Recompile eccBridge
 
 Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.0 for
-`eccUSDCBridge`, sold 0.81.0 for the voucher, sold 0.81.1 for the light client and the
+`eccBridge`, sold 0.81.0 for the voucher, sold 0.81.1 for the light client and the
 Arbitrum block verifier.
 
 ```bash
@@ -136,9 +140,10 @@ make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/
 ```
 
 The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
-`contracts/an/0.80.0_compiled/exchange/eccUSDCBridge.tvc` and check the ABI before
-deployment. This build's bridge version is 1.13.0 and its code hash starts with
-`66d15d49`; the voucher identity is unchanged, and the withdrawal ABI gains only the `WithdrawalRefused` event.
+`contracts/an/0.80.0_compiled/exchange/eccBridge.tvc` and check the ABI before
+deployment. This build's bridge version is 1.16.0 and its code hash starts with
+`e6810f06`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
+them apart.
 
 ## Build gotchas
 

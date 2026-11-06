@@ -42,13 +42,83 @@ assigns it when the release is tagged.
   and token-aware voucher callback. Withdrawal preflight also requires EVM `usdcTokenId()` and
   `maxWithdrawalAmount(uint32)` getters. Upgrade the paired contracts and CLI together.
 - The EVM storage layout adds `_tokens`, `_tokenIdOf`, `_tokenRegistered` and `_listedTokenIds`
-  after `treasuryBalance`, shifting later slots. Redeploy; do not reuse historical storage offsets.
+  after `treasuryBalance`, shifting later slots (`supplyMultiplierBps` moves from slot 5 to 9).
+  Redeploy; do not reuse historical storage offsets.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
   bridge. `DeployRealBridge` defaults to `3`.
 
+### New / Improvements
+
+- `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
+  or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted.
+- `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
+  (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
+  parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and
+  234 and 235, before `accept`, so a retry costs the bridge no gas.
+- `eccBridge` 1.16.0 (code hash `8047924b…`) credits the proven ERC-20 to its registered
+  ECC currency and tracks outstanding inventory independently for each source chain and currency.
+  Before opening deposits on EVM, register the same token and ECC id on AN with
+  `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
+  token base units. AN refuses unregistered tokens and the CLI refuses mismatched currency ids.
+  `DepositVoucher` 1.5.0 carries the token to `confirmTokenDeposit`; the existing
+  `finalizeDeposit`, `initiateWithdrawal` and `confirmDeposit` signatures are preserved.
+  Upgrading from 1.15.0 requires the structured `userCell` returned by
+  `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)`, followed by token registration
+  and restoration of the trusted bridge, EVM bridge (`setEvmBridge`) and anchor configuration. Subsequent upgrades preserve
+  token configuration and outstanding inventory automatically.
+- `ackinacki-bridge withdraw --token-id` selects the registered ECC currency (default `3`,
+  USDC). Amount precision comes from the destination token registry; no rounding is performed.
+  Withdrawal records and locks include the currency, while existing USDC keys are preserved.
+  The JSON burn summary includes `token_id` and uses that token's decimal precision.
+
+- `AckiNackiBridge.migrateToken(tokenId, successor)` (owner, paused only) hands a non-USDC listing's
+  custody and liabilities to the successor through its `fundToken`, with nothing minted on Acki Nacki.
+  The successor must list the same token under the same id, with a withdrawal cap no lower than the
+  old one. When replacing a bridge, call it for every such token before `setEvmBridge` reopens
+  withdrawals: both bridges can refuse a later burn of a token left behind, with the ECC already burned.
+- The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
+  `delistToken`, `tokenInfo`, `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and
+  `maxWithdrawalAmount`. Liabilities and limits use each token's base units; AAVE stays USDC-only.
+- New non-USDC listings start with deposits closed. Register the same token and ECC id on AN
+  before opening the EVM listing; withdrawals require a listed id and outstanding liabilities.
+- `--token` (`DEPOSIT_TOKEN`) defaults to the EVM bridge's `usdc()`. Amounts use the listing's
+  decimals, checked against the ERC-20. Deposits retain exact-balance and uint64 width checks.
+
+- Registry changes emit `TokenListed`, `TokenLimitsSet`, `TokenDepositsEnabledSet` and
+  `TokenDelisted`. Deposits can revert with `TokenNotListed` or `TokenDepositsDisabled`;
+  registry administration can return `InvalidTokenAddress`, `TokenAlreadyListed`,
+  `TokenIdAlreadyUsed`, `TokenLimitsInvalid`, `TokenLimitExceedsMintCeiling`,
+  `TokenStillHasLiabilities`, `CannotDelistUsdc` or `CannotListAToken`.
+- AN `setBridgeToken` refuses a lower `maxTvl`. `finalizeDeposit` does not reserve capacity, so two
+  deposits finalized against the same headroom can still leave the later confirmation refused with
+  `ERR_TVL_CAP`. Close deposits on EVM or lower the EVM TVL cap to throttle intake. Closing the AN
+  switch or lowering AN `maxTransfer` also holds back deposits already locked on EVM.
+
+### Fixes
+
+- Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
+  False and malformed returns still revert, and exact custody-delta checks remain in force.
+- USDC deposit limits cannot exceed AN's 50 USDC per transfer and 10,000 USDC per-chain
+  outstanding caps. Lowering deposit limits leaves existing withdrawals payable; payout caps
+  retain the highest accepted deposit limit. Withdrawal preflight checks the payout cap and ECC
+  id before a burn. Configuration-dependent payout reverts retry the existing proof file.
+- Deposit preflight retries transient failures of `usdc()`, `tokenIdOf()` and `tokenInfo()`
+  for up to 120 seconds; wrong-chain and missing-contract errors are reported before those reads.
+- The web UI checks USDC's current `tokenInfo` transfer limit, TVL capacity and deposit switch
+  before approval and again before deposit. A closed, absent or unreadable listing refuses the request.
+- `eth-lc-relayer arbitrum-anchors` discovers the new token-bearing `Deposit` event.
+
+## [0.8.0] – 2026-11-06
+
+### Breaking Changes
+
+- **Shellnet runs on a new `AckiNackiBridge`, `0xcEe5D884BC1b7F4CC84A31FEA74f3C8809D19Bd5`**, on
+  Arbitrum Sepolia from block `326573145`, with `eccUSDCBridge` 1.15.0. `eccUSDCBridge` no longer
+  trusts `0x3FB082a905a895151224F6d93bD074E816338638`. Set `BRIDGE_ADDRESS`,
+  `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` as `README.md` lists them.
 - **AAVE is mandatory, automatic, and Arbitrum Sepolia only** (#142). Redeploy the bridge:
-  storage slots from `owner` on move down by one (`supplyMultiplierBps` is slot 9 with the token registry), and the
+  storage slots from `owner` on move down by one (`supplyMultiplierBps` is slot 5), and the
   constructor reverts `InvalidAaveAddress` when either AAVE address is zero, on every chain.
   - `supplyToAave(uint256)` is removed, and with it the errors `AaveDisabled` and
     `NothingToSupply`. A keeper that called it has nothing left to call. `deposit` now keeps
@@ -87,7 +157,7 @@ assigns it when the release is tagged.
   `AckiNackiBridge` on the same chain for the same Acki Nacki bridge could pay a withdrawal the
   first had already paid; it no longer can, and neither bridge has to be paused for that. Burns
   made before the switch below are paid by the bridge they named. Upgrade in this order:
-  `eccBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
+  `eccUSDCBridge` on Acki Nacki, then a newly deployed `AckiNackiBridge` with the new verifier,
   then `setEvmBridge` for its chain, then the relayers and `ackinacki-bridge`. Replacing an
   existing bridge closes withdrawals to its chain (`setEvmBridge(<chainId>, 0)`) until the old
   bridge has paid the burns bound to it and its principal has moved; deposits stay open. The
@@ -103,7 +173,7 @@ assigns it when the release is tagged.
   word 24, and the witness JSON is `schema_version` 2. Event keys under `params/` carry circuit
   revision 4: the first prover or CLI run regenerates `event_pk.bin` / `event_vk.bin`. Burns made
   before the upgrade are proven with the release their bridge was deployed for.
-- **`eccBridge` 1.15.0** (code hash `71074c89af517458c73566d3e84937279547622e01e827eb9bf7161e156135a3`):
+- **`eccUSDCBridge` 1.15.0** (code hash `71074c89af517458c73566d3e84937279547622e01e827eb9bf7161e156135a3`):
   `WithdrawalInitiated` gains `uint160 dstBridge` between `tokenId` and `sender` (event id
   `0x728804fc`); `WithdrawalRefused` is unchanged. New owner call `setEvmBridge(dstChainId,
   evmBridge)` (`0` clears) and getter `getEvmBridge(dstChainId)`. A withdrawal to a chain with no
@@ -116,12 +186,12 @@ assigns it when the release is tagged.
   `IBridgeWithdrawalVerifier.verifyWithdrawal` is `0xbcd3e6c9`. A proof whose `dstBridge` is not
   the bridge's own address reverts `WrongDstBridge(uint256)`. Tooling that encodes the call by
   hand needs the twelve-field tuple.
-- **`ackinacki-bridge withdraw`** needs `eccBridge` 1.16.0. Before burning it requires
+- **`ackinacki-bridge withdraw`** needs `eccUSDCBridge` 1.15.0. Before burning it requires
   `getEvmBridge(<chain>)` to equal `--bridge-address` and stops with exit 2 otherwise, naming
   the bridge Acki Nacki binds that chain to. After the burn it checks that the captured event
   names `--bridge-address` and stops with exit 13 otherwise, before proving; re-run with the
   bridge the message names and `--allow-retry` — the idempotency key does not include the
-  bridge, so the run resumes without a second burn; without the flag it stops with exit 3.
+  bridge, so the run resumes without a second burn; without the flag it stops with exit 3. Deposits still work against 1.14.0.
 - **`relayer daemon-withdraw` and `relayer daemon-bridge`** park a `proof_event_*.json` whose
   `dstBridge` is another bridge without sending it, and treat `WrongDstBridge` as permanent;
   `relayer submit-withdraw` and `relayer withdraw-e2e` refuse such a proof. `bridge-verifier-daemon`
@@ -275,65 +345,9 @@ assigns it when the release is tagged.
   (`AckiNackiBridgeArbSepoliaAaveForkTest`) against `https://sepolia-rollup.arbitrum.io/rpc` on
   every pull request; an outage of that RPC fails the check.
 
-- `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
-  or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted.
-- `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
-  (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
-  parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and
-  234 and 235, before `accept`, so a retry costs the bridge no gas.
-- `eccBridge` 1.16.0 (code hash `8047924b…`) credits the proven ERC-20 to its registered
-  ECC currency and tracks outstanding inventory independently for each source chain and currency.
-  Before opening deposits on EVM, register the same token and ECC id on AN with
-  `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
-  token base units. AN refuses unregistered tokens and the CLI refuses mismatched currency ids.
-  `DepositVoucher` 1.5.0 carries the token to `confirmTokenDeposit`; the existing
-  `finalizeDeposit`, `initiateWithdrawal` and `confirmDeposit` signatures are preserved.
-  Upgrading from 1.15.0 requires the structured `userCell` returned by
-  `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)`, followed by token registration
-  and restoration of the trusted bridge, EVM bridge (`setEvmBridge`) and anchor configuration. Subsequent upgrades preserve
-  token configuration and outstanding inventory automatically.
-- `ackinacki-bridge withdraw --token-id` selects the registered ECC currency (default `3`,
-  USDC). Amount precision comes from the destination token registry; no rounding is performed.
-  Withdrawal records and locks include the currency, while existing USDC keys are preserved.
-  The JSON burn summary includes `token_id` and uses that token's decimal precision.
-
-- `AckiNackiBridge.migrateToken(tokenId, successor)` (owner, paused only) hands a non-USDC listing's
-  custody and liabilities to the successor through its `fundToken`, with nothing minted on Acki Nacki.
-  The successor must list the same token under the same id, with a withdrawal cap no lower than the
-  old one. When replacing a bridge, call it for every such token before `setEvmBridge` reopens
-  withdrawals: both bridges can refuse a later burn of a token left behind, with the ECC already burned.
-- The EVM token registry exposes `listToken`, `setTokenLimits`, `setTokenDepositsEnabled`,
-  `delistToken`, `tokenInfo`, `tokenIdOf`, `listedTokenIds`, `liabilitiesOf` and
-  `maxWithdrawalAmount`. Liabilities and limits use each token's base units; AAVE stays USDC-only.
-- New non-USDC listings start with deposits closed. Register the same token and ECC id on AN
-  before opening the EVM listing; withdrawals require a listed id and outstanding liabilities.
-- `--token` (`DEPOSIT_TOKEN`) defaults to the EVM bridge's `usdc()`. Amounts use the listing's
-  decimals, checked against the ERC-20. Deposits retain exact-balance and uint64 width checks.
-
-- Registry changes emit `TokenListed`, `TokenLimitsSet`, `TokenDepositsEnabledSet` and
-  `TokenDelisted`. Deposits can revert with `TokenNotListed` or `TokenDepositsDisabled`;
-  registry administration can return `InvalidTokenAddress`, `TokenAlreadyListed`,
-  `TokenIdAlreadyUsed`, `TokenLimitsInvalid`, `TokenLimitExceedsMintCeiling`,
-  `TokenStillHasLiabilities`, `CannotDelistUsdc` or `CannotListAToken`.
-- AN `setBridgeToken` refuses a lower `maxTvl`. `finalizeDeposit` does not reserve capacity, so two
-  deposits finalized against the same headroom can still leave the later confirmation refused with
-  `ERR_TVL_CAP`. Close deposits on EVM or lower the EVM TVL cap to throttle intake. Closing the AN
-  switch or lowering AN `maxTransfer` also holds back deposits already locked on EVM.
-
 ### Fixes
 
-- Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
-  False and malformed returns still revert, and exact custody-delta checks remain in force.
-- USDC deposit limits cannot exceed AN's 50 USDC per transfer and 10,000 USDC per-chain
-  outstanding caps. Lowering deposit limits leaves existing withdrawals payable; payout caps
-  retain the highest accepted deposit limit. Withdrawal preflight checks the payout cap and ECC
-  id before a burn. Configuration-dependent payout reverts retry the existing proof file.
-- Deposit preflight retries transient failures of `usdc()`, `tokenIdOf()` and `tokenInfo()`
-  for up to 120 seconds; wrong-chain and missing-contract errors are reported before those reads.
-- The web UI checks USDC's current `tokenInfo` transfer limit, TVL capacity and deposit switch
-  before approval and again before deposit. A closed, absent or unreadable listing refuses the request.
-- `eth-lc-relayer arbitrum-anchors` discovers the new token-bearing `Deposit` event.
-- `eccBridge` 1.15.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `71074c89…`):
+- `eccUSDCBridge` 1.15.0 (`contracts/an/0.80.0_compiled/exchange/`, code hash `71074c89…`):
   `disableOwnerAnchorsOn(l2ChainId)` for a chain with an Arbitrum block verifier throws
   `ERR_PARENT_OWNER_ANCHORS_ENABLED` (240) until the owner's anchors are off for the verifier's
   parent chain, and `deployL2Verifier` throws 240 on a closed chain for a parent chain the owner
@@ -341,7 +355,7 @@ assigns it when the release is tagged.
   parent-chain block, while `isOwnerAnchorsEnabled` reported it closed. Turn off Sepolia
   (or Ethereum) first, then the Arbitrum chain. `updateCode` drops the verifier code and the
   verifiers: install and deploy them again after the upgrade.
-- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccBridge` has
+- `scripts/deposit_anchor_params.py --call` takes only `setAcceptedBlockHash`: `eccUSDCBridge` has
   no `attestBlockHash`. The `deposit-relayer` hint on exit code 224 names the Arbitrum block
   verifier (`eth-lc-relayer arbitrum-anchors`) as the anchor writer for an Arbitrum chain.
 - `eth-lc-relayer daemon` no longer hangs on a rotate prover that prints more than a pipe
@@ -380,6 +394,8 @@ assigns it when the release is tagged.
   retry on the next tick, instead of waiting forever on a node that does not answer.
 - `eth-lc-relayer arbitrum-anchors` locks its `--anchor-state` file (`<file>.lock` next to it) and
   refuses to start while another instance holds it.
+- `ackinacki-bridge` accepts bridges 1.14.0 and newer (`MIN_BRIDGE_VERSION`): a release build works
+  with the deployed bridge, and `release.yaml` publishes the binaries again.
 - A bridge on a fresh network can be seeded at the network's genesis instead of waiting for the
   first 16384-block boundary: `compute_bridge_anchors --seed-seqno 0 --level 2` prints the genesis
   (zero anchor, the BK set file's commitment) without reading the chain, and `relayer daemon-live`

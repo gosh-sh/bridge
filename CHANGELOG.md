@@ -20,10 +20,14 @@ assigns it when the release is tagged.
 ### Removed
 -->
 
-## [Unreleased]
+## [0.8.0] – 2026-11-06
 
 ### Breaking Changes
 
+- **Shellnet runs on a new `AckiNackiBridge`, `0xcEe5D884BC1b7F4CC84A31FEA74f3C8809D19Bd5`**, on
+  Arbitrum Sepolia from block `326573145`, with `eccUSDCBridge` 1.15.0. `eccUSDCBridge` no longer
+  trusts `0x3FB082a905a895151224F6d93bD074E816338638`. Set `BRIDGE_ADDRESS`,
+  `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` as `README.md` lists them.
 - **AAVE is mandatory, automatic, and Arbitrum Sepolia only** (#142). Redeploy the bridge:
   storage slots from `owner` on move down by one (`supplyMultiplierBps` is slot 5), and the
   constructor reverts `InvalidAaveAddress` when either AAVE address is zero, on every chain.

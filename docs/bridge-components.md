@@ -3,7 +3,8 @@
 > **Verified against `b651b093`** (PR 139); the executables and state files against `f86d251e`
 > (PR 148); the `eth-lc-relayer daemon` rows, its rotate directory and the rotate key cache against
 > `d7a14b19` (PR 153); the AAVE V3 pool, aUSDC and the bridge's `approve` against `a61d1e75`
-> (PR 142). Every connection and every state file below is drawn from the code that makes or names
+> (PR 142); the `eth-lc-relayer arbitrum-anchors` rows and its `submitAncestry` against `0fd604ed`
+> (bridge-audit#154). Every connection and every state file below is drawn from the code that makes or names
 > it, not from prose; the tables give each one's `file:line` at that commit.
 
 A UML component diagram of the whole bridge as deployed on Arbitrum Sepolia: the contracts on the

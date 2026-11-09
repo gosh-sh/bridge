@@ -34,7 +34,7 @@ assigns it when the release is tagged.
   from that one log, which must be the six-field `Deposit` of a trusted EVM bridge with nothing
   added or missing. `logIndex` counts the logs of the receipt only — not the block-wide `logIndex`
   an RPC returns. Every caller, the CLI and `deposit-relayer` included, must switch to the new ABI
-  (`contracts/an/0.81.1_compiled/exchange/eccBridge.abi.json`); a deposit not yet finalized
+  (`contracts/an/0.80.1_compiled/exchange/eccBridge.abi.json`); a deposit not yet finalized
   is finalized with the new input after the upgrade. Its voucher address is unchanged, so a
   deposit already finalized stays finalized and is not credited twice.
 - There is no deposit circuit and no deposit verification key any more. 1.17.0 embeds no VK and
@@ -59,10 +59,10 @@ assigns it when the release is tagged.
   a small block, or fewer large ones — cannot be finalized;
   the CLI and `deposit-relayer` refuse to send it and report it as one the bridge cannot
   finalize.
-- `eccBridge` is built with `sold` 0.81.1 (it needs the KECCAK256 instruction, which
-  `EthBeaconLightClient` and `ArbitrumBlockVerifier` already use). Its artefacts move from
-  `contracts/an/0.80.0_compiled/exchange/` to `contracts/an/0.81.1_compiled/exchange/`, and
-  `contracts/an/place.json` places them in acki-nacki at `contracts/0.81.0_compiled/exchange/`.
+- `eccBridge` is built with `sold` 0.80.1 (the 0.80 line with the KECCAK256 instruction;
+  0.81.x sends events with a header Circuit 4 cannot prove). Its artefacts move from
+  `contracts/an/0.80.0_compiled/exchange/` to `contracts/an/0.80.1_compiled/exchange/`;
+  `contracts/an/place.json` still places them in acki-nacki at `contracts/0.80.0_compiled/exchange/`.
   `DepositVoucher` is unchanged, byte for byte. Upgrade a 1.16.0 bridge with `updateCode` and an
   empty `userCell`: the token registry, outstanding inventory and voucher code are carried over;
   as with every `updateCode`, the trusted EVM bridges, anchors and light clients are not, and the
@@ -89,7 +89,7 @@ assigns it when the release is tagged.
   `deposit_relayer_prover_stage_duration_seconds` and `deposit_relayer_prover_stage_failures_total`
   are removed. Exit-code hints cover 214, 244, 300–305, 307 and 308; 220 is gone.
 - `ackinacki-bridge` requires an AN bridge at exactly 1.17.0 (`MIN_BRIDGE_VERSION`; code hash
-  `0e8aeac2b949692b826967e6ee85b0efcc421ff698b6f408c60006a740e353f1`): an older bridge is refused,
+  `6adefed3a1c9f996bd908cc6b8f65f562db8bb2e70d6c5b38e216bbc8b5ab4ff`): an older bridge is refused,
   and so is a newer one in release builds, since its `finalizeDeposit` may take other arguments.
   Upgrade the AN bridge, the CLI and `deposit-relayer` together. `deposit` loses
   `--deposit-prover-dir`, `--log-dir` and `--prover-timeout-s` (passing one is an argument error)

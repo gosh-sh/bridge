@@ -141,7 +141,7 @@ async fn deployed_multisig_for_token(ecc3: u128, token_id: u32) -> (String, Stri
 /// the one the CLI ships (`abi/USDCBridge.abi.json`, kept identical to the
 /// compiled one by CI).
 const USDC_BRIDGE_TVC: &[u8] =
-    include_bytes!("../../../contracts/an/0.81.1_compiled/exchange/eccBridge.tvc");
+    include_bytes!("../../../contracts/an/0.80.1_compiled/exchange/eccBridge.tvc");
 
 /// The EVM bridge [`deployed_usdc_bridge`] binds Sepolia withdrawals to, and
 /// the `--bridge-address` of [`fake_world`].
@@ -1478,11 +1478,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.81.1 build of eccBridge 1.17.0: 1.16.0 with the deposit
+        // sold 0.80.1 build of eccBridge 1.17.0: 1.16.0 with the deposit
         // checked against its receipt instead of a ZK proof.
         assert_eq!(
             &hash[..8],
-            "0e8aeac2",
+            "6adefed3",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

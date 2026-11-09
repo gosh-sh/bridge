@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run bridge limit and deposit-receipt regressions in TVM without a node.
 
-Set SOLD_0_81_1 to sold 0.81.1 and SOLD_0_81 to sold 0.81.0, and TVM_DEBUGGER to a
+Set SOLD_0_80_1 to sold 0.80.1 and SOLD_0_81 to sold 0.81.0, and TVM_DEBUGGER to a
 tvm-debugger that runs KECCAK256 (tvm-sdk fd76a8a9 or later). Every deposit is a real
 receipt proof: `finalize` builds a block whose receipt trie holds the deposit
 (`scripts/deposit-receipt/vectors.py`) and a test hook anchors its hash. Directed events are
@@ -136,7 +136,7 @@ class BridgeLimits(unittest.TestCase):
 """
         end = source.rfind("}")
         bridge.write_text(source[:end] + hooks + source[end:])
-        sold = os.environ["SOLD_0_81_1"]
+        sold = os.environ["SOLD_0_80_1"]
         command([sold, "--tvm-version", "gosh", "--base-path", str(src),
                  str(bridge), "-o", str(cls.root)])
         cls.abi = cls.root / "eccBridge.abi.json"

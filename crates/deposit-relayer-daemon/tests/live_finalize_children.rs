@@ -12,7 +12,7 @@ use tvm_client::crypto::KeyPair;
 
 const BRIDGE_ABI: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../contracts/an/0.81.1_compiled/exchange/eccBridge.abi.json"
+    "/../../contracts/an/0.80.1_compiled/exchange/eccBridge.abi.json"
 );
 
 fn hash(hex_str: &str) -> [u8; 32] {

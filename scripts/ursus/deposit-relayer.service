@@ -14,13 +14,14 @@ Environment=PATH=/home/ubuntu/bridge-e2e/bin:/usr/bin:/bin
 # waste ticks re-checking them. --from-block (FROM_BLOCK) must not be above the
 # oldest deposit still to deliver — see deposit-relayer.env.example.
 ExecStart=/home/ubuntu/bridge-e2e/bin/deposit-relayer daemon \
+  --state-dir ${DEPOSIT_RELAYER_STATE_DIR} \
+  --log-dir ${DEPOSIT_RELAYER_LOG_DIR} \
   --rpc-url ${RPC_URL} \
   --bridge-address ${BRIDGE_ADDRESS} \
   --from-block ${FROM_BLOCK} \
   --confirmations 3 \
   --an-graphql-url ${AN_GRAPHQL_URL} \
   --an-keys-path ${AN_KEYS_PATH} \
-  --an-bridge-abi-path ${AN_BRIDGE_ABI_PATH} \
   --an-token-bridge ${AN_TOKEN_BRIDGE} \
   --an-sender ${AN_SENDER} \
   --start-deposit-id ${START_DEPOSIT_ID}

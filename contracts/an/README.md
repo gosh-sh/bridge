@@ -57,7 +57,8 @@ accept the message, so a refused deposit costs it nothing. Everything up to
 accept has to fit the 500 000 gas an external message may spend before it is
 accepted: a typical deposit takes 110 000 to 210 000, one with 60 ERC-20
 transfers before the `Deposit` in its receipt 360 000 to 450 000. A deposit
-whose proof takes more — about 75 or more such logs before it — cannot be
+whose proof takes more — about 65 such logs before it in a block of thousands
+of transactions, about 88 in a small block — cannot be
 finalized, and the CLI and `deposit-relayer` refuse to send it
 (`DepositWitness::check_gas` in `crates/deposit-receipt`). Such a message stays
 well under the 64 KiB a Block Manager takes. Three writers

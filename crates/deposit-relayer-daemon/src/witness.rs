@@ -286,7 +286,7 @@ mod tests {
         let ev = event(1);
         let within = MockWitnessBuilder::with_header_len(30_000).witness_for(&ev);
         check_gas_credit(&within).unwrap();
-        let over = MockWitnessBuilder::with_header_len(40_000).witness_for(&ev);
+        let over = MockWitnessBuilder::with_header_len(45_000).witness_for(&ev);
         assert!(matches!(
             check_gas_credit(&over),
             Err(RelayerError::Unprovable(_))

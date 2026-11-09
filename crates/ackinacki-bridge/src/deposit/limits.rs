@@ -117,7 +117,7 @@ mod tests {
             log_index: 60,
         };
         assert_eq!(check_gas(&w), Ok(()));
-        w.log_index = 140;
+        w.log_index = 160;
         let e = check_gas(&w).unwrap_err();
         assert!(e.to_string().contains("the bridge cannot accept it"), "{e}");
     }

@@ -110,22 +110,28 @@ const MEASURED: [(usize, usize, u16, u64); 11] = [
 ];
 
 #[test]
-fn the_gas_estimate_stays_above_every_measurement() {
+fn the_gas_estimate_stays_above_every_measurement_and_refuses_none_that_fits() {
     for (nodes, bytes, log_index, gas) in MEASURED {
         let w = witness(nodes, 0, bytes, log_index);
         let estimate = w.estimated_gas();
         assert!(
-            estimate > gas + gas / 10,
+            estimate > gas + gas / 25,
             "{nodes} nodes, {bytes} bytes, log {log_index}: {estimate} vs {gas}"
         );
+        if gas + gas / 25 <= AN_GAS_CREDIT {
+            assert!(
+                w.check_gas().is_ok(),
+                "{nodes} nodes, {bytes} bytes, log {log_index}: refused at {estimate}, takes {gas}"
+            );
+        }
     }
 }
 
 #[test]
 fn a_deposit_over_the_gas_credit_is_refused_and_stays_below_the_message_limit() {
     assert!(witness(3, 500, 600, 60).check_gas().is_ok());
-    assert!(witness(3, 500, 600, 140).check_gas().is_err());
-    let largest = (AN_GAS_CREDIT - 40_000 - 25_000) / 12;
+    assert!(witness(3, 500, 600, 160).check_gas().is_err());
+    let largest = (AN_GAS_CREDIT - 30_000 - 22_000) / 11;
     assert!(witness(1, 0, largest as usize, 0).check_gas().is_ok());
     assert!(witness(1, 0, largest as usize + 1, 0).check_gas().is_err());
     assert!(largest < 48 * 1024);

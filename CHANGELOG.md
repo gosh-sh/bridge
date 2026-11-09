@@ -55,7 +55,8 @@ assigns it when the release is tagged.
   nothing. All of it has to fit the 500 000 gas (`gas_credit`) an external message may spend
   before it is accepted: a typical deposit takes 110 000 to 210 000, one with 60 ERC-20 transfers
   before the `Deposit` in its receipt about 360 000 to 450 000. A deposit whose receipt proof
-  takes more — about 75 or more such logs before it, or fewer large ones — cannot be finalized;
+  takes more — about 65 such logs before it in a block of thousands of transactions, about 88 in
+  a small block, or fewer large ones — cannot be finalized;
   the CLI and `deposit-relayer` refuse to send it and report it as one the bridge cannot
   finalize.
 - `eccBridge` is built with `sold` 0.81.1 (it needs the KECCAK256 instruction, which
@@ -190,6 +191,11 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `scripts/ursus/deposit-relayer.service` starts again: it passes `--state-dir` and `--log-dir`
+  and no longer passes `--an-bridge-abi-path`, which the relayer does not have. In
+  `deposit-relayer.env` replace `DEPOSIT_RELAYER_STATE` with `DEPOSIT_RELAYER_STATE_DIR` and
+  `DEPOSIT_RELAYER_LOG_DIR` and drop `AN_BRIDGE_ABI_PATH`; the relayer refuses to start while
+  `DEPOSIT_RELAYER_STATE` is set.
 - Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
   False and malformed returns still revert, and exact custody-delta checks remain in force.
 - USDC deposit limits cannot exceed AN's 50 USDC per transfer and 10,000 USDC per-chain

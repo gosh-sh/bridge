@@ -386,12 +386,13 @@ def test_55_light_client_relayer_started(run, an, ctx):
 
 
 def test_60_light_client_accepts_spans(run):
-    """The light client accepts the Sepolia blocks between two checkpoints (submitAncestry): an
-    Arbitrum assertion's Sepolia block is one of those."""
-    wait_for("eth-lc-relayer gets a span accepted", lambda: "submitAncestry accepted" in run.log("lc-relayer"),
-             2 * LC_PROOF_SECS, log=lambda: run.log("lc-relayer"))
-    assert "span given up" not in run.log("lc-relayer"), \
-        "eth-lc-relayer gave a span up: its blocks will never be accepted\n" + tail(run.log("lc-relayer"))
+    """arbitrum-anchors sends the light client the Sepolia blocks of the epoch an Arbitrum
+    assertion landed in (submitAncestry), between the two checkpoints around it."""
+    sent = "submitAncestry sent for the assertion's parent-chain block"
+    wait_for("arbitrum-anchors gets a span accepted", lambda: sent in run.log("anchors"),
+             ANCHOR_SECS, log=lambda: run.log("anchors"))
+    assert "no more submitAncestry" not in run.log("anchors"), \
+        "arbitrum-anchors gave a span up: its block will never be accepted\n" + tail(run.log("anchors"))
 
 
 def test_61_deposit_block_anchored(run, an):

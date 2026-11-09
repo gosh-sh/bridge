@@ -76,13 +76,16 @@ flowchart LR
   end
   subgraph DEP["Deposit path, existing"]
     DR["deposit-relayer / user"]
+    AA["eth-lc-relayer arbitrum-anchors"]
   end
   BN -- "finality_update, updates,<br/>genesis, config/spec" --> D
-  EN -. "eth_getBlockByHash per span header<br/>(ancestry)" .-> D
+  EN -. "eth_getBlockByHash per span header<br/>(ancestry, --submit-ancestry)" .-> D
   D -- "witness JSON + env" --> P
   P -- "proof + public inputs" --> D
   D --- S
-  D -- "submitUpdate / submitRotate /<br/>submitAncestry (signed external message)" --> LC
+  D -- "submitUpdate / submitRotate<br/>(signed external message)" --> LC
+  EN -. "eth_getBlockByNumber<br/>(the assertion's epoch)" .-> AA
+  AA -- "submitAncestry<br/>(signed external message)" --> LC
   LC -- "zkhalo2VerifyWithVK(VK_BLOB, pi, proof)" --> N
   LC -- "acceptBlockHashFromLightClient<br/>(internal message)" --> UB
   UB ~~~ DR
@@ -120,8 +123,8 @@ sequenceDiagram
   LC->>LC: tvm.accept(), then zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)
   LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(execHash)), only when usdcBridge is set
   LC-->>R: HeadUpdated event
-  opt ETH_RPC_URL set
-    R->>LC: rePushAnchor(execHash)
+  R->>LC: rePushAnchor(execHash)
+  opt --submit-ancestry and ETH_RPC_URL set
     R->>LC: submitAncestry(headerRlps, oldest first, 3 to 33)
     LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(key)) per block between the anchors
   end
@@ -234,14 +237,16 @@ flowchart TD
 
 A step proves one execution block per epoch, the checkpoint. The contract records it in its own
 `_provenEthSlot` map (hash → Ethereum slot) and pushes it into `USDCBridge` through an internal message
-(`_pushExecHash`, `_notifySink`). A hash older than one year behind head is not live. Deposits in the other 31
-blocks of the epoch are covered by **ancestry**: the daemon fetches those execution headers over
-JSON-RPC, and `submitAncestry(headerRlps)` hashes each RLP header with the `gosh.keccak256`
-builtin and links them by RLP `parentHash`. The payload is the span between two anchors, oldest
-first, 3 to 33 headers: `headerRlps[0]` and the last header must each already be proven, and only
-the blocks between them are pushed. With `ETH_RPC_URL` set the daemon fetches the span back to the
-previous checkpoint after every accepted update and runs `link_headers` locally
-(`src/relayer.rs`). On-chain `submitAncestry` is `--submit-ancestry` (default off).
+(`_pushExecHash`, `_notifySink`). A hash older than 14 days behind head (`PROVEN_WINDOW_SLOTS`) is not
+live. The other 31 blocks of the epoch are covered by **ancestry**: `submitAncestry(headerRlps)`
+hashes each RLP header with the `gosh.keccak256` builtin and links them by RLP `parentHash`. The
+payload is the span between two anchors, oldest first, 3 to 33 headers: `headerRlps[0]` and the
+last header must each already be proven, and only the blocks between them are pushed.
+`eth-lc-relayer arbitrum-anchors` sends the span for the epoch each Arbitrum assertion landed in,
+once the light client's head has passed that epoch (`src/arbitrum.rs`); no other block of the
+followed chain is needed. The daemon can also cover every epoch: with `ETH_RPC_URL` set it fetches
+the span back to the previous checkpoint after every accepted update and runs `link_headers`
+locally (`src/relayer.rs`), and with `--submit-ancestry` (default off) it sends it.
 
 **Ancestry now fits the gas limit.** The software `EthKeccak.hash` is gone; one 642-byte Sepolia
 header cost **64.68 M** gas through it and costs **4,722** through the `KECCAK256` instruction
@@ -408,7 +413,7 @@ flowchart LR
   end
   SVC -- "GET light_client/finality_update<br/>GET light_client/updates<br/>GET beacon/genesis, config/spec" --> BN
   SVC -. "eth_getBlockByHash" .-> EN
-  SVC -- "signed external messages:<br/>submitUpdate, submitRotate, submitAncestry,<br/>rePushAnchor, setCommitteeCommitment, flip calls" --> GW
+  SVC -- "signed external messages:<br/>submitUpdate, submitRotate, rePushAnchor,<br/>setCommitteeCommitment, flip calls;<br/>submitAncestry with --submit-ancestry" --> GW
 ```
 
 ### 4.2 Ports and endpoints
@@ -463,7 +468,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `AN_USDC_BRIDGE` | `USDCBridge` address (its ABI and the light client's are built in; no `*_ABI_PATH`) | set | empty |
 | `ETH_LC_RELAYER_STATE_DIR`, `ETH_LC_RELAYER_WORK_DIR`, `ETH_LC_RELAYER_LOG_DIR` | the three directories (`--state-dir`, `--work-dir`, `--log-dir`), see §4.3 | required | required |
 | `ETH_RPC_URL` | execution JSON-RPC: local ancestry `link_headers`; `rePushAnchor` does not need it | optional | optional |
-| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain for the span between consecutive checkpoints | unset | unset |
+| `SUBMIT_ANCESTRY` | send `submitAncestry` on-chain for the span between consecutive checkpoints; `arbitrum-anchors` sends the spans the Arbitrum path needs | unset | unset |
 | daemon flags | | `--owner-hop` while a missed rotate should fall back to the owner key; `--rotate-timeout-secs` (default 10800) per stage; `--flip-owner` only once §3.5 no longer applies | `--no-rotate --no-flip-owner --owner-hop` |
 
 ### 4.5 Procedure
@@ -531,7 +536,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 | Submit cadence | one `submitUpdate` per Ethereum epoch (6.4 min); head lags Ethereum finality by about one epoch |
 | Period hop | every 8192 slots, about 27.3 h |
 | Contract gas | about 0.57 shell per accepted update on shellnet; fund ahead of that burn |
-| Proven-hash window | one year of Ethereum slots (`SLOTS_PER_YEAR = 2_628_000`). Hashes older than `head - 1y` are not `isProven`, are deleted from the FIFO (128/tx), and the sink is told `forgetBlockHashFromLightClient` (`contracts/an/exchange/eccBridge.sol:877`, called from `exchange/EthBeaconLightClient.sol:686`). |
+| Proven-hash window | 14 days of Ethereum slots (`PROVEN_WINDOW_SLOTS = 100_800`, getter `provenWindowSlots()`). Hashes older than `head - 14d` are not `isProven`, are deleted from the FIFO (at most 128 examined and 32 deleted per transaction), and the sink is told `forgetBlockHashFromLightClient`. |
 | Daemon memory at rest | about 14 GB of page cache, the proof is the peak |
 
 ## 6. Verifying a deployment
@@ -552,7 +557,8 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 - Journal lines to expect: `submitUpdate accepted slot=…` every 7 to 13 minutes;
   `owner hop: setCommitteeCommitment accepted` (shadow) or `submitRotate accepted`
   (production) once per period; `rePushAnchor accepted`; local ancestry `link_headers` when
-  `ETH_RPC_URL` is set; `submitAncestry accepted` only with `--submit-ancestry`.
+  `ETH_RPC_URL` is set; `submitAncestry accepted` only with `--submit-ancestry`. From
+  `arbitrum-anchors`: `submitAncestry sent for the assertion's parent-chain block`.
 - The state file is pinned to the first `genesis_validators_root` it sees
   (`src/relayer.rs:414`); pointing a daemon at another network fails instead of mixing heads.
 
@@ -562,8 +568,8 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   step-only with owner hops.
 - The proving key is rebuilt for every proof (about 4.5 of the 7 minutes).
 - Any change to the step circuit changes `VK_BLOB`; the contract is upgraded in place with
-  `updateCode` (`EthBeaconLightClient.sol`), which carries head, committee and the one-year
-  proven FIFO across the upgrade (this encoding is not compatible with the old
+  `updateCode` (`EthBeaconLightClient.sol`), which carries head, committee and the proven
+  FIFO across the upgrade (this encoding is not compatible with the old
   `mapping(uint256 => bool)`). The tvm-sdk opcode fixtures must be re-emitted with the same blob
   (`scripts/check_rotate_vkblob_accumulator.sh`).
 - Public beacon providers differ in what they serve; a production deployment wants its own

@@ -51,8 +51,20 @@ assigns it when the release is tagged.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
   bridge. `DeployRealBridge` defaults to `3`.
+- `EthBeaconLightClient` 1.7.0 keeps a proven Ethereum block hash 14 days instead of a year
+  (`PROVEN_WINDOW_SLOTS = 100_800`), and `slotsPerYear()` is now `provenWindowSlots()`. Upgrade a
+  running light client with `updateCode` (empty `userCell`): it then deletes the older hashes and
+  has the bridge forget them, at most 32 per transaction, two to three weeks for shellnet's backlog.
+  A block older than 14 days can no longer be accepted through the light client. Point anything
+  that reads `slotsPerYear()` at the new getter.
 
 ### New / Improvements
+
+- `eth-lc-relayer arbitrum-anchors` sends `submitAncestry` for the Ethereum epoch each Arbitrum
+  assertion landed in, to the light client the bridge's `getLightClient` names, once its head has
+  passed that epoch; at most three sends per block. Upgrade it first, then turn `SUBMIT_ANCESTRY`
+  (`--submit-ancestry`) off on `eth-lc-relayer daemon`: the daemon's spans admitted every block.
+  `docker/env/eth-lc-relayer.env.example` no longer sets it.
 
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted,

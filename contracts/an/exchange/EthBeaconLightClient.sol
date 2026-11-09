@@ -64,17 +64,20 @@ import "./eccBridge.sol";
 ///         `_acceptedBlockHash` sink. Anchors further apart than one span need
 ///         the checkpoint between them registered first, or the owner's
 ///         `setAcceptedBlockHash`.
-///         Proven hashes expire after `SLOTS_PER_YEAR` (365d of 12s slots) behind
-///         head: `isProven` / the sink forget that window. Deposits older than
-///         a year cannot `finalizeDeposit` against this oracle.
+///         Proven hashes expire `PROVEN_WINDOW_SLOTS` (14 days of 12 s slots)
+///         behind head: `isProven` and the sink forget them. A deposit block
+///         older than that cannot `finalizeDeposit` against this oracle, and a
+///         skipped checkpoint older than that cannot be late-registered.
 contract EthBeaconLightClient {
-    string constant version = "1.6.1";
+    string constant version = "1.7.0";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
-    // 365 * 24 * 3600 / 12. A proven execution hash older than this many
-    // slots behind head is not canonical for `finalizeDeposit` (one-year SLA).
-    uint64 constant SLOTS_PER_YEAR = 2_628_000;
+    // 14 * 24 * 3600 / 12. A proven execution hash older than this many
+    // slots behind head is not canonical. An Arbitrum deposit needs its
+    // parent-chain block only until `proveBlock` reads it, which the EIP-2935
+    // window already bounds to about a day.
+    uint64 constant PROVEN_WINDOW_SLOTS = 100_800;
     // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
     uint64 constant SLOTS_PER_PERIOD = 8192;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
@@ -155,7 +158,7 @@ contract EthBeaconLightClient {
     );
     /// USDCBridge rejected `acceptBlockHashFromLightClient` (bounce).
     event AnchorPushBounced();
-    /// Hashes dropped from the one-year proven window (and forgotten at the sink).
+    /// Hashes dropped from the proven window (and forgotten at the sink).
     event AnchorsExpired(uint64 count);
 
     /// @notice Deposit-style struct of the 11 proven public inputs
@@ -282,7 +285,7 @@ contract EthBeaconLightClient {
     bool _gloasForkSlotSet;
 
     // Canonicality registry: proven execution hashes with the Ethereum slot
-    // they were admitted at. 0 = absent. Live iff slot >= head - SLOTS_PER_YEAR.
+    // they were admitted at. 0 = absent. Live iff slot >= head - PROVEN_WINDOW_SLOTS.
     mapping(uint256 => uint64) _provenEthSlot;
     // Insertion FIFO used to delete expired keys (lazy `_isLive` is authoritative).
     mapping(uint64 => uint256) _provenQueue;
@@ -341,7 +344,7 @@ contract EthBeaconLightClient {
     /// its budget runs out and gives the span up, so an honest span is lost to
     /// permissionless coverage. Mint for the worst case before anything is
     /// queued. This bites on an ordinary chain, with no attacker: expired keys
-    /// are contiguous in the FIFO, so the first time a year's worth comes due
+    /// are contiguous in the FIFO, so the first time a window's worth comes due
     /// the forgets arrive 128 to a transaction.
     function ensureBalanceForSinks(uint64 messages) private pure {
         uint64 needed = MIN_BALANCE + messages * SINK_VALUE;
@@ -388,7 +391,7 @@ contract EthBeaconLightClient {
             && !_isLive(pi.executionBlockHash);
         require(advancing || late, ERR_STALE_UPDATE);
         if (late) {
-            require(_withinYear(pi.finalizedSlot), ERR_STALE_UPDATE);
+            require(_withinWindow(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
         // The signer is the committee in force, or the one a rotation
         // replaced, in the period that replaced committee served
@@ -576,20 +579,20 @@ contract EthBeaconLightClient {
         emit AncestryAccepted{dest: addrExtern}(_piForm(prev), added);
     }
 
-    function _yearCutoff() private view returns (uint64) {
-        if (_finalizedSlot <= SLOTS_PER_YEAR) {
+    function _windowCutoff() private view returns (uint64) {
+        if (_finalizedSlot <= PROVEN_WINDOW_SLOTS) {
             return 0;
         }
-        return _finalizedSlot - SLOTS_PER_YEAR;
+        return _finalizedSlot - PROVEN_WINDOW_SLOTS;
     }
 
-    function _withinYear(uint64 ethSlot) private view returns (bool) {
-        return ethSlot >= _yearCutoff();
+    function _withinWindow(uint64 ethSlot) private view returns (bool) {
+        return ethSlot >= _windowCutoff();
     }
 
     function _isLive(uint256 h) private view returns (bool) {
         uint64 s = _provenEthSlot[h];
-        return s != 0 && _withinYear(s);
+        return s != 0 && _withinWindow(s);
     }
 
     function _rev16(uint256 v) private pure returns (uint256 r) {
@@ -632,7 +635,7 @@ contract EthBeaconLightClient {
             _provenQueueTail += 1;
             n += 1;
             uint64 s = _provenEthSlot[h];
-            if (s != 0 && _withinYear(s)) {
+            if (s != 0 && _withinWindow(s)) {
                 _provenQueue[_provenQueueHead] = h;
                 _provenQueueHead += 1;
             } else if (s != 0) {
@@ -930,9 +933,9 @@ contract EthBeaconLightClient {
         return chainId == _l1ChainId && _isLive(blockHash);
     }
 
-    /// @notice Ethereum slots kept in the proven set (`365d / 12s`).
-    function slotsPerYear() external pure returns (uint64) {
-        return SLOTS_PER_YEAR;
+    /// @notice Ethereum slots kept in the proven set (14 days of 12 s slots).
+    function provenWindowSlots() external pure returns (uint64) {
+        return PROVEN_WINDOW_SLOTS;
     }
 
     /// @notice Occupancy of the eviction FIFO (live + not-yet-compacted expired).

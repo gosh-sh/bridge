@@ -8,8 +8,8 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::header_rlp::{keccak256, rlp_parent_hash};
 
-/// 365 * 24 * 3600 / 12. Matches `EthBeaconLightClient.SLOTS_PER_YEAR`.
-pub const SLOTS_PER_YEAR: u64 = 2_628_000;
+/// 14 * 24 * 3600 / 12. Matches `EthBeaconLightClient.PROVEN_WINDOW_SLOTS`.
+pub const PROVEN_WINDOW_SLOTS: u64 = 100_800;
 /// Sync-committee period: 256 epochs of 32 slots.
 pub const SLOTS_PER_PERIOD: u64 = 8192;
 /// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
@@ -117,17 +117,17 @@ impl LightClient {
         }
     }
 
-    fn year_cutoff(&self) -> u64 {
-        self.finalized_slot.saturating_sub(SLOTS_PER_YEAR)
+    fn window_cutoff(&self) -> u64 {
+        self.finalized_slot.saturating_sub(PROVEN_WINDOW_SLOTS)
     }
 
-    fn within_year(&self, eth_slot: u64) -> bool {
-        eth_slot >= self.year_cutoff()
+    fn within_window(&self, eth_slot: u64) -> bool {
+        eth_slot >= self.window_cutoff()
     }
 
     pub fn is_live(&self, h: &[u8; 32]) -> bool {
         match self.proven.get(h) {
-            Some(&s) if s != 0 && self.within_year(s) => true,
+            Some(&s) if s != 0 && self.within_window(s) => true,
             _ => false,
         }
     }
@@ -143,7 +143,7 @@ impl LightClient {
             let h = self.queue.pop_front().expect("non-empty");
             n += 1;
             match self.proven.get(&h).copied() {
-                Some(s) if self.within_year(s) => self.queue.push_back(h),
+                Some(s) if self.within_window(s) => self.queue.push_back(h),
                 Some(_) => {
                     self.proven.remove(&h);
                     self.sink_forgets.push(pi_form(&h));
@@ -196,10 +196,10 @@ impl LightClient {
         if !advancing && !late {
             return Err(LcError::StaleUpdate);
         }
-        // The contract tests the year window before the committee, so a stale
+        // The contract tests the window before the committee, so a stale
         // update signed by the wrong committee reports StaleUpdate, not
         // WrongCommittee. The order is part of what this replica pins.
-        if late && !self.within_year(slot) {
+        if late && !self.within_window(slot) {
             return Err(LcError::StaleUpdate);
         }
         let prev_ok = self.prev_committee != [0; 32]
@@ -425,7 +425,7 @@ mod tests {
             LcError::NotProven
         );
 
-        c.submit_update(100 + SLOTS_PER_YEAR + 1, [0x22; 32], [0xC0; 32])
+        c.submit_update(100 + PROVEN_WINDOW_SLOTS + 1, [0x22; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(c.sink_forgets, vec![block_hash]);
     }
@@ -649,7 +649,7 @@ mod tests {
     }
 
     /// The replaced committee may only sign in the period it served.
-    /// Without that bound it could sign any slot in the one-year window,
+    /// Without that bound it could sign any slot in the proven window,
     /// including slots it never attested, and the hashes it wrote would back
     /// mints.
     #[test]
@@ -819,9 +819,9 @@ mod tests {
         }
         assert!(c.sink_forgets.is_empty(), "nothing has expired yet");
 
-        // Jump the head a year past all of them: every one is now outside the
+        // Jump the head a window past all of them: every one is now outside the
         // window, and the next call compacts.
-        let far = SLOTS_PER_YEAR + 32 * n as u64 + 32;
+        let far = PROVEN_WINDOW_SLOTS + 32 * n as u64 + 32;
         c.submit_update(far, [0xFF; 32], [0xC0; 32]).unwrap();
         assert_eq!(
             c.sink_forgets.len(),
@@ -978,11 +978,11 @@ mod tests {
     }
 
     #[test]
-    fn year_window_drops_hash_and_forgets_sink() {
+    fn window_drops_hash_and_forgets_sink() {
         let mut c = lc();
         c.submit_update(100, [0x11; 32], [0xC0; 32]).unwrap();
         assert!(c.is_live(&[0x11; 32]));
-        c.submit_update(100 + SLOTS_PER_YEAR + 1, [0x22; 32], [0xC0; 32])
+        c.submit_update(100 + PROVEN_WINDOW_SLOTS + 1, [0x22; 32], [0xC0; 32])
             .unwrap();
         assert!(!c.is_live(&[0x11; 32]));
         assert!(c.is_live(&[0x22; 32]));
@@ -994,9 +994,9 @@ mod tests {
     }
 
     #[test]
-    fn late_register_older_than_year_is_stale() {
+    fn late_register_older_than_the_window_is_stale() {
         let mut c = lc();
-        c.submit_update(SLOTS_PER_YEAR + 50, [0xAA; 32], [0xC0; 32])
+        c.submit_update(PROVEN_WINDOW_SLOTS + 50, [0xAA; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(
             c.submit_update(40, [0xBB; 32], [0xC0; 32]).unwrap_err(),
@@ -1009,7 +1009,7 @@ mod tests {
     fn ancestry_expired_checkpoint_unknown() {
         let mut c = lc();
         let chain = anchored_span(&mut c, 4);
-        c.submit_update(64 + SLOTS_PER_YEAR + 1, [0xEE; 32], [0xC0; 32])
+        c.submit_update(64 + PROVEN_WINDOW_SLOTS + 1, [0xEE; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(
             c.submit_ancestry(&chain).unwrap_err(),

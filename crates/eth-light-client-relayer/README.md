@@ -7,9 +7,11 @@ Polls Ethereum beacon `finality_update` **and** `light_client/updates` (current
 
 `finalizeDeposit` flip (owner): `scripts/ursus/flip_deposit_to_light_client.md`.
 Ancestry (31/32 on-chain) fills the span between two proven checkpoints,
-headers oldest first. The daemon fetches the span back to its previous
-checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
-`submitAncestry` is `--submit-ancestry` (default off). One-shot:
+headers oldest first. `arbitrum-anchors` sends the span for the epoch each
+Arbitrum assertion landed in, which is all the Arbitrum path needs. The daemon
+fetches the span back to its previous checkpoint when `ETH_RPC_URL` is set and
+checks it locally; sending it for every epoch is `--submit-ancestry` (default
+off). The light client keeps a proven hash 14 days. One-shot:
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
 parent chain, which is necessary for a span to carry it, not sufficient.
@@ -97,7 +99,8 @@ eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' …
 
 # 10. Bridge on an Arbitrum chain: anchor the blocks that hold deposits through
 #     ArbitrumBlockVerifier.proveBlock (live-submit), next to deposit-relayer
-#     daemon. Keep --state-dir across restarts: the proofs in its state file
+#     daemon. Sends submitAncestry for each assertion's parent-chain epoch to
+#     the light client the bridge names (getLightClient). Keep --state-dir across restarts: the proofs in its state file
 #     cannot be fetched again.
 eth-lc-relayer arbitrum-anchors --parent-rpc-url … --arbitrum-rpc-url … \
   --bridge-address 0x… --from-block <bridge deploy block> \

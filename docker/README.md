@@ -94,7 +94,7 @@ sourced by its entrypoint; the other services get theirs as container environmen
 | `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the two metrics ports |
 | `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, BK set sha256 and commitment |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
-| `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `SUBMIT_ANCESTRY`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
+| `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
 | `$BRIDGE_OPT/env/arbitrum-anchors.env` | `env/arbitrum-anchors.env.example` | `PARENT_RPC_URL`, `ARBITRUM_RPC_URL`, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE` |
 | `$BRIDGE_OPT/env/cli.env` (optional) | none | endpoints and addresses for `compose run cli`; never a private key, which goes in as `run -e …` for the one run or as a file under `keys/` |
 

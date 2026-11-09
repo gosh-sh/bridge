@@ -21,8 +21,12 @@
 //! costs a delay, not a deposit: a later batch covers the same blocks.
 //!
 //! The parent-chain block with the assertion has to be accepted by the bridge
-//! first (the parent chain's light client, with `submitAncestry` for blocks
-//! between its checkpoints); until it is, the proof waits in the state file.
+//! first. The parent chain's light client proves one block per epoch, the
+//! checkpoint; the assertion's block is almost never one. Once the light
+//! client's head has passed the epoch the block sits in, [`tick`] sends
+//! `submitAncestry` for the span between the two checkpoints around it, and
+//! the light client admits every block between them. Until the bridge
+//! accepts the block, the proof waits in the state file.
 //!
 //! The live Acki Nacki side (`TvmAnchorTarget`) needs the `live-submit`
 //! feature, as every other call this crate sends to Acki Nacki.
@@ -55,7 +59,11 @@ use tracing::{error, info, warn};
 #[cfg(feature = "live-submit")]
 use tvm_client::crypto::KeyPair;
 
-use crate::{error::RelayerError, header_rlp::encode_header_rlp, source::get_logs_with_retry};
+use crate::{
+    error::RelayerError,
+    header_rlp::{encode_header_rlp, link_headers},
+    source::get_logs_with_retry,
+};
 
 /// `Deposit(uint256 indexed depositId, address indexed sender, uint256 amount,
 /// bytes32 anAccount, uint256 timestamp, address token)` of `AckiNackiBridge`.
@@ -100,6 +108,9 @@ pub struct ArbitrumChain {
     /// The block the chain's Nitro history starts at: block number =
     /// message count - 1 + this.
     pub nitro_genesis_block: u64,
+    /// `genesis_time` of the parent chain's beacon chain: where its epochs,
+    /// and so its light-client checkpoints, start.
+    pub parent_beacon_genesis: u64,
 }
 
 pub const ARBITRUM_CHAINS: &[ArbitrumChain] = &[
@@ -110,6 +121,7 @@ pub const ARBITRUM_CHAINS: &[ArbitrumChain] = &[
         rollup: address!("042b2e6c5e99d4c521bd49beed5e99651d9b0cf4"),
         sequencer_inbox: address!("6c97864CE4bEf387dE0b3310A44230f7E3F1be0D"),
         nitro_genesis_block: 0,
+        parent_beacon_genesis: 1_655_733_600,
     },
     ArbitrumChain {
         name: "Arbitrum One",
@@ -118,6 +130,7 @@ pub const ARBITRUM_CHAINS: &[ArbitrumChain] = &[
         rollup: address!("4dceb440657f21083db8add07665f8ddbe1dcfc0"),
         sequencer_inbox: address!("1c479675ad559DC151F6Ec7ed3FbF8ceE79582B6"),
         nitro_genesis_block: 22_207_817,
+        parent_beacon_genesis: 1_606_824_023,
     },
 ];
 
@@ -219,6 +232,13 @@ pub struct ReadyProof {
     /// Deposit block → unix time `proveBlock` was last sent for it.
     #[serde(default)]
     pub sent: BTreeMap<u64, u64>,
+    /// Unix time a `submitAncestry` span for `parent_block` was last tried.
+    #[serde(default)]
+    pub span_tried: Option<u64>,
+    /// `submitAncestry` calls sent for `parent_block`, at most
+    /// [`MAX_SPAN_SENDS`].
+    #[serde(default)]
+    pub spans_sent: u32,
 }
 
 /// What `arbitrum-anchors` keeps between runs. The slot proofs cannot be
@@ -369,6 +389,17 @@ pub trait ArbitrumView: Send + Sync {
         block: u64,
         tx_index: u32,
     ) -> Result<(B256, Bytes, Vec<Bytes>), RelayerError>;
+    /// A parent-chain block's header; `None` past the head.
+    async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError>;
+}
+
+/// A parent-chain block header: what a `submitAncestry` span is made of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentHeader {
+    pub number: u64,
+    pub hash: B256,
+    pub rlp: Bytes,
+    pub timestamp: u64,
 }
 
 /// Arguments of `ArbitrumBlockVerifier.proveBlock`.
@@ -400,11 +431,17 @@ impl ProveBlock {
     }
 }
 
-/// The bridge and the chain's verifier on Acki Nacki.
+/// The bridge, the chain's verifier and the parent chain's light client on
+/// Acki Nacki.
 #[async_trait]
 pub trait AnchorTarget: Send + Sync {
     async fn is_accepted(&self, chain_id: u64, block_hash: B256) -> Result<bool, RelayerError>;
     async fn prove_block(&self, call: &ProveBlock) -> Result<(), RelayerError>;
+    /// The beacon slot of the light client's head (`getHead`); `None` when
+    /// the bridge has no light client for the parent chain.
+    async fn light_client_head_slot(&self) -> Result<Option<u64>, RelayerError>;
+    /// `submitAncestry(headerRlps)` on the light client, oldest header first.
+    async fn submit_ancestry(&self, headers: &[Bytes]) -> Result<(), RelayerError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -454,6 +491,10 @@ pub struct TickReport {
     pub proofs_failed: usize,
     pub accepted: usize,
     pub waiting_for_parent: usize,
+    /// `submitAncestry` spans sent for assertion blocks, and the ones Acki
+    /// Nacki refused.
+    pub spans_sent: usize,
+    pub spans_failed: usize,
 }
 
 /// One round: new deposits, new batches and assertions, then every proof
@@ -582,6 +623,8 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                                 receipt_proof,
                                 end,
                                 sent: BTreeMap::new(),
+                                span_tried: None,
+                                spans_sent: 0,
                             });
                             report.assertions_matched += 1;
                         },
@@ -617,6 +660,21 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
             .await?
         {
             report.waiting_for_parent += 1;
+            if proof
+                .span_tried
+                .is_none_or(|at| now >= at + cfg.resend_after_secs)
+            {
+                proof.span_tried = Some(now);
+                if let Err(e) = cover_parent_block(chain, view, an, proof, &mut report).await {
+                    warn!(
+                        parent_block = proof.parent_block,
+                        error = %e,
+                        retry_in_secs = cfg.resend_after_secs,
+                        "could not build the span for the assertion's parent-chain block; \
+                         trying again later"
+                    );
+                }
+            }
             continue;
         }
         let blocks: Vec<u64> = proof.end.slots.keys().copied().collect();
@@ -673,6 +731,153 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     }
     state.ready.retain(|p| !p.end.slots.is_empty());
     Ok(report)
+}
+
+/// Most `submitAncestry` calls sent for one assertion block. One is sent only
+/// once the bridge accepts both ends of the span, so a refusal is a node or
+/// contract fault a resend does not fix, and each costs the light client gas.
+pub const MAX_SPAN_SENDS: u32 = 3;
+
+/// Beacon slot length and epoch length, in seconds and slots.
+const SECONDS_PER_SLOT: u64 = 12;
+const SLOTS_PER_EPOCH: u64 = 32;
+
+/// Blocks tried as each end of a span: the last ones at or before an epoch
+/// boundary. Before Gloas the light client's checkpoint is the block of the
+/// boundary slot; from Gloas on, the payload bid's parent, the block of the
+/// slot before it. The third covers a slot with no block.
+const ANCHOR_CANDIDATES: usize = 3;
+
+/// Sends `submitAncestry` for the epoch of `proof.parent_block`, between the
+/// light client's checkpoints on either side of it. Waits, sending nothing,
+/// until the light client's head has passed the epoch and the bridge accepts
+/// both checkpoints.
+async fn cover_parent_block<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
+    chain: &ArbitrumChain,
+    view: &V,
+    an: &T,
+    proof: &mut ReadyProof,
+    report: &mut TickReport,
+) -> Result<(), RelayerError> {
+    if proof.spans_sent >= MAX_SPAN_SENDS {
+        return Ok(());
+    }
+    let b = proof.parent_block;
+    let Some(block) = view.parent_header(b).await? else {
+        return Ok(());
+    };
+    if block.hash != proof.parent_hash {
+        return Err(RelayerError::other(format!(
+            "parent block {b} is {} now, not the {} the assertion was read from",
+            block.hash, proof.parent_hash
+        )));
+    }
+    let genesis = chain.parent_beacon_genesis;
+    let epoch_secs = SECONDS_PER_SLOT * SLOTS_PER_EPOCH;
+    let since = block.timestamp.checked_sub(genesis).ok_or_else(|| {
+        RelayerError::other(format!("parent block {b} is older than the beacon genesis"))
+    })?;
+    let t0 = genesis + since / epoch_secs * epoch_secs;
+    let t1 = t0 + epoch_secs;
+    // The checkpoint that closes the epoch is proven no earlier than the head
+    // reaches the epoch's end: reading the head first spares the walk below
+    // while the light client is still behind.
+    let Some(head) = an.light_client_head_slot().await? else {
+        return Ok(());
+    };
+    if head < (t1 - genesis) / SECONDS_PER_SLOT {
+        return Ok(());
+    }
+    // The blocks after `b` up to the end of its epoch, oldest first.
+    let mut after: Vec<ParentHeader> = Vec::new();
+    while after.len() < SLOTS_PER_EPOCH as usize {
+        let Some(h) = view.parent_header(b + 1 + after.len() as u64).await? else {
+            break;
+        };
+        if h.timestamp > t1 {
+            break;
+        }
+        after.push(h);
+    }
+    // The blocks before `b`, newest first, until enough of them sit at or
+    // before the epoch's start.
+    let mut before: Vec<ParentHeader> = Vec::new();
+    while before.len() <= SLOTS_PER_EPOCH as usize
+        && before.iter().filter(|h| h.timestamp <= t0).count() < ANCHOR_CANDIDATES
+        && (before.len() as u64) < b
+    {
+        let Some(h) = view.parent_header(b - 1 - before.len() as u64).await? else {
+            break;
+        };
+        before.push(h);
+    }
+    let mut newer = None;
+    for (i, h) in after.iter().enumerate().rev().take(ANCHOR_CANDIDATES) {
+        if an.is_accepted(chain.parent_chain_id, h.hash).await? {
+            newer = Some(i);
+            break;
+        }
+    }
+    let mut older = None;
+    for (i, h) in before
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.timestamp <= t0)
+        .take(ANCHOR_CANDIDATES)
+    {
+        if an.is_accepted(chain.parent_chain_id, h.hash).await? {
+            older = Some(i);
+            break;
+        }
+    }
+    let (Some(older), Some(newer)) = (older, newer) else {
+        info!(
+            parent_block = b,
+            newer_found = newer.is_some(),
+            older_found = older.is_some(),
+            "the bridge does not accept the checkpoints around the assertion's parent-chain block \
+             yet; waiting for the light client"
+        );
+        return Ok(());
+    };
+    let headers: Vec<Bytes> = before[..=older]
+        .iter()
+        .rev()
+        .chain(std::iter::once(&block))
+        .chain(&after[..=newer])
+        .map(|h| h.rlp.clone())
+        .collect();
+    let rlps: Vec<Vec<u8>> = headers.iter().map(|h| h.to_vec()).collect();
+    link_headers(&rlps)?;
+    match an.submit_ancestry(&headers).await {
+        Ok(()) => {
+            info!(
+                parent_block = b,
+                from = before[older].number,
+                to = after[newer].number,
+                "submitAncestry sent for the assertion's parent-chain block"
+            );
+            report.spans_sent += 1;
+        },
+        Err(e) => {
+            warn!(
+                parent_block = b,
+                error = %e,
+                "submitAncestry refused"
+            );
+            report.spans_failed += 1;
+        },
+    }
+    proof.spans_sent += 1;
+    if proof.spans_sent >= MAX_SPAN_SENDS {
+        warn!(
+            parent_block = b,
+            sent = proof.spans_sent,
+            "no more submitAncestry for this block: the bridge still does not accept it; it needs \
+             the owner's setAcceptedBlockHash"
+        );
+    }
+    Ok(())
 }
 
 /// What [`take_batch`] did with a batch.
@@ -1086,19 +1291,43 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
         }
         Ok((header.hash, encode_header_rlp(&header)?, proof))
     }
+
+    async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError> {
+        let Some(block) = self
+            .parent
+            .get_block_by_number(number.into())
+            .await
+            .map_err(eth("parent eth_getBlockByNumber"))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ParentHeader {
+            number,
+            hash: block.header.hash,
+            rlp: encode_header_rlp(&block.header)?,
+            timestamp: block.header.inner.timestamp,
+        }))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Live Acki Nacki target
 // ─────────────────────────────────────────────────────────────────────
 
-/// The bridge's getters and the chain's verifier over tvm_client.
+/// The bridge's getters, the chain's verifier and the parent chain's light
+/// client over tvm_client.
 #[cfg(feature = "live-submit")]
 pub struct TvmAnchorTarget {
     bridge: TvmAckiNacki,
     verifier: TvmAckiNacki,
     bridge_address: ExtendedAddress,
     verifier_address: ExtendedAddress,
+    light_client: TvmAckiNacki,
+    parent_chain_id: u64,
+    /// The parent chain's light client, once the bridge names one
+    /// (`getLightClient`). Asked again until it does: the relayer may start
+    /// before `deployLightClient`.
+    light_client_address: std::sync::Mutex<Option<ExtendedAddress>>,
 }
 
 /// A uint160 address getter value, hex or decimal.
@@ -1196,12 +1425,59 @@ impl TvmAnchorTarget {
             )));
         }
         info!(verifier = %verifier_address, "ArbitrumBlockVerifier of {}", chain.name);
-        Ok(Self {
+        let target = Self {
             bridge,
             verifier,
             bridge_address,
             verifier_address,
-        })
+            light_client: client(crate::abi::light_client_abi())?,
+            parent_chain_id: chain.parent_chain_id,
+            light_client_address: std::sync::Mutex::new(None),
+        };
+        if target.light_client_address().await?.is_none() {
+            warn!(
+                "the bridge has no light client for parent chain {} yet: until it has, no \
+                 submitAncestry is sent and the assertions' blocks need the owner's \
+                 setAcceptedBlockHash",
+                chain.parent_chain_id
+            );
+        }
+        Ok(target)
+    }
+
+    /// The parent chain's light client, which the spans for the assertions'
+    /// blocks go to; `None` while the bridge has none.
+    async fn light_client_address(&self) -> Result<Option<ExtendedAddress>, RelayerError> {
+        if let Some(address) = self
+            .light_client_address
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            return Ok(Some(address));
+        }
+        let got = self
+            .bridge
+            .run_getter(
+                &self.bridge_address.to_string(),
+                "getLightClient",
+                serde_json::json!({ "l1ChainId": self.parent_chain_id.to_string() }),
+            )
+            .await?;
+        let account = got
+            .get("value0")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if !account.starts_with("0:") {
+            return Ok(None);
+        }
+        let address = ExtendedAddress::from_legacy(account, Some(self.bridge_address.dapp_id()))?;
+        info!(light_client = %address, "EthBeaconLightClient of parent chain {}", self.parent_chain_id);
+        *self
+            .light_client_address
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(address.clone());
+        Ok(Some(address))
     }
 }
 
@@ -1239,6 +1515,42 @@ impl AnchorTarget for TvmAnchorTarget {
             .await?;
         Ok(())
     }
+
+    async fn light_client_head_slot(&self) -> Result<Option<u64>, RelayerError> {
+        let Some(address) = self.light_client_address().await? else {
+            return Ok(None);
+        };
+        let out = self
+            .light_client
+            .run_getter(&address.to_string(), "getHead", serde_json::json!({}))
+            .await?;
+        let slot = out
+            .get("finalizedSlot")
+            .and_then(abi_uint)
+            .and_then(|s| u64::try_from(s).ok())
+            .ok_or_else(|| RelayerError::AckiNacki(format!("getHead answered {out}")))?;
+        Ok(Some(slot))
+    }
+
+    async fn submit_ancestry(&self, headers: &[Bytes]) -> Result<(), RelayerError> {
+        let Some(address) = self.light_client_address().await? else {
+            return Err(RelayerError::other(
+                "the bridge has no light client for the parent chain",
+            ));
+        };
+        // External and permissionless, like `proveBlock`: the parent-hash
+        // links are the authorization, and the light client pays its gas.
+        let header_rlps: Vec<String> = headers.iter().map(hex::encode).collect();
+        self.light_client
+            .call_contract(ContractCallRequest {
+                from: address.clone(),
+                to: address.clone(),
+                function: "submitAncestry".to_string(),
+                params: serde_json::json!({ "headerRlps": header_rlps }),
+            })
+            .await?;
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1255,6 +1567,12 @@ impl AnchorTarget for NoBridge {
         Ok(false)
     }
     async fn prove_block(&self, _: &ProveBlock) -> Result<(), RelayerError> {
+        Err(RelayerError::other("arbitrum-vector sends nothing"))
+    }
+    async fn light_client_head_slot(&self) -> Result<Option<u64>, RelayerError> {
+        Ok(None)
+    }
+    async fn submit_ancestry(&self, _: &[Bytes]) -> Result<(), RelayerError> {
         Err(RelayerError::other("arbitrum-vector sends nothing"))
     }
 }
@@ -1308,6 +1626,9 @@ impl<V: ArbitrumView> ArbitrumView for OneBlockBehind<V> {
         tx_index: u32,
     ) -> Result<(B256, Bytes, Vec<Bytes>), RelayerError> {
         self.inner.parent_receipt(block, tx_index).await
+    }
+    async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError> {
+        self.inner.parent_header(number).await
     }
 }
 
@@ -1474,6 +1795,8 @@ mod tests {
         failing_batch_ends: Vec<u64>,
         /// How many parent receipt reads fail before one succeeds.
         failing_receipts: u32,
+        /// Real, linked parent-chain headers by number, for the spans.
+        parent: BTreeMap<u64, ParentHeader>,
     }
 
     #[async_trait]
@@ -1565,9 +1888,17 @@ mod tests {
                     "receipt in {block}: connection reset"
                 )));
             }
+            if let Some(header) = c.parent.get(&block) {
+                return Ok((header.hash, header.rlp.clone(), vec![Bytes::from(vec![
+                    0xbb,
+                ])]));
+            }
             Ok((h(1_000_000 + block), Bytes::from(vec![0xaa]), vec![
                 Bytes::from(vec![0xbb]),
             ]))
+        }
+        async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError> {
+            Ok(self.lock().unwrap().parent.get(&number).cloned())
         }
     }
 
@@ -1577,6 +1908,13 @@ mod tests {
         sent: Mutex<Vec<ProveBlock>>,
         /// How many proveBlock calls fail before one is sent.
         failing_sends: Mutex<u32>,
+        /// The light client's head slot; `None` = no light client.
+        head_slot: Mutex<Option<u64>>,
+        /// `submitAncestry` payloads sent. A sent span is admitted: the blocks
+        /// between its ends become accepted, as the light client does.
+        spans: Mutex<Vec<Vec<Bytes>>>,
+        /// How many submitAncestry calls fail before one is sent.
+        failing_spans: Mutex<u32>,
     }
 
     #[async_trait]
@@ -1595,6 +1933,22 @@ mod tests {
                 return Err(RelayerError::Eth("Acki Nacki is not reachable".into()));
             }
             self.sent.lock().unwrap().push(call.clone());
+            Ok(())
+        }
+        async fn light_client_head_slot(&self) -> Result<Option<u64>, RelayerError> {
+            Ok(*self.head_slot.lock().unwrap())
+        }
+        async fn submit_ancestry(&self, headers: &[Bytes]) -> Result<(), RelayerError> {
+            let mut failing = self.failing_spans.lock().unwrap();
+            if *failing > 0 {
+                *failing -= 1;
+                return Err(RelayerError::AckiNacki("exit code 250".into()));
+            }
+            let mut accepted = self.accepted.lock().unwrap();
+            for rlp in &headers[1..headers.len() - 1] {
+                accepted.push((ARB.parent_chain_id, keccak256(rlp)));
+            }
+            self.spans.lock().unwrap().push(headers.to_vec());
             Ok(())
         }
     }
@@ -2139,6 +2493,242 @@ mod tests {
         assert_eq!(chain.lock().unwrap().slot_reads, 1);
         let held: Vec<u64> = state.ready[0].end.slots.keys().copied().collect();
         assert_eq!(held, vec![100, 120]);
+    }
+
+    // ── spans for the assertion's parent-chain block ───────────────────
+
+    /// The epoch the assertion's parent block sits in, and its first slot.
+    const EPOCH: u64 = 360_000;
+    const E0: u64 = EPOCH * 32;
+
+    /// Linked parent-chain headers numbered from 1 000, one per slot in
+    /// `E0 - 40 ..= E0 + 72` except the `missing` ones.
+    fn parent_chain(missing: &[u64]) -> BTreeMap<u64, ParentHeader> {
+        let mut out = BTreeMap::new();
+        let mut parent = B256::ZERO;
+        let mut number = 1_000;
+        for slot in E0 - 40..=E0 + 72 {
+            if missing.contains(&slot) {
+                continue;
+            }
+            let header = alloy::consensus::Header {
+                parent_hash: parent,
+                number,
+                timestamp: ARB.parent_beacon_genesis + slot * 12,
+                ..Default::default()
+            };
+            let rlp = Bytes::from(alloy::rlp::encode(&header));
+            let hash = keccak256(&rlp);
+            out.insert(number, ParentHeader {
+                number,
+                hash,
+                rlp,
+                timestamp: header.timestamp,
+            });
+            parent = hash;
+            number += 1;
+        }
+        out
+    }
+
+    fn at_slot(parent: &BTreeMap<u64, ParentHeader>, slot: u64) -> ParentHeader {
+        let ts = ARB.parent_beacon_genesis + slot * 12;
+        parent
+            .values()
+            .find(|h| h.timestamp == ts)
+            .unwrap_or_else(|| panic!("no block at slot {slot}"))
+            .clone()
+    }
+
+    /// `one_deposit`, with the assertion in the parent block of slot
+    /// `E0 + 10` and the batch two blocks before it.
+    fn deposit_with_parent_chain(missing: &[u64]) -> (Mutex<FakeChain>, ParentHeader) {
+        let parent = parent_chain(missing);
+        let b = at_slot(&parent, E0 + 10);
+        let chain = Mutex::new(FakeChain {
+            arbitrum_head: 200,
+            parent_head: b.number + 40,
+            deposits: vec![(100, h(100))],
+            events: vec![
+                ParentEvent::Batch {
+                    block: b.number - 2,
+                    log_index: 0,
+                    batch: 7,
+                },
+                ParentEvent::Assertion {
+                    block: b.number,
+                    log_index: 3,
+                    tx_index: 5,
+                    end_hash: h(150),
+                },
+            ],
+            batch_ends: BTreeMap::from([(7, 150)]),
+            parent,
+            ..FakeChain::default()
+        });
+        (chain, b)
+    }
+
+    /// Spans are tried on every tick, to keep the tests short.
+    async fn run_now(
+        chain: &Mutex<FakeChain>,
+        an: &FakeBridge,
+        state: &mut AnchorState,
+    ) -> TickReport {
+        let cfg = TickConfig {
+            resend_after_secs: 0,
+            ..cfg()
+        };
+        tick(ARB, chain, an, state, &cfg).await.unwrap()
+    }
+
+    fn hash_of(rlp: &Bytes) -> B256 {
+        keccak256(rlp)
+    }
+
+    #[tokio::test]
+    async fn a_span_covers_the_assertion_block_once_the_light_client_passes_its_epoch() {
+        // From Gloas on, a checkpoint is the block of the slot before the
+        // epoch boundary: the payload bid's parent.
+        let (chain, b) = deposit_with_parent_chain(&[]);
+        let parent = chain.lock().unwrap().parent.clone();
+        let older = at_slot(&parent, E0 - 1);
+        let newer = at_slot(&parent, E0 + 31);
+        let an = FakeBridge::default();
+        accept(&an, ARB.parent_chain_id, older.hash);
+        accept(&an, ARB.parent_chain_id, newer.hash);
+        *an.head_slot.lock().unwrap() = Some(E0 + 31);
+        let mut state = AnchorState::default();
+
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!(r.assertions_matched, 1);
+        assert_eq!(r.spans_sent, 0, "the head has not passed the epoch yet");
+        assert!(an.spans.lock().unwrap().is_empty());
+
+        *an.head_slot.lock().unwrap() = Some(E0 + 32);
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!(r.spans_sent, 1);
+        let span = an.spans.lock().unwrap()[0].clone();
+        assert_eq!(span.len(), 33, "two checkpoints and the 31 blocks between");
+        assert_eq!(hash_of(&span[0]), older.hash);
+        assert_eq!(hash_of(&span[32]), newer.hash);
+        assert!(span.contains(&b.rlp));
+
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!(r.proofs_sent, 1, "the bridge accepts the parent block now");
+        assert_eq!(r.spans_sent, 0);
+    }
+
+    #[tokio::test]
+    async fn before_gloas_the_span_runs_between_the_boundary_blocks() {
+        let (chain, _) = deposit_with_parent_chain(&[]);
+        let parent = chain.lock().unwrap().parent.clone();
+        let older = at_slot(&parent, E0);
+        let newer = at_slot(&parent, E0 + 32);
+        let an = FakeBridge::default();
+        accept(&an, ARB.parent_chain_id, older.hash);
+        accept(&an, ARB.parent_chain_id, newer.hash);
+        *an.head_slot.lock().unwrap() = Some(E0 + 32);
+        let mut state = AnchorState::default();
+
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!(r.spans_sent, 1);
+        let span = an.spans.lock().unwrap()[0].clone();
+        assert_eq!(span.len(), 33);
+        assert_eq!(hash_of(&span[0]), older.hash);
+        assert_eq!(hash_of(&span[32]), newer.hash);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_slot_without_a_block_takes_the_block_before_it() {
+        // No block in the slot before the boundary: the bid's parent is the
+        // block of the slot before that. A slot inside the epoch is empty too.
+        let (chain, _) = deposit_with_parent_chain(&[E0 - 1, E0 + 20]);
+        let parent = chain.lock().unwrap().parent.clone();
+        let older = at_slot(&parent, E0 - 2);
+        let newer = at_slot(&parent, E0 + 31);
+        let an = FakeBridge::default();
+        accept(&an, ARB.parent_chain_id, older.hash);
+        accept(&an, ARB.parent_chain_id, newer.hash);
+        *an.head_slot.lock().unwrap() = Some(E0 + 40);
+        let mut state = AnchorState::default();
+
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!(r.spans_sent, 1);
+        let span = an.spans.lock().unwrap()[0].clone();
+        assert_eq!(
+            span.len(),
+            32,
+            "slots E0 - 2 ..= E0 + 31, two of them empty"
+        );
+        assert_eq!(hash_of(&span[0]), older.hash);
+        assert_eq!(hash_of(&span[31]), newer.hash);
+    }
+
+    #[tokio::test]
+    async fn no_span_while_a_checkpoint_is_not_accepted() {
+        // The light client skipped the checkpoint that closes the epoch.
+        let (chain, _) = deposit_with_parent_chain(&[]);
+        let parent = chain.lock().unwrap().parent.clone();
+        let an = FakeBridge::default();
+        accept(&an, ARB.parent_chain_id, at_slot(&parent, E0 - 1).hash);
+        *an.head_slot.lock().unwrap() = Some(E0 + 64);
+        let mut state = AnchorState::default();
+
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!(
+            (r.spans_sent, r.spans_failed, r.waiting_for_parent),
+            (0, 0, 1)
+        );
+        assert_eq!(state.ready[0].spans_sent, 0);
+    }
+
+    #[tokio::test]
+    async fn no_span_without_a_light_client() {
+        let (chain, _) = deposit_with_parent_chain(&[]);
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        let r = run_now(&chain, &an, &mut state).await;
+        assert_eq!((r.spans_sent, r.waiting_for_parent), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn a_refused_span_is_sent_again_at_most_max_span_sends_times() {
+        let (chain, _) = deposit_with_parent_chain(&[]);
+        let parent = chain.lock().unwrap().parent.clone();
+        let an = FakeBridge::default();
+        accept(&an, ARB.parent_chain_id, at_slot(&parent, E0 - 1).hash);
+        accept(&an, ARB.parent_chain_id, at_slot(&parent, E0 + 31).hash);
+        *an.head_slot.lock().unwrap() = Some(E0 + 32);
+        *an.failing_spans.lock().unwrap() = u32::MAX;
+        let mut state = AnchorState::default();
+
+        let mut failed = 0;
+        for _ in 0..MAX_SPAN_SENDS + 2 {
+            failed += run_now(&chain, &an, &mut state).await.spans_failed;
+        }
+        assert_eq!(failed, MAX_SPAN_SENDS as usize);
+        assert_eq!(state.ready[0].spans_sent, MAX_SPAN_SENDS);
+    }
+
+    #[tokio::test]
+    async fn a_span_waits_resend_after_secs_between_tries() {
+        let (chain, _) = deposit_with_parent_chain(&[]);
+        let parent = chain.lock().unwrap().parent.clone();
+        let an = FakeBridge::default();
+        accept(&an, ARB.parent_chain_id, at_slot(&parent, E0 - 1).hash);
+        accept(&an, ARB.parent_chain_id, at_slot(&parent, E0 + 31).hash);
+        *an.head_slot.lock().unwrap() = Some(E0 + 32);
+        *an.failing_spans.lock().unwrap() = 1;
+        let mut state = AnchorState::default();
+
+        assert_eq!(run(&chain, &an, &mut state).await.spans_failed, 1);
+        let r = run(&chain, &an, &mut state).await;
+        assert_eq!(
+            (r.spans_sent, r.spans_failed),
+            (0, 0),
+            "not tried again before resend_after_secs"
+        );
     }
 
     #[tokio::test]

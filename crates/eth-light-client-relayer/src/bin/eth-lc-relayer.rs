@@ -355,10 +355,12 @@ enum Cmd {
         /// `--submit-ancestry` is also set.
         #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
         eth_rpc_url: Option<String>,
-        /// Send `submitAncestry` after each checkpoint. Default **off**. The
-        /// span needs a proven anchor at both ends, so nothing is sent until a
-        /// previous checkpoint is on record, nor when the gap to it is wider
-        /// than a span. Needs `--eth-rpc-url`.
+        /// Send `submitAncestry` after each checkpoint, admitting every block
+        /// of the followed chain. Default **off**: `arbitrum-anchors` sends
+        /// the span each assertion's block needs, and nothing else uses the
+        /// other blocks. The span needs a proven anchor at both ends, so
+        /// nothing is sent until a previous checkpoint is on record, nor when
+        /// the gap to it is wider than a span. Needs `--eth-rpc-url`.
         #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
         submit_ancestry: bool,
         /// On a period jump the contract has no rotate for, prove a step of
@@ -398,9 +400,11 @@ enum Cmd {
         rotate_timeout_secs: u64,
     },
     /// Anchor the Arbitrum blocks that hold deposits: follow the parent
-    /// chain's batches and assertions and call `proveBlock` on the chain's
-    /// `ArbitrumBlockVerifier`. Runs next to `deposit-relayer daemon`, which
-    /// finalizes the deposits once their blocks are accepted.
+    /// chain's batches and assertions, send `submitAncestry` to the parent
+    /// chain's light client for the epoch each assertion landed in, and call
+    /// `proveBlock` on the chain's `ArbitrumBlockVerifier`. Runs next to
+    /// `deposit-relayer daemon`, which finalizes the deposits once their
+    /// blocks are accepted.
     ArbitrumAnchors {
         /// Parent-chain RPC: Sepolia for Arbitrum Sepolia, Ethereum for
         /// Arbitrum One. Must serve `eth_getBlockReceipts`.
@@ -421,8 +425,8 @@ enum Cmd {
         /// tvm_client 3.0 endpoint that serves GraphQL and `/v2/messages`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
-        /// tvm-cli keys JSON that signs the `proveBlock` messages (any key:
-        /// the call is permissionless).
+        /// tvm-cli keys JSON that signs the `proveBlock` and `submitAncestry`
+        /// messages (any key: both calls are permissionless).
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
         /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).

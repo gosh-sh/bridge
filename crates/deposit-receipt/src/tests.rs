@@ -44,6 +44,93 @@ fn a_live_arbitrum_block_rebuilds_its_receipts_root_and_hash() {
     assert_eq!(rlp, unhex(fd["header"].as_str().unwrap()));
 }
 
+fn rebuilds_root_and_hash(block: &str, receipts: &str) -> std::collections::BTreeSet<u64> {
+    let header: Header = serde_json::from_str(block).unwrap();
+    let mut receipts: Vec<RpcReceipt> = serde_json::from_str(receipts).unwrap();
+    receipts.sort_by_key(|r| r.transaction_index);
+    let values: Vec<Vec<u8>> = receipts.iter().map(RpcReceipt::trie_value).collect();
+    for index in 0..values.len() {
+        assert_eq!(
+            receipt_proof(&values, index).0,
+            header.inner.receipts_root,
+            "{index}"
+        );
+    }
+    assert_eq!(keccak256(alloy::rlp::encode(&header.inner)), header.hash);
+    receipts
+        .iter()
+        .map(|r| r.ty.map_or(0, |t| t.to()))
+        .collect()
+}
+
+#[test]
+fn a_live_op_stack_block_with_canyon_deposit_receipts_rebuilds_its_root() {
+    let types = rebuilds_root_and_hash(
+        include_str!("fixtures/base_sepolia_55363630_block.json"),
+        include_str!("fixtures/base_sepolia_55363630_receipts.json"),
+    );
+    assert_eq!(types, [0, 2, OP_DEPOSIT_TX_TYPE as u64].into());
+}
+
+#[test]
+fn a_live_mantle_block_whose_deposit_receipt_has_no_version_rebuilds_its_root() {
+    let types = rebuilds_root_and_hash(
+        include_str!("fixtures/mantle_102932123_block.json"),
+        include_str!("fixtures/mantle_102932123_receipts.json"),
+    );
+    assert_eq!(types, [0, OP_DEPOSIT_TX_TYPE as u64].into());
+}
+
+fn witness(nodes: usize, node_len: usize, header_len: usize, log_index: u16) -> DepositWitness {
+    DepositWitness {
+        chain_id: 1,
+        block_number: 1,
+        block_hash: B256::ZERO,
+        header: vec![0; header_len].into(),
+        tx_index: 0,
+        receipt_proof: vec![vec![0; node_len].into(); nodes],
+        log_index,
+    }
+}
+
+/// Gas measured in tvm-debugger up to `tvm.accept()` of eccBridge 1.17.0:
+/// (proof nodes, header plus proof bytes, logIndex, gas).
+const MEASURED: [(usize, usize, u16, u64); 11] = [
+    (3, 1_825, 0, 107_910),
+    (3, 4_966, 20, 185_366),
+    (3, 11_246, 60, 357_619),
+    (3, 17_526, 100, 510_667),
+    (3, 25_376, 150, 730_985),
+    (3, 13_016, 10, 249_961),
+    (3, 29_801, 25, 462_266),
+    (3, 46_586, 40, 674_231),
+    (7, 3_040, 0, 202_312),
+    (7, 12_461, 60, 452_021),
+    (7, 12_926, 60, 453_527),
+];
+
+#[test]
+fn the_gas_estimate_stays_above_every_measurement() {
+    for (nodes, bytes, log_index, gas) in MEASURED {
+        let w = witness(nodes, 0, bytes, log_index);
+        let estimate = w.estimated_gas();
+        assert!(
+            estimate > gas + gas / 10,
+            "{nodes} nodes, {bytes} bytes, log {log_index}: {estimate} vs {gas}"
+        );
+    }
+}
+
+#[test]
+fn a_deposit_over_the_gas_credit_is_refused_and_stays_below_the_message_limit() {
+    assert!(witness(3, 500, 600, 60).check_gas().is_ok());
+    assert!(witness(3, 500, 600, 140).check_gas().is_err());
+    let largest = (AN_GAS_CREDIT - 40_000 - 25_000) / 12;
+    assert!(witness(1, 0, largest as usize, 0).check_gas().is_ok());
+    assert!(witness(1, 0, largest as usize + 1, 0).check_gas().is_err());
+    assert!(largest < 48 * 1024);
+}
+
 #[test]
 fn only_the_bridges_six_field_deposit_passes_the_shape_check() {
     let bridge = Address::repeat_byte(0x42);

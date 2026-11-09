@@ -32,6 +32,7 @@ from make_synthetic import Trie, encode_header, header, ib, nibbles, rlp  # noqa
 DEPOSIT_EVENT = "Deposit(uint256,address,uint256,bytes32,uint256,address)"
 DEPOSIT_TOPIC0 = keccak256(DEPOSIT_EVENT.encode())
 LEGACY_DEPOSIT_TOPIC0 = keccak256(b"Deposit(uint256,address,uint256,bytes32,uint256)")
+OP_DEPOSIT_TX_TYPE = 0x7E
 
 
 def word(v):
@@ -88,10 +89,15 @@ def _hb(h):
 
 def encode_receipt(r):
     """The receipt-trie value of a JSON-RPC receipt: the EIP-2718 type byte,
-    unless legacy, then rlp([status, cumulativeGasUsed, logsBloom, logs])."""
+    unless legacy, then rlp([status, cumulativeGasUsed, logsBloom, logs]). An
+    OP Stack deposit receipt (type 0x7e) that reports `depositReceiptVersion`
+    also carries `depositNonce` and that version."""
     logs = [[_hb(l["address"]), [_hb(t) for t in l["topics"]], _hb(l["data"])] for l in r["logs"]]
-    body = rlp([ib(r["status"]), ib(r["cumulativeGasUsed"]), _hb(r["logsBloom"]), logs])
+    fields = [ib(r["status"]), ib(r["cumulativeGasUsed"]), _hb(r["logsBloom"]), logs]
     t = int(r.get("type", "0x0"), 16)
+    if t == OP_DEPOSIT_TX_TYPE and r.get("depositReceiptVersion") is not None:
+        fields += [ib(r["depositNonce"]), ib(r["depositReceiptVersion"])]
+    body = rlp(fields)
     return body if t == 0 else bytes([t]) + body
 
 

@@ -388,15 +388,14 @@ contract AckiNackiBridge {
     // ---------------------------------------------------------------------
 
     /// @notice Emitted on every deposit. `anAccount` alone is the Acki Nacki
-    ///         destination: it is carried as ZK public inputs and credited on the
-    ///         AN side (the EVM `sender` is kept only for provenance, since a
-    ///         20-byte EVM address is not a valid AN recipient).
-    /// @dev `token` is appended last on purpose: the deposit circuit reads
-    ///      `amount`, `anAccount` and `timestamp` at fixed offsets into the
-    ///      log's non-indexed data, and appending leaves those three offsets
-    ///      where they were. The circuit binds `token` to this field, so the
-    ///      destination ERC-20 is proven from the receipt rather than chosen
-    ///      by whoever generates the proof.
+    ///         destination: `eccBridge.finalizeDeposit` reads it from this log
+    ///         and credits it on the AN side (the EVM `sender` is kept only for
+    ///         provenance, since a 20-byte EVM address is not a valid AN
+    ///         recipient).
+    /// @dev `eccBridge` proves the receipt holding this log and reads it at
+    ///      fixed offsets: exactly three topics and the four data words
+    ///      `amount`, `anAccount`, `timestamp`, `token`. Changing the event's
+    ///      fields, order or indexing breaks `finalizeDeposit` (error 244).
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,

@@ -44,7 +44,7 @@ use crate::{
     error::RelayerError,
     types::DepositEvent,
     voucher::{self, DepositIdentity},
-    witness::{check_payload_len, check_witness_matches, DepositWitness},
+    witness::{check_gas_credit, check_witness_matches, DepositWitness},
 };
 
 /// Outcome of an [`AnSubmitter::submit`] call.
@@ -169,7 +169,7 @@ impl AnSubmitter for MockAnSubmitter {
         witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
         check_witness_matches(event, witness)?;
-        check_payload_len(witness)?;
+        check_gas_credit(witness)?;
 
         let mut inner = self.inner.lock().expect("poisoned lock");
         if inner.nullifiers.contains(&event.deposit_id) {
@@ -304,14 +304,13 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
     /// Submit a witness directly, without a [`DepositEvent`] to compare it
     /// with: the bridge reads every deposit field from the proven receipt, so
     /// this is the path of the `finalize-one` operator command, where the
-    /// Ethereum event is not fetched again. A witness over
-    /// [`crate::witness::MAX_FINALIZE_PAYLOAD_BYTES`] is refused before
-    /// anything is sent.
+    /// Ethereum event is not fetched again. A witness the bridge could not
+    /// check within its gas credit is refused before anything is sent.
     pub async fn submit_witness(
         &self,
         witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
-        check_payload_len(witness)?;
+        check_gas_credit(witness)?;
         let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
         let to = ExtendedAddress::parse(&self.config.token_bridge).map_err(RelayerError::from)?;
         let params = witness.finalize_params();
@@ -805,8 +804,7 @@ mod tests {
             confirm_timeout_secs: 1,
         });
         let ev = event(4);
-        let big =
-            MockWitnessBuilder::with_header_len(crate::MAX_FINALIZE_PAYLOAD_BYTES).witness_for(&ev);
+        let big = MockWitnessBuilder::with_header_len(48 * 1024).witness_for(&ev);
         assert!(matches!(
             sub.submit(&ev, &big).await,
             Err(RelayerError::Unprovable(_))

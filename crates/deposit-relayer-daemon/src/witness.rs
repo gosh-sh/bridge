@@ -23,12 +23,6 @@ pub use deposit_receipt::DepositWitness;
 
 use crate::{error::RelayerError, types::DepositEvent};
 
-/// Largest header plus receipt proof the relayer sends. The block manager
-/// takes external messages of up to 64 KiB through `/v2/messages`; the rest
-/// of the message (ABI header, signature, the other arguments, the cell tree
-/// overhead) has to fit beside it.
-pub const MAX_FINALIZE_PAYLOAD_BYTES: usize = 48 * 1024;
-
 /// Produces the `finalizeDeposit` arguments for a confirmed [`DepositEvent`].
 ///
 /// [`RelayerError::Unprovable`] means the deposit cannot be finalized from its
@@ -38,17 +32,12 @@ pub trait WitnessBuilder: Send + Sync {
     async fn build(&self, event: &DepositEvent) -> Result<DepositWitness, RelayerError>;
 }
 
-/// Refuses a witness whose message would be over the block manager's limit:
-/// the bridge never sees it, so retrying cannot help.
-pub fn check_payload_len(witness: &DepositWitness) -> Result<(), RelayerError> {
-    let len = witness.payload_len();
-    if len > MAX_FINALIZE_PAYLOAD_BYTES {
-        return Err(RelayerError::Unprovable(format!(
-            "the block header and receipt proof are {len} bytes, over the \
-             {MAX_FINALIZE_PAYLOAD_BYTES}-byte limit of a finalizeDeposit message"
-        )));
-    }
-    Ok(())
+/// Refuses a witness the bridge could not check within the gas an external
+/// message may spend before the bridge accepts it
+/// ([`deposit_receipt::AN_GAS_CREDIT`]): no node takes such a message, so
+/// retrying cannot help.
+pub fn check_gas_credit(witness: &DepositWitness) -> Result<(), RelayerError> {
+    witness.check_gas().map_err(RelayerError::Unprovable)
 }
 
 /// Refuses a witness of another deposit: another chain, another block (the
@@ -259,7 +248,7 @@ mod tests {
         let ev = event(9);
         let w = MockWitnessBuilder::new().build(&ev).await.unwrap();
         check_witness_matches(&ev, &w).unwrap();
-        check_payload_len(&w).unwrap();
+        check_gas_credit(&w).unwrap();
         assert!(MockWitnessBuilder::failing_on(9).build(&ev).await.is_err());
         assert!(matches!(
             MockWitnessBuilder::unprovable_on(9).build(&ev).await,
@@ -293,16 +282,13 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_over_the_message_limit_cannot_be_finalized() {
+    fn a_proof_over_the_gas_credit_cannot_be_finalized() {
         let ev = event(1);
-        let at_limit =
-            MockWitnessBuilder::with_header_len(MAX_FINALIZE_PAYLOAD_BYTES - 100).witness_for(&ev);
-        assert_eq!(at_limit.payload_len(), MAX_FINALIZE_PAYLOAD_BYTES);
-        check_payload_len(&at_limit).unwrap();
-        let over =
-            MockWitnessBuilder::with_header_len(MAX_FINALIZE_PAYLOAD_BYTES - 99).witness_for(&ev);
+        let within = MockWitnessBuilder::with_header_len(30_000).witness_for(&ev);
+        check_gas_credit(&within).unwrap();
+        let over = MockWitnessBuilder::with_header_len(40_000).witness_for(&ev);
         assert!(matches!(
-            check_payload_len(&over),
+            check_gas_credit(&over),
             Err(RelayerError::Unprovable(_))
         ));
     }

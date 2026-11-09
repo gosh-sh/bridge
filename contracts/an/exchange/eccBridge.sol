@@ -948,15 +948,13 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     /// @param logIndex      — index of the `Deposit` log within that receipt.
     function finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex,
                              bytes[] receiptProof, uint16 logIndex) public {
-        // Before accept, so the bridge pays nothing for a block it does not know.
+        // Every check runs before accept, within the external message's gas
+        // credit, so a refused deposit costs the bridge nothing. A deposit
+        // whose proof walk exceeds the credit cannot be finalized; the CLI and
+        // deposit-relayer refuse to send one.
         require(!_paused, ERR_PAUSED);
         uint256 blockHash = gosh.keccak256(header);
         require(_acceptedBlockHash[chainId][blockHash], ERR_UNKNOWN_BLOCK);
-
-        // Walking the receipt proof takes far more gas than an external
-        // message may spend before accept. A wrong proof only costs the
-        // bridge its own gas.
-        tvm.accept();
         DepositPI f = _provenDeposit(header, blockHash, txIndex, receiptProof, logIndex);
         f.chainId = chainId;
         require(f.amount > 0, ERR_ZERO_AMOUNT);
@@ -967,6 +965,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
         _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
 
+        tvm.accept();
         _saveMsg();
         tvm.commit();
         ensureBalance();

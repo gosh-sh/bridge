@@ -1403,7 +1403,7 @@ async fn walk(
                                 w.block_number, w.block_hash, dep.block_number, dep.block_hash
                             )))
                         },
-                        Ok(w) => limits::check_payload(w.payload_len())
+                        Ok(w) => limits::check_gas(&w)
                             .map(|()| w)
                             .map_err(WitnessError::Final),
                         Err(e) => Err(e),
@@ -2961,7 +2961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_receipt_proof_too_large_for_one_message_closes_at_exit_35() {
+    async fn a_receipt_proof_over_the_gas_credit_closes_at_exit_35() {
         let mut w = World::healthy();
         let h = w.mined_deposit(7);
         w.evm
@@ -2970,9 +2970,7 @@ mod tests {
             .unwrap()
             .get_mut(&h)
             .unwrap()
-            .receipt_proof = vec![Bytes::from(
-            vec![0u8; crate::deposit::limits::MAX_FINALIZE_PAYLOAD],
-        )];
+            .receipt_proof = vec![Bytes::from(vec![0u8; 48 * 1024])];
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         w.anchor_after(0);
@@ -2980,10 +2978,7 @@ mod tests {
         let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::DepositUnprovable, "{e}");
         let m = e.to_string();
-        assert!(
-            m.contains("one finalizeDeposit message carries at most"),
-            "{m}"
-        );
+        assert!(m.contains("before the bridge accepts it"), "{m}");
         assert!(m.contains("Give the bridge operator:"), "{m}");
         assert!(!m.contains("--resume"), "{m}");
         assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was finalized");

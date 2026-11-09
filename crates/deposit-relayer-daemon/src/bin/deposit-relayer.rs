@@ -40,7 +40,7 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    bridge_abi, check_payload_len, fetch_deposit_from_receipt, prepare_dir,
+    bridge_abi, check_gas_credit, fetch_deposit_from_receipt, prepare_dir,
     refuse_unrecognised_state, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
     AnSubmitter, BackoffConfig, DeploymentIdentity, DepositSource, DepositWitness, EthLogSource,
     MockAnSubmitter, ReceiptWitnessBuilder, Relayer, RelayerConfig, RelayerMetrics, RelayerState,
@@ -458,7 +458,7 @@ async fn finalize_one(
     let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
     let witness: DepositWitness = serde_json::from_slice(&raw)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
-    check_payload_len(&witness)?;
+    check_gas_credit(&witness)?;
     info!(
         chain_id = witness.chain_id,
         block_number = witness.block_number,
@@ -628,7 +628,7 @@ async fn prove_one(
     let witness = ReceiptWitnessBuilder::new(provider, bridge_address)
         .build(&event)
         .await?;
-    check_payload_len(&witness)?;
+    check_gas_credit(&witness)?;
 
     prepare_dir("out", &out_dir).map_err(|e| anyhow::anyhow!(e))?;
     let path = out_dir.join(WITNESS_FILE_NAME);

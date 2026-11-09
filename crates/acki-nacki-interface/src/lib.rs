@@ -21,7 +21,7 @@ pub use traits::{IAckiNacki, TransactionSender};
 #[cfg(feature = "tvm-sdk")]
 pub use tvm_client::{
     parse_exit_code_from_message, TvmAckiNacki, TvmClientConfig, EXIT_CONSTRUCTOR_ALREADY_CALLED,
-    EXIT_INVALID_ZKPROOF, HD_PATH_V3,
+    HD_PATH_V3,
 };
 pub use types::{
     AccountInfo, AckiNackiTransaction, ChildOutcome, ChildTransaction, ContractCallRequest,

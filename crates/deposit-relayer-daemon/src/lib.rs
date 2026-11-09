@@ -82,6 +82,6 @@ pub use supported_chains::{
 };
 pub use types::DepositEvent;
 pub use witness::{
-    check_payload_len, check_witness_matches, DepositWitness, MockWitnessBuilder,
-    ReceiptWitnessBuilder, WitnessBuilder, MAX_FINALIZE_PAYLOAD_BYTES,
+    check_gas_credit, check_witness_matches, DepositWitness, MockWitnessBuilder,
+    ReceiptWitnessBuilder, WitnessBuilder,
 };

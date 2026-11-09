@@ -29,8 +29,8 @@ pub enum RelayerError {
     /// The deposit cannot be finalized from its receipt: its transaction
     /// failed, the log is not the bridge's `Deposit` in the one shape the AN
     /// bridge reads, the transaction or log index does not fit a `uint16`, or
-    /// header and proof are over
-    /// [`crate::witness::MAX_FINALIZE_PAYLOAD_BYTES`]. Final for that
+    /// the bridge could not check the proof within the gas an external
+    /// message may spend before it is accepted. Final for that
     /// deposit: the relayer records it in `unprovable_deposit_ids` at once,
     /// and only the EVM bridge operator can return the funds.
     #[error("the deposit cannot be finalized from its receipt: {0}")]

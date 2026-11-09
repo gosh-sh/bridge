@@ -8,7 +8,8 @@
 //! checks each one the way the bridge will: the header must hash to the block
 //! hash, the receipts must rebuild the root, and the log must have the one
 //! shape the bridge accepts. It reads receipts as plain JSON, so Arbitrum
-//! receipt types (0x64–0x6a, 0x78) go through like Ethereum ones.
+//! receipt types (0x64–0x6a, 0x78) go through like Ethereum ones, and OP Stack
+//! deposit receipts (0x7e) keep the fields their trie value carries.
 
 use alloy::{
     consensus::{Eip658Value, Receipt, ReceiptWithBloom},
@@ -72,7 +73,15 @@ pub struct RpcReceipt {
     pub transaction_hash: B256,
     pub transaction_index: U64,
     pub block_hash: B256,
+    #[serde(default)]
+    pub deposit_nonce: Option<U64>,
+    #[serde(default)]
+    pub deposit_receipt_version: Option<U64>,
 }
+
+/// The EIP-2718 type of an OP Stack deposit transaction, the first of every
+/// OP Stack block.
+pub const OP_DEPOSIT_TX_TYPE: u8 = 0x7e;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RpcLog {
@@ -87,8 +96,37 @@ impl RpcReceipt {
     }
 
     /// The receipt-trie value: the EIP-2718 type byte unless legacy, then
-    /// `rlp([status, cumulativeGasUsed, logsBloom, logs])`.
+    /// `rlp([status, cumulativeGasUsed, logsBloom, logs])`. An OP Stack deposit
+    /// receipt that reports `depositReceiptVersion` (Canyon and later) also
+    /// carries `depositNonce` and that version; Mantle reports neither.
     pub fn trie_value(&self) -> Vec<u8> {
+        let value = self.base_trie_value();
+        let ty = self.ty.map_or(0, |t| t.to::<u64>());
+        let Some(version) = self
+            .deposit_receipt_version
+            .filter(|_| ty == OP_DEPOSIT_TX_TYPE as u64)
+        else {
+            return value;
+        };
+        let mut fields = &value[1..];
+        let header = alloy::rlp::Header::decode(&mut fields).expect("an encoded receipt");
+        let mut payload = fields[..header.payload_length].to_vec();
+        alloy::rlp::Encodable::encode(
+            &self.deposit_nonce.unwrap_or_default().to::<u64>(),
+            &mut payload,
+        );
+        alloy::rlp::Encodable::encode(&version.to::<u64>(), &mut payload);
+        let mut out = vec![OP_DEPOSIT_TX_TYPE];
+        alloy::rlp::Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut out);
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    fn base_trie_value(&self) -> Vec<u8> {
         let logs = self
             .logs
             .iter()
@@ -187,7 +225,42 @@ impl DepositWitness {
     pub fn payload_len(&self) -> usize {
         self.header.len() + self.receipt_proof.iter().map(|p| p.len()).sum::<usize>()
     }
+
+    /// An upper bound on the gas `finalizeDeposit` spends before it accepts
+    /// the message: every proof node is hashed and parsed, and every log
+    /// before `logIndex` is skipped. Fitted to eccBridge 1.17.0 in
+    /// tvm-debugger, it exceeds the measured gas by 18–27% from 3 to 7 proof
+    /// nodes and 0 to 150 logs of 0.2–1 KiB before the deposit.
+    pub fn estimated_gas(&self) -> u64 {
+        40_000
+            + 25_000 * self.receipt_proof.len() as u64
+            + 12 * self.payload_len() as u64
+            + 3_000 * u64::from(self.log_index)
+    }
+
+    /// Refuses a deposit the bridge could not accept: its check would run
+    /// out of [`AN_GAS_CREDIT`] first. That also keeps the message far below
+    /// the 64 KiB a block manager takes.
+    pub fn check_gas(&self) -> Result<(), String> {
+        let gas = self.estimated_gas();
+        if gas > AN_GAS_CREDIT {
+            return Err(format!(
+                "checking its receipt proof ({} bytes, {} nodes, log {} of its receipt) takes up \
+                 to {gas} gas, over the {AN_GAS_CREDIT} an external message may spend before the \
+                 bridge accepts it",
+                self.payload_len(),
+                self.receipt_proof.len(),
+                self.log_index
+            ));
+        }
+        Ok(())
+    }
 }
+
+/// The gas an external message may spend before the contract accepts it
+/// (`gas_credit` in the Acki Nacki blockchain config). `finalizeDeposit`
+/// checks the whole deposit within it.
+pub const AN_GAS_CREDIT: u64 = 500_000;
 
 async fn rpc<N, P, R>(
     provider: &P,

@@ -1482,7 +1482,7 @@ mod tests {
         // checked against its receipt instead of a ZK proof.
         assert_eq!(
             &hash[..8],
-            "dfee3289",
+            "0e8aeac2",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

@@ -66,7 +66,7 @@ class BridgeLimits(unittest.TestCase):
         assert source.count(usdc_only) == 1
         source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || "
                                 "(_testAllowOtherTokens && tokenId > USDC_ECC_ID), ERR_TOKEN_CONFIG);")
-        accept = "tvm.accept();\n        DepositPI f = _provenDeposit("
+        accept = "tvm.accept();\n        _saveMsg();\n        tvm.commit();"
         assert source.count(accept) == 1
         source = source.replace(accept, f"require(!_testStopAtAccept, {ACCEPT_REACHED});\n        " + accept)
         source = re.sub(r"emit WithdrawalRefused\{dest: addrExtern\}\(.*?\);",
@@ -455,6 +455,19 @@ class BridgeLimits(unittest.TestCase):
         result = self.finalize(anchor=False, expect=224)
         self.assertLess(result["gas_used"], GAS_CREDIT)
         result = self.finalize(expect=ACCEPT_REACHED)
+        self.assertLess(result["gas_used"], GAS_CREDIT)
+        # Every refusal of a proven receipt comes before accept, so the bridge pays for none.
+        foreign = [vectors.deposit_log(43, 1, 1, 43, USDC_TOKEN)]
+        for kwargs, code in (({"logs": [TRANSFER_LOG], "log_index": 0}, 244),
+                             ({"logs": foreign, "log_index": 0}, 222),
+                             ({"token": SECOND_TOKEN}, 241),
+                             ({"amount": TRANSFER + 1}, 234),
+                             ({"receipt": vectors.receipt([TRANSFER_LOG], status=0), "log_index": 0}, 308)):
+            result = self.finalize(expect=code, **kwargs)
+            self.assertLess(result["gas_used"], GAS_CREDIT, code)
+        # A receipt with 60 transfers before its deposit is still checked within the credit.
+        logs = [TRANSFER_LOG] * 60 + [vectors.deposit_log(42, 7, 1, 43, USDC_TOKEN)]
+        result = self.finalize(logs=logs, log_index=60, expect=ACCEPT_REACHED)
         self.assertLess(result["gas_used"], GAS_CREDIT)
         self.call("setPaused", {"paused": True}, signed=True)
         result = self.finalize(expect=231)

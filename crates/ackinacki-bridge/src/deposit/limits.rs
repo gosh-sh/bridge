@@ -5,15 +5,9 @@
 //! `receiptsRoot` and reads log `logIndex` of that receipt (counted within
 //! the receipt). Both indices are `uint16`. The receipt must be a success,
 //! and the log the bridge's `Deposit` in its one shape: three topics and
-//! four data words. The header and the proof nodes travel in one external
-//! message, and the block manager's `/v2/messages` takes at most 64 KiB
-//! for the whole of it.
-
-/// The most header and proof-node bytes a `finalizeDeposit` may carry
-/// ([`deposit_receipt::DepositWitness::payload_len`]). The block manager's
-/// `/v2/messages` takes 64 KiB for the whole message; the rest is left to
-/// the message's own header, the ABI encoding and the cell tree.
-pub const MAX_FINALIZE_PAYLOAD: usize = 48 * 1024;
+//! four data words. The bridge checks all of that before it accepts the
+//! external message, so the check has to fit the gas such a message may
+//! spend first ([`deposit_receipt::AN_GAS_CREDIT`]).
 
 /// Why the bridge cannot finalize a deposit from its receipt. Final: the
 /// same receipt gives the same answer every time.
@@ -34,10 +28,11 @@ pub enum Unfinalizable {
         /// The index found.
         value: u64,
     },
-    /// The header and the receipt proof are too large for one message.
-    PayloadTooLarge {
-        /// Their length in bytes.
-        len: usize,
+    /// Checking the receipt proof would take more gas than the bridge may
+    /// spend before it accepts the message.
+    OverGasCredit {
+        /// The proof's size and the gas it may take.
+        reason: String,
     },
 }
 
@@ -56,13 +51,9 @@ impl std::fmt::Display for Unfinalizable {
                 "its {what} is {value}; the bridge takes at most {}",
                 u16::MAX
             ),
-            Self::PayloadTooLarge {
-                len,
-            } => write!(
-                f,
-                "the block header and the receipt proof are {len} bytes; one finalizeDeposit \
-                 message carries at most {MAX_FINALIZE_PAYLOAD}"
-            ),
+            Self::OverGasCredit {
+                reason,
+            } => write!(f, "the bridge cannot accept it: {reason}"),
         }
     }
 }
@@ -81,15 +72,14 @@ pub fn check_indices(tx_index: u64, receipt_log_index: u64) -> Result<(), Unfina
     Ok(())
 }
 
-/// Refuses a header and receipt proof of `len` bytes that do not fit one
-/// message.
-pub fn check_payload(len: usize) -> Result<(), Unfinalizable> {
-    if len > MAX_FINALIZE_PAYLOAD {
-        return Err(Unfinalizable::PayloadTooLarge {
-            len,
-        });
-    }
-    Ok(())
+/// Refuses a receipt proof the bridge could not check within the gas it
+/// may spend before accepting the message.
+pub fn check_gas(witness: &deposit_receipt::DepositWitness) -> Result<(), Unfinalizable> {
+    witness
+        .check_gas()
+        .map_err(|reason| Unfinalizable::OverGasCredit {
+            reason,
+        })
 }
 
 #[cfg(test)]
@@ -116,9 +106,19 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_bound_is_inclusive_and_below_the_message_limit() {
-        assert_eq!(check_payload(MAX_FINALIZE_PAYLOAD), Ok(()));
-        assert!(check_payload(MAX_FINALIZE_PAYLOAD + 1).is_err());
-        const { assert!(MAX_FINALIZE_PAYLOAD < 64 * 1024) };
+    fn a_proof_over_the_gas_credit_is_refused() {
+        let mut w = deposit_receipt::DepositWitness {
+            chain_id: 1,
+            block_number: 1,
+            block_hash: Default::default(),
+            header: vec![0; 600].into(),
+            tx_index: 0,
+            receipt_proof: vec![vec![0; 500].into(); 3],
+            log_index: 60,
+        };
+        assert_eq!(check_gas(&w), Ok(()));
+        w.log_index = 140;
+        let e = check_gas(&w).unwrap_err();
+        assert!(e.to_string().contains("the bridge cannot accept it"), "{e}");
     }
 }

@@ -43,8 +43,7 @@ permissionless — the receipt is the authorization. It hashes the RLP block
 `header` with `KECCAK256` and requires that hash in the anchor set of `chainId`
 (224 otherwise): the receipt places the event in a block, but cannot show that
 the block is canonical, and the anchor set is per chain, so a block of one chain
-does not prove a deposit on another. Only then does it accept the message and
-prove, with `EthTrie`, the receipt of transaction `txIndex` against the header's
+does not prove a deposit on another. It then proves, with `EthTrie`, the receipt of transaction `txIndex` against the header's
 `receiptsRoot` (`receiptProof` is the receipts-trie path, root first; errors
 300–305). The transaction must have succeeded (308). The deposit is read from
 log `logIndex` of that receipt — counted within the receipt, not the block-wide
@@ -53,12 +52,21 @@ log `logIndex` of that receipt — counted within the receipt, not the block-wid
 bytes32 anAccount, uint256 timestamp, address token)`: three topics, four data
 words, nothing more (244 otherwise). Its emitter must be a trusted L1 bridge
 for `chainId` (`setTrustedL1Bridge`; the zerostate seeds one, see below; 222
-otherwise). A deposit costs the bridge 130 000 to 230 000 gas, more when many
-logs precede the `Deposit` in its receipt (about 380 000 with 60), and the
-message stays well under the 64 KiB a Block Manager takes. Three writers
+otherwise). The token and limit checks follow, and only then does the bridge
+accept the message, so a refused deposit costs it nothing. Everything up to
+accept has to fit the 500 000 gas an external message may spend before it is
+accepted: a typical deposit takes 110 000 to 210 000, one with 60 ERC-20
+transfers before the `Deposit` in its receipt 360 000 to 450 000. A deposit
+whose proof takes more — about 75 or more such logs before it — cannot be
+finalized, and the CLI and `deposit-relayer` refuse to send it
+(`DepositWitness::check_gas` in `crates/deposit-receipt`). Such a message stays
+well under the 64 KiB a Block Manager takes. Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
-until the flip. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
+until the flip. The `Deposit` event carries no chain id, so the `chainId` a
+hash is admitted under is the only thing binding its block to a chain: an
+`AckiNackiBridge` deployed at the same address on two chains would otherwise
+let one deposit be finalized under both. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
 for one chain and needs a light client or an Arbitrum block verifier deployed
 for it (`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
 for chain id 0). A chain with an Arbitrum block verifier closes only after its

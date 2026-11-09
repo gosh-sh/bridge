@@ -33,7 +33,7 @@ use crate::{
     source::{advance_scan_cursor, DepositSource},
     state::{unix_now_secs, DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
-    witness::{check_payload_len, WitnessBuilder},
+    witness::{check_gas_credit, WitnessBuilder},
 };
 
 /// Static configuration for one relayer instance.
@@ -408,7 +408,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
             .witness
             .build(&event)
             .await
-            .and_then(|w| check_payload_len(&w).map(|()| w));
+            .and_then(|w| check_gas_credit(&w).map(|()| w));
         timer.finish();
         let witness = match built {
             Ok(b) => b,
@@ -1853,16 +1853,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_receipt_proof_over_the_message_limit_is_unprovable_and_never_sent() {
+    async fn a_receipt_proof_over_the_gas_credit_is_unprovable_and_never_sent() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
         let submitter = Arc::new(MockAnSubmitter::accepting());
         let mut relayer = make_relayer(
             source,
-            Arc::new(MockWitnessBuilder::with_header_len(
-                crate::witness::MAX_FINALIZE_PAYLOAD_BYTES,
-            )),
+            Arc::new(MockWitnessBuilder::with_header_len(48 * 1024)),
             submitter.clone(),
             dir.path().join("state.json"),
         );
@@ -1872,7 +1870,7 @@ mod tests {
                 reason,
             } => {
                 assert_eq!(deposit_id, 0);
-                assert!(reason.contains("limit"), "{reason}");
+                assert!(reason.contains("gas"), "{reason}");
             },
             other => panic!("expected Unprovable, got {other:?}"),
         }

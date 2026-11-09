@@ -45,12 +45,19 @@ assigns it when the release is tagged.
   ends inside an item), 301 (wrong RLP kind or size), 302 (a proof node does not hash to its
   parent), 303 (the proof does not follow the key), 304 (an inline trie node), 305 (no receipt at
   `txIndex`), 307 (no log at `logIndex`) and 308 (the transaction failed). 224
-  (`ERR_UNKNOWN_BLOCK`) now means the header's hash is not an accepted anchor for `chainId`.
-- `finalizeDeposit` accepts the message once the block is known to be anchored (about 10 000
-  gas), then proves the receipt: 130 000 to 230 000 gas for a typical deposit, more for a
-  receipt with many logs before the `Deposit` (about 380 000 with 60). Refusals after that point —
-  the token and limit checks 241, 243, 234 and 235 among them — are paid by the bridge, so a
-  deposit retried while a token is unregistered or closed now costs the bridge gas on every try.
+  (`ERR_UNKNOWN_BLOCK`) now means the header's hash is not an accepted anchor for `chainId`,
+  222 that the log's emitter is not a trusted EVM bridge for `chainId`, and 214
+  (`ERR_OVERFLOW`) that the proven amount does not fit uint64. The `Deposit` event carries no
+  chain id: a block is bound to its chain only by the `chainId` it is anchored under, so an
+  owner who anchors a block by hand must use the chain it comes from.
+- `finalizeDeposit` makes every check — the anchor, the receipt proof, the log, the emitter, the
+  token and the limits — before it accepts the message, so a refused deposit costs the bridge
+  nothing. All of it has to fit the 500 000 gas (`gas_credit`) an external message may spend
+  before it is accepted: a typical deposit takes 110 000 to 210 000, one with 60 ERC-20 transfers
+  before the `Deposit` in its receipt about 360 000 to 450 000. A deposit whose receipt proof
+  takes more — about 75 or more such logs before it, or fewer large ones — cannot be finalized;
+  the CLI and `deposit-relayer` refuse to send it and report it as one the bridge cannot
+  finalize.
 - `eccBridge` is built with `sold` 0.81.1 (it needs the KECCAK256 instruction, which
   `EthBeaconLightClient` and `ArbitrumBlockVerifier` already use). Its artefacts move from
   `contracts/an/0.80.0_compiled/exchange/` to `contracts/an/0.81.1_compiled/exchange/`, and
@@ -76,12 +83,12 @@ assigns it when the release is tagged.
   input) instead of `vk_blob.bin`, `public_inputs.bin` and `proof.bin`, and `finalize-one
   --bundle-dir` reads it. An existing `deposit-relayer-state.json` still loads; its `dapp_id` is
   ignored. A deposit that cannot be finalized from its receipt — the transaction failed, the log
-  has another shape, or the call would exceed 48 KiB — is skipped as before under
+  has another shape, or its proof would not fit the gas credit — is skipped as before under
   `unprovable_deposit_ids` and `deposit_relayer_unprovable_deposits`. The metrics
   `deposit_relayer_prover_stage_duration_seconds` and `deposit_relayer_prover_stage_failures_total`
   are removed. Exit-code hints cover 214, 244, 300–305, 307 and 308; 220 is gone.
 - `ackinacki-bridge` requires an AN bridge at exactly 1.17.0 (`MIN_BRIDGE_VERSION`; code hash
-  `dfee328984a5945cf17e275fff4c5bb9dbe5dc9a79f48635860ab348d2df4ba2`): an older bridge is refused,
+  `0e8aeac2b949692b826967e6ee85b0efcc421ff698b6f408c60006a740e353f1`): an older bridge is refused,
   and so is a newer one in release builds, since its `finalizeDeposit` may take other arguments.
   Upgrade the AN bridge, the CLI and `deposit-relayer` together. `deposit` loses
   `--deposit-prover-dir`, `--log-dir` and `--prover-timeout-s` (passing one is an argument error)
@@ -91,8 +98,8 @@ assigns it when the release is tagged.
   `--resume` of a deposit an older CLI left at `Proved` rebuilds it (the old files can be deleted).
   Any transaction type is now accepted, legacy included. Exit code 32 means the receipt proof
   could not be built and is retryable with `--resume`; 35 means the bridge cannot finalize the
-  deposit from its receipt (another log shape, transaction or log index above 65535, or header
-  and proof over 48 KiB); 33 names bridge refusals 244, 300–305, 307 and 308, which are not
+  deposit from its receipt (another log shape, transaction or log index above 65535, or a proof
+  over the gas credit); 33 names bridge refusals 244, 300–305, 307 and 308, which are not
   retried. The success JSON drops `tx.access_list_len`. `install.sh` no longer installs
   `deposit-prover/` or `kzg_params_18.srs`, needs 11 GB of disk instead of 13, replaces a CLI
   that still has `--deposit-prover-dir`, and names a leftover `deposit-prover/` or
@@ -141,8 +148,7 @@ assigns it when the release is tagged.
   and such a proof does not slow other payouts or `verifyBlock` with `--backoff-max-secs`.
 - `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
   (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
-  parked while a token is unregistered or closed on AN. From `eccBridge` 1.17.0 each such retry
-  costs the bridge gas (see above).
+  parked while a token is unregistered or closed on AN.
 - `eccBridge` 1.16.0 (code hash `e6810f06…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register USDC under ECC id `3` on AN with

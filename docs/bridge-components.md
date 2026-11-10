@@ -4,6 +4,7 @@
 > (PR 148); the `eth-lc-relayer daemon` rows, its rotate directory and the rotate key cache against
 > `d7a14b19` (PR 153); the AAVE V3 pool, aUSDC and the bridge's `approve` against `a61d1e75`
 > (PR 142); the `eth-lc-relayer arbitrum-anchors` rows and its `submitAncestry` against `0fd604ed`
+> (bridge-audit#154); the daemon's checkpoint queue and the step proving key against `b06de7a4`
 > (bridge-audit#154). Every connection and every state file below is drawn from the code that makes or names
 > it, not from prose; the tables give each one's `file:line` at that commit.
 
@@ -106,8 +107,8 @@ container layout is in [`docker/README.md`](../docker/README.md).
   `deposit-prover` is three executables from `deposit-prover/examples`, `eth-light-client-prover`
   four from `eth-light-client-prover/examples`: the step and the rotate's three stages.
 - Not drawn: the provers' own state, and the read-only inputs — SRS and keys (`--params-dir`,
-  `--prover-dir`), verifier bytecode, ABIs. The exception is `<prover-dir>/rotate-keys/`: the rotate
-  stages write their proving keys there themselves.
+  `--prover-dir`), verifier bytecode, ABIs. The exceptions are `<prover-dir>/rotate-keys/` and the
+  step key directory: the provers write their proving keys there themselves.
 
 | File | Holds | Default path | Code |
 |---|---|---|---|
@@ -118,6 +119,8 @@ container layout is in [`docker/README.md`](../docker/README.md).
 | `./state/` | `prover_state.json`: the layer windows, the BK-set commitment, the last key block applied; `prover_bk_set.json`; `bootstrap_seed.json`; `relayer-state.json`, the daemon's cursor, which `daemon-live` keeps only here and refuses another `--state-dir` for | `crates/bridge-relayer-daemon/src/bin/relayer.rs:415` | `crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs:157`, `paths.rs:83`, `:87`, `:95`; `crates/bridge-relayer-daemon/src/bin/relayer.rs:95`, `:65` |
 | `eth-lc-relayer-state.json` | the last finalized slot, the committee period, the header spans still owed, a rotation in flight | none, `--state-dir` is required: `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:74` | `crates/eth-light-client-relayer/src/dirs.rs:21`, `state.rs:30` |
 | `eth-lc-relayer-state.json.lock` | an exclusive lock held while the daemon runs; a second one refuses to start | in the state directory | `crates/eth-light-client-relayer/src/state.rs:124` |
+| `eth-lc-relayer-state.json.steps/` | the checkpoints taken from the beacon node and not yet on the light client, one `<finalized slot>.json` each: the beacon answer, the committee, the signing domain; a file that does not parse is renamed `.unreadable` | beside the state file: `crates/eth-light-client-relayer/src/step_queue.rs:100` | `crates/eth-light-client-relayer/src/step_queue.rs:108`, `:142`; opened at `crates/eth-light-client-relayer/src/relayer.rs:271` |
+| `STEP_KEY_DIR` | the step proving key, tied to the build of `export_step_vk_blob`: written by the first proof of a build, read by every later one; `step_key.lock`, shared while a run reads the key, exclusive while one generates it | `step-key/` next to the SRS: `eth-light-client-prover/examples/export_step_vk_blob.rs:218` | `eth-light-client-prover/examples/export_step_vk_blob.rs:240`, `:259`, `:359` |
 | `<work-dir>/rotate-<P>/` | the rotate of period P: one directory per stage, `shard/`, `step/`, `tree/`, each written whole or not at all; removed once the contract is past P | none, `--work-dir` is required: `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:82` | `crates/eth-light-client-relayer/src/rotate.rs:163`, `:177`; removed at `crates/eth-light-client-relayer/src/relayer.rs:697` |
 | `<prover-dir>/rotate-keys/` | the proving keys of every rotate stage and tree level, each tied to the build of its prover; written on the first rotate after an install or a binary upgrade, reused after that | none, `--prover-dir` is required when the daemon may rotate: `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:329` | `crates/eth-light-client-relayer/src/rotate.rs:482`; written by `eth-light-client-prover/src/key_cache.rs` |
 | `arbitrum-anchors-state.json` | the parent-chain and deposit cursors, the deposit blocks still pending, the slot proofs taken per batch, the proofs ready to send | none, `--state-dir` is required: `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:92` | `crates/eth-light-client-relayer/src/dirs.rs:23`, `arbitrum.rs:248` |

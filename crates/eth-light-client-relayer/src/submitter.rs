@@ -149,6 +149,7 @@ struct MockInner {
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
+    gateway_error: bool,
     /// `--dry-run`: the first accepted step bootstraps the committee period,
     /// and every accepted step sets the current committee to its own, as
     /// the contract's would be.
@@ -182,6 +183,7 @@ impl MockAnSubmitter {
                 gloas_gets: 0,
                 gloas_get_fails_from: None,
                 committee_period_read_fails: false,
+                gateway_error: false,
                 follow_steps: false,
             }),
         }
@@ -244,6 +246,12 @@ impl MockAnSubmitter {
     /// Refuse every `submitUpdate` from now on, or stop refusing.
     pub fn set_reject(&self, on: bool) {
         self.inner.lock().expect("poisoned").reject = on;
+    }
+
+    /// Answer every `submitUpdate` as a gateway that fails before the chain
+    /// runs the call: an HTTP 500 with no exit code.
+    pub fn set_gateway_error(&self, on: bool) {
+        self.inner.lock().expect("poisoned").gateway_error = on;
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -356,9 +364,16 @@ impl MockAnSubmitter {
 impl AnSubmitter for MockAnSubmitter {
     async fn submit_update(&self, bundle: &StepProofBundle) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if inner.gateway_error {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "submitUpdate failed: HTTP status 500 Internal Server Error".into(),
+            });
+        }
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
-                reason: "ZKHALO2VERIFYWITHVK rejected the step proof".into(),
+                reason: "submitUpdate failed: ZKHALO2VERIFYWITHVK rejected the step proof, \
+                         exit_code=220"
+                    .into(),
             });
         }
         let slot = bundle.parsed.finalized_slot;

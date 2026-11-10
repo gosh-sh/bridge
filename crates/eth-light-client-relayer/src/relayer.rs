@@ -491,7 +491,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     // hop over it; the next tick reads the contract again.
                     Err(e) if self.config.enable_rotate => {
                         warn!(error = %e, "getCommitteeState at the period boundary failed; next tick");
-                        count_failure(Stage::Rotate);
+                        count_failure(Stage::Submit);
                         return Ok(TickOutcome::AnPending {
                             reason: format!("getCommitteeState at the period boundary: {e}"),
                         });
@@ -1465,15 +1465,17 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     finalized_slot: update.finalized_slot,
                 })
             },
-            // The contract read this proof and refused it. Sending it again
-            // gets the same answer when the proof itself is the cause (a
-            // Gloas slot the owner has changed since, a committee that moved
-            // on), so it is dropped and the checkpoint proven again against
-            // what the contract holds then.
+            // An exit code: the contract ran the call and refused this proof,
+            // so the next send gets a new one, proven against what the
+            // contract holds then. No exit code: the call never ran (an HTTP
+            // 4xx or 5xx from the gateway, an answer that did not parse), and
+            // the same proof goes again.
             SubmitOutcome::Rejected {
                 reason,
             } => {
-                drop(bundle);
+                if crate::submitter::parsed_exit_code(&reason).is_none() {
+                    self.keep_proof(slot, bundle);
+                }
                 self.step_failed(slot, Stage::Submit, &reason);
                 Ok(TickOutcome::AnRejected {
                     reason,
@@ -4107,6 +4109,122 @@ mod tests {
             prover.started(),
             3,
             "the proof that went on chain is a fresh one"
+        );
+    }
+
+    /// A send the chain never ran (an HTTP 500 from the gateway, no exit
+    /// code) goes again with the same proof: nothing is proven anew.
+    #[tokio::test]
+    async fn a_gateway_error_sends_the_same_proof_again() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let prover = GatedProver::open();
+        let (mut r, _source, mock) = gated_relayer(
+            vec![update(100, 96)],
+            prover.clone(),
+            dir.path().join("state.json"),
+        );
+        mock.set_gateway_error(true);
+        let mut failed = 0;
+        for _ in 0..8 {
+            if matches!(r.tick().await.unwrap(), TickOutcome::AnRejected { .. }) {
+                failed += 1;
+                if failed == 3 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(failed, 3);
+        assert_eq!(prover.started(), 1, "one proof, sent three times");
+        assert_eq!(failures(&snapshotter, "submit"), 3);
+
+        mock.set_gateway_error(false);
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate {
+                finalized_slot: 96,
+                ..
+            }
+        ));
+        assert_eq!(
+            prover.started(),
+            1,
+            "the proof that went on chain is the first one"
+        );
+    }
+
+    /// A contract that cannot be read at the period boundary is an Acki
+    /// Nacki problem, counted as `submit`, not a missing rotate.
+    #[tokio::test]
+    async fn a_failed_committee_read_at_the_boundary_counts_as_submit() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            mock.clone(),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        mock.fail_committee_period_reads();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::AnPending { .. }
+        ));
+        assert_eq!(failures(&snapshotter, "submit"), 1);
+        assert_eq!(failures(&snapshotter, "rotate"), 0);
+    }
+
+    /// The daemon stops on a dead watcher also while a round is waiting for
+    /// a proof, not only between rounds.
+    #[tokio::test]
+    async fn the_daemon_stops_on_a_dead_watcher_in_the_middle_of_a_round() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        {
+            // A checkpoint left in the queue by an earlier run.
+            let (mut r, _source, _mock) =
+                gated_relayer(vec![update(100, 96)], GatedProver::closed(), path.clone());
+            r.tick().await.unwrap();
+            assert_eq!(r.queued(), 1);
+        }
+        let mut cfg = RelayerConfig::new(path);
+        cfg.enable_rotate = false;
+        cfg.watch_interval = Duration::from_millis(10);
+        // The round waits this long for the gated proof that never comes.
+        cfg.poll_interval = Duration::from_secs(60);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(PanickingSource),
+            GatedProver::closed(),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let run = r
+            .run_until_shutdown(
+                crate::daemon::BackoffConfig::default(),
+                crate::daemon::RelayerMetrics::new(),
+                std::future::pending::<()>(),
+            )
+            .await;
+        assert!(run.is_err(), "a dead watcher is an error");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it stops without waiting out the round: {:?}",
+            started.elapsed()
         );
     }
 

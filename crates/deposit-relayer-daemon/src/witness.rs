@@ -128,6 +128,7 @@ where
             &self.provider,
             event.source_chain_id,
             self.bridge,
+            event.block_hash,
             event.tx_hash,
             log_index,
         )

@@ -950,12 +950,15 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                              bytes[] receiptProof, uint16 logIndex) public {
         // Every check runs before accept, within the external message's gas
         // credit, so a refused deposit costs the bridge nothing. A deposit
-        // whose proof walk exceeds the credit cannot be finalized; the CLI and
-        // deposit-relayer refuse to send one.
+        // already finalized is not refused here: it passes every check, is
+        // accepted and paid for by the bridge, and ends at its existing
+        // voucher without a second mint. A deposit whose proof walk exceeds
+        // the credit cannot be finalized; the CLI and deposit-relayer refuse
+        // to send one.
         require(!_paused, ERR_PAUSED);
         uint256 blockHash = gosh.keccak256(header);
         require(_acceptedBlockHash[chainId][blockHash], ERR_UNKNOWN_BLOCK);
-        DepositPI f = _provenDeposit(header, blockHash, txIndex, receiptProof, logIndex);
+        DepositPI f = _provenDeposit(header, txIndex, receiptProof, logIndex);
         f.chainId = chainId;
         require(f.amount > 0, ERR_ZERO_AMOUNT);
         // The != 0 guard keeps a stray `_trustedL1Bridge[chainId][0]=true`
@@ -1227,11 +1230,12 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // ========================================================
 
     /// @dev The deposit in log `logIndex` of the receipt of transaction
-    ///      `txIndex`, proven against the receipts root of `header`, which
-    ///      hashes to `blockHash`. `chainId` is left for the caller.
-    function _provenDeposit(bytes header, uint256 blockHash, uint16 txIndex,
+    ///      `txIndex`, proven against the receipts root of `header`. The
+    ///      caller has checked that `header` hashes to an accepted block.
+    ///      `chainId` is left for the caller.
+    function _provenDeposit(bytes header, uint16 txIndex,
                             bytes[] receiptProof, uint16 logIndex) private pure returns (DepositPI f) {
-        (, uint256 receiptsRoot) = EthTrie.headerRoots(header, blockHash);
+        (, uint256 receiptsRoot) = EthTrie.roots(header);
         (uint256 key, uint nibbles) = EthTrie.receiptKey(txIndex);
         (TvmSlice receipt, uint len) = EthTrie.prove(receiptsRoot, key, nibbles, receiptProof);
         TvmSlice log = EthTrie.receiptLog(receipt, len, logIndex);

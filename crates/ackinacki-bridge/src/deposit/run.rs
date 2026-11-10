@@ -950,7 +950,7 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
             ExitCode::DepositUnprovable,
             format!(
                 "{m}. The CLI does not finalize a deposit other than the one requested; the \
-                 deposit is in the EVM bridge, and its operator can finalize or return it"
+                 deposit is in the EVM bridge, and the bridge's relayer finalizes it"
             ),
         ),
         Negative::Unprovable(v) => (
@@ -958,8 +958,7 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
             ExitCode::DepositUnprovable,
             format!(
                 "the deposit is on chain but the Acki Nacki bridge cannot finalize it from its \
-                 receipt: {v}. The deposit is in the EVM bridge and only its operator can return \
-                 it"
+                 receipt: {v}. The deposit is in the EVM bridge"
             ),
         ),
     };
@@ -1391,6 +1390,7 @@ async fn walk(
                         .deposit_witness(
                             chain_id,
                             rec.params.bridge,
+                            dep.block_hash,
                             claim.tx_hash,
                             dep.receipt_log_index,
                         )

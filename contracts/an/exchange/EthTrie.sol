@@ -205,6 +205,24 @@ library EthTrie {
         (receiptsRoot, s) = _hash(s);       // receiptsRoot
     }
 
+    /// `stateRoot` and `receiptsRoot` of a header RLP whose hash the caller
+    /// has already checked. The same reading as `headerRoots`, without its hash.
+    function roots(bytes header) internal pure returns (uint256 stateRoot, uint256 receiptsRoot) {
+        TvmSlice s = header.toSlice();
+        uint8 kind;
+        uint len;
+        uint hdr;
+        uint t;
+        (kind, len, hdr, s) = _hdr(s);
+        require(kind == LIST, ERR_RLP);
+        (t, s) = _skipItem(s);              // parentHash
+        (t, s) = _skipItem(s);              // ommersHash
+        (t, s) = _skipItem(s);              // beneficiary
+        (stateRoot, s) = _hash(s);          // stateRoot
+        (t, s) = _skipItem(s);              // transactionsRoot
+        (receiptsRoot, s) = _hash(s);       // receiptsRoot
+    }
+
     /// The receipt-trie key of transaction `index`: rlp(index), as nibbles.
     function receiptKey(uint index) internal pure returns (uint256 key, uint nibbles) {
         if (index == 0) return (0x80, 2);

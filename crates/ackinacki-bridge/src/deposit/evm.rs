@@ -203,11 +203,13 @@ pub trait EvmRead: Send + Sync {
     async fn probe_block(&self, tag: BlockTag) -> anyhow::Result<usize>;
     /// The `finalizeDeposit` arguments for the `Deposit` log at
     /// `receipt_log_index` (counted within the receipt) of transaction
-    /// `tx`, emitted by `bridge` on chain `chain_id`.
+    /// `tx`, emitted by `bridge` on chain `chain_id` in block `block_hash`,
+    /// the block the deposit was confirmed in.
     async fn deposit_witness(
         &self,
         chain_id: u64,
         bridge: Address,
+        block_hash: B256,
         tx: B256,
         receipt_log_index: u64,
     ) -> Result<DepositWitness, WitnessError>;
@@ -770,6 +772,7 @@ impl EvmRead for AlloyEvm {
         &self,
         chain_id: u64,
         bridge: Address,
+        block_hash: B256,
         tx: B256,
         receipt_log_index: u64,
     ) -> Result<DepositWitness, WitnessError> {
@@ -779,7 +782,7 @@ impl EvmRead for AlloyEvm {
                 value: receipt_log_index,
             })
         })?;
-        Ok(deposit_receipt::fetch(&self.p, chain_id, bridge, tx, index).await?)
+        Ok(deposit_receipt::fetch(&self.p, chain_id, bridge, block_hash, tx, index).await?)
     }
 
     async fn estimate_gas_at(

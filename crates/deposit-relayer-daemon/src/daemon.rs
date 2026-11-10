@@ -347,8 +347,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                         deposit_id,
                         reason = %reason,
                         "daemon: deposit cannot be finalized from its receipt; recorded in \
-                         unprovable_deposit_ids. finalize-one cannot help; only the EVM bridge \
-                         operator can return its funds",
+                         unprovable_deposit_ids. finalize-one cannot help",
                     );
                     (true, LastOutcome::Unprovable {
                         deposit_id,

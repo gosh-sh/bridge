@@ -20,7 +20,7 @@
 //! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN; seeded from `state.json` `last_finalized_deposit_id` on start (parked/unprovable ids are not in that field) and never moves backwards when a lower outstanding id completes |
 //! | `deposit_relayer_attempts_since_progress` | gauge | | Attempt count of the last failed outstanding id (`state.json`); reset when any id finalizes. Waiting for a deposit nobody made yet is not an attempt |
 //! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` (`state.json` → `parked_deposit_ids`) |
-//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits that cannot be finalized from their receipt (failed transaction, a log the AN bridge does not read, over the message limit); only the EVM bridge operator can return those funds (`state.json` → `unprovable_deposit_ids`) |
+//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits that cannot be finalized from their receipt (failed transaction, a log the AN bridge does not read, over the message limit) (`state.json` → `unprovable_deposit_ids`) |
 //! | `deposit_relayer_outstanding_deposits` | gauge | | Deposits still to retry, including anchor waits (`state.json` → `outstanding_deposits`) |
 //! | `deposit_relayer_waiting_for_anchor` | gauge | | Outstanding deposits waiting for an AN block anchor |
 //! | `deposit_relayer_oldest_anchor_wait_timestamp_seconds` | gauge | | First observation of the oldest anchor wait (persisted); 0 when none |
@@ -117,8 +117,7 @@ pub fn describe() {
     );
     describe_gauge!(
         UNPROVABLE_DEPOSITS,
-        "Deposits that cannot be finalized from their receipt; only the EVM bridge operator can \
-         return those funds."
+        "Deposits that cannot be finalized from their receipt."
     );
     describe_gauge!(
         OUTSTANDING_DEPOSITS,

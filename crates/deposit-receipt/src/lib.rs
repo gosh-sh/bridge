@@ -291,33 +291,28 @@ where
 
 /// The `finalizeDeposit` arguments for log `log_index` (counted within the
 /// receipt, not the block) of transaction `tx_hash`, emitted by `bridge` on
-/// chain `chain_id`. The node must serve `eth_getBlockReceipts` for the block.
+/// chain `chain_id` in block `block_hash`, the block the deposit was found
+/// in. The node must serve `eth_getBlockReceipts` for the block.
+///
+/// [`Error::Failed`] and [`Error::NotDeposit`] are read from the receipt
+/// only after it has rebuilt that block's `receiptsRoot`: a node that
+/// answers from another branch, or with a receipt of another block, gives
+/// an error the caller retries, never a verdict.
 pub async fn fetch<N: Network, P: Provider<N>>(
     provider: &P,
     chain_id: u64,
     bridge: Address,
+    block_hash: B256,
     tx_hash: B256,
     log_index: usize,
 ) -> Result<DepositWitness, Error> {
     let receipt: RpcReceipt = rpc(provider, "eth_getTransactionReceipt", json!([tx_hash])).await?;
-    if !receipt.succeeded() {
-        return Err(Error::Failed(tx_hash));
+    if receipt.block_hash != block_hash {
+        return Err(Error::BlockChanged(
+            block_hash,
+            "eth_getTransactionReceipt puts the transaction in another block",
+        ));
     }
-    let log = receipt
-        .logs
-        .get(log_index)
-        .ok_or_else(|| Error::NotDeposit {
-            tx: tx_hash,
-            index: log_index,
-            reason: format!("the receipt has {} logs", receipt.logs.len()),
-        })?;
-    check_deposit_log(log, bridge).map_err(|reason| Error::NotDeposit {
-        tx: tx_hash,
-        index: log_index,
-        reason,
-    })?;
-
-    let block_hash = receipt.block_hash;
     let header: Header = rpc(provider, "eth_getBlockByHash", json!([block_hash, false])).await?;
     if header.hash != block_hash {
         return Err(Error::BlockChanged(
@@ -355,6 +350,25 @@ pub async fn fetch<N: Network, P: Provider<N>>(
     if root != header.inner.receipts_root {
         return Err(Error::ReceiptsRoot(block_hash));
     }
+
+    // The receipt that rebuilt the root: its status and logs are the block's.
+    let receipt = &receipts[tx_index];
+    if !receipt.succeeded() {
+        return Err(Error::Failed(tx_hash));
+    }
+    let log = receipt
+        .logs
+        .get(log_index)
+        .ok_or_else(|| Error::NotDeposit {
+            tx: tx_hash,
+            index: log_index,
+            reason: format!("the receipt has {} logs", receipt.logs.len()),
+        })?;
+    check_deposit_log(log, bridge).map_err(|reason| Error::NotDeposit {
+        tx: tx_hash,
+        index: log_index,
+        reason,
+    })?;
 
     Ok(DepositWitness {
         chain_id,

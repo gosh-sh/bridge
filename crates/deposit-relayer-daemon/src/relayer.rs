@@ -144,7 +144,7 @@ pub enum TickOutcome {
     /// failed, the log is not a `Deposit` the AN bridge reads, or header and
     /// proof are over the message limit). Recorded in
     /// `unprovable_deposit_ids` and advanced past at once; `finalize-one`
-    /// cannot help. Only the EVM bridge operator can return the funds.
+    /// cannot help.
     Unprovable { deposit_id: u64, reason: String },
 }
 
@@ -422,8 +422,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                     reason = %reason,
                     unprovable = ?self.state.unprovable_deposit_ids,
                     "deposit cannot be finalized from its receipt; recorded in \
-                     unprovable_deposit_ids and skipped at once. finalize-one cannot help; only \
-                     the EVM bridge operator can return its funds",
+                     unprovable_deposit_ids and skipped at once. finalize-one cannot help",
                 );
                 return Ok(TickOutcome::Unprovable {
                     deposit_id: target,

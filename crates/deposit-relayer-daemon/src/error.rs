@@ -31,8 +31,7 @@ pub enum RelayerError {
     /// bridge reads, the transaction or log index does not fit a `uint16`, or
     /// the bridge could not check the proof within the gas an external
     /// message may spend before it is accepted. Final for that
-    /// deposit: the relayer records it in `unprovable_deposit_ids` at once,
-    /// and only the EVM bridge operator can return the funds.
+    /// deposit: the relayer records it in `unprovable_deposit_ids` at once.
     #[error("the deposit cannot be finalized from its receipt: {0}")]
     Unprovable(String),
 

@@ -103,29 +103,30 @@ change was needed.
 | Relayer | `crates/deposit-relayer-daemon/` | Finds the `Deposit` log, builds the witness (`ReceiptWitnessBuilder` in `src/witness.rs`), checks the payload size and submits `finalizeDeposit`. `deposit-relayer --help` lists the subcommands. |
 | CLI | `crates/ackinacki-bridge/` (`deposit` subcommand) | Approve, deposit, then the same witness (`deposit_witness` in `src/deposit/evm.rs`) and `finalizeDeposit`. Builds only from `crates/bridge-prover-libraries` with `-p ackinacki-bridge`. |
 | Contracts | `contracts/an/exchange/eccBridge.sol`, `contracts/an/exchange/EthTrie.sol`, `contracts/an/exchange/DepositVoucher.sol` | Error codes in `contracts/an/exchange/modifiers/errors.sol` and at the top of `EthTrie.sol`. |
-| Compiled artefacts | `contracts/an/0.81.1_compiled/exchange/eccBridge.{tvc,abi.json}`; `contracts/an/0.81.0_compiled/exchange/DepositVoucher.{tvc,abi.json}` | `contracts/an/place.json` places both onto acki-nacki's `contracts/0.81.0_compiled/exchange/`, and the sources (`EthTrie.sol` among them) onto `contracts/exchange/`. Runtime ABI copies are kept in step by `scripts/check_bridge_abi_in_sync.sh`. |
+| Compiled artefacts | `contracts/an/0.80.1_compiled/exchange/eccBridge.{tvc,abi.json}`; `contracts/an/0.81.0_compiled/exchange/DepositVoucher.{tvc,abi.json}` | `contracts/an/place.json` places both onto acki-nacki's `contracts/0.81.0_compiled/exchange/`, and the sources (`EthTrie.sol` among them) onto `contracts/exchange/`. Runtime ABI copies are kept in step by `scripts/check_bridge_abi_in_sync.sh`. |
 | Anchors | `scripts/deposit_anchor_params.py` | Turns a witness JSON or a `(chain id, block hash)` into `setAcceptedBlockHash` arguments; `--verify` checks against an independent RPC that the block is canonical and buried deep enough. |
 | Test vectors | `scripts/deposit-receipt/vectors.py` | `synthetic(...)` builds a self-consistent block and receipt trie with no node; `live --rpc-url <RPC> --tx <hash>` captures a real one into `scripts/deposit-receipt/fixtures/`. |
-| Contract tests | `scripts/test_an_bridge_limits.py` | Runs the bridge in a TVM debugger with real receipt proofs from `vectors.py`. Needs `SOLD_0_81_1`, `SOLD_0_81` and a `TVM_DEBUGGER` that runs `KECCAK256`. |
+| Contract tests | `scripts/test_an_bridge_limits.py` | Runs the bridge in a TVM debugger with real receipt proofs from `vectors.py`. Needs `SOLD_0_80_1`, `SOLD_0_81` and a `TVM_DEBUGGER` that runs `KECCAK256`; CI runs it with the released binaries. |
 | Chain allowlist | `crates/deposit-chain-ids/` | The source chains the relayer and the CLI accept; on chain the gate is `_trustedL1Bridge` plus the anchors. |
 
 ## Recompile eccBridge
 
-Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.81.1 for `eccBridge`, the
-light client and the Arbitrum block verifier (they call `gosh.keccak256`, which 0.81.1 is the
-first release to assemble), sold 0.81.0 for `DepositVoucher`. The Makefile refuses a compiler that
-reports another version.
+Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.1 for `eccBridge` (the
+0.80 line with `KECCAK256`; 0.81.x changes the event header the withdrawal proof reads), sold
+0.81.1 for the light client and the Arbitrum block verifier, sold 0.81.0 for `DepositVoucher`.
+The Makefile refuses a compiler that reports another version.
 
 ```bash
-make -C contracts/an/exchange SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
+make -C contracts/an/exchange SOLD_0_80_1=/path/to/sold-0.80.1 SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
 ```
 
 It writes beside the sources and does not touch the tracked artefacts: copy the rebuilt
-`eccBridge.tvc` and `eccBridge.abi.json` to `contracts/an/0.81.1_compiled/exchange/` by hand and
+`eccBridge.tvc` and `eccBridge.abi.json` to `contracts/an/0.80.1_compiled/exchange/` by hand and
 commit them together. The voucher must stay byte-identical — its code hash is part of every
 voucher address. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh`
 tells them apart. The `an-contracts.yaml` pipeline checks the voucher ABI, `place.json` and the
-zerostate encoder; `scripts/test_an_bridge_limits.py` is run by hand.
+zerostate encoder, rebuilds the four contracts and compares them with the tracked artefacts,
+checks the event header, and runs `scripts/test_an_bridge_limits.py`.
 
 ## Docs
 

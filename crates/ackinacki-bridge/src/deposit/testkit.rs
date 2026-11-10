@@ -508,6 +508,7 @@ impl EvmRead for FakeEvm {
         &self,
         _: u64,
         _: Address,
+        _: B256,
         tx: B256,
         _: u64,
     ) -> Result<DepositWitness, WitnessError> {

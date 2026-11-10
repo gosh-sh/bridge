@@ -143,8 +143,7 @@ pub struct RelayerState {
     pub parked_deposit_ids: Vec<u64>,
     /// Deposit ids that cannot be finalized from their receipt, advanced past
     /// at once. The name dates from the off-chain prover.
-    /// `finalize-one` cannot help these; only the EVM bridge operator can
-    /// return their funds.
+    /// `finalize-one` cannot help these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprovable_deposit_ids: Vec<u64>,
     /// Deposits waiting for an anchor, a pending submission, or a retry after

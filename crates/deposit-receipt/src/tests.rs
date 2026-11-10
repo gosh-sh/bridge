@@ -195,3 +195,78 @@ fn finalize_params_carry_the_abi_names() {
     );
     assert_eq!(w.payload_len(), 3);
 }
+
+/// The live Arbitrum Sepolia deposit transaction, read through a node that
+/// answers `eth_getTransactionReceipt` with `receipt`; the block and its
+/// receipts are the real ones. Its `Deposit` log predates the token field, so
+/// a fetch that gets as far as the log ends in `NotDeposit`.
+async fn fetch_with(receipt: serde_json::Value, log_index: usize) -> Result<DepositWitness, Error> {
+    use alloy::{providers::ProviderBuilder, transports::mock::Asserter};
+    let vector: serde_json::Value = serde_json::from_str(VECTOR).unwrap();
+    let asserter = Asserter::new();
+    asserter.push_success(&receipt);
+    asserter.push_success(&serde_json::from_str::<serde_json::Value>(BLOCK).unwrap());
+    asserter.push_success(&serde_json::from_str::<serde_json::Value>(RECEIPTS).unwrap());
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+    fetch(
+        &provider,
+        421_614,
+        "0xcee5d884bc1b7f4cc84a31fea74f3c8809d19bd5"
+            .parse()
+            .unwrap(),
+        vector["blockHash"].as_str().unwrap().parse().unwrap(),
+        vector["transactionHash"].as_str().unwrap().parse().unwrap(),
+        log_index,
+    )
+    .await
+}
+
+/// The deposit transaction's receipt as `eth_getBlockReceipts` returns it.
+fn block_receipt() -> serde_json::Value {
+    let receipts: Vec<serde_json::Value> = serde_json::from_str(RECEIPTS).unwrap();
+    receipts
+        .into_iter()
+        .find(|r| r["transactionIndex"] == "0x9")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_verdict_is_read_from_the_receipt_that_rebuilt_the_block() {
+    // A node behind a load balancer answers from a stale branch that the
+    // transaction failed. The block's own receipt is a success, and only
+    // that one decides: here, that its log is not the current Deposit.
+    let mut stale = block_receipt();
+    stale["status"] = "0x0".into();
+    stale["logs"] = serde_json::json!([]);
+    let got = fetch_with(stale, 1).await;
+    assert!(
+        matches!(
+            got,
+            Err(Error::NotDeposit {
+                index: 1,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+    let got = fetch_with(block_receipt(), 0).await;
+    assert!(
+        matches!(
+            got,
+            Err(Error::NotDeposit {
+                index: 0,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_receipt_of_another_block_is_retried_never_a_verdict() {
+    let mut elsewhere = block_receipt();
+    elsewhere["blockHash"] = format!("0x{}", "11".repeat(32)).into();
+    elsewhere["status"] = "0x0".into();
+    let got = fetch_with(elsewhere, 1).await;
+    assert!(matches!(got, Err(Error::BlockChanged(..))), "{got:?}");
+}

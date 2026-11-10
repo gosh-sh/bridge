@@ -1347,9 +1347,6 @@ pub struct FakeAn {
     pub sent: Mutex<u32>,
     /// The arguments of every `send_finalize`, in order.
     pub sent_witnesses: Mutex<Vec<DepositWitness>>,
-    /// The wallet of every `send_finalize_from_wallet`, in order. Those
-    /// sends also count in `sent` and `sent_witnesses`.
-    pub wallet_sends: Mutex<Vec<crate::deposit::args::AnWallet>>,
     /// How long each send takes before it answers.
     pub send_delay: Mutex<std::time::Duration>,
     /// External messages that appear once a send was made: `(account,
@@ -1602,16 +1599,6 @@ impl AnSend for FakeAn {
             .unwrap_or(FinalizeSend::Unknown {
                 message: "no script".into(),
             })
-    }
-
-    async fn send_finalize_from_wallet(
-        &self,
-        bridge: [u8; 32],
-        w: &DepositWitness,
-        wallet: &crate::deposit::args::AnWallet,
-    ) -> FinalizeSend {
-        self.wallet_sends.lock().unwrap().push(wallet.clone());
-        self.send_finalize(bridge, [0; 32], w).await
     }
 }
 
@@ -1883,7 +1870,6 @@ impl World {
             wc_project_id: Some("test".into()),
             wc_relay_url: "ws://relay.invalid".into(),
             from_address: None,
-            an_wallet: None,
         }
     }
 

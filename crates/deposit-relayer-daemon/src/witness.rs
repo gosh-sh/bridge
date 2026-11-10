@@ -35,12 +35,9 @@ pub trait WitnessBuilder: Send + Sync {
 /// Refuses a witness the bridge could not check within the gas an external
 /// message may spend before the bridge accepts it
 /// ([`deposit_receipt::AN_GAS_CREDIT`]): no node takes such a message, so
-/// retrying cannot help. [`RelayerError::NeedsWallet`] when the user's own
-/// wallet can still send it, [`RelayerError::Unprovable`] when no message
-/// can carry it.
+/// retrying cannot help.
 pub fn check_gas_credit(witness: &DepositWitness) -> Result<(), RelayerError> {
-    witness.check_wallet().map_err(RelayerError::Unprovable)?;
-    witness.check_gas().map_err(RelayerError::NeedsWallet)
+    witness.check_gas().map_err(RelayerError::Unprovable)
 }
 
 /// Refuses a witness of another deposit: another chain, another block (the
@@ -286,18 +283,13 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_over_the_gas_credit_needs_the_users_wallet() {
+    fn a_proof_over_the_gas_credit_cannot_be_finalized() {
         let ev = event(1);
         let within = MockWitnessBuilder::with_header_len(30_000).witness_for(&ev);
         check_gas_credit(&within).unwrap();
         let over = MockWitnessBuilder::with_header_len(45_000).witness_for(&ev);
         assert!(matches!(
             check_gas_credit(&over),
-            Err(RelayerError::NeedsWallet(_))
-        ));
-        let too_large = MockWitnessBuilder::with_header_len(70_000).witness_for(&ev);
-        assert!(matches!(
-            check_gas_credit(&too_large),
             Err(RelayerError::Unprovable(_))
         ));
     }

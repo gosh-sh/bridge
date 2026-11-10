@@ -807,11 +807,6 @@ mod tests {
         let big = MockWitnessBuilder::with_header_len(48 * 1024).witness_for(&ev);
         assert!(matches!(
             sub.submit(&ev, &big).await,
-            Err(RelayerError::NeedsWallet(_))
-        ));
-        let too_large = MockWitnessBuilder::with_header_len(70_000).witness_for(&ev);
-        assert!(matches!(
-            sub.submit(&ev, &too_large).await,
             Err(RelayerError::Unprovable(_))
         ));
         assert_eq!(client.transaction_count(), 0);

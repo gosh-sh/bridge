@@ -20,8 +20,7 @@
 //! | `deposit_relayer_last_finalized_deposit_id` | gauge | | Highest `depositId` finalized (or found finalized) on AN; seeded from `state.json` `last_finalized_deposit_id` on start (parked/unprovable ids are not in that field) and never moves backwards when a lower outstanding id completes |
 //! | `deposit_relayer_attempts_since_progress` | gauge | | Attempt count of the last failed outstanding id (`state.json`); reset when any id finalizes. Waiting for a deposit nobody made yet is not an attempt |
 //! | `deposit_relayer_parked_deposits` | gauge | | Deposits parked by `--skip-after-attempts` that still need `finalize-one` (`state.json` → `parked_deposit_ids`) |
-//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits that cannot be finalized from their receipt (failed transaction, a log the AN bridge does not read, a proof no message can carry) (`state.json` → `unprovable_deposit_ids`) |
-//! | `deposit_relayer_wallet_deposits` | gauge | | Deposits whose receipt proof needs more gas than an external message may spend; their users finalize them from their own Acki Nacki wallets (`state.json` → `wallet_deposit_ids`) |
+//! | `deposit_relayer_unprovable_deposits` | gauge | | Deposits that cannot be finalized from their receipt (failed transaction, a log the AN bridge does not read, over the message limit) (`state.json` → `unprovable_deposit_ids`) |
 //! | `deposit_relayer_outstanding_deposits` | gauge | | Deposits still to retry, including anchor waits (`state.json` → `outstanding_deposits`) |
 //! | `deposit_relayer_waiting_for_anchor` | gauge | | Outstanding deposits waiting for an AN block anchor |
 //! | `deposit_relayer_oldest_anchor_wait_timestamp_seconds` | gauge | | First observation of the oldest anchor wait (persisted); 0 when none |
@@ -50,7 +49,6 @@ pub const LAST_FINALIZED_DEPOSIT_ID: &str = "deposit_relayer_last_finalized_depo
 pub const ATTEMPTS_SINCE_PROGRESS: &str = "deposit_relayer_attempts_since_progress";
 pub const PARKED_DEPOSITS: &str = "deposit_relayer_parked_deposits";
 pub const UNPROVABLE_DEPOSITS: &str = "deposit_relayer_unprovable_deposits";
-pub const WALLET_DEPOSITS: &str = "deposit_relayer_wallet_deposits";
 pub const OUTSTANDING_DEPOSITS: &str = "deposit_relayer_outstanding_deposits";
 pub const WAITING_FOR_ANCHOR: &str = "deposit_relayer_waiting_for_anchor";
 pub const OLDEST_ANCHOR_WAIT_TIMESTAMP_SECONDS: &str =
@@ -122,11 +120,6 @@ pub fn describe() {
         "Deposits that cannot be finalized from their receipt."
     );
     describe_gauge!(
-        WALLET_DEPOSITS,
-        "Deposits whose receipt proof needs more gas than an external message may spend; their \
-         users finalize them from their own wallets."
-    );
-    describe_gauge!(
         OUTSTANDING_DEPOSITS,
         "Deposits still to retry, including anchor waits (state.json outstanding_deposits)."
     );
@@ -184,7 +177,6 @@ pub fn set_state_gauges(
     attempts_since_progress: u32,
     parked: usize,
     unprovable: usize,
-    wallet: usize,
     outstanding: usize,
     scan_done_through_block: Option<u64>,
 ) {
@@ -192,7 +184,6 @@ pub fn set_state_gauges(
     gauge!(ATTEMPTS_SINCE_PROGRESS).set(f64::from(attempts_since_progress));
     gauge!(PARKED_DEPOSITS).set(parked as f64);
     gauge!(UNPROVABLE_DEPOSITS).set(unprovable as f64);
-    gauge!(WALLET_DEPOSITS).set(wallet as f64);
     gauge!(OUTSTANDING_DEPOSITS).set(outstanding as f64);
     if let Some(block) = scan_done_through_block {
         gauge!(SCAN_DONE_THROUGH_BLOCK).set(block as f64);

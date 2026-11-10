@@ -238,49 +238,9 @@ impl DepositWitness {
             + 2_600 * u64::from(self.log_index)
     }
 
-    /// Its check does not fit [`AN_GAS_CREDIT`]: a node refuses it as an
-    /// external message, and the user's own wallet sends it as an internal
-    /// one, whose value pays for the check ([`Self::wallet_value`]).
-    pub fn needs_wallet(&self) -> bool {
-        self.estimated_gas() > AN_GAS_CREDIT
-    }
-
-    /// The value, in nano-shell, a wallet attaches to `finalizeDeposit` so
-    /// the bridge can check the deposit before it accepts the message: the
-    /// estimated gas and a quarter more at [`AN_NANO_PER_GAS`]. The bridge
-    /// keeps what the check does not spend.
-    pub fn wallet_value(&self) -> u64 {
-        let gas = self.estimated_gas();
-        (gas + gas / 4) * AN_NANO_PER_GAS
-    }
-
-    /// Refuses a deposit no message can carry to the bridge: its check
-    /// takes more than one transaction may spend ([`AN_TX_GAS_LIMIT`]), or
-    /// header and proof do not fit the wallet's message
-    /// ([`MAX_WALLET_PAYLOAD`]).
-    pub fn check_wallet(&self) -> Result<(), String> {
-        let gas = self.estimated_gas();
-        if gas > AN_TX_GAS_LIMIT {
-            return Err(format!(
-                "checking its receipt proof ({} bytes, {} nodes, log {} of its receipt) takes up \
-                 to {gas} gas, over the {AN_TX_GAS_LIMIT} one Acki Nacki transaction may spend",
-                self.payload_len(),
-                self.receipt_proof.len(),
-                self.log_index
-            ));
-        }
-        if self.payload_len() > MAX_WALLET_PAYLOAD {
-            return Err(format!(
-                "its header and receipt proof take {} bytes, over the {MAX_WALLET_PAYLOAD} that \
-                 fit one message to the bridge",
-                self.payload_len()
-            ));
-        }
-        Ok(())
-    }
-
-    /// Refuses a deposit the bridge could not accept from an external
-    /// message: its check would run out of [`AN_GAS_CREDIT`] first.
+    /// Refuses a deposit the bridge could not accept: its check would run
+    /// out of [`AN_GAS_CREDIT`] first. That also keeps the message far below
+    /// the 64 KiB a block manager takes.
     pub fn check_gas(&self) -> Result<(), String> {
         let gas = self.estimated_gas();
         if gas > AN_GAS_CREDIT {
@@ -301,22 +261,6 @@ impl DepositWitness {
 /// (`gas_credit` in the Acki Nacki blockchain config). `finalizeDeposit`
 /// checks the whole deposit within it.
 pub const AN_GAS_CREDIT: u64 = 500_000;
-
-/// The most gas one Acki Nacki transaction may spend. On shellnet an
-/// internal message carrying `value` nano-shell gets `value / 1000 + 9000`
-/// gas, and no more than this, whatever it carries (the compute phase of
-/// its transactions records it as `gas_limit`).
-pub const AN_TX_GAS_LIMIT: u64 = 10_000_000;
-
-/// What one unit of gas costs on Acki Nacki, in nano-shell: the same
-/// shellnet transactions spend 1 000 nano-shell of `gas_fees` per gas used
-/// above the first 9 000.
-pub const AN_NANO_PER_GAS: u64 = 1_000;
-
-/// The header and proof bytes one wallet message can carry to the bridge:
-/// the 64 KiB a block manager takes for an external message, less room for
-/// the wallet call around them.
-pub const MAX_WALLET_PAYLOAD: usize = 60 * 1024;
 
 async fn rpc<N, P, R>(
     provider: &P,

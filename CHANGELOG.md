@@ -46,6 +46,9 @@ assigns it when the release is tagged.
   `--log-dir`, `--prover-timeout-s`, `BRIDGE_DEPOSIT_PROVER_DIR` and `BRIDGE_DEPOSIT_LOG_DIR`, writes
   `<work-dir>/<op-id>/receipt_proof.json` at step 7, and its success JSON drops
   `tx.access_list_len`. Upgrade the AN bridge, the CLI and `deposit-relayer` together.
+- A deposit whose receipt proof needs more than the 500 000 gas an external message may spend
+  (about 65 or more other events before `Deposit` in its transaction) cannot be finalized: CLI exit
+  35, `deposit-relayer` `unprovable_deposit_ids`. Make every deposit a transaction of its own.
 - The EVM RPC for deposits must serve `eth_getBlockByHash` and `eth_getBlockReceipts`.
 - `scripts/deposit_anchor_params.py` takes a `witness.json`, or `--chain-id` with `--block-hash`;
   `--verify` refuses a node whose `eth_chainId` is not the anchor's chain.
@@ -82,16 +85,6 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
-- A deposit whose receipt proof needs more than the 500 000 gas of an external message is sent
-  from the user's own multisig: `ackinacki-bridge deposit --an-wallet <dapp_id::account_id>
-  --an-wallet-keys <keys.json>` attaches the gas (without them, exit 32 asks for them on
-  `--resume`). `deposit-relayer` skips such a deposit into `wallet_deposit_ids` (tick outcome
-  `needs_wallet`, gauge `deposit_relayer_wallet_deposits`); only a proof over 60 KiB or
-  10 000 000 gas cannot be finalized (exit 35, `unprovable_deposit_ids`).
-- `an-contracts` CI rebuilds the AN contracts with the released compilers
-  (`scripts/fetch_an_toolchain.sh`, `scripts/check_an_artefacts.py`), checks that `eccBridge`
-  emits `WithdrawalInitiated` with the header Circuit 4 proves
-  (`scripts/check_withdrawal_event_header.py`) and runs `scripts/test_an_bridge_limits.py`.
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted,
   and such a proof does not slow other payouts or `verifyBlock` with `--backoff-max-secs`.

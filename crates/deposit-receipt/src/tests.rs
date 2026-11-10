@@ -138,26 +138,6 @@ fn a_deposit_over_the_gas_credit_is_refused_and_stays_below_the_message_limit() 
 }
 
 #[test]
-fn a_deposit_over_the_gas_credit_goes_from_a_wallet_up_to_the_message_limit() {
-    let within = witness(3, 500, 600, 60);
-    assert!(!within.needs_wallet());
-    let over = witness(3, 500, 600, 160);
-    assert!(over.needs_wallet());
-    assert!(over.check_wallet().is_ok());
-    // The value pays for the estimate and a quarter more, at 1 000 nano-shell a
-    // gas.
-    let gas = over.estimated_gas();
-    assert_eq!(over.wallet_value(), (gas + gas / 4) * 1_000);
-    assert!(over.wallet_value() / AN_NANO_PER_GAS + 9_000 > gas);
-    // 300 transfers before the deposit still fit one message.
-    assert!(witness(3, 500, 66_000 - 1_500, 300).check_wallet().is_err());
-    assert!(witness(3, 500, 50_000, 300).check_wallet().is_ok());
-    // A receipt with thousands of logs before the deposit needs more than one
-    // transaction.
-    assert!(witness(3, 500, 600, 4_000).check_wallet().is_err());
-}
-
-#[test]
 fn only_the_bridges_six_field_deposit_passes_the_shape_check() {
     let bridge = Address::repeat_byte(0x42);
     let deposit = RpcLog {

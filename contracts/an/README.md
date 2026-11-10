@@ -59,18 +59,14 @@ for that transaction, and it ends at its existing voucher without a second
 mint. An external message may spend 500 000 gas before it is accepted: a
 typical deposit takes 110 000 to 210 000, one with 60 ERC-20 transfers before
 the `Deposit` in its receipt 360 000 to 450 000. A deposit whose proof takes
-more — about 65 such logs before it in a block of thousands of transactions,
-about 88 in a small block — is sent as an internal message from the user's own
-Acki Nacki wallet (`ackinacki-bridge deposit --an-wallet`), whose value pays
-for the check; `deposit-relayer` sends only external messages and lists such
-deposits in `wallet_deposit_ids`. A deposit past that path's limits cannot be
-finalized at all. The wallet's message has to fit the 64 KiB a Block Manager
-takes, which leaves 60 KiB for the header and the proof: about 370 ERC-20
-transfers before the deposit in its receipt. One transaction spends at most
-10 000 000 gas (on shellnet an internal message gets `value / 1000 + 9000` gas
-up to that cap, as the compute phase of its transactions records), which lies
-beyond what fits the message (`DepositWitness::check_wallet` in
-`crates/deposit-receipt`).
+more cannot be finalized, and the CLI and `deposit-relayer` refuse to send it
+(`DepositWitness::check_gas` in `crates/deposit-receipt`). Only other events in
+the deposit's own transaction make a proof that large: about 65 logs before the
+`Deposit` in a block of thousands of transactions, about 88 in a small block.
+`AckiNackiBridge.deposit` called on its own emits three to eight, so **make
+every deposit a transaction of its own**, not one step of a batch or of another
+contract's call that emits dozens of events: the USDC of such a deposit stays
+in the EVM bridge, which has no refund.
 Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`

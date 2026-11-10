@@ -6,10 +6,8 @@
 //! the receipt). Both indices are `uint16`. The receipt must be a success,
 //! and the log the bridge's `Deposit` in its one shape: three topics and
 //! four data words. The bridge checks all of that before it accepts the
-//! message. An external message may spend [`deposit_receipt::AN_GAS_CREDIT`]
-//! on it; a proof that needs more is sent from the user's own wallet
-//! (`--an-wallet`), whose message carries the gas, up to what one
-//! transaction may spend.
+//! external message, so the check has to fit the gas such a message may
+//! spend first ([`deposit_receipt::AN_GAS_CREDIT`]).
 
 /// Why the bridge cannot finalize a deposit from its receipt. Final: the
 /// same receipt gives the same answer every time.
@@ -30,10 +28,9 @@ pub enum Unfinalizable {
         /// The index found.
         value: u64,
     },
-    /// No message can carry the receipt proof to the bridge: checking it
-    /// takes more gas than one transaction may spend, or it does not fit one
-    /// message.
-    TooLarge {
+    /// Checking the receipt proof would take more gas than the bridge may
+    /// spend before it accepts the message.
+    OverGasCredit {
         /// The proof's size and the gas it may take.
         reason: String,
     },
@@ -54,9 +51,9 @@ impl std::fmt::Display for Unfinalizable {
                 "its {what} is {value}; the bridge takes at most {}",
                 u16::MAX
             ),
-            Self::TooLarge {
+            Self::OverGasCredit {
                 reason,
-            } => write!(f, "no message can carry it to the bridge: {reason}"),
+            } => write!(f, "the bridge cannot accept it: {reason}"),
         }
     }
 }
@@ -75,13 +72,12 @@ pub fn check_indices(tx_index: u64, receipt_log_index: u64) -> Result<(), Unfina
     Ok(())
 }
 
-/// Refuses a receipt proof no message can carry to the bridge. One that
-/// needs more gas than an external message may spend still goes, from the
-/// user's wallet.
+/// Refuses a receipt proof the bridge could not check within the gas it
+/// may spend before accepting the message.
 pub fn check_gas(witness: &deposit_receipt::DepositWitness) -> Result<(), Unfinalizable> {
     witness
-        .check_wallet()
-        .map_err(|reason| Unfinalizable::TooLarge {
+        .check_gas()
+        .map_err(|reason| Unfinalizable::OverGasCredit {
             reason,
         })
 }
@@ -110,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_over_the_gas_credit_needs_a_wallet_and_one_over_a_transaction_is_refused() {
+    fn a_proof_over_the_gas_credit_is_refused() {
         let mut w = deposit_receipt::DepositWitness {
             chain_id: 1,
             block_number: 1,
@@ -121,12 +117,8 @@ mod tests {
             log_index: 60,
         };
         assert_eq!(check_gas(&w), Ok(()));
-        assert!(!w.needs_wallet());
         w.log_index = 160;
-        assert_eq!(check_gas(&w), Ok(()));
-        assert!(w.needs_wallet());
-        w.log_index = 4_000;
         let e = check_gas(&w).unwrap_err();
-        assert!(e.to_string().contains("no message can carry it"), "{e}");
+        assert!(e.to_string().contains("the bridge cannot accept it"), "{e}");
     }
 }

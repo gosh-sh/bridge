@@ -46,13 +46,6 @@ TRANSFER_LOG = ((USDC_TOKEN).to_bytes(20, "big"), [bytes.fromhex(
 SUPPLY_LOG = (b"\x77" * 20, [b"\x55" * 32, b"\0" * 31 + b"\x2a"], b"\0" * 64)
 
 
-def estimated_gas(v, log_index):
-    """`deposit_receipt::DepositWitness::estimated_gas` of the `finalizeDeposit` arguments `v`."""
-    nodes = [bytes.fromhex(n) for n in v["receiptProof"]]
-    payload = len(bytes.fromhex(v["header"])) + sum(map(len, nodes))
-    return 30_000 + 22_000 * len(nodes) + 11 * payload + 2_600 * log_index
-
-
 def command(args):
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode:
@@ -229,11 +222,10 @@ class BridgeLimits(unittest.TestCase):
     def anchor(self, v, chain=1):
         self.call("testAnchor", {"chainId": str(chain), "blockHash": v["blockHash"]})
 
-    def submit(self, v, chain=1, log_index=1, expect=0, header=None, source=None, shell=1_000_000_000):
+    def submit(self, v, chain=1, log_index=1, expect=0, header=None):
         return self.call("finalizeDeposit", {
             "chainId": str(chain), "header": v["header"], "txIndex": v["txIndex"],
-            "receiptProof": v["receiptProof"], "logIndex": log_index}, expect=expect, header=header,
-            source=source, shell=shell)
+            "receiptProof": v["receiptProof"], "logIndex": log_index}, expect=expect, header=header)
 
     def voucher(self, deposit, chain=1):
         return self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})[
@@ -480,21 +472,6 @@ class BridgeLimits(unittest.TestCase):
         self.call("setPaused", {"paused": True}, signed=True)
         result = self.finalize(expect=231)
         self.assertLess(result["gas_used"], GAS_CREDIT)
-
-    def test_a_deposit_over_the_gas_credit_is_finalized_from_a_wallet(self):
-        # 200 transfers before the deposit in its receipt: checking it takes more gas than an
-        # external message may spend before accept, so a node refuses the external message.
-        # The user's wallet sends the same arguments as an internal message, whose value pays
-        # for the check. The CLI attaches value for `DepositWitness::estimated_gas`; the check
-        # must not take more than that estimate.
-        logs = [TRANSFER_LOG] * 200 + [vectors.deposit_log(42, 8, 1, 43, USDC_TOKEN)]
-        v = vectors.synthetic(vectors.receipt(logs))
-        self.anchor(v)
-        self.deployed(self.submit(v, log_index=200, source=SENDER, shell=2_000_000_000), 8)
-        self.call("testStopAtAccept")
-        result = self.submit(v, log_index=200, expect=ACCEPT_REACHED)
-        self.assertGreater(result["gas_used"], GAS_CREDIT)
-        self.assertLessEqual(result["gas_used"], estimated_gas(v, 200))
 
     def test_limits_refuse_a_proven_deposit(self):
         self.finalize(amount=TRANSFER + 1, expect=234)

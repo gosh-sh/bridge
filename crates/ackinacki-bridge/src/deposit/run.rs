@@ -1515,39 +1515,6 @@ async fn walk(
                         }
                     },
                     None => {
-                        // A proof over an external message's gas credit goes
-                        // from the user's wallet, which attaches the gas.
-                        let wallet = if proof.needs_wallet() {
-                            let Some(wallet) = p.an_wallet.clone() else {
-                                let e = err(
-                                    ExitCode::DepositProofFailed,
-                                    Stage::Finalize,
-                                    &op,
-                                    format!(
-                                        "checking the receipt proof takes up to {} gas, over the \
-                                         {} an external message may spend before the bridge \
-                                         accepts it. Send it from your Acki Nacki multisig, which \
-                                         attaches {} nano-shell for the gas: --resume {op} \
-                                         --an-wallet <dapp_id::account_id> --an-wallet-keys \
-                                         <keys.json>",
-                                        proof.estimated_gas(),
-                                        deposit_receipt::AN_GAS_CREDIT,
-                                        proof.wallet_value(),
-                                    ),
-                                );
-                                return Err(in_doubt(rec, e));
-                            };
-                            ui.status(&format!(
-                                "the receipt proof needs more gas than an external message may \
-                                 spend; sending finalizeDeposit from {} with {} nano-shell for \
-                                 the gas",
-                                wallet.address.extended(),
-                                proof.wallet_value()
-                            ));
-                            Some(wallet)
-                        } else {
-                            None
-                        };
                         board.start(StepId::Finalize, "");
                         let fc = FinCtx {
                             bridge: cx.bridge_acc,
@@ -1558,7 +1525,6 @@ async fn walk(
                             not_before,
                             deadline: look,
                             poll: d.polls.anchor,
-                            wallet,
                         };
                         let an = d.an.as_ref();
                         match finalize::finalize(an, an, store, rec, &fc, &proof, ui).await? {
@@ -2995,7 +2961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_receipt_proof_over_the_gas_credit_is_sent_from_the_users_wallet() {
+    async fn a_receipt_proof_over_the_gas_credit_closes_at_exit_35() {
         let mut w = World::healthy();
         let h = w.mined_deposit(7);
         w.evm
@@ -3009,32 +2975,24 @@ mod tests {
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         w.anchor_after(0);
         let (p, d) = on_the_real_clock(&w);
-        // Without --an-wallet nothing is sent, and the deposit stays open.
         let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
-        assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
+        assert_eq!(e.exit_code(), ExitCode::DepositUnprovable, "{e}");
         let m = e.to_string();
         assert!(m.contains("before the bridge accepts it"), "{m}");
-        assert!(m.contains("--an-wallet"), "{m}");
-        assert!(!m.contains("operator"), "{m}");
-        assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was sent");
-        let op = e.op_id().unwrap().to_string();
-        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
-        assert_eq!(rec.stage, OpStage::Proved);
-        // A resume with the wallet sends the proof on disk from it.
-        w.credit_chain_for_mined_deposit();
-        let target = OpRef::Op(op.clone());
-        let (mut p, d) = resuming_on_the_real_clock(&w, &target);
-        let wallet = crate::deposit::args::AnWallet {
-            address: World::target(),
-            keys: "/keys.json".into(),
-        };
-        p.an_wallet = Some(wallet.clone());
-        resume(&p, &d, &target, None).await.unwrap();
-        assert_eq!(*w.an.wallet_sends.lock().unwrap(), vec![wallet]);
-        assert_eq!(*w.an.sent.lock().unwrap(), 1, "sent once, from the wallet");
+        assert!(m.contains("Give the bridge operator:"), "{m}");
+        assert!(!m.contains("--resume"), "{m}");
+        assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was finalized");
+        let rec = Store::open(&p.state_dir)
+            .unwrap()
+            .load(e.op_id().unwrap())
+            .unwrap();
+        assert_eq!(rec.stage, OpStage::Failed);
+        // A resume answers from the record and proves nothing again.
+        let target = OpRef::Op(e.op_id().unwrap().to_string());
+        let (p, d) = resuming_on_the_real_clock(&w, &target);
+        let again = resume(&p, &d, &target, None).await.unwrap_err();
+        assert_eq!(again.exit_code(), ExitCode::DepositUnprovable, "{again}");
         assert_eq!(w.witness_builds(), 1, "not built again");
-        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
-        assert_eq!(rec.stage, OpStage::Credited);
     }
 
     #[tokio::test]

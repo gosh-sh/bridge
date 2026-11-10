@@ -110,9 +110,9 @@ pub enum ExitCode {
     CreditUnconfirmed = 34,
     /// The deposit is on chain but the Acki Nacki bridge cannot finalize it
     /// from its receipt (the log is not the bridge's `Deposit`, the
-    /// transaction or log index does not fit `uint16`, or the receipt proof
-    /// is too large for any message), or it is not the deposit that was
-    /// requested.
+    /// transaction or log index does not fit `uint16`, or checking the
+    /// receipt proof needs more gas than an external message may spend), or
+    /// it is not the deposit that was requested.
     DepositUnprovable = 35,
     /// The deposit voucher exists and the bridge transaction that should
     /// have minted the credit aborted. Only the operator can pay it out.

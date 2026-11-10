@@ -146,12 +146,6 @@ pub struct RelayerState {
     /// `finalize-one` cannot help these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprovable_deposit_ids: Vec<u64>,
-    /// Deposit ids whose receipt proof needs more gas than an external
-    /// message may spend, advanced past at once. Their users finalize them
-    /// from their own Acki Nacki wallets (`ackinacki-bridge deposit
-    /// --an-wallet`); the relayer sends no message for them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub wallet_deposit_ids: Vec<u64>,
     /// Deposits waiting for an anchor, a pending submission, or a retry after
     /// failure. Bounded by unfinished ids, not by every deposit ever made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -255,7 +249,7 @@ impl RelayerState {
     /// The next new `depositId` the relayer should try at `now`.
     ///
     /// Walks `last_processed + 1` (or `start`), skipping parked, unprovable,
-    /// wallet and outstanding ids. The relayer alternates this walk with ready
+    /// and outstanding ids. The relayer alternates this walk with ready
     /// outstanding retries so neither queue needs the other to become idle.
     /// `_now` is unused: backoff is applied by
     /// [`ready_outstanding_after`], not by this walk.
@@ -428,16 +422,6 @@ impl RelayerState {
         self.advance_past(deposit_id);
     }
 
-    /// Record a deposit its user finalizes from their own wallet and advance
-    /// the cursor past it. The id goes to `wallet_deposit_ids`.
-    pub fn record_wallet(&mut self, deposit_id: u64) {
-        if !self.wallet_deposit_ids.contains(&deposit_id) {
-            self.wallet_deposit_ids.push(deposit_id);
-        }
-        self.remove_outstanding(deposit_id);
-        self.advance_past(deposit_id);
-    }
-
     /// Attempt count stored for `deposit_id`, or `attempts_since_progress`
     /// when it is not outstanding.
     pub fn outstanding_attempts(&self, deposit_id: u64) -> u32 {
@@ -509,7 +493,6 @@ impl RelayerState {
     fn is_skipped(&self, deposit_id: u64) -> bool {
         self.parked_deposit_ids.contains(&deposit_id)
             || self.unprovable_deposit_ids.contains(&deposit_id)
-            || self.wallet_deposit_ids.contains(&deposit_id)
     }
 
     pub fn ready_outstanding(&self, now: u64) -> Option<u64> {
@@ -835,19 +818,6 @@ mod tests {
         assert!(s.parked_deposit_ids.is_empty());
         assert!(s.outstanding_deposits.is_empty());
         assert_eq!(s.attempts_since_progress, 0);
-    }
-
-    #[test]
-    fn record_wallet_advances_apart_from_unprovable() {
-        let mut s = RelayerState::default();
-        s.record_attempt(3, 0, 0);
-        s.record_wallet(3);
-        assert_eq!(s.next_target_at(0, 0), 4);
-        assert_eq!(s.wallet_deposit_ids, vec![3]);
-        assert!(s.unprovable_deposit_ids.is_empty());
-        assert!(s.outstanding_deposits.is_empty());
-        let back = RelayerState::from_json(&serde_json::to_vec(&s).unwrap()).unwrap();
-        assert_eq!(back.wallet_deposit_ids, vec![3]);
     }
 
     #[test]

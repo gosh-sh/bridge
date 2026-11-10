@@ -953,8 +953,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         // already finalized is not refused here: it passes every check, is
         // accepted and paid for by the bridge, and ends at its existing
         // voucher without a second mint. A deposit whose proof walk exceeds
-        // the credit is sent as an internal message from the user's wallet,
-        // whose value pays for the checks.
+        // the credit cannot be finalized; the CLI and deposit-relayer refuse
+        // to send one.
         require(!_paused, ERR_PAUSED);
         uint256 blockHash = gosh.keccak256(header);
         require(_acceptedBlockHash[chainId][blockHash], ERR_UNKNOWN_BLOCK);

@@ -107,9 +107,6 @@ pub struct FinCtx {
     pub deadline: Option<tokio::time::Instant>,
     /// How often a paused bridge is looked at again.
     pub poll: Duration,
-    /// The wallet that sends a proof over an external message's gas
-    /// credit; `None` sends the external message.
-    pub wallet: Option<crate::deposit::args::AnWallet>,
 }
 
 /// What the deadline leaves behind. With a send in flight, or one that
@@ -354,10 +351,7 @@ async fn attempts(
             )
         })?;
         let earlier = in_doubt.swap(true, Ordering::SeqCst);
-        let outcome = match &cx.wallet {
-            Some(w) => send.send_finalize_from_wallet(cx.bridge, witness, w).await,
-            None => send.send_finalize(cx.bridge, cx.bridge_dapp, witness).await,
-        };
+        let outcome = send.send_finalize(cx.bridge, cx.bridge_dapp, witness).await;
         match react(&outcome) {
             Reaction::ToCredit => {
                 return Ok(FinalizeExit::ToCredit {
@@ -549,7 +543,6 @@ mod tests {
             not_before: 0,
             deadline: None,
             poll: std::time::Duration::from_secs(30),
-            wallet: None,
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
@@ -621,7 +614,6 @@ mod tests {
             not_before: 0,
             deadline: Some(tokio::time::Instant::now() + std::time::Duration::from_secs(600)),
             poll: std::time::Duration::from_secs(30),
-            wallet: None,
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
@@ -693,7 +685,6 @@ mod tests {
             not_before: 0,
             deadline: Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1)),
             poll: std::time::Duration::from_secs(30),
-            wallet: None,
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
@@ -737,7 +728,6 @@ mod tests {
             not_before: 0,
             deadline: Some(tokio::time::Instant::now() + std::time::Duration::from_secs(1)),
             poll: std::time::Duration::from_secs(30),
-            wallet: None,
         };
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let t0 = tokio::time::Instant::now();
@@ -786,7 +776,6 @@ mod tests {
                 tokio::time::Instant::now() + std::time::Duration::from_secs(deadline_s),
             ),
             poll: std::time::Duration::from_secs(30),
-            wallet: None,
         };
         (an, cx)
     }

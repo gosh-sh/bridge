@@ -241,6 +241,11 @@ impl MockAnSubmitter {
         self.inner.lock().expect("poisoned").gloas_gets
     }
 
+    /// Refuse every `submitUpdate` from now on, or stop refusing.
+    pub fn set_reject(&self, on: bool) {
+        self.inner.lock().expect("poisoned").reject = on;
+    }
+
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
     /// Lets a test play the one sequence that matters: the first attempt times
     /// out, the chain ran it anyway, and the retry is refused against the

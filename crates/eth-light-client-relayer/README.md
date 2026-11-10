@@ -13,7 +13,7 @@ waits for a better signed one. The daemon proves the oldest queued
 checkpoints in the background, `--parallel-proofs` at once (default 2), and
 sends them oldest first. A checkpoint that fails is tried again until it is
 on chain; each failed try adds one to
-`eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"}` at
+`eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}` at
 `GET /metrics` (`--metrics-addr`, `ETH_LC_RELAYER_METRICS_ADDR`). Ancestry
 admits the blocks behind a proven one, headers oldest first, up to 32 per
 call. Across checkpoints the daemon missed (it or the beacon node was down)

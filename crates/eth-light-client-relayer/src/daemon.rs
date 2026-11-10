@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     error::RelayerError,
@@ -100,13 +100,16 @@ impl<S: BeaconSource + 'static, P: ProofGenerator + 'static, A: AnSubmitter> Rel
         backoff.validate()?;
         tokio::pin!(shutdown);
         let mut delay = backoff.initial;
-        let _watcher = self.spawn_watcher();
+        // Without the watcher no checkpoint is taken while every round still
+        // looks fine; the daemon stops instead, and its supervisor restarts it.
+        let mut watcher = self.spawn_watcher();
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
                     info!("shutdown signal; exiting after last tick");
                     return Ok(());
                 }
+                why = watcher.stopped() => return Err(watcher_stopped(why)),
                 outcome = self.work() => {
                     metrics.ticks_total.fetch_add(1, Ordering::Relaxed);
                     match outcome {
@@ -128,10 +131,16 @@ impl<S: BeaconSource + 'static, P: ProofGenerator + 'static, A: AnSubmitter> Rel
             }
             tokio::select! {
                 _ = &mut shutdown => return Ok(()),
+                why = watcher.stopped() => return Err(watcher_stopped(why)),
                 _ = tokio::time::sleep(delay) => {}
             }
         }
     }
+}
+
+fn watcher_stopped(why: String) -> RelayerError {
+    error!(why, "checkpoint watcher stopped; the daemon exits");
+    RelayerError::other(format!("checkpoint watcher stopped: {why}"))
 }
 
 fn record(m: &RelayerMetrics, o: &TickOutcome) {

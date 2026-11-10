@@ -76,7 +76,7 @@ assigns it when the release is tagged.
   (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) at once. A checkpoint that fails is tried again
   until it is on chain, and a version signed by fewer than 342 of the committee is not taken.
 - `eth-lc-relayer daemon --metrics-addr` (`ETH_LC_RELAYER_METRICS_ADDR`) serves `GET /metrics` with
-  the counter `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"}`;
+  the counter `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}`;
   `docker/compose.yaml` publishes it on `ETH_LC_RELAYER_METRICS_PORT` (default 9468). Add it to
   the scrape config.
 - `eth-lc-relayer daemon` closes the blocks of checkpoints it missed with `submitAncestry` back from

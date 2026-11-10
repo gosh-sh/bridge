@@ -111,8 +111,12 @@ and a restart proves what the previous run had queued.
 
 A checkpoint whose proof fails, or which Acki Nacki does not take, stays at the front and is tried
 again for as long as it takes: the light client cannot move past a checkpoint that is not on
-chain. Each failed try adds one to the counter `eth_lc_relayer_checkpoint_failures_total`, with
-`stage="prove"` or `stage="submit"`, served at `GET /metrics` when `--metrics-addr` is set.
+chain. A proof the contract refused is not sent again; the checkpoint is proven anew against what
+the contract holds then (a Gloas slot the owner changed, for one). Each failed try adds one to the
+counter `eth_lc_relayer_checkpoint_failures_total`, with `stage="prove"`, `stage="submit"`, or
+`stage="rotate"` while the checkpoint waits at a period boundary for the committee rotate, served
+at `GET /metrics` when `--metrics-addr` is set. The daemon exits with an ERROR if its watcher
+stops, so that its supervisor starts it again.
 Checkpoints the daemon never saw, because it or the beacon node was down, are logged as an ERROR
 and their blocks are closed with `submitAncestry` (§3.4).
 

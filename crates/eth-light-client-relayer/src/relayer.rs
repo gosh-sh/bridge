@@ -28,15 +28,16 @@ use crate::{
 };
 
 /// Failed attempts to get a checkpoint on chain, by `stage`: `prove` (the
-/// step proof did not come out) or `submit` (Acki Nacki did not take it or
-/// did not answer). The checkpoint is tried again however often this grows.
+/// step proof did not come out), `submit` (Acki Nacki did not take it or did
+/// not answer) or `rotate` (it waits at a period boundary for the committee
+/// rotate). The checkpoint is tried again however often this grows.
 pub const CHECKPOINT_FAILURES: &str = "eth_lc_relayer_checkpoint_failures_total";
 
 /// Describe the daemon's metrics to the exporter the binary installs.
 pub fn describe_metrics() {
     metrics::describe_counter!(
         CHECKPOINT_FAILURES,
-        "Failed attempts to get a checkpoint on chain: stage=prove or stage=submit"
+        "Failed attempts to get a checkpoint on chain: stage=prove, submit or rotate"
     );
 }
 
@@ -44,6 +45,9 @@ pub fn describe_metrics() {
 enum Stage {
     Prove,
     Submit,
+    /// The front checkpoint is of a period the contract has no committee
+    /// for yet, and waits for the rotate.
+    Rotate,
 }
 
 impl Stage {
@@ -51,8 +55,14 @@ impl Stage {
         match self {
             Self::Prove => "prove",
             Self::Submit => "submit",
+            Self::Rotate => "rotate",
         }
     }
+}
+
+/// One more failed attempt at the front checkpoint in the counter.
+fn count_failure(stage: Stage) {
+    metrics::counter!(CHECKPOINT_FAILURES, "stage" => stage.label()).increment(1);
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +491,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     // hop over it; the next tick reads the contract again.
                     Err(e) if self.config.enable_rotate => {
                         warn!(error = %e, "getCommitteeState at the period boundary failed; next tick");
+                        count_failure(Stage::Rotate);
                         return Ok(TickOutcome::AnPending {
                             reason: format!("getCommitteeState at the period boundary: {e}"),
                         });
@@ -512,10 +523,12 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             if self.config.owner_hop {
                 let mut update = update;
                 if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+                    count_failure(Stage::Submit);
                     return Ok(outcome);
                 }
                 return self.owner_hop(update, from_period, to_period).await;
             }
+            count_failure(Stage::Rotate);
             self.state.record_rotate_pending(to_period);
             self.persist()?;
             warn!(
@@ -540,6 +553,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     .is_some_and(|out| out.from_period == from_period)
                 && sends < MAX_ROTATE_SENDS
             {
+                count_failure(Stage::Rotate);
                 return Ok(TickOutcome::AnPending {
                     reason: format!(
                         "the rotate proof from period {from_period} is unconfirmed after {sends} \
@@ -562,6 +576,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             );
             let mut update = update;
             if let Err(outcome) = self.pin_gloas_fork_slot(&mut update).await {
+                count_failure(Stage::Submit);
                 return Ok(outcome);
             }
             let outcome = self.owner_hop(update, from_period, to_period).await?;
@@ -574,6 +589,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             }
             return Ok(outcome);
         }
+        count_failure(Stage::Rotate);
         self.state.record_rotate_pending(to_period);
         self.persist()?;
         warn!(
@@ -1270,6 +1286,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                         rotate.hop_refused = true;
                     }
                 }
+                count_failure(Stage::Rotate);
                 self.state.record_rotate_pending(to_period);
                 self.persist()?;
                 self.keep_proof(update.finalized_slot, bundle);
@@ -1371,7 +1388,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
     /// The checkpoint stays at the front and is tried again: the light
     /// client cannot move past a checkpoint that is not on chain.
     fn step_failed(&self, finalized_slot: u64, stage: Stage, reason: &str) {
-        metrics::counter!(CHECKPOINT_FAILURES, "stage" => stage.label()).increment(1);
+        count_failure(stage);
         warn!(
             slot = finalized_slot,
             stage = stage.label(),
@@ -1448,10 +1465,15 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     finalized_slot: update.finalized_slot,
                 })
             },
+            // The contract read this proof and refused it. Sending it again
+            // gets the same answer when the proof itself is the cause (a
+            // Gloas slot the owner has changed since, a committee that moved
+            // on), so it is dropped and the checkpoint proven again against
+            // what the contract holds then.
             SubmitOutcome::Rejected {
                 reason,
             } => {
-                self.keep_proof(slot, bundle);
+                drop(bundle);
                 self.step_failed(slot, Stage::Submit, &reason);
                 Ok(TickOutcome::AnRejected {
                     reason,
@@ -3767,6 +3789,7 @@ mod tests {
         gate: tokio::sync::Semaphore,
         running: std::sync::atomic::AtomicUsize,
         peak: std::sync::atomic::AtomicUsize,
+        started: std::sync::atomic::AtomicUsize,
         fail: std::sync::Mutex<std::collections::HashSet<u64>>,
     }
 
@@ -3776,6 +3799,7 @@ mod tests {
                 gate: tokio::sync::Semaphore::new(0),
                 running: Default::default(),
                 peak: Default::default(),
+                started: Default::default(),
                 fail: Default::default(),
             })
         }
@@ -3793,6 +3817,10 @@ mod tests {
         fn peak(&self) -> usize {
             self.peak.load(std::sync::atomic::Ordering::SeqCst)
         }
+
+        fn started(&self) -> usize {
+            self.started.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     #[async_trait::async_trait]
@@ -3802,6 +3830,7 @@ mod tests {
             update: &FinalityUpdate,
         ) -> Result<StepProofBundle, RelayerError> {
             use std::sync::atomic::Ordering::SeqCst;
+            self.started.fetch_add(1, SeqCst);
             let now = self.running.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(now, SeqCst);
             self.gate.acquire().await.expect("gate open").forget();
@@ -3982,23 +4011,11 @@ mod tests {
         assert!(failed > 3, "128 is tried more than three times: {failed}");
         assert_eq!(r.state.last_finalized_slot, Some(96));
         assert_eq!(r.queued(), 2, "128 and 160 both wait");
-        let counted: u64 = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(key, ..)| {
-                key.key().name() == CHECKPOINT_FAILURES
-                    && key
-                        .key()
-                        .labels()
-                        .any(|l| l.key() == "stage" && l.value() == "prove")
-            })
-            .map(|(.., value)| match value {
-                metrics_util::debugging::DebugValue::Counter(n) => n,
-                other => panic!("not a counter: {other:?}"),
-            })
-            .sum();
-        assert_eq!(counted, failed, "every failed try is counted");
+        assert_eq!(
+            failures(&snapshotter, "prove"),
+            failed,
+            "every failed try is counted"
+        );
 
         prover.fail.lock().unwrap().clear();
         let mut on_chain = Vec::new();
@@ -4018,6 +4035,156 @@ mod tests {
                 .all(|s| !s.has_missed_checkpoints()),
             "no checkpoint was missed"
         );
+    }
+
+    /// What `eth_lc_relayer_checkpoint_failures_total{stage}` holds.
+    fn failures(snapshotter: &metrics_util::debugging::Snapshotter, stage: &str) -> u64 {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| {
+                key.key().name() == CHECKPOINT_FAILURES
+                    && key
+                        .key()
+                        .labels()
+                        .any(|l| l.key() == "stage" && l.value() == stage)
+            })
+            .map(|(.., value)| match value {
+                metrics_util::debugging::DebugValue::Counter(n) => n,
+                other => panic!("not a counter: {other:?}"),
+            })
+            .sum()
+    }
+
+    /// A proof the contract refused is not sent again: the checkpoint is
+    /// proven anew, so a proof made against what the contract no longer
+    /// holds (a Gloas slot the owner changed) does not stop the light client.
+    #[tokio::test]
+    async fn a_refused_proof_is_dropped_and_the_checkpoint_proven_again() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let prover = GatedProver::open();
+        let (mut r, _source, mock) = gated_relayer(
+            vec![update(100, 96)],
+            prover.clone(),
+            dir.path().join("state.json"),
+        );
+        mock.set_reject(true);
+        let mut refused = 0;
+        for _ in 0..8 {
+            if matches!(r.tick().await.unwrap(), TickOutcome::AnRejected { .. }) {
+                refused += 1;
+                if refused == 2 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(refused, 2);
+        assert_eq!(
+            prover.started(),
+            2,
+            "each refusal proves the checkpoint again"
+        );
+        assert_eq!(failures(&snapshotter, "submit"), 2);
+
+        mock.set_reject(false);
+        let mut on_chain = None;
+        for _ in 0..8 {
+            if let TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } = r.tick().await.unwrap()
+            {
+                on_chain = Some(finalized_slot);
+                break;
+            }
+        }
+        assert_eq!(on_chain, Some(96));
+        assert_eq!(
+            prover.started(),
+            3,
+            "the proof that went on chain is a fresh one"
+        );
+    }
+
+    /// A checkpoint waiting at a period boundary for the committee rotate is
+    /// not on chain either, and the counter says so.
+    #[tokio::test]
+    async fn waiting_for_the_rotate_is_counted() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(9000, 8192)]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        for _ in 0..3 {
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::RotateRequired { .. }
+            ));
+        }
+        assert_eq!(failures(&snapshotter, "rotate"), 3);
+    }
+
+    /// A beacon source that panics, as a bug in the watcher's path would.
+    struct PanickingSource;
+
+    #[async_trait::async_trait]
+    impl BeaconSource for PanickingSource {
+        async fn fetch_finality(&self) -> Result<FinalityUpdate, RelayerError> {
+            panic!("beacon source exploded")
+        }
+
+        async fn period_update(
+            &self,
+            _period: u64,
+        ) -> Result<crate::source::PeriodUpdate, RelayerError> {
+            unreachable!("no rotate in this test")
+        }
+    }
+
+    /// The daemon does not go on without its watcher: every round would look
+    /// fine while no checkpoint is taken. It stops with the reason, and its
+    /// supervisor starts it again.
+    #[tokio::test]
+    async fn the_daemon_stops_when_its_watcher_dies() {
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.enable_rotate = false;
+        cfg.watch_interval = Duration::from_millis(10);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(PanickingSource),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        let run = tokio::time::timeout(
+            Duration::from_secs(10),
+            r.run_until_shutdown(
+                crate::daemon::BackoffConfig::default(),
+                crate::daemon::RelayerMetrics::new(),
+                std::future::pending::<()>(),
+            ),
+        )
+        .await
+        .expect("the daemon stops on its own");
+        let err = run.expect_err("a dead watcher is an error");
+        assert!(err.to_string().contains("beacon source exploded"), "{err}");
     }
 
     /// A version of a checkpoint signed by fewer than two thirds of the

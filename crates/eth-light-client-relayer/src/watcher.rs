@@ -199,6 +199,25 @@ impl<S: BeaconSource + 'static> Watcher<S> {
 /// A running watcher; dropping it stops it.
 pub struct WatcherTask(tokio::task::JoinHandle<()>);
 
+impl WatcherTask {
+    /// Wait until the watcher stops, which it does only by panicking, and
+    /// say why. Cancel-safe: the daemon polls it beside its own work.
+    pub async fn stopped(&mut self) -> String {
+        match (&mut self.0).await {
+            Ok(()) => "it returned".into(),
+            Err(e) if e.is_panic() => {
+                let panic = e.into_panic();
+                panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "it panicked".into())
+            },
+            Err(e) => e.to_string(),
+        }
+    }
+}
+
 impl Drop for WatcherTask {
     fn drop(&mut self) {
         self.0.abort();

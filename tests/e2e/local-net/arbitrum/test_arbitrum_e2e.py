@@ -26,16 +26,14 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
 
-from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOLIA_BEACON_GENESIS,
-                      SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv, tail, wait_for)
+from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, REPO, SEPOLIA_CHAIN, env,
+                      evm_address, keccak256, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
-RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: 103 min)
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 
@@ -62,18 +60,6 @@ def test_01_deployer_key_matches_its_address(arb, ctx):
     assert eth >= 5 * 10**15, f"{address} has {eth / 1e18} ETH on Arbitrum Sepolia; a run needs ~0.005"
     assert usdc >= AMOUNT, f"{address} has {usdc / 1e6} USDC on Arbitrum Sepolia; the run moves 2"
     ctx.update(address=address, usdc_before=usdc)
-
-
-def test_02_no_sepolia_committee_change_during_the_run():
-    """The Sepolia sync committee stays the same for the whole run. The light client follows a
-    new committee only through a rotate proof, which does not run live yet, or by the owner's
-    hand, which this test does not allow: a run across the change would stall."""
-    slot = int((time.time() - SEPOLIA_BEACON_GENESIS) // SLOT_SECS)
-    left = (PERIOD_SLOTS - slot % PERIOD_SLOTS) * SLOT_SECS
-    change = datetime.fromtimestamp(time.time() + left, timezone.utc)
-    print(f"  Sepolia period {slot // PERIOD_SLOTS}, next committee at {change:%F %H:%M} UTC")
-    assert left > RUN_SECS, (f"the Sepolia sync committee changes in {left // 60} min, at {change:%H:%M} UTC; "
-                             f"start the run after that")
 
 
 # ── 1 · the network ─────────────────────────────────────────────────────────
@@ -386,12 +372,13 @@ def test_55_light_client_relayer_started(run, an, ctx):
 
 
 def test_60_light_client_accepts_spans(run):
-    """The light client accepts the Sepolia blocks between two checkpoints (submitAncestry): an
-    Arbitrum assertion's Sepolia block is one of those."""
-    wait_for("eth-lc-relayer gets a span accepted", lambda: "submitAncestry accepted" in run.log("lc-relayer"),
-             2 * LC_PROOF_SECS, log=lambda: run.log("lc-relayer"))
-    assert "span given up" not in run.log("lc-relayer"), \
-        "eth-lc-relayer gave a span up: its blocks will never be accepted\n" + tail(run.log("lc-relayer"))
+    """arbitrum-anchors sends the light client the Sepolia blocks of the epoch an Arbitrum
+    assertion landed in (submitAncestry), between the two checkpoints around it."""
+    sent = "submitAncestry sent for the assertion's parent-chain block"
+    wait_for("arbitrum-anchors gets a span accepted", lambda: sent in run.log("anchors"),
+             ANCHOR_SECS, log=lambda: run.log("anchors"))
+    assert "no more submitAncestry" not in run.log("anchors"), \
+        "arbitrum-anchors gave a span up: its block will never be accepted\n" + tail(run.log("anchors"))
 
 
 def test_61_deposit_block_anchored(run, an):

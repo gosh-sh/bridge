@@ -6,10 +6,23 @@ Polls Ethereum beacon `finality_update` **and** `light_client/updates` (current
 `EthBeaconLightClient.submitUpdate` on Acki Nacki.
 
 `finalizeDeposit` flip (owner): `scripts/ursus/flip_deposit_to_light_client.md`.
-Ancestry (31/32 on-chain) fills the span between two proven checkpoints,
-headers oldest first. The daemon fetches the span back to its previous
-checkpoint when `ETH_RPC_URL` is set and checks it locally; sending
-`submitAncestry` is `--submit-ancestry` (default off). One-shot:
+A watcher in a task of its own asks the beacon node every slot and takes
+every checkpoint it finalizes into a queue on disk as it appears
+(`<state file>.steps/`); a version signed by fewer than 342 of the committee
+waits for a better signed one. The daemon proves the oldest queued
+checkpoints in the background, `--parallel-proofs` at once (default 2), and
+sends them oldest first. A checkpoint that fails is tried again until it is
+on chain; each failed try adds one to
+`eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}` at
+`GET /metrics` (`--metrics-addr`, `ETH_LC_RELAYER_METRICS_ADDR`). Ancestry
+admits the blocks behind a proven one, headers oldest first, up to 32 per
+call. Across checkpoints the daemon missed (it or the beacon node was down)
+it sends them back from the next checkpoint, from the headers of
+`ETH_RPC_URL`, which it needs to start;
+between adjacent checkpoints only with `--submit-ancestry` (default off).
+`arbitrum-anchors` sends the span for the epoch each Arbitrum assertion
+landed in, which is all the Arbitrum path needs. The light client keeps a
+proven hash 14 days. One-shot:
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's
 parent chain, which is necessary for a span to carry it, not sufficient.
@@ -67,11 +80,11 @@ eth-lc-relayer prove-one --beacon-url … \
   --srs-path $HOME/srs/hermez-raw-19 \
   --out-dir ./bundle --work-dir ./work --log-dir ./logs
 
-# 4a. Keep the step proving key between proves: generate it once per prover
-#     build (STEP_KEY_DIR=<dir> STEP_KEYGEN_ONLY=1 export_step_vk_blob), then
-#     set STEP_KEY_DIR in the relayer's environment, which the prover inherits.
-#     Generate it again after every prover upgrade: the prover refuses a key
-#     another build generated.
+# 4a. The step prover keeps its proving key in STEP_KEY_DIR (inherited from
+#     the relayer's environment), or in step-key/ next to the SRS. The first
+#     prove of a build generates it there, every later one reads it, and a key
+#     another build generated is replaced. STEP_KEYGEN_ONLY=1 generates it
+#     ahead of the first prove and stops.
 
 # 5. Pin the Gloas fork slot (after deploy, and again on mainnet once Gloas
 #    is scheduled; Sepolia 11296768, mainnet max until then)
@@ -85,8 +98,9 @@ eth-lc-relayer submit-rotate --bundle-dir ./rotate_tree --state-dir ./state …
 eth-lc-relayer ancestry-one --beacon-url … \
   --checkpoint-slot 12345678 --deposit-hash 0x…
 
-# 8. Write the blocks between two proven anchors on-chain (needs
-#    --submit-ancestry on the daemon, or this one-shot + live-submit)
+# 8. Write the blocks between two proven anchors on-chain (the daemon does it
+#    across missed checkpoints, and everywhere with --submit-ancestry; this
+#    one-shot needs live-submit)
 eth-lc-relayer submit-ancestry --eth-rpc-url … --checkpoint-hash 0x… \
   --older-anchor-hash 0x… \
   --an-graphql-url … --an-keys-path … \
@@ -97,7 +111,8 @@ eth-lc-relayer flip-owner --an-usdc-bridge 'dapp::account' …
 
 # 10. Bridge on an Arbitrum chain: anchor the blocks that hold deposits through
 #     ArbitrumBlockVerifier.proveBlock (live-submit), next to deposit-relayer
-#     daemon. Keep --state-dir across restarts: the proofs in its state file
+#     daemon. Sends submitAncestry for each assertion's parent-chain epoch to
+#     the light client the bridge names (getLightClient). Keep --state-dir across restarts: the proofs in its state file
 #     cannot be fetched again.
 eth-lc-relayer arbitrum-anchors --parent-rpc-url … --arbitrum-rpc-url … \
   --bridge-address 0x… --from-block <bridge deploy block> \

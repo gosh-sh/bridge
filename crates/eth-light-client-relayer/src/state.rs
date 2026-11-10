@@ -11,19 +11,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::RelayerError;
 
-/// One span of execution headers the daemon still owes the light client.
+/// One span of execution headers the daemon still owes the light client:
+/// the blocks between two checkpoints it put on chain one after the other.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OwedSpan {
     /// The older anchor: the checkpoint the head stood on before.
     pub older: [u8; 32],
     /// The newer anchor: the checkpoint that moved the head.
     pub newer: [u8; 32],
+    /// Finalized slots of the two anchors; unset in spans an earlier version
+    /// queued.
+    #[serde(default)]
+    pub older_slot: Option<u64>,
+    #[serde(default)]
+    pub newer_slot: Option<u64>,
+    /// The oldest block already admitted, when part of the span is: the next
+    /// `submitAncestry` walks back from it.
+    #[serde(default)]
+    pub cursor: Option<[u8; 32]>,
+    /// Blocks admitted so far, against which a walk that never meets `older`
+    /// is stopped.
+    #[serde(default)]
+    pub walked: u64,
     /// Submissions this span has already cost the light client.
     #[serde(default)]
     pub paid_attempts: u32,
     /// When its headers first failed to fetch; unset while fetching works.
     #[serde(default)]
     pub fetch_since: Option<u64>,
+}
+
+impl OwedSpan {
+    /// Whether checkpoints are missing between the two anchors: then the
+    /// blocks between them have no other way onto the light client.
+    pub fn has_missed_checkpoints(&self) -> bool {
+        match (self.older_slot, self.newer_slot) {
+            (Some(o), Some(n)) => crate::step_queue::missed_between(o, n) > 0,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,14 +222,17 @@ mod tests {
         s.owed_spans.push(OwedSpan {
             older: [1u8; 32],
             newer: [2u8; 32],
+            older_slot: Some(64),
+            newer_slot: Some(160),
+            cursor: Some([5u8; 32]),
+            walked: 33,
             paid_attempts: 2,
             fetch_since: Some(1_700_000_000),
         });
         s.owed_spans.push(OwedSpan {
             older: [2u8; 32],
             newer: [3u8; 32],
-            paid_attempts: 0,
-            fetch_since: None,
+            ..Default::default()
         });
         s.save(&path).unwrap();
 

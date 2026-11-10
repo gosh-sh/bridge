@@ -36,8 +36,10 @@ pub mod relayer;
 pub mod rotate;
 pub mod source;
 pub mod state;
+pub mod step_queue;
 pub mod submitter;
 pub mod types;
+pub mod watcher;
 
 pub use an_config::AnConfig;
 pub use ancestry::{covers_deposit, ExecLink};
@@ -50,7 +52,7 @@ pub use error::RelayerError;
 pub use prover::{
     MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,
 };
-pub use relayer::{Relayer, RelayerConfig, TickOutcome};
+pub use relayer::{describe_metrics, Relayer, RelayerConfig, TickOutcome};
 pub use rotate::{
     MockRotateRunner, RotateStageRunner, SubprocessRotateConfig, SubprocessRotateRunner,
 };
@@ -68,3 +70,4 @@ pub use types::{
     FinalityUpdate, RotateProofBundle, StepProofBundle, GLOAS_NOT_SCHEDULED, SLOTS_PER_SYNC_PERIOD,
     STEP_INSTANCE_LEN,
 };
+pub use watcher::Watcher;

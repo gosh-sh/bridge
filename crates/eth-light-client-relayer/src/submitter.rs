@@ -149,6 +149,7 @@ struct MockInner {
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
+    gateway_error: bool,
     /// `--dry-run`: the first accepted step bootstraps the committee period,
     /// and every accepted step sets the current committee to its own, as
     /// the contract's would be.
@@ -182,6 +183,7 @@ impl MockAnSubmitter {
                 gloas_gets: 0,
                 gloas_get_fails_from: None,
                 committee_period_read_fails: false,
+                gateway_error: false,
                 follow_steps: false,
             }),
         }
@@ -239,6 +241,17 @@ impl MockAnSubmitter {
 
     pub fn gloas_gets(&self) -> u32 {
         self.inner.lock().expect("poisoned").gloas_gets
+    }
+
+    /// Refuse every `submitUpdate` from now on, or stop refusing.
+    pub fn set_reject(&self, on: bool) {
+        self.inner.lock().expect("poisoned").reject = on;
+    }
+
+    /// Answer every `submitUpdate` as a gateway that fails before the chain
+    /// runs the call: an HTTP 500 with no exit code.
+    pub fn set_gateway_error(&self, on: bool) {
+        self.inner.lock().expect("poisoned").gateway_error = on;
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -351,9 +364,16 @@ impl MockAnSubmitter {
 impl AnSubmitter for MockAnSubmitter {
     async fn submit_update(&self, bundle: &StepProofBundle) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        if inner.gateway_error {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "submitUpdate failed: HTTP status 500 Internal Server Error".into(),
+            });
+        }
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
-                reason: "ZKHALO2VERIFYWITHVK rejected the step proof".into(),
+                reason: "submitUpdate failed: ZKHALO2VERIFYWITHVK rejected the step proof, \
+                         exit_code=220"
+                    .into(),
             });
         }
         let slot = bundle.parsed.finalized_slot;
@@ -419,7 +439,7 @@ impl AnSubmitter for MockAnSubmitter {
         &self,
         header_rlps: &[Vec<u8>],
     ) -> Result<SubmitOutcome, RelayerError> {
-        let (older, newer) = crate::header_rlp::link_headers(header_rlps)?;
+        let (_, newer) = crate::header_rlp::link_headers(header_rlps)?;
         let mut inner = self.inner.lock().expect("poisoned");
         inner.ancestry_attempts += 1;
         if inner.error_ancestry {
@@ -437,13 +457,15 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "submitAncestry rejected".into(),
             });
         }
-        if !inner.proven.contains(&older) || !inner.proven.contains(&newer) {
+        // As the contract: the newest end proven, every header behind it
+        // admitted, the oldest included.
+        if !inner.proven.contains(&newer) {
             return Ok(SubmitOutcome::Rejected {
                 reason: "ERR_UNKNOWN_CHECKPOINT".into(),
             });
         }
         let last = header_rlps.len() - 1;
-        for rlp in &header_rlps[1..last] {
+        for rlp in &header_rlps[..last] {
             inner.proven.insert(crate::header_rlp::keccak256(rlp));
         }
         inner.ancestry_count += 1;

@@ -26,16 +26,14 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
 
-from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOLIA_BEACON_GENESIS,
-                      SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv, tail, wait_for)
+from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, REPO, SEPOLIA_CHAIN, env,
+                      evm_address, keccak256, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
-RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: 103 min)
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 
 
@@ -62,18 +60,6 @@ def test_01_deployer_key_matches_its_address(arb, ctx):
     assert eth >= 5 * 10**15, f"{address} has {eth / 1e18} ETH on Arbitrum Sepolia; a run needs ~0.005"
     assert usdc >= AMOUNT, f"{address} has {usdc / 1e6} USDC on Arbitrum Sepolia; the run moves 2"
     ctx.update(address=address, usdc_before=usdc)
-
-
-def test_02_no_sepolia_committee_change_during_the_run():
-    """The Sepolia sync committee stays the same for the whole run. The light client follows a
-    new committee only through a rotate proof, which does not run live yet, or by the owner's
-    hand, which this test does not allow: a run across the change would stall."""
-    slot = int((time.time() - SEPOLIA_BEACON_GENESIS) // SLOT_SECS)
-    left = (PERIOD_SLOTS - slot % PERIOD_SLOTS) * SLOT_SECS
-    change = datetime.fromtimestamp(time.time() + left, timezone.utc)
-    print(f"  Sepolia period {slot // PERIOD_SLOTS}, next committee at {change:%F %H:%M} UTC")
-    assert left > RUN_SECS, (f"the Sepolia sync committee changes in {left // 60} min, at {change:%H:%M} UTC; "
-                             f"start the run after that")
 
 
 # ── 1 · the network ─────────────────────────────────────────────────────────

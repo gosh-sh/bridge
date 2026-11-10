@@ -22,8 +22,8 @@ use deposit_receipt::DepositWitness;
 use serde_json::Value;
 use tvm_client::{
     abi::{
-        decode_message_body, encode_message, Abi, CallSet, FunctionHeader,
-        ParamsOfDecodeMessageBody, ParamsOfEncodeMessage, Signer,
+        decode_message_body, encode_message, encode_message_body, Abi, CallSet, FunctionHeader,
+        ParamsOfDecodeMessageBody, ParamsOfEncodeMessage, ParamsOfEncodeMessageBody, Signer,
     },
     account::{get_account, ParamsOfGetAccount},
     error::ClientError,
@@ -36,7 +36,10 @@ use tvm_client::{
 };
 
 use crate::{
-    deposit::refusals::{exit_code_from_sdk, react, FinalizeSend, Reaction},
+    deposit::{
+        args::AnWallet,
+        refusals::{exit_code_from_sdk, react, FinalizeSend, Reaction},
+    },
     errors::{CliError, CliResult},
 };
 
@@ -423,7 +426,24 @@ pub trait AnSend: Send + Sync {
         bridge_dapp: [u8; 32],
         witness: &DepositWitness,
     ) -> FinalizeSend;
+
+    /// Sends the same call once as an internal message from `wallet`, a
+    /// single-custodian multisig, with [`DepositWitness::wallet_value`]
+    /// attached: the gas the bridge checks the deposit with before it
+    /// accepts. For a proof over the gas credit of an external message.
+    /// The outcome is the bridge's transaction; a wallet that refuses or
+    /// aborts sent nothing.
+    async fn send_finalize_from_wallet(
+        &self,
+        bridge: [u8; 32],
+        witness: &DepositWitness,
+        wallet: &AnWallet,
+    ) -> FinalizeSend;
 }
+
+/// How long the bridge's transaction of a wallet's `finalizeDeposit` is
+/// looked for once the wallet sent it.
+const WALLET_FINALIZE_SEEN: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Identity of a prepared finalization; a BOC must never serve another
 /// deposit or destination.
@@ -916,6 +936,186 @@ impl AnSend for LiveAn {
         self.finish_finalize(&request, &message, &outcome).await;
         outcome
     }
+
+    async fn send_finalize_from_wallet(
+        &self,
+        bridge: [u8; 32],
+        witness: &DepositWitness,
+        wallet: &AnWallet,
+    ) -> FinalizeSend {
+        let not_sent = |message: String| FinalizeSend::NotSent {
+            message,
+        };
+        let keys = match crate::burn::load_keypair_for(&wallet.keys, "an-wallet-keys") {
+            Ok(k) => k,
+            Err(e) => return not_sent(e.to_string()),
+        };
+        let body = match encode_message_body(self.ctx.clone(), ParamsOfEncodeMessageBody {
+            abi: Abi::Json(crate::deposit::identity::BRIDGE_ABI.to_string()),
+            call_set: CallSet {
+                function_name: "finalizeDeposit".into(),
+                header: None,
+                input: Some(witness.finalize_params()),
+            },
+            is_internal: true,
+            signer: Signer::None,
+            processing_try_index: None,
+            address: None,
+            signature_id: None,
+        })
+        .await
+        {
+            Ok(b) => b.body,
+            Err(e) => return not_sent(format!("encode finalizeDeposit: {}", e.message())),
+        };
+        let value = witness.wallet_value();
+        let multisig = Abi::Json(crate::burn::MULTISIG_ABI_JSON.to_string());
+        let params = serde_json::json!({
+            "dest": format!("0:{}", hex::encode(bridge)),
+            "value": value.to_string(),
+            "cc": {},
+            "bounce": true,
+            "flags": 1,
+            "payload": body,
+        });
+        // Signing errors name parts of the key: keep the SDK's code, drop its text.
+        let message = match encode_message(self.ctx.clone(), ParamsOfEncodeMessage {
+            abi: multisig.clone(),
+            address: Some(format!("0:{}", wallet.address.account_hex())),
+            call_set: CallSet::some_with_function_and_input("sendTransaction", params),
+            signer: Signer::Keys {
+                keys,
+            },
+            deploy_set: None,
+            processing_try_index: None,
+            signature_id: None,
+        })
+        .await
+        {
+            Ok(m) => m.message,
+            Err(e) => {
+                return not_sent(format!(
+                    "--an-wallet {}: sendTransaction could not be signed or encoded (client error \
+                     {}); check --an-wallet-keys",
+                    wallet.address.extended(),
+                    e.code()
+                ))
+            },
+        };
+        let refused = |what: String| {
+            not_sent(format!(
+                "--an-wallet {} {what}; nothing reached the bridge. The wallet must be a \
+                 single-custodian multisig whose custodian is --an-wallet-keys, holding at least \
+                 {value} nano-shell for the gas",
+                wallet.address.extended()
+            ))
+        };
+        let sent = match send_message(
+            self.ctx.clone(),
+            ParamsOfSendMessage {
+                message: message.clone(),
+                abi: Some(multisig.clone()),
+                thread_id: None,
+                send_events: false,
+                dapp_id: wallet.address.dapp_hex(),
+            },
+            |_| async {},
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return match send_error(&e) {
+                    FinalizeSend::Rejected {
+                        exit_code, ..
+                    } => refused(format!(
+                        "refused sendTransaction (exit code {})",
+                        exit_code.map_or("unknown".into(), |c| c.to_string())
+                    )),
+                    other => other,
+                }
+            },
+        };
+        let waited = wait_for_transaction(
+            self.ctx.clone(),
+            ParamsOfWaitForTransaction {
+                abi: Some(multisig),
+                message,
+                shard_block_id: String::new(),
+                send_events: false,
+                sending_endpoints: Some(vec![]),
+                tx_hash: sent.tx_hash.clone(),
+            },
+            |_| async {},
+        )
+        .await;
+        let tx = match waited {
+            Ok(r) => r.transaction,
+            Err(e) => {
+                return match classify_send_error(&e) {
+                    FinalizeSend::Rejected {
+                        exit_code, ..
+                    } => refused(format!(
+                        "refused sendTransaction (exit code {})",
+                        exit_code.map_or("unknown".into(), |c| c.to_string())
+                    )),
+                    other => other,
+                }
+            },
+        };
+        if tx["aborted"].as_bool().unwrap_or(true) {
+            return refused(format!(
+                "aborted sendTransaction (exit code {})",
+                tx.pointer("/compute/exit_code")
+                    .and_then(Value::as_i64)
+                    .map_or("unknown".into(), |c| c.to_string())
+            ));
+        }
+        let Some(wallet_tx) = tx["id"]
+            .as_str()
+            .or(tx["hash"].as_str())
+            .map(str::to_string)
+        else {
+            return FinalizeSend::Unknown {
+                message: "the wallet's transaction has no id".into(),
+            };
+        };
+        // The wallet's one outbound message, then the bridge transaction that took it.
+        let deadline = tokio::time::Instant::now() + WALLET_FINALIZE_SEEN;
+        loop {
+            if let Some(out) = wallet_out(self, &wallet_tx, bridge).await {
+                if let Some(dst) = out.dst_tx {
+                    let exit_code = match self.transaction(&dst.hash).await {
+                        Ok(Some(t)) => t.exit_code,
+                        _ => None,
+                    };
+                    return FinalizeSend::Executed {
+                        tx_id: dst.hash,
+                        aborted: dst.aborted,
+                        exit_code,
+                    };
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return FinalizeSend::Unknown {
+                    message: format!(
+                        "the wallet sent finalizeDeposit in transaction {wallet_tx}; the bridge's \
+                         transaction of it was not seen yet"
+                    ),
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+}
+
+/// The message transaction `wallet_tx` sent to `bridge`, with the
+/// transaction that received it once there is one.
+async fn wallet_out(an: &LiveAn, wallet_tx: &str, bridge: [u8; 32]) -> Option<MsgView> {
+    let tx = an.transaction(wallet_tx).await.ok()??;
+    let to_bridge = format!("0:{}", hex::encode(bridge));
+    let out = tx.out.into_iter().find(|m| m.dst == to_bridge)?;
+    an.message(&out.hash).await.ok()?
 }
 
 #[cfg(test)]

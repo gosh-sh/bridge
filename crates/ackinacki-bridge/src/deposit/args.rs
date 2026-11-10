@@ -93,8 +93,13 @@ pub struct AnTarget {
 
 impl AnTarget {
     pub fn parse(raw: &str) -> CliResult<AnTarget> {
+        Self::parse_flag(raw, "to")
+    }
+
+    /// [`AnTarget::parse`] for the value of `--<flag>`.
+    pub fn parse_flag(raw: &str, flag: &'static str) -> CliResult<AnTarget> {
         let bad = |expected: &str| CliError::ArgInvalid {
-            flag: "to",
+            flag,
             expected: expected.into(),
             got: redact(raw),
         };
@@ -113,9 +118,11 @@ impl AnTarget {
             return Err(bad("each half exactly 64 hex characters"));
         };
         if account_id == [0u8; 32] {
-            return Err(bad(
+            return Err(bad(if flag == "to" {
                 "a non-zero account id: the bridge refuses a zero recipient"
-            ));
+            } else {
+                "a non-zero account id"
+            }));
         }
         Ok(AnTarget {
             dapp_id,
@@ -307,6 +314,25 @@ pub struct DepositArgs {
     /// wallet that its transaction does not exist.
     #[arg(long, value_name = "OP_ID", conflicts_with = "dry_run")]
     pub abandon: Option<String>,
+
+    /// Acki Nacki multisig that sends `finalizeDeposit` when its receipt
+    /// proof needs more gas than an external message may spend. It attaches
+    /// the gas, in shell, and must hold it.
+    #[arg(long, value_name = "dapp_id::account_id", requires = "an_wallet_keys")]
+    pub an_wallet: Option<String>,
+    /// The keys.json of `--an-wallet`'s single custodian.
+    #[arg(long, value_name = "PATH", requires = "an_wallet")]
+    pub an_wallet_keys: Option<PathBuf>,
+}
+
+/// The Acki Nacki multisig that sends `finalizeDeposit` for a deposit whose
+/// receipt proof needs more gas than an external message may spend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnWallet {
+    /// `--an-wallet`.
+    pub address: AnTarget,
+    /// `--an-wallet-keys`, absolute.
+    pub keys: PathBuf,
 }
 
 /// The Acki Nacki network an endpoint points at, as an operation records
@@ -413,6 +439,8 @@ pub struct DepositParams {
     pub wc_project_id: Option<String>,
     pub wc_relay_url: String,
     pub from_address: Option<Address>,
+    /// `--an-wallet` and `--an-wallet-keys`.
+    pub an_wallet: Option<AnWallet>,
 }
 
 impl DepositArgs {
@@ -451,6 +479,11 @@ impl DepositArgs {
         // the profile keys that happen to be missing as well.
         let amount = self.amount.as_deref().map(parse_amount).transpose()?;
         let to = self.to.as_deref().map(AnTarget::parse).transpose()?;
+        let an_wallet_address = self
+            .an_wallet
+            .as_deref()
+            .map(|w| AnTarget::parse_flag(w, "an-wallet"))
+            .transpose()?;
         for (flag, secs, max) in [
             ("anchor-timeout-s", self.anchor_timeout_s, MAX_WAIT_S),
             ("relayer-grace-s", self.relayer_grace_s, MAX_WAIT_S),
@@ -592,6 +625,13 @@ impl DepositArgs {
             wc_project_id,
             wc_relay_url: self.wc_relay_url.clone(),
             from_address: self.from_address,
+            an_wallet: match (an_wallet_address, &self.an_wallet_keys) {
+                (Some(address), Some(keys)) => Some(AnWallet {
+                    address,
+                    keys: abs(keys.clone(), "an-wallet-keys")?,
+                }),
+                _ => None,
+            },
         })
     }
 }

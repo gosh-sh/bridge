@@ -29,12 +29,23 @@ pub enum RelayerError {
     /// The deposit cannot be finalized from its receipt: its transaction
     /// failed, the log is not the bridge's `Deposit` in the one shape the AN
     /// bridge reads, the transaction or log index does not fit a `uint16`, or
-    /// the bridge could not check the proof within the gas an external
-    /// message may spend before it is accepted. Final for that
-    /// deposit: the relayer records it in `unprovable_deposit_ids` at once,
-    /// and only the EVM bridge operator can return the funds.
+    /// no message can carry its proof (over one transaction's gas, or over
+    /// one message). Final for that deposit: the relayer records it in
+    /// `unprovable_deposit_ids` at once.
     #[error("the deposit cannot be finalized from its receipt: {0}")]
     Unprovable(String),
+
+    /// The bridge checks the deposit's receipt proof with more gas than an
+    /// external message may spend before it is accepted. The relayer sends
+    /// only external messages; the deposit's user sends this one from their
+    /// own Acki Nacki wallet, which attaches the gas. The relayer records it
+    /// in `wallet_deposit_ids` at once.
+    #[error(
+        "the deposit's receipt proof needs more gas than an external message may spend ({0}); its \
+         user finalizes it from their Acki Nacki wallet: ackinacki-bridge deposit --resume \
+         <op-id> --an-wallet <dapp_id::account_id> --an-wallet-keys <keys.json>"
+    )]
+    NeedsWallet(String),
 
     /// The AN side rejected the finalize submission (the receipt proof was
     /// refused, or the deposit's voucher already exists). The

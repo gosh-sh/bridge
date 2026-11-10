@@ -64,7 +64,8 @@ use crate::{
 pub(crate) const USDC_BRIDGE_ABI_JSON: &str = include_str!("../abi/USDCBridge.abi.json");
 
 /// Vendored multisig ABI (same file preflight uses for `getCustodians`).
-const MULTISIG_ABI_JSON: &str = include_str!("../abi/UpdateCustodianMultisigWallet.abi.json");
+pub(crate) const MULTISIG_ABI_JSON: &str =
+    include_str!("../abi/UpdateCustodianMultisigWallet.abi.json");
 
 /// ECC token id for USDC on Acki Nacki (`cc` map key on multisig
 /// sendTransaction). Bare integer per the AN token model.
@@ -444,12 +445,17 @@ fn interpret_processed(
 /// The returned `KeyPair` is the ONLY place the secret half lives; it is
 /// consumed by `Signer::Keys` and dropped when `compose` returns.
 fn load_keypair(path: &Path) -> CliResult<KeyPair> {
+    load_keypair_for(path, "from-keys")
+}
+
+/// [`load_keypair`] for the keys file `--<flag>` names.
+pub(crate) fn load_keypair_for(path: &Path, flag: &str) -> CliResult<KeyPair> {
     let contents = std::fs::read_to_string(path).map_err(|e| CliError::KeyFilePerms {
         path: path.display().to_string(),
         problem: format!("cannot read: {e}"),
     })?;
     let json: Value = serde_json::from_str(&contents).map_err(|_| CliError::Preflight {
-        reason: format!("--from-keys {}: not valid JSON", path.display()),
+        reason: format!("--{flag} {}: not valid JSON", path.display()),
         source: None,
     })?;
     // Normalised the SAME way preflight normalises, via
@@ -472,15 +478,15 @@ fn load_keypair(path: &Path) -> CliResult<KeyPair> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| CliError::Preflight {
                 reason: format!(
-                    "--from-keys {}: missing '{field}' string field",
+                    "--{flag} {}: missing '{field}' string field",
                     path.display()
                 ),
                 source: None,
             })?;
         crate::preflight::normalize_key_file_hex(raw).ok_or_else(|| CliError::Preflight {
             reason: format!(
-                "--from-keys {}: '{field}' field is not 1-64 hex characters (an optional `0x` \
-                 prefix is accepted)",
+                "--{flag} {}: '{field}' field is not 1-64 hex characters (an optional `0x` prefix \
+                 is accepted)",
                 path.display()
             ),
             source: None,

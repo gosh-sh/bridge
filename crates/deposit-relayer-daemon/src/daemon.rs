@@ -96,6 +96,7 @@ pub struct RelayerMetrics {
     pub finalized_total: AtomicU64,
     pub already_finalized_total: AtomicU64,
     pub unprovable_total: AtomicU64,
+    pub wallet_total: AtomicU64,
     pub not_yet_available_total: AtomicU64,
     pub proof_failed_total: AtomicU64,
     pub an_rejected_total: AtomicU64,
@@ -115,6 +116,7 @@ impl RelayerMetrics {
             finalized: self.finalized_total.load(Ordering::Relaxed),
             already_finalized: self.already_finalized_total.load(Ordering::Relaxed),
             unprovable: self.unprovable_total.load(Ordering::Relaxed),
+            wallet: self.wallet_total.load(Ordering::Relaxed),
             not_yet_available: self.not_yet_available_total.load(Ordering::Relaxed),
             proof_failed: self.proof_failed_total.load(Ordering::Relaxed),
             an_rejected: self.an_rejected_total.load(Ordering::Relaxed),
@@ -132,6 +134,7 @@ pub struct RelayerMetricsSnapshot {
     pub finalized: u64,
     pub already_finalized: u64,
     pub unprovable: u64,
+    pub wallet: u64,
     pub not_yet_available: u64,
     pub proof_failed: u64,
     pub an_rejected: u64,
@@ -147,6 +150,7 @@ pub struct DaemonRunSummary {
     pub finalized: u64,
     pub already_finalized: u64,
     pub unprovable: u64,
+    pub wallet: u64,
     pub not_yet_available: u64,
     pub proof_failed: u64,
     pub an_rejected: u64,
@@ -167,6 +171,7 @@ pub enum LastOutcome {
     AnPending { deposit_id: u64 },
     Skipped { deposit_id: u64 },
     Unprovable { deposit_id: u64 },
+    NeedsWallet { deposit_id: u64 },
     TickError,
 }
 
@@ -347,10 +352,20 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                         deposit_id,
                         reason = %reason,
                         "daemon: deposit cannot be finalized from its receipt; recorded in \
-                         unprovable_deposit_ids. finalize-one cannot help; only the EVM bridge \
-                         operator can return its funds",
+                         unprovable_deposit_ids. finalize-one cannot help",
                     );
                     (true, LastOutcome::Unprovable {
+                        deposit_id,
+                    })
+                },
+                Ok(TickOutcome::NeedsWallet {
+                    deposit_id, ..
+                }) => {
+                    if let Some(m) = &metrics {
+                        m.wallet_total.fetch_add(1, Ordering::Relaxed);
+                    }
+                    summary.wallet += 1;
+                    (true, LastOutcome::NeedsWallet {
                         deposit_id,
                     })
                 },
@@ -419,6 +434,9 @@ fn outcome_label(outcome: &Result<TickOutcome, RelayerError>) -> &'static str {
         Ok(TickOutcome::Unprovable {
             ..
         }) => "unprovable",
+        Ok(TickOutcome::NeedsWallet {
+            ..
+        }) => "needs_wallet",
         Err(_) => "error",
     }
 }

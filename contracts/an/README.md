@@ -53,15 +53,25 @@ bytes32 anAccount, uint256 timestamp, address token)`: three topics, four data
 words, nothing more (244 otherwise). Its emitter must be a trusted L1 bridge
 for `chainId` (`setTrustedL1Bridge`; the zerostate seeds one, see below; 222
 otherwise). The token and limit checks follow, and only then does the bridge
-accept the message, so a refused deposit costs it nothing. Everything up to
-accept has to fit the 500 000 gas an external message may spend before it is
-accepted: a typical deposit takes 110 000 to 210 000, one with 60 ERC-20
-transfers before the `Deposit` in its receipt 360 000 to 450 000. A deposit
-whose proof takes more — about 65 such logs before it in a block of thousands
-of transactions, about 88 in a small block — cannot be
-finalized, and the CLI and `deposit-relayer` refuse to send it
-(`DepositWitness::check_gas` in `crates/deposit-receipt`). Such a message stays
-well under the 64 KiB a Block Manager takes. Three writers
+accept the message, so a refused deposit costs it nothing. A deposit already
+finalized is not refused before accept: it passes every check, the bridge pays
+for that transaction, and it ends at its existing voucher without a second
+mint. An external message may spend 500 000 gas before it is accepted: a
+typical deposit takes 110 000 to 210 000, one with 60 ERC-20 transfers before
+the `Deposit` in its receipt 360 000 to 450 000. A deposit whose proof takes
+more — about 65 such logs before it in a block of thousands of transactions,
+about 88 in a small block — is sent as an internal message from the user's own
+Acki Nacki wallet (`ackinacki-bridge deposit --an-wallet`), whose value pays
+for the check; `deposit-relayer` sends only external messages and lists such
+deposits in `wallet_deposit_ids`. A deposit past that path's limits cannot be
+finalized at all. The wallet's message has to fit the 64 KiB a Block Manager
+takes, which leaves 60 KiB for the header and the proof: about 370 ERC-20
+transfers before the deposit in its receipt. One transaction spends at most
+10 000 000 gas (on shellnet an internal message gets `value / 1000 + 9000` gas
+up to that cap, as the compute phase of its transactions records), which lies
+beyond what fits the message (`DepositWitness::check_wallet` in
+`crates/deposit-receipt`).
+Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. The `Deposit` event carries no chain id, so the `chainId` a
@@ -102,7 +112,8 @@ flags. Both owner keys therefore remain trusted after a flip.
 | `exchange/` | Sources and a `Makefile` that builds them in place |
 | `token/interface/ISubscriber.sol` | Copy of the token subscriber interface from acki-nacki; `eccBridge.sol` imports it as `../token/interface/ISubscriber.sol` |
 | `0.81.0_compiled/exchange/` | `DepositVoucher.tvc`, `DepositVoucher.abi.json` |
-| `0.81.1_compiled/exchange/` | `eccBridge.tvc`, `eccBridge.abi.json`, `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
+| `0.80.1_compiled/exchange/` | `eccBridge.tvc`, `eccBridge.abi.json` |
+| `0.81.1_compiled/exchange/` | `EthBeaconLightClient.tvc`, `EthBeaconLightClient.abi.json`, `ArbitrumBlockVerifier.tvc`, `ArbitrumBlockVerifier.abi.json` |
 | `zerostate/` | `BridgeZerostateData.sol` with its artefacts, and `test_zerostate_init.py`, which tests `zerostate_init.py` one level up. The contract is never deployed: it builds the data cell the premined bridge is upgraded with |
 | `EthBeaconLightClient.sol`, `EthKeccak.sol` | A separate, standalone variant of the light client with a settable bridge address (`_usdcBridge`). It is not part of the zerostate and not built by the `Makefile` |
 | `place.json` | Manifest of every file's destination in acki-nacki, or that it stays here; `scripts/check_place_manifest.py` checks it against the tracked files |
@@ -455,18 +466,27 @@ AN identity/history. That migration is not implemented. Amounts above
 
 ## Rebuilding
 
-    make -C contracts/an/exchange SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
+    make -C contracts/an/exchange SOLD_0_80_1=/path/to/sold-0.80.1 SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
 
-The `.tvc` metadata of the tracked artefacts records `sold` 0.81.0 for
-`DepositVoucher.tvc` and 0.81.1 for `eccBridge.tvc`, `EthBeaconLightClient.tvc` and
-`ArbitrumBlockVerifier.tvc`, which is why the compiled folders carry those names.
-Any other compiler changes the code hash, so the `Makefile` builds each contract
-with its own compiler, `SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is
-unset or the binary reports a different version.
+The `.tvc` metadata of the tracked artefacts records `sold` 0.80.1 for
+`eccBridge.tvc`, 0.81.0 for `DepositVoucher.tvc` and 0.81.1 for
+`EthBeaconLightClient.tvc` and `ArbitrumBlockVerifier.tvc`, which is why the
+compiled folders carry those names. Any other compiler changes the code hash, so
+the `Makefile` builds each contract with its own compiler, `SOLD_0_80_1`,
+`SOLD_0_81` or `SOLD_0_81_1`, and stops when a variable is unset or the binary
+reports a different version. CI rebuilds all four with the released compilers
+and compares them byte for byte with the tracked artefacts.
 
-The three contracts built with 0.81.1 call `gosh.keccak256`, which release
-[`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1) is the first to
-assemble. `DepositVoucher` stays on 0.81.0 because its code is part of every voucher's address:
+`eccBridge`, the light client and the verifier call `gosh.keccak256`. The light
+client and the verifier are built with
+[`gosh_0.81.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.81.1);
+`eccBridge` with
+[`gosh_0.80.1`](https://github.com/gosh-sh/TVM-Solidity-Compiler/releases/tag/gosh_0.80.1),
+the 0.80 line with `KECCAK256`: 0.81.x emits events with another external
+outbound header (tag `$110110`), and the withdrawal proof (Circuit 4) is built
+for the 0.80 one, `ext_out_msg_info$11`. CI
+checks that the `WithdrawalInitiated` the tracked `eccBridge.tvc` emits has that
+header. `DepositVoucher` stays on 0.81.0 because its code is part of every voucher's address:
 it reaches the bridge through an interface, not by importing `eccBridge.sol`, so 0.81.0 still
 builds it. The bridge does not import the verifier,
 only `ArbitrumBlockVerifierDeploy.sol`, a contract with the verifier's state

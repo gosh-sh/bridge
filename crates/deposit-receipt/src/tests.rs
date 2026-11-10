@@ -138,6 +138,26 @@ fn a_deposit_over_the_gas_credit_is_refused_and_stays_below_the_message_limit() 
 }
 
 #[test]
+fn a_deposit_over_the_gas_credit_goes_from_a_wallet_up_to_the_message_limit() {
+    let within = witness(3, 500, 600, 60);
+    assert!(!within.needs_wallet());
+    let over = witness(3, 500, 600, 160);
+    assert!(over.needs_wallet());
+    assert!(over.check_wallet().is_ok());
+    // The value pays for the estimate and a quarter more, at 1 000 nano-shell a
+    // gas.
+    let gas = over.estimated_gas();
+    assert_eq!(over.wallet_value(), (gas + gas / 4) * 1_000);
+    assert!(over.wallet_value() / AN_NANO_PER_GAS + 9_000 > gas);
+    // 300 transfers before the deposit still fit one message.
+    assert!(witness(3, 500, 66_000 - 1_500, 300).check_wallet().is_err());
+    assert!(witness(3, 500, 50_000, 300).check_wallet().is_ok());
+    // A receipt with thousands of logs before the deposit needs more than one
+    // transaction.
+    assert!(witness(3, 500, 600, 4_000).check_wallet().is_err());
+}
+
+#[test]
 fn only_the_bridges_six_field_deposit_passes_the_shape_check() {
     let bridge = Address::repeat_byte(0x42);
     let deposit = RpcLog {
@@ -194,4 +214,79 @@ fn finalize_params_carry_the_abi_names() {
         json!({"chainId": "421614", "header": "f901", "txIndex": 9, "receiptProof": ["c0"], "logIndex": 1})
     );
     assert_eq!(w.payload_len(), 3);
+}
+
+/// The live Arbitrum Sepolia deposit transaction, read through a node that
+/// answers `eth_getTransactionReceipt` with `receipt`; the block and its
+/// receipts are the real ones. Its `Deposit` log predates the token field, so
+/// a fetch that gets as far as the log ends in `NotDeposit`.
+async fn fetch_with(receipt: serde_json::Value, log_index: usize) -> Result<DepositWitness, Error> {
+    use alloy::{providers::ProviderBuilder, transports::mock::Asserter};
+    let vector: serde_json::Value = serde_json::from_str(VECTOR).unwrap();
+    let asserter = Asserter::new();
+    asserter.push_success(&receipt);
+    asserter.push_success(&serde_json::from_str::<serde_json::Value>(BLOCK).unwrap());
+    asserter.push_success(&serde_json::from_str::<serde_json::Value>(RECEIPTS).unwrap());
+    let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+    fetch(
+        &provider,
+        421_614,
+        "0xcee5d884bc1b7f4cc84a31fea74f3c8809d19bd5"
+            .parse()
+            .unwrap(),
+        vector["blockHash"].as_str().unwrap().parse().unwrap(),
+        vector["transactionHash"].as_str().unwrap().parse().unwrap(),
+        log_index,
+    )
+    .await
+}
+
+/// The deposit transaction's receipt as `eth_getBlockReceipts` returns it.
+fn block_receipt() -> serde_json::Value {
+    let receipts: Vec<serde_json::Value> = serde_json::from_str(RECEIPTS).unwrap();
+    receipts
+        .into_iter()
+        .find(|r| r["transactionIndex"] == "0x9")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_verdict_is_read_from_the_receipt_that_rebuilt_the_block() {
+    // A node behind a load balancer answers from a stale branch that the
+    // transaction failed. The block's own receipt is a success, and only
+    // that one decides: here, that its log is not the current Deposit.
+    let mut stale = block_receipt();
+    stale["status"] = "0x0".into();
+    stale["logs"] = serde_json::json!([]);
+    let got = fetch_with(stale, 1).await;
+    assert!(
+        matches!(
+            got,
+            Err(Error::NotDeposit {
+                index: 1,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+    let got = fetch_with(block_receipt(), 0).await;
+    assert!(
+        matches!(
+            got,
+            Err(Error::NotDeposit {
+                index: 0,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_receipt_of_another_block_is_retried_never_a_verdict() {
+    let mut elsewhere = block_receipt();
+    elsewhere["blockHash"] = format!("0x{}", "11".repeat(32)).into();
+    elsewhere["status"] = "0x0".into();
+    let got = fetch_with(elsewhere, 1).await;
+    assert!(matches!(got, Err(Error::BlockChanged(..))), "{got:?}");
 }

@@ -141,11 +141,14 @@ pub enum TickOutcome {
     /// retried. Operator must run `finalize-one` manually.
     Skipped { deposit_id: u64, reason: String },
     /// The deposit cannot be finalized from its receipt (its transaction
-    /// failed, the log is not a `Deposit` the AN bridge reads, or header and
-    /// proof are over the message limit). Recorded in
-    /// `unprovable_deposit_ids` and advanced past at once; `finalize-one`
-    /// cannot help. Only the EVM bridge operator can return the funds.
+    /// failed, the log is not a `Deposit` the AN bridge reads, or no message
+    /// can carry its proof). Recorded in `unprovable_deposit_ids` and
+    /// advanced past at once; `finalize-one` cannot help.
     Unprovable { deposit_id: u64, reason: String },
+    /// The deposit's receipt proof needs more gas than an external message
+    /// may spend. Recorded in `wallet_deposit_ids` and advanced past at
+    /// once; its user finalizes it from their own Acki Nacki wallet.
+    NeedsWallet { deposit_id: u64, reason: String },
 }
 
 /// Single relayer instance. Holds a [`DepositSource`], a [`WitnessBuilder`]
@@ -422,12 +425,30 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                     reason = %reason,
                     unprovable = ?self.state.unprovable_deposit_ids,
                     "deposit cannot be finalized from its receipt; recorded in \
-                     unprovable_deposit_ids and skipped at once. finalize-one cannot help; only \
-                     the EVM bridge operator can return its funds",
+                     unprovable_deposit_ids and skipped at once. finalize-one cannot help",
                 );
                 return Ok(TickOutcome::Unprovable {
                     deposit_id: target,
                     reason: format!("unprovable: {reason}"),
+                });
+            },
+            // An external message cannot carry it; the user's wallet can.
+            Err(RelayerError::NeedsWallet(reason)) => {
+                self.state.record_wallet(target);
+                self.persist_state()?;
+                warn!(
+                    deposit_id = target,
+                    tx = %event.tx_hash,
+                    reason = %reason,
+                    wallet = ?self.state.wallet_deposit_ids,
+                    "the deposit's receipt proof needs more gas than an external message may \
+                     spend; recorded in wallet_deposit_ids and skipped. Its user finalizes it \
+                     from their own Acki Nacki wallet: ackinacki-bridge deposit --resume \
+                     <op-id> --an-wallet <dapp_id::account_id> --an-wallet-keys <keys.json>",
+                );
+                return Ok(TickOutcome::NeedsWallet {
+                    deposit_id: target,
+                    reason,
                 });
             },
             Err(e) => {
@@ -569,6 +590,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
             self.state.attempts_since_progress,
             self.state.parked_deposit_ids.len(),
             self.state.unprovable_deposit_ids.len(),
+            self.state.wallet_deposit_ids.len(),
             self.state.outstanding_deposits.len(),
             self.state.scan_done_through_block,
         );
@@ -1853,7 +1875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_receipt_proof_over_the_gas_credit_is_unprovable_and_never_sent() {
+    async fn a_receipt_proof_over_the_gas_credit_is_left_to_the_users_wallet() {
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
@@ -1865,16 +1887,17 @@ mod tests {
             dir.path().join("state.json"),
         );
         match relayer.tick().await.unwrap() {
-            TickOutcome::Unprovable {
+            TickOutcome::NeedsWallet {
                 deposit_id,
                 reason,
             } => {
                 assert_eq!(deposit_id, 0);
                 assert!(reason.contains("gas"), "{reason}");
             },
-            other => panic!("expected Unprovable, got {other:?}"),
+            other => panic!("expected NeedsWallet, got {other:?}"),
         }
-        assert_eq!(relayer.state().unprovable_deposit_ids, vec![0]);
+        assert_eq!(relayer.state().wallet_deposit_ids, vec![0]);
+        assert!(relayer.state().unprovable_deposit_ids.is_empty());
         assert_eq!(submitter.finalized_count(), 0);
     }
 

@@ -19,8 +19,9 @@ so that discharging them is one command rather than a judgement call:
 A `witness.json` is the `finalizeDeposit` input the deposit relayer's
 `prove-one` and the CLI's work directory hold; its header must hash to its
 `blockHash`. `--verify` resolves the hash over JSON-RPC and fails unless the
-node agrees the block is canonical (its number maps back to the same hash) and
-buried at least `--min-confirmations` deep. Point `--rpc` at a node you trust
+node is on the anchor's chain (`eth_chainId` equals its `chainId`), agrees the
+block is canonical (its number maps back to the same hash) and has it buried at
+least `--min-confirmations` deep. Point `--rpc` at a node you trust
 and that the relayer does not control; verifying against the same endpoint that
 produced the witness proves nothing.
 
@@ -92,9 +93,14 @@ def rpc(url: str, method: str, params: list) -> object:
     return payload["result"]
 
 
-def verify_canonical(url: str, block_hash: int, min_confirmations: int) -> list[str]:
+def verify_canonical(url: str, chain_id: int, block_hash: int, min_confirmations: int) -> list[str]:
     """Return a list of reasons the anchor must not be admitted (empty = admit)."""
     hash_hex = f"0x{block_hash:064x}"
+    # The anchor binds the block to `chain_id` and nothing else does: a node of
+    # another chain must not vouch for it.
+    node_chain = int(rpc(url, "eth_chainId", []), 16)
+    if node_chain != chain_id:
+        return [f"the node is on chain {node_chain}, the anchor is for chain {chain_id}"]
     block = rpc(url, "eth_getBlockByHash", [hash_hex, False])
     if block is None:
         return [
@@ -166,7 +172,7 @@ def main() -> int:
             if not url:
                 problems.append(f"no RPC known for chain {chain_id}; pass --rpc")
             else:
-                problems = verify_canonical(url, block_hash, args.min_confirmations)
+                problems = verify_canonical(url, chain_id, block_hash, args.min_confirmations)
 
         if problems:
             rejected += 1

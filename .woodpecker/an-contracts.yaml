@@ -12,6 +12,17 @@
 #
 # The zerostate module's own unit tests (contracts/an/zerostate_init.py) also
 # run here.
+#
+# The tvm step works on the compiled contracts themselves, with the released
+# compilers and tvm-sdk tools (scripts/fetch_an_toolchain.sh pins their hashes):
+#
+#   * every tracked .tvc and .abi.json is its source built with the compiler the
+#     Makefile pins (scripts/check_an_artefacts.py);
+#   * the tracked eccBridge.tvc emits WithdrawalInitiated with the header the
+#     withdrawal proof, Circuit 4, is built for (scripts/check_withdrawal_event_header.py);
+#   * the bridge's TVM tests pass: receipt proofs, refusals before accept,
+#     limits, the voucher, a deposit over the gas credit sent from a wallet
+#     (scripts/test_an_bridge_limits.py).
 
 when:
   - event: pull_request
@@ -45,3 +56,14 @@ steps:
     depends_on: [ ]
     commands:
       - python3 scripts/check_lc_relayer_abis.py
+  tvm:
+    # Debian: make for the Makefile, curl and sha256sum for the downloads.
+    image: python:3
+    depends_on: [ ]
+    commands:
+      - scripts/fetch_an_toolchain.sh /tmp/an-tools
+      - export PATH="/tmp/an-tools:$PATH" TVM_DEBUGGER=/tmp/an-tools/tvm-debugger TVM_CLI=/tmp/an-tools/tvm-cli
+      - export SOLD_0_80_1=/tmp/an-tools/sold-0.80.1 SOLD_0_81=/tmp/an-tools/sold-0.81.0 SOLD_0_81_1=/tmp/an-tools/sold-0.81.1
+      - python3 scripts/check_an_artefacts.py
+      - python3 scripts/check_withdrawal_event_header.py
+      - python3 scripts/test_an_bridge_limits.py

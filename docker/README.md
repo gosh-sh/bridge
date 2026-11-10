@@ -72,7 +72,7 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
   params/relayer/                    # SRS k=17..22, inner keys, SHA256SUMS (finalize-params.sh); pk_cache/ rw
   params/deposit-prover/             # kzg_params_18.srs; the proving key the first proof writes
   params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_20.srs, kzg_bn254_21.srs;
-                                     #   step-key/ from `compose run lc-keygen`;
+                                     #   step-key/ written by the first step proof;
                                      #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
 ```
 
@@ -115,7 +115,7 @@ next to it.
    writes `SHA256SUMS`; its sha256 goes into `daemon-live.env` as `PARAMS_MANIFEST_SHA256`.
    Deposit prover: `kzg_params_18.srs` into `params/deposit-prover/` (cut from the k=21 SRS
    with `downsize_srs`, in the `bridge-cli` image). Light client: `kzg_bn254_19.srs` into
-   `params/lc-prover/`, then the step key once per image:
+   `params/lc-prover/`; the first step proof of an image writes its key there, or ahead of it
    `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB). The rotate needs the
    Hermez `kzg_bn254_21.srs` there too: the release asset of that name, checked against the
    release's `SHA256SUMS`. Its shard stage reads `kzg_bn254_20.srs`, cut from that file once
@@ -155,7 +155,7 @@ start it again after.
 
 Set `BRIDGE_IMAGE_TAG` to the new tag, `docker compose pull`, run `preflight`, then
 `docker compose up -d` service by service. The state directories carry over; the light
-client's step key is per image (`lc-keygen` again when the prover changed). To roll back, set
+client's step key is per image, replaced by the first proof of an image whose prover changed. To roll back, set
 the previous tag and `up -d` again.
 
 ## Status

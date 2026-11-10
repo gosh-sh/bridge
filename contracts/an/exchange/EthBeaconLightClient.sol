@@ -57,13 +57,12 @@ import "./eccBridge.sol";
 ///         its own slot (`CheckpointBackfilled`), signed by the committee in
 ///         force or by the one a rotation replaced, which is what rescues a
 ///         skip at a period edge in the honest case.
-///         `submitAncestry` fills the span between two already-proven anchors:
-///         headers oldest first, 3 to 33 of them (two anchors and up to the 31
-///         blocks of an epoch), each hashed with `gosh.keccak256` and linked by
-///         RLP `parentHash`. The blocks between the anchors go into the same
-///         `_acceptedBlockHash` sink. Anchors further apart than one span need
-///         the checkpoint between them registered first, or the owner's
-///         `setAcceptedBlockHash`.
+///         `submitAncestry` admits the blocks behind an already-proven one:
+///         headers oldest first, 2 to 33 of them, the last one proven, each
+///         hashed with `gosh.keccak256` and linked by RLP `parentHash`. Every
+///         header before the last goes into the same `_acceptedBlockHash`
+///         sink. A call's oldest header is proven for the next call, so a
+///         chain of calls reaches back over any gap inside the window.
 ///         Proven hashes expire `PROVEN_WINDOW_SLOTS` (14 days of 12 s slots)
 ///         behind head: `isProven` and the sink forget them. A deposit block
 ///         older than that cannot `finalizeDeposit` against this oracle, and a
@@ -146,7 +145,7 @@ contract EthBeaconLightClient {
         uint256 fromCommitteeCommitment,
         uint256 toCommitteeCommitment
     );
-    /// `checkpointHash` is the newer of the two anchors the span ended on.
+    /// `checkpointHash` is the proven block the span ended on.
     event AncestryAccepted(
         uint256 checkpointHash,
         uint64  hashesAdded
@@ -523,60 +522,63 @@ contract EthBeaconLightClient {
     }
 
     // ========================================================
-    // Epoch ancestry (31/32 non-checkpoint execution hashes)
+    // Ancestry: the blocks behind a proven one
     // ========================================================
 
-    /// @notice Fills in the blocks between two proven anchors. Headers oldest
-    ///         first; `headerRlps[0]` and the last one must each already be
-    ///         proven, and only the blocks between them are admitted.
-    ///         Permissionless: the keccak + parent links are the authorization.
+    /// @notice Admits the blocks behind a proven one. Headers oldest first;
+    ///         the last one must already be proven, and every header before it
+    ///         is admitted once it hashes to the parent hash the next one
+    ///         names. Chained calls reach back any distance: each call's
+    ///         oldest header is proven for the next. Permissionless: the
+    ///         keccak + parent links are the authorization.
     function submitAncestry(bytes[] headerRlps) public {
-        require(headerRlps.length >= 3, ERR_BAD_ANCESTRY);
+        require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 33, ERR_ANCESTRY_TOO_LONG);
-        // Both anchors before `accept`, inside the pre-accept credit, so a
-        // span that cannot admit anything — a far end that is not an anchor —
-        // is refused without the light client paying for the walk. The call
-        // is permissionless and the contract pays for everything after
-        // `accept`, on a reverted transaction too.
+        // The proven end before `accept`, inside the pre-accept credit, so a
+        // span that cannot admit anything is refused without the light client
+        // paying for the walk. The call is permissionless and the contract
+        // pays for everything after `accept`, on a reverted transaction too.
         //
-        // This does not bound a payload whose two ends are both real. The
-        // forged headers between them link to each other and break only at
-        // the last link: measured at 1,917,462 gas for 31 of them, charged to
-        // the client, with nothing admitted. No cheap check bounds that,
-        // because verifying the chain is the work the gas pays for. The same
-        // exposure is in `submitUpdate` since 1.4.1 — `accept` must precede
-        // the halo2 verify — and the answer there is the same as here: this
-        // contract mints its own gas, and `rePushAnchor` is permissionless and
-        // cheap and reaches `ensureBalance`, so anyone can restore the floor
-        // and the client cannot be stranded.
-        uint256 firstKey = _piForm(gosh.keccak256(headerRlps[0]));
-        uint256 lastKey = _piForm(gosh.keccak256(headerRlps[headerRlps.length - 1]));
-        require(_isLive(firstKey) && _isLive(lastKey), ERR_UNKNOWN_CHECKPOINT);
+        // The walk goes from the proven end back, so forged headers break at
+        // the first link the walk checks, not after it has hashed all of
+        // them. A payload of real headers admits real blocks: every ancestor
+        // of a proven block is on the chain that block is on. This contract
+        // mints its own gas, and `rePushAnchor` is permissionless and cheap
+        // and reaches `ensureBalance`, so anyone can restore the floor and
+        // the client cannot be stranded.
+        uint last = headerRlps.length - 1;
+        uint256 lastKey = _piForm(gosh.keccak256(headerRlps[last]));
+        require(_isLive(lastKey), ERR_UNKNOWN_CHECKPOINT);
         tvm.accept();
         // Before `_evictExpired` and the walk, because both queue messages.
         ensureBalanceForSinks(MAX_FORGETS_PER_TX + uint64(headerRlps.length));
-        uint last = headerRlps.length - 1;
-        uint256 prev = gosh.keccak256(headerRlps[0]);
-        uint256 anchor = _piForm(prev);
-        require(_isLive(anchor), ERR_UNKNOWN_CHECKPOINT);
-        uint64 anchorSlot = _provenEthSlot[anchor];
+        uint64 anchorSlot = _provenEthSlot[lastKey];
         _evictExpired();
         uint64 added = 0;
-        uint i;
-        for (i = 1; i <= last; i++) {
-            require(EthKeccak.rlpParentHash(headerRlps[i]) == prev, ERR_BAD_ANCESTRY);
-            prev = gosh.keccak256(headerRlps[i]);
-            uint256 key = _piForm(prev);
-            if (i == last) {
-                require(_isLive(key), ERR_UNKNOWN_CHECKPOINT);
-            } else if (!_isLive(key)) {
-                _pushExecHash(key, anchorSlot);
+        uint256 parent = EthKeccak.rlpParentHash(headerRlps[last]);
+        uint i = last;
+        while (i > 0) {
+            i -= 1;
+            uint256 h = gosh.keccak256(headerRlps[i]);
+            require(h == parent, ERR_BAD_ANCESTRY);
+            uint256 key = _piForm(h);
+            // A block `back` blocks behind sits at least `back` slots earlier,
+            // so this is never earlier than its own slot: it leaves the window
+            // no sooner than it should. One already outside the window is not
+            // admitted, or the sink would accept what the client has dropped.
+            uint64 back = uint64(last - i);
+            uint64 slot = anchorSlot > back ? anchorSlot - back : 1;
+            if (!_isLive(key) && _withinWindow(slot)) {
+                _pushExecHash(key, slot);
                 added += 1;
+            }
+            if (i > 0) {
+                parent = EthKeccak.rlpParentHash(headerRlps[i]);
             }
         }
         ensureBalance();
         address addrExtern = address.makeAddrExtern(AncestryAcceptedEmit, bitCntAddress);
-        emit AncestryAccepted{dest: addrExtern}(_piForm(prev), added);
+        emit AncestryAccepted{dest: addrExtern}(lastKey, added);
     }
 
     function _windowCutoff() private view returns (uint64) {

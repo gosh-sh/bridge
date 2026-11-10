@@ -57,6 +57,8 @@ assigns it when the release is tagged.
   has the bridge forget them, at most 32 per transaction, two to three weeks for shellnet's backlog.
   A block older than 14 days can no longer be accepted through the light client. Point anything
   that reads `slotsPerYear()` at the new getter.
+- `eth-lc-relayer daemon` does not start without `ETH_RPC_URL` (`--eth-rpc-url`): set it to an
+  execution RPC of the followed chain.
 
 ### New / Improvements
 
@@ -65,6 +67,15 @@ assigns it when the release is tagged.
   passed that epoch; at most three sends per block. Upgrade it first, then turn `SUBMIT_ANCESTRY`
   (`--submit-ancestry`) off on `eth-lc-relayer daemon`: the daemon's spans admitted every block.
   `docker/env/eth-lc-relayer.env.example` no longer sets it.
+- `eth-lc-relayer daemon` proves every Ethereum checkpoint: each one is queued on disk in
+  `<state file>.steps/` as it appears and proven in the background, `--parallel-proofs`
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) at once, about 25 GB each; size the host for that.
+- `eth-lc-relayer daemon` closes the blocks of checkpoints it missed with `submitAncestry` back from
+  the next one and logs `checkpoints missed` as an ERROR.
+- `EthBeaconLightClient` 1.7.0 `submitAncestry` takes 2 to 33 headers and needs only the last one
+  proven; it admits every header before it.
+- `export_step_vk_blob` always keeps its proving key, in `STEP_KEY_DIR` or `step-key/` next to the
+  SRS, and replaces a key another build generated; `lc-keygen` is optional.
 
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted,

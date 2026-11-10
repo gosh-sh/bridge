@@ -272,9 +272,10 @@ services:
         target: /data/params/pk_cache
         bind: { create_host_path: false }
 
-  # The step proving key for the light-client prover of this image: generated
-  # once per image into /data/params/step-key (the prover refuses a key another
-  # build generated). Minutes and a few GB.
+  # The step proving key for the light-client prover of this image, generated
+  # into /data/params/step-key ahead of the first proof. Optional: the first
+  # proof of an image generates it there itself, and a key another build
+  # generated is replaced. Minutes and a few GB.
   lc-keygen:
     <<: *service
     profiles: [ops]

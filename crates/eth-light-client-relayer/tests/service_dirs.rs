@@ -118,9 +118,16 @@ async fn a_step_cycle_writes_only_into_the_three_directories() {
         "{outcome:?}"
     );
 
-    // State: the file, nothing else (the atomic write's `.tmp` is renamed
-    // away; the lock belongs to the daemon binary, not the loop).
-    assert_eq!(entries(&dirs.state), vec![STATE_FILE_NAME.to_string()]);
+    // State: the file and the checkpoint queue beside it, nothing else (the
+    // atomic write's `.tmp` is renamed away; the lock belongs to the daemon
+    // binary, not the loop). The queue is empty once the checkpoint is on
+    // chain.
+    let queue = format!("{STATE_FILE_NAME}.steps");
+    assert_eq!(entries(&dirs.state), vec![
+        STATE_FILE_NAME.to_string(),
+        queue.clone()
+    ]);
+    assert_eq!(entries(&dirs.state.join(&queue)), Vec::<String>::new());
     // Work: the per-prove directory is gone with the bundle.
     assert_eq!(entries(&dirs.work), Vec::<String>::new());
     // Logs: the prover's transcript, both streams, named after the step and

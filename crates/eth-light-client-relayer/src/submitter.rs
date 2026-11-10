@@ -419,7 +419,7 @@ impl AnSubmitter for MockAnSubmitter {
         &self,
         header_rlps: &[Vec<u8>],
     ) -> Result<SubmitOutcome, RelayerError> {
-        let (older, newer) = crate::header_rlp::link_headers(header_rlps)?;
+        let (_, newer) = crate::header_rlp::link_headers(header_rlps)?;
         let mut inner = self.inner.lock().expect("poisoned");
         inner.ancestry_attempts += 1;
         if inner.error_ancestry {
@@ -437,13 +437,15 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "submitAncestry rejected".into(),
             });
         }
-        if !inner.proven.contains(&older) || !inner.proven.contains(&newer) {
+        // As the contract: the newest end proven, every header behind it
+        // admitted, the oldest included.
+        if !inner.proven.contains(&newer) {
             return Ok(SubmitOutcome::Rejected {
                 reason: "ERR_UNKNOWN_CHECKPOINT".into(),
             });
         }
         let last = header_rlps.len() - 1;
-        for rlp in &header_rlps[1..last] {
+        for rlp in &header_rlps[..last] {
             inner.proven.insert(crate::header_rlp::keccak256(rlp));
         }
         inner.ancestry_count += 1;

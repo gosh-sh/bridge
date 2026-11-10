@@ -36,6 +36,7 @@ pub mod relayer;
 pub mod rotate;
 pub mod source;
 pub mod state;
+pub mod step_queue;
 pub mod submitter;
 pub mod types;
 

@@ -79,11 +79,12 @@ fn is_success(o: &TickOutcome) -> bool {
         TickOutcome::SubmittedUpdate { .. }
             | TickOutcome::AlreadyOnHead { .. }
             | TickOutcome::Unchanged { .. }
+            | TickOutcome::Proving { .. }
             | TickOutcome::Rotated { .. }
     )
 }
 
-impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
+impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P, A> {
     pub async fn run_until_shutdown<F>(
         &mut self,
         backoff: BackoffConfig,
@@ -166,6 +167,9 @@ fn record(m: &RelayerMetrics, o: &TickOutcome) {
             m.an_rejected_total.fetch_add(1, Ordering::Relaxed);
         },
         TickOutcome::WeakSubjectivityLag {
+            ..
+        }
+        | TickOutcome::Proving {
             ..
         } => {},
     }

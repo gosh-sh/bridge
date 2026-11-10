@@ -42,6 +42,18 @@ cargo registry and one target directory per workspace, so a rebuild after a smal
 short. `CLI_FEATURES` passes cargo features to `ackinacki-bridge` (the local-network e2e
 builds it with `ackinacki-bridge/dev-unfixed-bridge`).
 
+## Host memory
+
+All the services of `compose.yaml` on one host need 256 GB of RAM; 128 GB is not enough. Their
+peaks, summed and not measured together: `eth-lc-relayer` about 100 GB (two step proofs of about
+25 GB each beside a rotate stage of about 50 GB, `docs/eth-light-client.md` §5), `daemon-live`
+about 14 GB for the block proofs and 12.6 GB for `aggregate-proof`, `deposit-relayer` about
+9.6 GB: about 135 GB. The attestation proof in `daemon-live` grows with the number of signers its
+circuit is built for: about 38 GB at 1000 and 78 GB at 2000
+(`crates/bridge-circuits/attestation-bls-checker-circuit/PARALLEL_BENCHMARK_N14_REPORT.md`), up
+to about 200 GB in all. A memory limit on the `eth-lc-relayer` container has to sit above
+100 GB, or the kernel kills its rotate stage.
+
 ## Layout on the host
 
 Two roots (bridge-audit#132): what is small and not recoverable, and what is large and can
@@ -91,7 +103,7 @@ sourced by its entrypoint; the other services get theirs as container environmen
 
 | File | Template | Holds |
 |---|---|---|
-| `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the two metrics ports |
+| `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the three metrics ports |
 | `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, BK set sha256 and commitment |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
 | `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
@@ -100,8 +112,8 @@ sourced by its entrypoint; the other services get theirs as container environmen
 
 `METRICS_LISTEN_ADDR` is required and is the host's address on the monitoring network: a
 `ports:` entry without an address publishes the port on every interface, past the host
-firewall. `/metrics` is served by `daemon-live` (9464) and `deposit-relayer` (9467); the
-compose healthchecks read them.
+firewall. `/metrics` is served by `daemon-live` (9464), `deposit-relayer` (9467) and
+`eth-lc-relayer` (9468); the compose healthchecks read the first two.
 
 Flags without an environment variable (`eth-lc-relayer daemon --owner-hop --rotate-timeout-secs …`)
 are the service's `command:` in the compose file; override it in a `compose.override.yaml`

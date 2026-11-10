@@ -18,6 +18,10 @@ tracing-appender = "0.2"
 hex = "0.4"
 # sha256 of the rotate VK blob, checked against the pin before `submitRotate`.
 sha2 = "0.10"
+# Prometheus counters of the daemon; `daemon --metrics-addr` installs the
+# text exporter (`GET /metrics`), as `deposit-relayer` does.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 fs2 = "0.4"
@@ -73,6 +77,8 @@ axiom-eth = { git = "https://github.com/gosh-sh/axiom-eth", rev = "1d61be00a63ec
 live-submit = ["acki-nacki-interface/tvm-sdk", "dep:tvm_client"]
 
 [dev-dependencies]
+# Reads the counters a test makes (`DebuggingRecorder`).
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
 tokio = { version = "1.42", features = ["macros", "rt-multi-thread", "test-util"] }
 tempfile = "3"
 # `arbitrum.rs` tests build the JSON-RPC error a node answers with.

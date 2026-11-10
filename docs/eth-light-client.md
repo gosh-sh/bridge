@@ -99,14 +99,22 @@ signed external messages from the relayer, and the contract itself decides what 
 
 Every Ethereum epoch (32 slots, 6.4 minutes) the beacon chain finalizes a new checkpoint. The
 daemon turns each one into a `submitUpdate`. The beacon node serves only its latest
-`finality_update`, so every tick first takes it into a queue on disk
-(`<state file>.steps/`, `src/step_queue.rs`) when it is a checkpoint the queue and the contract do
-not have. Step proofs run in the background for the oldest queued checkpoints,
-`--parallel-proofs` at once (default 2), and each tick waits up to `--poll-secs` for the oldest
-one, then sends it. Checkpoints go on chain oldest first, and a restart proves what the previous
-run had queued. A checkpoint whose proof fails, or which the contract refuses, three times is
-given up with an ERROR; so are checkpoints the daemon never saw because it or the beacon node was
-down. The blocks of either are closed with `submitAncestry` (§3.4).
+`finality_update`, so a watcher in a task of its own asks for it every slot (12 s,
+`src/watcher.rs`) and takes it into a queue on disk (`<state file>.steps/`, `src/step_queue.rs`)
+when it is a checkpoint the queue and the contract do not have. Proving, sending, the daemon's
+backoff and the rotate run in the daemon's loop beside it and never delay it. A version signed by
+fewer than 342 of the 512 committee members is not taken, since the contract would refuse it; the
+watcher waits for the same checkpoint signed by more. Step proofs run in the background for the
+oldest queued checkpoints, `--parallel-proofs` at once (default 2), and each round of the loop
+waits up to `--poll-secs` for the oldest one, then sends it. Checkpoints go on chain oldest first,
+and a restart proves what the previous run had queued.
+
+A checkpoint whose proof fails, or which Acki Nacki does not take, stays at the front and is tried
+again for as long as it takes: the light client cannot move past a checkpoint that is not on
+chain. Each failed try adds one to the counter `eth_lc_relayer_checkpoint_failures_total`, with
+`stage="prove"` or `stage="submit"`, served at `GET /metrics` when `--metrics-addr` is set.
+Checkpoints the daemon never saw, because it or the beacon node was down, are logged as an ERROR
+and their blocks are closed with `submitAncestry` (§3.4).
 
 ```mermaid
 sequenceDiagram
@@ -116,10 +124,10 @@ sequenceDiagram
   participant P as Step prover
   participant LC as EthBeaconLightClient
   participant UB as USDCBridge
-  loop every tick
+  loop every slot, in the watcher task
     R->>B: GET /eth/v1/beacon/light_client/finality_update
     B-->>R: attested + finalized headers, sync_aggregate
-    Note over R: a new checkpoint goes into the queue on disk
+    Note over R: a new checkpoint signed by at least 342 goes into the queue on disk
   end
   Note over R: oldest queued checkpoint, same committee period
   R->>B: GET /eth/v1/beacon/light_client/updates?start_period=P&count=1
@@ -438,7 +446,7 @@ flowchart LR
 | relayer → Acki Nacki | HTTPS 443 | `/graphql` on the network gateway (`AN_GRAPHQL_URL`); tvm_client sends signed external messages and reads accounts | every submit | `src/an_config.rs:15` |
 | operator → Acki Nacki | HTTPS 443 | `tvm-cli --url <gateway host>` (REST) for deploy, funding, getters | deploy kit | `deploy/shellnet-shadow/lib.sh` |
 | self-hosted Acki Nacki node | TCP 8600 Block Keeper API (`api_addr`), UDP 10000 gossip, UDP 8500 node QUIC, gql-server TCP 3000 (`--listen`) | | | `acki-nacki` repo: `node/src/config/network_config.rs`, `gql-server/src/defaults.rs:4` |
-| relayer host inbound | none | | | the daemon exposes no port; metrics are counters in the log |
+| relayer host inbound | the address in `ETH_LC_RELAYER_METRICS_ADDR` (`--metrics-addr`), none when unset; 9468 in `docker/compose.yaml` | `GET /metrics`, Prometheus text | each scrape | `src/bin/eth-lc-relayer.rs` |
 
 Beacon client REST defaults are the clients' documented defaults (Lighthouse and Nimbus 5052,
 Lodestar 9596, Teku 5051, Prysm gateway 3500). Light-client data serving must be enabled on a
@@ -475,6 +483,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `STEP_KEY_DIR` | where the step prover keeps its proving key, `step-key/` next to the SRS when unset. The first proof of a build generates it there and every later one reads it; a key another build generated is replaced | `/data/params/step-key` in the image | |
 | `LIGHT_CLIENT_PARALLEL_PROOFS` | step proofs at once (`--parallel-proofs`, 1 to 16) | 2 | 2 |
+| `ETH_LC_RELAYER_METRICS_ADDR` | where `GET /metrics` is served (`--metrics-addr`), with `eth_lc_relayer_checkpoint_failures_total`; no metrics when unset | `0.0.0.0:9468` in `docker/compose.yaml` | unset |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |
 | `AN_LIGHT_CLIENT`, `AN_SENDER` | light client address as `dapp_id::account_id` (self-rooted deploy: both halves equal) | | |
@@ -544,8 +553,9 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
 
 | Quantity | Value |
 |---|---|
-| Step proof, k=19 | about 7 min wall with keygen (4.5 of them), which only the first proof of a build does; about 3 min with the stored key. About 25 GB RSS each, two at once by default (with a rotate stage on top, not yet measured) |
-| Rotate proof | three stages, run one after another: shards 39 min / 41.6 GB RSS, step snark 6 min / 26 GB, tree 42 min / 49.8 GB (Sepolia, period 1403→1404, 3 November 2026). These include the proving keys written on the first run (about 15 min of the total); `rotate-keys/` then holds about 40 GB. The step prover keeps running while a stage does, so the host peaks at about 75 GB RSS |
+| Step proof, k=19 | about 7 min wall with keygen (4.5 of them), which only the first proof of a build does; about 3 min with the stored key. About 25 GB RSS each, `--parallel-proofs` at once (default 2) |
+| Rotate proof | three stages, run one after another: shards 39 min / 41.6 GB RSS, step snark 6 min / 26 GB, tree 42 min / 49.8 GB (Sepolia, period 1403→1404, 3 November 2026). These include the proving keys written on the first run (about 15 min of the total); `rotate-keys/` then holds about 40 GB |
+| `eth-lc-relayer` container memory | the step proofs keep running while a rotate stage does: about 25 GB per parallel step proof plus about 50 GB for the tree stage, so about 100 GB RSS with the default two and 75 GB with `LIGHT_CLIENT_PARALLEL_PROOFS=1` (summed, not measured together). A container memory limit has to sit above that, or the kernel kills the rotate stage |
 | Submit cadence | one `submitUpdate` per Ethereum epoch (6.4 min); head lags Ethereum finality by about one epoch |
 | Period hop | every 8192 slots, about 27.3 h |
 | Contract gas | about 0.57 shell per accepted update on shellnet; fund ahead of that burn |
@@ -569,13 +579,16 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   return the same hash.
 - Journal lines to expect: `checkpoint queued` and `submitUpdate accepted` once per epoch
   (6.4 minutes), with consecutive slots 32 apart; `step proof started` for each;
+  `checkpoint not on chain yet; trying again` (WARN) with the `stage` and the reason for each failed
+  try, and `checkpoint signed by too few of the committee` (WARN) while the beacon node serves a
+  thinly signed version;
   `owner hop: setCommitteeCommitment accepted` (shadow) or `submitRotate accepted`
   (production) once per period; `rePushAnchor accepted`. `checkpoints missed` (ERROR) names the
   slots around a gap, and `submitAncestry accepted … reached_older=true` closes it; `span given
   up` (ERROR) names blocks that need the owner. From `arbitrum-anchors`: `submitAncestry sent
   for the assertion's parent-chain block`.
 - The state file is pinned to the first `genesis_validators_root` it sees
-  (`src/relayer.rs:414`); pointing a daemon at another network fails instead of mixing heads.
+  (`src/watcher.rs:64`); pointing a daemon at another network fails instead of mixing heads.
 
 ## 7. Known limits
 

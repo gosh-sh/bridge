@@ -1,4 +1,7 @@
 //! Long-running loop with exponential backoff and SIGINT-aware shutdown.
+//!
+//! The beacon watcher runs in a task of its own beside the loop, at its own
+//! pace: the backoff, proving and sending never delay taking a checkpoint.
 
 use std::{
     future::Future,
@@ -84,7 +87,7 @@ fn is_success(o: &TickOutcome) -> bool {
     )
 }
 
-impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P, A> {
+impl<S: BeaconSource + 'static, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P, A> {
     pub async fn run_until_shutdown<F>(
         &mut self,
         backoff: BackoffConfig,
@@ -97,13 +100,14 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         backoff.validate()?;
         tokio::pin!(shutdown);
         let mut delay = backoff.initial;
+        let _watcher = self.spawn_watcher();
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
                     info!("shutdown signal; exiting after last tick");
                     return Ok(());
                 }
-                outcome = self.tick() => {
+                outcome = self.work() => {
                     metrics.ticks_total.fetch_add(1, Ordering::Relaxed);
                     match outcome {
                         Ok(o) => {

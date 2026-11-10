@@ -21,7 +21,7 @@ fn update() -> eth_light_client_relayer::FinalityUpdate {
         "beacon":{"slot":"4","state_root":"0x1111111111111111111111111111111111111111111111111111111111111111"},
         "execution":{"block_hash":"0x2222222222222222222222222222222222222222222222222222222222222222"}
       },
-      "sync_aggregate":{"sync_committee_bits":"0x01"}
+      "sync_aggregate":{"sync_committee_bits":"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
     }}"#;
     let mut update = parse_finality_update(json).unwrap();
     update.committee_json = "[]".into();

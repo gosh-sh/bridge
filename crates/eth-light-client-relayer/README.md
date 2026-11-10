@@ -6,13 +6,19 @@ Polls Ethereum beacon `finality_update` **and** `light_client/updates` (current
 `EthBeaconLightClient.submitUpdate` on Acki Nacki.
 
 `finalizeDeposit` flip (owner): `scripts/ursus/flip_deposit_to_light_client.md`.
-The daemon takes every checkpoint the beacon node finalizes into a queue on
-disk as it appears (`<state file>.steps/`), proves the oldest ones in the
-background, `--parallel-proofs` at once (default 2), and sends them oldest
-first. Ancestry admits the blocks behind a proven one, headers oldest first,
-up to 32 per call. Across checkpoints the daemon missed (it or the beacon node
-was down, or a proof failed three times) it sends them back from the next
-checkpoint, from the headers of `ETH_RPC_URL`, which it needs to start;
+A watcher in a task of its own asks the beacon node every slot and takes
+every checkpoint it finalizes into a queue on disk as it appears
+(`<state file>.steps/`); a version signed by fewer than 342 of the committee
+waits for a better signed one. The daemon proves the oldest queued
+checkpoints in the background, `--parallel-proofs` at once (default 2), and
+sends them oldest first. A checkpoint that fails is tried again until it is
+on chain; each failed try adds one to
+`eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"}` at
+`GET /metrics` (`--metrics-addr`, `ETH_LC_RELAYER_METRICS_ADDR`). Ancestry
+admits the blocks behind a proven one, headers oldest first, up to 32 per
+call. Across checkpoints the daemon missed (it or the beacon node was down)
+it sends them back from the next checkpoint, from the headers of
+`ETH_RPC_URL`, which it needs to start;
 between adjacent checkpoints only with `--submit-ancestry` (default off).
 `arbitrum-anchors` sends the span for the epoch each Arbitrum assertion
 landed in, which is all the Arbitrum path needs. The light client keeps a

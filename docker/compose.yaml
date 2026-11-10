@@ -155,14 +155,16 @@ services:
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
     pull_policy: ${BRIDGE_PULL_POLICY:-missing}
     # Rotates are proven here: the stages peak at ~50 GB RSS (the tree), and
-    # the step prover (~25 GB) keeps running beside them, so a memory limit,
-    # if one is set, has to sit above ~75 GB.
+    # the step proofs (~25 GB each, LIGHT_CLIENT_PARALLEL_PROOFS at once,
+    # default 2) keep running beside them, so a memory limit, if one is set,
+    # has to sit above ~100 GB (~75 GB with LIGHT_CLIENT_PARALLEL_PROOFS=1).
     command: ["daemon", "--no-flip-owner", "--owner-hop", "--poll-secs", "64", "--prove-timeout-secs", "7200", "--rotate-timeout-secs", "10800"]
     env_file:
       - path: ${BRIDGE_OPT}/env/eth-lc-relayer.env
         required: true
     environment:
       AN_KEYS_PATH: /run/keys/an-owner.keys.json
+      ETH_LC_RELAYER_METRICS_ADDR: 0.0.0.0:9468
     volumes:
       - type: bind
         source: ${BRIDGE_OPT}/keys/an-owner.keys.json
@@ -188,6 +190,10 @@ services:
         source: ${BRIDGE_DATA}/params/lc-prover
         target: /data/params
         bind: { create_host_path: false }
+    ports:
+      # The LAN address is required: without one Docker publishes the port on
+      # every interface, past the host firewall.
+      - "${METRICS_LISTEN_ADDR:?}:${ETH_LC_RELAYER_METRICS_PORT:-9468}:9468"
     # A tick may be inside a step proof (up to --prove-timeout-secs). A rotate
     # stage is not waited for: it is killed, and the stages it finished stay
     # in /data/work/rotate-<P>/.

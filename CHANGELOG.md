@@ -59,6 +59,9 @@ assigns it when the release is tagged.
   that reads `slotsPerYear()` at the new getter.
 - `eth-lc-relayer daemon` does not start without `ETH_RPC_URL` (`--eth-rpc-url`): set it to an
   execution RPC of the followed chain.
+- The `eth-lc-relayer` container needs about 100 GB of memory: two step proofs at once
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) beside a rotate stage; 75 GB with `1`. Raise a
+  memory limit set for the previous 75 GB. A host running all of `docker/compose.yaml` needs 256 GB.
 
 ### New / Improvements
 
@@ -67,9 +70,15 @@ assigns it when the release is tagged.
   passed that epoch; at most three sends per block. Upgrade it first, then turn `SUBMIT_ANCESTRY`
   (`--submit-ancestry`) off on `eth-lc-relayer daemon`: the daemon's spans admitted every block.
   `docker/env/eth-lc-relayer.env.example` no longer sets it.
-- `eth-lc-relayer daemon` proves every Ethereum checkpoint: each one is queued on disk in
-  `<state file>.steps/` as it appears and proven in the background, `--parallel-proofs`
-  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) at once, about 25 GB each; size the host for that.
+- `eth-lc-relayer daemon` proves every Ethereum checkpoint: a watcher asks the beacon node every
+  slot, apart from proving and sending, and queues each checkpoint on disk in
+  `<state file>.steps/` as it appears; proofs run in the background, `--parallel-proofs`
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) at once. A checkpoint that fails is tried again
+  until it is on chain, and a version signed by fewer than 342 of the committee is not taken.
+- `eth-lc-relayer daemon --metrics-addr` (`ETH_LC_RELAYER_METRICS_ADDR`) serves `GET /metrics` with
+  the counter `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"}`;
+  `docker/compose.yaml` publishes it on `ETH_LC_RELAYER_METRICS_PORT` (default 9468). Add it to
+  the scrape config.
 - `eth-lc-relayer daemon` closes the blocks of checkpoints it missed with `submitAncestry` back from
   the next one and logs `checkpoints missed` as an ERROR.
 - `EthBeaconLightClient` 1.7.0 `submitAncestry` takes 2 to 33 headers and needs only the last one

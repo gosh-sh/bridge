@@ -127,6 +127,8 @@ impl AnchorsDirs {
     }
 }
 
+// Parsed once at start; the size of the largest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Fetch and print the latest light-client finality update.
@@ -371,6 +373,10 @@ enum Cmd {
             value_parser = clap::value_parser!(u16).range(1..=16)
         )]
         parallel_proofs: u16,
+        /// Serve Prometheus metrics at `http://<addr>/metrics`, among them
+        /// `eth_lc_relayer_checkpoint_failures_total`. Off without it.
+        #[arg(long, env = "ETH_LC_RELAYER_METRICS_ADDR")]
+        metrics_addr: Option<std::net::SocketAddr>,
         /// On a period jump the contract has no rotate for, prove a step of
         /// the new period and advance the committee with the owner key
         /// (`setCommitteeCommitment`) instead of waiting for a rotate proof.
@@ -704,6 +710,7 @@ async fn real_main() -> anyhow::Result<()> {
             eth_rpc_url,
             submit_ancestry,
             parallel_proofs,
+            metrics_addr,
             owner_hop,
             an_graphql_url,
             an_keys_path,
@@ -733,6 +740,9 @@ async fn real_main() -> anyhow::Result<()> {
             }
             if let Some(v) = an_usdc_bridge {
                 an.usdc_bridge = v;
+            }
+            if let Some(addr) = metrics_addr {
+                install_metrics_exporter(addr)?;
             }
             run_daemon(
                 beacon_url,
@@ -2074,6 +2084,18 @@ async fn arbitrum_vector(
         "no assertion ended at a batch seen within {} min",
         timeout.as_secs() / 60
     )
+}
+
+/// Serve the Prometheus text format at `http://<addr>/metrics` for the
+/// lifetime of the process.
+fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .install()
+        .map_err(|e| anyhow::anyhow!("metrics exporter on {addr}: {e}"))?;
+    eth_light_client_relayer::describe_metrics();
+    info!(%addr, "metrics exporter listening (GET /metrics)");
+    Ok(())
 }
 
 async fn run<S, P, A>(mut relayer: Relayer<S, P, A>, backoff: BackoffConfig) -> anyhow::Result<()>

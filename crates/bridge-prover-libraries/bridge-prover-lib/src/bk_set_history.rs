@@ -1,0 +1,768 @@
+//! Builds a block-keeper set at a height from the GraphQL history, retrying
+//! the failures that retrying can cure.
+//!
+//! [`BkSetHistory`] is the IO surface (thread 0 of a gql-server);
+//! [`build_bk_set_at`] makes one attempt through the pure replay in
+//! [`crate::bk_set_replay`], [`build_bk_set_with_retry`] repeats it.
+
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
+
+use bridge_gql_fetcher::gql_client::{GqlClient, UnknownFieldError, DEFAULT_THREAD_ID_HEX};
+use tracing::warn;
+
+use crate::bk_set_replay::{
+    leaves_to_fetch, replay_to, rows_to_fetch, BkSetSnapshot, BkSetUpdateRow, BkTarget,
+    BlockLeaves, FinalCheck, ReplayError, ReplayedSet,
+};
+
+/// Rows asked for per `bkSetUpdates` page.
+const PAGE_SIZE: u32 = 100;
+
+/// The field a gql-server must know to serve a snapshot.
+const LATEST_BK_SET_FIELD: &str = "latestBkSet";
+
+/// Read access to the block-keeper set history of thread 0.
+#[allow(async_fn_in_trait)]
+pub trait BkSetHistory {
+    /// The set that signs the newest snapshot block; `None` while the server
+    /// has no snapshot yet.
+    async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>>;
+    /// Every `bkSetUpdates` row with a height in `[height_start, height_end]`,
+    /// all pages.
+    async fn bk_set_updates(
+        &self,
+        height_start: u64,
+        height_end: u64,
+    ) -> anyhow::Result<Vec<BkSetUpdateRow>>;
+    /// Block-id-tree leaves of the block at `height`, `None` when the server
+    /// has none.
+    async fn block_leaves(&self, height: u64) -> anyhow::Result<Option<BlockLeaves>>;
+    /// Height of the newest rotation at or below `height`, `None` when there
+    /// is none.
+    async fn last_update_at_or_below(&self, height: u64) -> anyhow::Result<Option<u64>>;
+}
+
+impl BkSetHistory for GqlClient {
+    async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>> {
+        Ok(self
+            .query_latest_bk_set()
+            .await?
+            .map(|latest| BkSetSnapshot {
+                anchor_height: latest.height,
+                signers: latest.signers.into_iter().collect::<HashMap<_, _>>(),
+            }))
+    }
+
+    async fn bk_set_updates(
+        &self,
+        height_start: u64,
+        height_end: u64,
+    ) -> anyhow::Result<Vec<BkSetUpdateRow>> {
+        let mut rows = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let (page, next) = self
+                .query_bk_set_updates_range(
+                    DEFAULT_THREAD_ID_HEX,
+                    Some(height_start),
+                    Some(height_end),
+                    PAGE_SIZE,
+                    after.as_deref(),
+                )
+                .await?;
+            rows.extend(page.into_iter().map(|u| BkSetUpdateRow {
+                height: u.height,
+                bk_set_update_hex: u.bk_set_update_hex,
+            }));
+            match next {
+                None => return Ok(rows),
+                Some(cursor) => {
+                    anyhow::ensure!(
+                        after.as_deref() != Some(cursor.as_str()),
+                        "bkSetUpdates returned the same page cursor twice"
+                    );
+                    after = Some(cursor);
+                },
+            }
+        }
+    }
+
+    async fn block_leaves(&self, height: u64) -> anyhow::Result<Option<BlockLeaves>> {
+        Ok(self
+            .query_block_by_height(DEFAULT_THREAD_ID_HEX, height)
+            .await?
+            .block_merkle_tree_leaves)
+    }
+
+    async fn last_update_at_or_below(&self, height: u64) -> anyhow::Result<Option<u64>> {
+        self.query_last_bk_set_update_at_or_below(DEFAULT_THREAD_ID_HEX, height)
+            .await
+    }
+}
+
+/// One attempt: snapshot, rows, leaves, replay.
+pub async fn build_bk_set_at<H: BkSetHistory>(
+    h: &H,
+    target: &BkTarget,
+) -> Result<ReplayedSet, ReplayError> {
+    let snapshot = match h.latest_bk_set().await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return Err(ReplayError::NoSnapshot),
+        Err(e) => {
+            let too_old = e
+                .downcast_ref::<UnknownFieldError>()
+                .is_some_and(|u| u.field == LATEST_BK_SET_FIELD);
+            return Err(if too_old {
+                ReplayError::ServerTooOld
+            } else {
+                ReplayError::Query(e)
+            });
+        },
+    };
+
+    let rows = match rows_to_fetch(snapshot.anchor_height, target.height) {
+        Some((from, to)) => h
+            .bk_set_updates(from, to)
+            .await
+            .map_err(ReplayError::Query)?,
+        None => Vec::new(),
+    };
+
+    let mut leaves = BTreeMap::new();
+    for height in leaves_to_fetch(&rows, target) {
+        match h.block_leaves(height).await.map_err(ReplayError::Query)? {
+            Some(l) => {
+                leaves.insert(height, l);
+            },
+            None => {
+                return Err(ReplayError::MissingLeaves {
+                    height,
+                })
+            },
+        }
+    }
+
+    replay_to(&snapshot, &rows, &leaves, target)
+}
+
+/// How hard [`build_bk_set_with_retry`] tries.
+#[derive(Clone, Copy, Debug)]
+pub struct BuildPolicy {
+    /// Data failures (a check against the leaves failed) before giving up,
+    /// counted over the whole call.
+    pub data_attempts: u32,
+    /// Bound on the backoff slept on transient failures, since the start or
+    /// the last data failure; `None` retries them forever.
+    pub transient_budget: Option<Duration>,
+    pub backoff_initial: Duration,
+    pub backoff_max: Duration,
+    pub backoff_multiplier: u32,
+}
+
+impl Default for BuildPolicy {
+    fn default() -> Self {
+        Self {
+            data_attempts: 3,
+            transient_budget: None,
+            backoff_initial: Duration::from_secs(2),
+            backoff_max: Duration::from_secs(60),
+            backoff_multiplier: 2,
+        }
+    }
+}
+
+impl BuildPolicy {
+    fn next_backoff(&self, current: Duration) -> Duration {
+        current
+            .saturating_mul(self.backoff_multiplier)
+            .min(self.backoff_max)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error(
+        "the block-keeper set failed its checks on {attempts} fresh snapshots: {last}. Either \
+         `bkSetUpdates` returned an incomplete range, or a change the node applies implicitly \
+         (owner re-added under another index, overwrite, removal of an absent index) is not in \
+         the rows"
+    )]
+    Data { attempts: u32, last: ReplayError },
+    #[error("the block-keeper set queries kept failing for {waited:?}: {last}")]
+    Transient { waited: Duration, last: ReplayError },
+    #[error(
+        "the GraphQL server does not know `latestBkSet`: needs gql-server >= 1.5.0 serving \
+         blockchain.latestBkSet"
+    )]
+    NoLatestBkSetField,
+}
+
+/// [`build_bk_set_at`] with retries: transient failures back off and repeat,
+/// data failures repeat on a fresh snapshot up to `policy.data_attempts`,
+/// a server without `latestBkSet` fails at once.
+pub async fn build_bk_set_with_retry<H: BkSetHistory>(
+    h: &H,
+    target: &BkTarget,
+    policy: &BuildPolicy,
+) -> Result<ReplayedSet, BuildError> {
+    let mut data_failures = 0u32;
+    let mut waited = Duration::ZERO;
+    let mut backoff = policy.backoff_initial;
+    loop {
+        let err = match build_bk_set_at(h, target).await {
+            Ok(set) => return Ok(set),
+            Err(ReplayError::ServerTooOld) => return Err(BuildError::NoLatestBkSetField),
+            Err(e) => e,
+        };
+        if err.is_transient() {
+            if policy
+                .transient_budget
+                .is_some_and(|budget| waited >= budget)
+            {
+                return Err(BuildError::Transient {
+                    waited,
+                    last: err,
+                });
+            }
+            warn!(error = %err, retry_in = ?backoff, "bk set build failed, will retry");
+            tokio::time::sleep(backoff).await;
+            waited = waited.saturating_add(backoff);
+            backoff = policy.next_backoff(backoff);
+        } else {
+            data_failures += 1;
+            if data_failures >= policy.data_attempts {
+                return Err(BuildError::Data {
+                    attempts: data_failures,
+                    last: err,
+                });
+            }
+            warn!(
+                error = %err,
+                attempt = data_failures,
+                "bk set failed its checks, retrying on a fresh snapshot"
+            );
+            waited = Duration::ZERO;
+            backoff = policy.backoff_initial;
+        }
+    }
+}
+
+/// The target for a bridge seeded at `seed`: genesis checks block 1, any
+/// other seed the set after the changes of the seed block.
+pub fn seed_target(seed: u64) -> BkTarget {
+    if seed == 0 {
+        BkTarget {
+            height: 0,
+            check: FinalCheck::L2Of(1),
+        }
+    } else {
+        BkTarget {
+            height: seed,
+            check: FinalCheck::L3Of(seed),
+        }
+    }
+}
+
+/// The set a relayer must hold, given the last seen block `last_seen`, the
+/// newest rotation `last_bk_update` and the bundle `stride`.
+pub fn bk_target(last_seen: u64, last_bk_update: u64, stride: u64) -> BkTarget {
+    let held = last_bk_update != 0
+        && stride != 0
+        && (last_seen / stride + 1).saturating_mul(stride) <= last_bk_update;
+    if held {
+        BkTarget {
+            height: last_bk_update - 1,
+            check: FinalCheck::L2Of(last_bk_update),
+        }
+    } else if last_bk_update < last_seen {
+        BkTarget {
+            height: last_seen - 1,
+            check: FinalCheck::L2Of(last_seen),
+        }
+    } else if last_bk_update == 0 {
+        // `last_seen` is 0 as well.
+        seed_target(0)
+    } else {
+        BkTarget {
+            height: last_bk_update,
+            check: FinalCheck::L3Of(last_bk_update),
+        }
+    }
+}
+
+/// The set at a bridge seed together with the newest rotation at or below it.
+#[derive(Clone, Debug)]
+pub struct GenesisBk {
+    pub set: ReplayedSet,
+    pub last_bk_set_update_seq_no: u64,
+}
+
+/// Build the set at `seed` and look up the newest rotation at or below it.
+/// The rotation comes from its own query, not from the rows of the walk, which
+/// need not reach it.
+pub async fn genesis_bk_for_seed<H: BkSetHistory>(
+    h: &H,
+    seed: u64,
+    policy: &BuildPolicy,
+) -> anyhow::Result<GenesisBk> {
+    let mut waited = Duration::ZERO;
+    let mut backoff = policy.backoff_initial;
+    let cursor = loop {
+        match h.last_update_at_or_below(seed).await {
+            Ok(found) => break found.unwrap_or(0),
+            Err(e) if e.downcast_ref::<UnknownFieldError>().is_some() => return Err(e),
+            Err(e) => {
+                if policy
+                    .transient_budget
+                    .is_some_and(|budget| waited >= budget)
+                {
+                    return Err(e.context(format!(
+                        "last bk set update at or below {seed} kept failing for {waited:?}"
+                    )));
+                }
+                warn!(
+                    error = %e,
+                    retry_in = ?backoff,
+                    "last bk set update query failed, will retry"
+                );
+                tokio::time::sleep(backoff).await;
+                waited = waited.saturating_add(backoff);
+                backoff = policy.next_backoff(backoff);
+            },
+        }
+    };
+
+    // The cursor query spent part of the transient budget already.
+    let remaining = BuildPolicy {
+        transient_budget: policy.transient_budget.map(|b| b.saturating_sub(waited)),
+        ..*policy
+    };
+    let set = build_bk_set_with_retry(h, &seed_target(seed), &remaining).await?;
+    Ok(GenesisBk {
+        set,
+        last_bk_set_update_seq_no: cursor,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{BTreeMap, HashMap, VecDeque},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        time::Duration,
+    };
+
+    use bridge_gql_fetcher::gql_client::{
+        create_client, UnknownFieldError, BLOCK_ID_TREE_LEAF_COUNT,
+    };
+    use halo2_base::halo2_proofs::halo2curves::{
+        bls12_381::{Fr as BlsScalar, G1},
+        group::Curve,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::Instant,
+    };
+
+    use super::*;
+    use crate::bk_set_replay::commitment;
+
+    fn key(seed: u64) -> Vec<u8> {
+        (G1::generator() * BlsScalar::from(seed))
+            .to_affine()
+            .to_compressed_be()
+            .to_vec()
+    }
+
+    fn set(entries: &[(u16, u64)]) -> HashMap<u16, Vec<u8>> {
+        entries.iter().map(|(i, s)| (*i, key(*s))).collect()
+    }
+
+    fn c(entries: &[(u16, u64)]) -> [u8; 32] {
+        commitment(&set(entries))
+    }
+
+    fn blob(variant: u32, index: u16, seed: u64) -> String {
+        let point = (G1::generator() * BlsScalar::from(seed)).to_affine();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&variant.to_le_bytes());
+        buf.extend_from_slice(&index.to_le_bytes());
+        buf.extend_from_slice(&96u64.to_le_bytes());
+        buf.extend_from_slice(&point.to_uncompressed_be());
+        hex::encode(buf)
+    }
+
+    fn row(height: u64, variant: u32, index: u16, seed: u64) -> BkSetUpdateRow {
+        BkSetUpdateRow {
+            height: Some(height),
+            bk_set_update_hex: blob(variant, index, seed),
+        }
+    }
+
+    fn leaves(l2: [u8; 32], l3: [u8; 32]) -> BlockLeaves {
+        let mut l = [[0u8; 32]; BLOCK_ID_TREE_LEAF_COUNT];
+        l[2] = l2;
+        l[3] = l3;
+        l
+    }
+
+    fn snap(anchor_height: u64, entries: &[(u16, u64)]) -> BkSetSnapshot {
+        BkSetSnapshot {
+            anchor_height,
+            signers: set(entries),
+        }
+    }
+
+    // S0 --17000--> S1 --18000--> S2
+    const S0: &[(u16, u64)] = &[(0, 1), (1, 2)];
+    const S1: &[(u16, u64)] = &[(0, 1), (1, 2), (2, 3)];
+    const S2: &[(u16, u64)] = &[(0, 1), (2, 3)];
+
+    #[derive(Default)]
+    struct FakeHistory {
+        snapshots: Mutex<VecDeque<Option<BkSetSnapshot>>>,
+        /// Until this much time has passed the server has no snapshot; then it
+        /// answers with the given one.
+        late_snapshot: Option<(Duration, BkSetSnapshot)>,
+        started: Option<Instant>,
+        unknown_field: bool,
+        rows: Vec<BkSetUpdateRow>,
+        leaves: BTreeMap<u64, BlockLeaves>,
+        last_le: BTreeMap<u64, u64>,
+        latest_calls: AtomicUsize,
+    }
+
+    impl FakeHistory {
+        fn with_snapshots(snapshots: Vec<Option<BkSetSnapshot>>) -> Self {
+            Self {
+                snapshots: Mutex::new(snapshots.into()),
+                ..Default::default()
+            }
+        }
+
+        fn latest_calls(&self) -> usize {
+            self.latest_calls.load(Ordering::SeqCst)
+        }
+
+        /// Heights 17000 and 18000 rotate S0 -> S1 -> S2.
+        fn chain(mut self) -> Self {
+            self.rows = vec![row(17000, 0, 2, 3), row(18000, 1, 1, 2)];
+            self.leaves.insert(16384, leaves(c(S0), c(S0)));
+            self.leaves.insert(17000, leaves(c(S0), c(S1)));
+            self.leaves.insert(18000, leaves(c(S1), c(S2)));
+            self
+        }
+    }
+
+    impl BkSetHistory for FakeHistory {
+        async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>> {
+            self.latest_calls.fetch_add(1, Ordering::SeqCst);
+            if self.unknown_field {
+                return Err(anyhow::Error::new(UnknownFieldError {
+                    field: "latestBkSet".into(),
+                }));
+            }
+            if let (Some((after, late)), Some(started)) = (&self.late_snapshot, self.started) {
+                if started.elapsed() >= *after {
+                    return Ok(Some(late.clone()));
+                }
+                return Ok(None);
+            }
+            let mut q = self.snapshots.lock().unwrap();
+            // The last entry repeats forever.
+            Ok(if q.len() > 1 {
+                q.pop_front().unwrap()
+            } else {
+                q.front().cloned().flatten()
+            })
+        }
+
+        async fn bk_set_updates(
+            &self,
+            height_start: u64,
+            height_end: u64,
+        ) -> anyhow::Result<Vec<BkSetUpdateRow>> {
+            Ok(self
+                .rows
+                .iter()
+                .filter(|r| {
+                    r.height
+                        .is_some_and(|h| (height_start..=height_end).contains(&h))
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn block_leaves(&self, height: u64) -> anyhow::Result<Option<BlockLeaves>> {
+            Ok(self.leaves.get(&height).copied())
+        }
+
+        async fn last_update_at_or_below(&self, height: u64) -> anyhow::Result<Option<u64>> {
+            Ok(self.last_le.get(&height).copied())
+        }
+    }
+
+    fn back_target() -> BkTarget {
+        seed_target(16384)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn null_snapshot_retries_until_one_arrives() {
+        let h = FakeHistory::with_snapshots(vec![None, None, Some(snap(19000, S2))]).chain();
+        let out = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(out.pubkeys, set(S0));
+        assert_eq!(h.latest_calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bad_snapshot_key_is_retried_not_fatal() {
+        let mut bad = snap(19000, S2);
+        bad.signers.insert(0, vec![0xff; 48]);
+        let h = FakeHistory::with_snapshots(vec![Some(bad), Some(snap(19000, S2))]).chain();
+        let out = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(out.pubkeys, set(S0));
+        assert_eq!(h.latest_calls(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn data_error_stops_after_three_attempts() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(19000, S2))]).chain();
+        h.rows.retain(|r| r.height != Some(17000));
+        let e = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e, BuildError::Data {
+                attempts: 3,
+                ..
+            }),
+            "{e}"
+        );
+        assert_eq!(h.latest_calls(), 3);
+        let msg = e.to_string();
+        assert!(
+            msg.contains("incomplete") && msg.contains("implicitly"),
+            "{msg}"
+        );
+        assert!(msg.contains("height"), "{msg}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_failure_does_not_reset_the_data_count() {
+        // data, transient, data, data -> three data failures in total.
+        let mut h = FakeHistory::with_snapshots(vec![
+            Some(snap(19000, S2)),
+            None,
+            Some(snap(19000, S2)),
+            Some(snap(19000, S2)),
+        ])
+        .chain();
+        h.rows.retain(|r| r.height != Some(17000));
+        let e = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e, BuildError::Data {
+                attempts: 3,
+                ..
+            }),
+            "{e}"
+        );
+        assert_eq!(h.latest_calls(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_transient_budget_gives_up() {
+        let h = FakeHistory::with_snapshots(vec![None]).chain();
+        let p = BuildPolicy {
+            transient_budget: Some(Duration::from_secs(180)),
+            ..BuildPolicy::default()
+        };
+        let e = build_bk_set_with_retry(&h, &back_target(), &p)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e, BuildError::Transient { waited, .. } if waited >= Duration::from_secs(180)),
+            "{e}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_after_a_minute_fits_the_budget() {
+        let mut h = FakeHistory::default().chain();
+        h.late_snapshot = Some((Duration::from_secs(70), snap(19000, S2)));
+        h.started = Some(Instant::now());
+        let p = BuildPolicy {
+            transient_budget: Some(Duration::from_secs(180)),
+            ..BuildPolicy::default()
+        };
+        let out = build_bk_set_with_retry(&h, &back_target(), &p)
+            .await
+            .unwrap();
+        assert_eq!(out.pubkeys, set(S0));
+    }
+
+    #[tokio::test]
+    async fn old_server_is_named_not_retried() {
+        let h = FakeHistory {
+            unknown_field: true,
+            ..Default::default()
+        };
+        let e = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, BuildError::NoLatestBkSetField));
+        assert!(e
+            .to_string()
+            .contains("needs gql-server >= 1.5.0 serving blockchain.latestBkSet"));
+        assert_eq!(h.latest_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn deploy_cursor_comes_from_its_own_query() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(19000, S2))]).chain();
+        h.last_le.insert(16384, 15000);
+        let g = genesis_bk_for_seed(&h, 16384, &BuildPolicy::default())
+            .await
+            .unwrap();
+        // The backward walk only sees 17000 and 18000.
+        assert_eq!(g.last_bk_set_update_seq_no, 15000);
+        assert_eq!(g.set.pubkeys, set(S0));
+    }
+
+    #[tokio::test]
+    async fn deploy_cursor_survives_a_forward_walk() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(10000, S0))]);
+        h.leaves.insert(16384, leaves(c(S0), c(S0)));
+        h.last_le.insert(16384, 9000);
+        let g = genesis_bk_for_seed(&h, 16384, &BuildPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(g.last_bk_set_update_seq_no, 9000);
+    }
+
+    #[tokio::test]
+    async fn deploy_cursor_is_zero_only_when_the_query_is_empty() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(10000, S0))]);
+        h.leaves.insert(16384, leaves(c(S0), c(S0)));
+        let g = genesis_bk_for_seed(&h, 16384, &BuildPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(g.last_bk_set_update_seq_no, 0);
+    }
+
+    #[test]
+    fn target_table() {
+        let s = 16384;
+        assert_eq!(bk_target(16384, 40000, s), BkTarget {
+            height: 39999,
+            check: FinalCheck::L2Of(40000)
+        });
+        assert_eq!(bk_target(32768, 20000, s), BkTarget {
+            height: 32767,
+            check: FinalCheck::L2Of(32768)
+        });
+        assert_eq!(bk_target(16384, 20000, s), BkTarget {
+            height: 20000,
+            check: FinalCheck::L3Of(20000)
+        });
+        assert_eq!(bk_target(16384, 16384, s), BkTarget {
+            height: 16384,
+            check: FinalCheck::L3Of(16384)
+        });
+        assert_eq!(bk_target(0, 0, s), BkTarget {
+            height: 0,
+            check: FinalCheck::L2Of(1)
+        });
+        assert_eq!(bk_target(16384, 0, s), BkTarget {
+            height: 16383,
+            check: FinalCheck::L2Of(16384)
+        });
+    }
+
+    #[test]
+    fn seed_target_for_genesis_checks_block_one() {
+        assert_eq!(seed_target(0), BkTarget {
+            height: 0,
+            check: FinalCheck::L2Of(1)
+        });
+        assert_eq!(seed_target(16384), BkTarget {
+            height: 16384,
+            check: FinalCheck::L3Of(16384)
+        });
+    }
+
+    /// The unknown-field answer of an old gql-server survives the real
+    /// adapter and is recognised after one request.
+    #[tokio::test]
+    async fn old_server_over_http_is_named_after_one_request() {
+        const BODY: &str = r#"{"data":null,"errors":[{"message":"Unknown field \"latestBkSet\" on type \"BlockchainQuery\".","locations":[{"line":1,"column":16}]}]}"#;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    // Read the headers and the whole body, then answer.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(split) = text.find("\r\n\r\n") {
+                            let want = text[..split]
+                                .lines()
+                                .find_map(|l| {
+                                    let (k, v) = l.split_once(':')?;
+                                    k.eq_ignore_ascii_case("content-length")
+                                        .then(|| v.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= split + 4 + want {
+                                break;
+                            }
+                        }
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                         {}\r\nconnection: close\r\n\r\n{BODY}",
+                        BODY.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let client = create_client(&url).unwrap();
+        let e = build_bk_set_with_retry(&client, &seed_target(16384), &BuildPolicy::default())
+            .await
+            .unwrap_err();
+        server.abort();
+        assert!(matches!(e, BuildError::NoLatestBkSetField), "{e}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+}

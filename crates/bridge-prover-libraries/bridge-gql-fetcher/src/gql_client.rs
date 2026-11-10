@@ -164,6 +164,35 @@ enum AttemptError {
     GraphqlErrors(String),
     MissingData,
     NullData(String),
+    /// The server does not know a queried field (an older gql-server).
+    UnknownField(String),
+}
+
+/// A queried GraphQL field that the server does not know — what an older
+/// gql-server answers to a newer query. Carried inside [`anyhow::Error`];
+/// recognise it with `err.downcast_ref::<UnknownFieldError>()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownFieldError {
+    pub field: String,
+}
+
+impl std::fmt::Display for UnknownFieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GraphQL server does not know field `{}`", self.field)
+    }
+}
+
+impl std::error::Error for UnknownFieldError {}
+
+/// The field name out of the first `Unknown field "<f>" on type …` message
+/// in a GraphQL `errors` array.
+pub(crate) fn unknown_field_in(errors: &Value) -> Option<String> {
+    errors.as_array()?.iter().find_map(|e| {
+        let msg = e.get("message")?.as_str()?;
+        let rest = msg.strip_prefix("Unknown field \"")?;
+        let (field, tail) = rest.split_once('"')?;
+        tail.starts_with(" on type ").then(|| field.to_string())
+    })
 }
 
 impl AttemptError {
@@ -175,6 +204,7 @@ impl AttemptError {
             AttemptError::Decode(_) => "decode",
             AttemptError::GraphqlErrors(_) => "graphql_error",
             AttemptError::MissingData | AttemptError::NullData(_) => "null_data",
+            AttemptError::UnknownField(_) => "unknown_field",
         }
     }
 }
@@ -188,6 +218,7 @@ impl std::fmt::Display for AttemptError {
             AttemptError::GraphqlErrors(s) => write!(f, "GraphQL errors: {s}"),
             AttemptError::MissingData => write!(f, "response has no `data` field"),
             AttemptError::NullData(p) => write!(f, "required object `{p}` is null"),
+            AttemptError::UnknownField(n) => write!(f, "server does not know field `{n}`"),
         }
     }
 }
@@ -392,6 +423,8 @@ impl GqlClient {
         let mut round: u32 = 0;
         let mut last_error: Option<AttemptError> = None;
         loop {
+            // Per endpoint of this round: the field it said it does not know.
+            let mut unknown_this_round: Vec<Option<String>> = vec![None; count];
             for (idx, endpoint) in self.endpoints.iter().enumerate() {
                 for attempt in 1..=retries {
                     let started = Instant::now();
@@ -438,6 +471,13 @@ impl GqlClient {
                                 error = %e,
                                 "GraphQL request failed",
                             );
+                            // An endpoint that does not know the field will not
+                            // learn it by being asked again: move on.
+                            if let AttemptError::UnknownField(name) = &e {
+                                unknown_this_round[idx] = Some(name.clone());
+                                last_error = Some(e);
+                                break;
+                            }
                             last_error = Some(e);
                             if attempt < retries {
                                 tokio::time::sleep(self.cfg.retry_delay).await;
@@ -460,6 +500,15 @@ impl GqlClient {
                         "GraphQL endpoint exhausted its retries; failing over",
                     );
                     tokio::time::sleep(self.cfg.retry_delay).await;
+                }
+            }
+            // Every endpoint answered "unknown field" with the same name: the
+            // whole fleet is an old server, waiting out more rounds is futile.
+            if let Some(Some(field)) = unknown_this_round.first() {
+                if unknown_this_round.iter().all(|u| u.as_ref() == Some(field)) {
+                    return Err(anyhow::Error::new(UnknownFieldError {
+                        field: field.clone(),
+                    }));
                 }
             }
             round += 1;
@@ -511,6 +560,9 @@ impl GqlClient {
             }
         })?;
         if let Some(errors) = body.get("errors") {
+            if let Some(field) = unknown_field_in(errors) {
+                return Err(AttemptError::UnknownField(field));
+            }
             return Err(AttemptError::GraphqlErrors(truncate_for_log(
                 &errors.to_string(),
             )));
@@ -757,51 +809,55 @@ impl GqlClient {
         let data = self
             .query_op("bk_set_updates_paged", &q, &["/blockchain/bkSetUpdates"])
             .await?;
-        let edges = data
+        Ok(parse_light_bk_set_updates_page(&data, first))
+    }
+
+    /// Latest block-keeper set as the server knows it, or `None` while the
+    /// server has none yet. An older gql-server answers with
+    /// [`UnknownFieldError`].
+    pub async fn query_latest_bk_set(&self) -> anyhow::Result<Option<GqlLatestBkSet>> {
+        let q = "{ blockchain { latestBkSet { thread_id seq_no block_id height chain_order \
+                 updated_at signers { signer_index pubkey } } } }";
+        let data = self.query_op("latest_bk_set", q, &["/blockchain"]).await?;
+        parse_latest_bk_set(&data)
+    }
+
+    /// `bkSetUpdates` of one thread with `height_start <= height <=
+    /// height_end` (either bound optional), oldest first, forward-paginated
+    /// by `chain_order` cursor. Same page and cursor semantics as
+    /// [`Self::query_bk_set_updates_paged`].
+    pub async fn query_bk_set_updates_range(
+        &self,
+        thread_id_hex: &str,
+        height_start: Option<u64>,
+        height_end: Option<u64>,
+        first: u32,
+        after: Option<&str>,
+    ) -> anyhow::Result<(Vec<BkSetUpdateWithAttestations>, Option<String>)> {
+        let q = bk_set_updates_range_query(thread_id_hex, height_start, height_end, first, after)?;
+        let data = self
+            .query_op("bk_set_updates_range", &q, &["/blockchain/bkSetUpdates"])
+            .await?;
+        Ok(parse_light_bk_set_updates_page(&data, first))
+    }
+
+    /// Height of the last rotation of the thread at or below `height_end`,
+    /// or `None` when there is none.
+    pub async fn query_last_bk_set_update_at_or_below(
+        &self,
+        thread_id_hex: &str,
+        height_end: u64,
+    ) -> anyhow::Result<Option<u64>> {
+        let q = last_bk_set_update_query(thread_id_hex, height_end)?;
+        let data = self
+            .query_op("bk_set_update_last", &q, &["/blockchain/bkSetUpdates"])
+            .await?;
+        Ok(data
             .pointer("/blockchain/bkSetUpdates/edges")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let mut updates = Vec::new();
-        let mut last_cursor: Option<String> = None;
-        for edge in &edges {
-            if let Some(node) = edge.get("node") {
-                let block_id = node
-                    .get("block_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let bk_set_update_hex = node
-                    .get("bk_set_update")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let height = node.get("height").and_then(|v| v.as_u64());
-                let chain_order = node
-                    .get("chain_order")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(ref c) = chain_order {
-                    last_cursor = Some(c.clone());
-                }
-                updates.push(BkSetUpdateWithAttestations {
-                    block_id,
-                    bk_set_update_hex,
-                    height,
-                    attestations: Vec::new(),
-                    chain_order,
-                });
-            }
-        }
-        // "More data available" heuristic: server returned a full page.
-        // (The `has_next_page` flag isn't in our projection; comparing
-        // len == first is close enough and only affects when we stop paging.)
-        let next = if updates.len() as u32 >= first {
-            last_cursor
-        } else {
-            None
-        };
-        Ok((updates, next))
+            .and_then(Value::as_array)
+            .and_then(|edges| edges.last())
+            .and_then(|edge| edge.pointer("/node/height"))
+            .and_then(Value::as_u64))
     }
 
     /// Fetch the first N bkSetUpdates (oldest first).
@@ -934,6 +990,169 @@ impl BkSetUpdateWithAttestations {
 }
 
 
+/// Parse a `bkSetUpdates` page fetched with the light projection
+/// (`block_id bk_set_update height chain_order`). The second value is the
+/// cursor of the next page, `None` once the page is not full.
+fn parse_light_bk_set_updates_page(
+    data: &Value,
+    first: u32,
+) -> (Vec<BkSetUpdateWithAttestations>, Option<String>) {
+    let edges = data
+        .pointer("/blockchain/bkSetUpdates/edges")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut updates = Vec::new();
+    let mut last_cursor: Option<String> = None;
+    for edge in &edges {
+        if let Some(node) = edge.get("node") {
+            let block_id = node
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let bk_set_update_hex = node
+                .get("bk_set_update")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let height = node.get("height").and_then(|v| v.as_u64());
+            let chain_order = node
+                .get("chain_order")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(ref c) = chain_order {
+                last_cursor = Some(c.clone());
+            }
+            updates.push(BkSetUpdateWithAttestations {
+                block_id,
+                bk_set_update_hex,
+                height,
+                attestations: Vec::new(),
+                chain_order,
+            });
+        }
+    }
+    // "More data available" heuristic: server returned a full page.
+    // (The `has_next_page` flag isn't in our projection; comparing
+    // len == first is close enough and only affects when we stop paging.)
+    let next = if updates.len() as u32 >= first {
+        last_cursor
+    } else {
+        None
+    };
+    (updates, next)
+}
+/// The block-keeper set the server reports as the latest one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GqlLatestBkSet {
+    pub thread_id: String,
+    pub seq_no: u64,
+    pub block_id: String,
+    pub height: u64,
+    /// `(signer_index, 48-byte BLS public key)`.
+    pub signers: Vec<(u16, Vec<u8>)>,
+}
+
+const BK_PUBKEY_HEX_LEN: usize = 96;
+
+/// Parse `data` of the `latestBkSet` query. `latestBkSet: null` is `Ok(None)`.
+pub(crate) fn parse_latest_bk_set(data: &Value) -> anyhow::Result<Option<GqlLatestBkSet>> {
+    let node = match data.pointer("/blockchain/latestBkSet") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(node) => node,
+    };
+    let text = |key: &str| -> anyhow::Result<String> {
+        Ok(node
+            .get(key)
+            .and_then(Value::as_str)
+            .with_context(|| format!("latestBkSet.{key} is missing or not a string"))?
+            .to_string())
+    };
+    let number = |key: &str| -> anyhow::Result<u64> {
+        node.get(key)
+            .and_then(Value::as_u64)
+            .with_context(|| format!("latestBkSet.{key} is missing or not an unsigned integer"))
+    };
+    let raw_signers = node
+        .get("signers")
+        .and_then(Value::as_array)
+        .context("latestBkSet.signers is missing or not an array")?;
+    let mut signers = Vec::with_capacity(raw_signers.len());
+    for (i, signer) in raw_signers.iter().enumerate() {
+        let index = signer
+            .get("signer_index")
+            .and_then(Value::as_u64)
+            .and_then(|v| u16::try_from(v).ok())
+            .with_context(|| format!("latestBkSet.signers[{i}].signer_index is not a u16"))?;
+        let pubkey_hex = signer
+            .get("pubkey")
+            .and_then(Value::as_str)
+            .with_context(|| format!("latestBkSet.signers[{i}].pubkey is missing"))?;
+        if pubkey_hex.len() != BK_PUBKEY_HEX_LEN {
+            bail!(
+                "latestBkSet.signers[{i}].pubkey has {} hex chars, expected {BK_PUBKEY_HEX_LEN}",
+                pubkey_hex.len()
+            );
+        }
+        let pubkey = hex::decode(pubkey_hex)
+            .with_context(|| format!("latestBkSet.signers[{i}].pubkey is not hex"))?;
+        signers.push((index, pubkey));
+    }
+    Ok(Some(GqlLatestBkSet {
+        thread_id: text("thread_id")?,
+        seq_no: number("seq_no")?,
+        block_id: text("block_id")?,
+        height: number("height")?,
+        signers,
+    }))
+}
+
+fn graphql_int(value: u64, what: &str) -> anyhow::Result<i64> {
+    i64::try_from(value)
+        .with_context(|| format!("bkSetUpdates {what} exceeds the live GraphQL signed Int range"))
+}
+
+fn escape_graphql_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub(crate) fn bk_set_updates_range_query(
+    thread_id_hex: &str,
+    height_start: Option<u64>,
+    height_end: Option<u64>,
+    first: u32,
+    after: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut args = format!(
+        r#"thread_id: "{}", first: {first}"#,
+        escape_graphql_string(thread_id_hex)
+    );
+    if let Some(h) = height_start {
+        args.push_str(&format!(", height_start: {}", graphql_int(h, "height_start")?));
+    }
+    if let Some(h) = height_end {
+        args.push_str(&format!(", height_end: {}", graphql_int(h, "height_end")?));
+    }
+    if let Some(cur) = after {
+        args.push_str(&format!(r#", after: "{}""#, escape_graphql_string(cur)));
+    }
+    Ok(format!(
+        "{{ blockchain {{ bkSetUpdates({args}) {{ edges {{ node {{ block_id bk_set_update \
+         height chain_order }} }} }} }} }}"
+    ))
+}
+
+pub(crate) fn last_bk_set_update_query(
+    thread_id_hex: &str,
+    height_end: u64,
+) -> anyhow::Result<String> {
+    Ok(format!(
+        r#"{{ blockchain {{ bkSetUpdates(thread_id: "{}", last: 1, height_end: {}) {{ edges {{ node {{ height }} }} }} }} }}"#,
+        escape_graphql_string(thread_id_hex),
+        graphql_int(height_end, "height_end")?
+    ))
+}
 
 /// Default thread_id used by the single-thread testbed.
 pub const DEFAULT_THREAD_ID_HEX: &str =
@@ -1599,15 +1818,15 @@ mod failover_tests {
     const GQL_ERRORS: &str = r#"{"errors":[{"message":"boom"}],"data":null}"#;
 
     #[derive(Clone)]
-    enum Reply {
+    pub(super) enum Reply {
         Json(&'static str),
         Status(u16),
         Drop,
     }
 
-    struct MockServer {
-        url: String,
-        hits: Arc<AtomicUsize>,
+    pub(super) struct MockServer {
+        pub(super) url: String,
+        pub(super) hits: Arc<AtomicUsize>,
     }
 
     fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1618,7 +1837,7 @@ mod failover_tests {
     /// next script entry (the last one repeats forever). `Connection: close`
     /// makes reqwest open a new connection per attempt, so `hits` counts
     /// attempts exactly.
-    async fn spawn(script: Vec<Reply>) -> MockServer {
+    pub(super) async fn spawn(script: Vec<Reply>) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1980,5 +2199,147 @@ mod attestation_layout_tests {
         assert_eq!(&att.raw_bytes[data + 84..data + 116], &att.envelope_hash);
         assert_eq!(u32_at(&att.raw_bytes, data + 116), 0, "PRIMARY");
         assert_eq!(att.raw_bytes.len(), data + 120);
+    }
+}
+
+#[cfg(test)]
+mod bk_set_query_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{
+        failover_tests::{spawn, Reply},
+        *,
+    };
+
+    const UNKNOWN_LATEST_BK_SET: &str = r#"{"data":null,"errors":[{"message":"Unknown field \"latestBkSet\" on type \"BlockchainQuery\".","locations":[{"line":1,"column":16}]}]}"#;
+
+    const OK_LATEST_BK_SET: &str = r#"{"data":{"blockchain":{"latestBkSet":{"thread_id":"00","seq_no":7,"block_id":"bb","height":7,"chain_order":"x","updated_at":1,"signers":[{"signer_index":3,"pubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}}}"#;
+
+    fn latest_with_pubkey(pk: &str) -> serde_json::Value {
+        serde_json::json!({"blockchain": {"latestBkSet": {"thread_id": "00", "seq_no": 7,
+            "block_id": "bb", "height": 7, "chain_order": "x", "updated_at": 1,
+            "signers": [{"signer_index": 3, "pubkey": pk}]}}})
+    }
+
+    #[test]
+    fn unknown_field_is_read_from_the_message() {
+        let body: serde_json::Value = serde_json::from_str(UNKNOWN_LATEST_BK_SET).unwrap();
+        assert_eq!(
+            unknown_field_in(&body["errors"]).as_deref(),
+            Some("latestBkSet")
+        );
+        assert_eq!(
+            unknown_field_in(&serde_json::json!([{"message": "boom"}])),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_bk_set_null_is_none() {
+        let v = serde_json::json!({"blockchain": {"latestBkSet": null}});
+        assert!(parse_latest_bk_set(&v).unwrap().is_none());
+    }
+
+    #[test]
+    fn latest_bk_set_parses_signers() {
+        let v = latest_with_pubkey(&"a".repeat(96));
+        let s = parse_latest_bk_set(&v).unwrap().unwrap();
+        assert_eq!(
+            (
+                s.height,
+                s.signers.len(),
+                s.signers[0].0,
+                s.signers[0].1.len()
+            ),
+            (7, 1, 3, 48)
+        );
+    }
+
+    #[test]
+    fn latest_bk_set_rejects_bad_pubkey() {
+        for bad in ["zz".repeat(48), "ab".repeat(47)] {
+            assert!(parse_latest_bk_set(&latest_with_pubkey(&bad)).is_err());
+        }
+    }
+
+    #[test]
+    fn range_query_carries_thread_and_bounds() {
+        let q = bk_set_updates_range_query(
+            DEFAULT_THREAD_ID_HEX,
+            Some(15001),
+            Some(40000),
+            500,
+            Some("c"),
+        )
+        .unwrap();
+        assert!(q.contains(&format!(r#"thread_id: "{DEFAULT_THREAD_ID_HEX}""#)));
+        assert!(
+            q.contains("height_start: 15001")
+                && q.contains("height_end: 40000")
+                && q.contains(r#"after: "c""#)
+        );
+    }
+
+    #[test]
+    fn last_update_query_uses_last_one() {
+        let q = last_bk_set_update_query(DEFAULT_THREAD_ID_HEX, 16384).unwrap();
+        assert!(q.contains("last: 1") && q.contains("height_end: 16384") && !q.contains("first:"));
+    }
+
+    fn daemon_cfg() -> GqlClientConfig {
+        GqlClientConfig {
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            retries_per_endpoint: 3,
+            retry_delay: Duration::from_millis(5),
+            max_rounds: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn old_server_is_reported_once_with_a_one_attempt_client() {
+        let srv = spawn(vec![Reply::Json(UNKNOWN_LATEST_BK_SET)]).await;
+        let c = create_client(&srv.url).unwrap();
+        let e = c.query_latest_bk_set().await.unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<UnknownFieldError>().unwrap().field,
+            "latestBkSet"
+        );
+        assert_eq!(srv.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn old_server_is_reported_once_with_the_daemon_client() {
+        let srv = spawn(vec![Reply::Json(UNKNOWN_LATEST_BK_SET)]).await;
+        let c = create_client_with_failover(&srv.url, &[], daemon_cfg()).unwrap();
+        let e = c.query_latest_bk_set().await.unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<UnknownFieldError>().unwrap().field,
+            "latestBkSet"
+        );
+        assert_eq!(srv.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn old_primary_fails_over_to_a_new_backup() {
+        let old = spawn(vec![Reply::Json(UNKNOWN_LATEST_BK_SET)]).await;
+        let new = spawn(vec![Reply::Json(OK_LATEST_BK_SET)]).await;
+        let c = create_client_with_failover(&old.url, std::slice::from_ref(&new.url), daemon_cfg())
+            .unwrap();
+        assert!(c.query_latest_bk_set().await.unwrap().is_some());
+        assert_eq!(old.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(new.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn old_and_flaky_endpoints_keep_the_round_policy() {
+        let old = spawn(vec![Reply::Json(UNKNOWN_LATEST_BK_SET)]).await;
+        let flaky = spawn(vec![Reply::Status(503), Reply::Json(OK_LATEST_BK_SET)]).await;
+        let c =
+            create_client_with_failover(&old.url, std::slice::from_ref(&flaky.url), daemon_cfg())
+            .unwrap();
+        assert!(c.query_latest_bk_set().await.unwrap().is_some());
+        assert_eq!(old.hits.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.hits.load(Ordering::SeqCst), 2);
     }
 }

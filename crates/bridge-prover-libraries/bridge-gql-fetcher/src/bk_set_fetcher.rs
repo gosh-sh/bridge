@@ -7,7 +7,7 @@ use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
 use tracing::{debug, info};
 
 use crate::gql_client::{
-    BkSetUpdateWithAttestations, GqlClient, GRAPHQL_SIGNED_INT_MAX,
+    BkSetUpdateWithAttestations, GqlClient, DEFAULT_THREAD_ID_HEX,
 };
 
 /// Page size for `next_update_after` cursor walk. Sized to match
@@ -59,8 +59,10 @@ pub async fn next_update_after(
     let mut last_height_seen: u64 = 0;
     loop {
         let (page, next) = client
-            .query_bk_set_updates_paged(
-                GRAPHQL_SIGNED_INT_MAX,
+            .query_bk_set_updates_range(
+                DEFAULT_THREAD_ID_HEX,
+                Some(cursor_seq_no.saturating_add(1)),
+                None,
                 NEXT_UPDATE_PAGE_SIZE,
                 after.as_deref(),
             )
@@ -123,46 +125,11 @@ pub async fn highest_bk_set_update_le(
     client: &GqlClient,
     cap_seq_no: u64,
 ) -> anyhow::Result<u64> {
-    let mut after: Option<String> = None;
-    let mut pages = 0usize;
-    let mut last_height_seen: u64 = 0;
-    let mut max_height: u64 = 0;
-    loop {
-        let (page, next) = client
-            .query_bk_set_updates_paged(
-                cap_seq_no,
-                NEXT_UPDATE_PAGE_SIZE,
-                after.as_deref(),
-            )
-            .await
-            .with_context(|| format!("highest_bk_set_update_le page {}", pages))?;
-        pages += 1;
-        debug!(
-            "highest_bk_set_update_le page {}: {} events (cursor advance -> {:?})",
-            pages,
-            page.len(),
-            next,
-        );
-        assert_ascending_by_height(&page, &mut last_height_seen).with_context(|| {
-            format!("highest_bk_set_update_le page {}: order sanity", pages)
-        })?;
-        if let Some(h) = page.iter().filter_map(|u| u.height).max() {
-            if h > max_height {
-                max_height = h;
-            }
-        }
-        match next {
-            Some(c) => after = Some(c),
-            None => return Ok(max_height),
-        }
-        if pages > 10_000 {
-            bail!(
-                "highest_bk_set_update_le: refusing to paginate past 10_000 pages \
-                 (likely a server-side pagination bug) at cursor {:?}",
-                after,
-            );
-        }
-    }
+    Ok(client
+        .query_last_bk_set_update_at_or_below(DEFAULT_THREAD_ID_HEX, cap_seq_no)
+        .await
+        .context("highest_bk_set_update_le")?
+        .unwrap_or(0))
 }
 
 /// Pick the smallest-height entry with `height > cursor_seq_no` from a

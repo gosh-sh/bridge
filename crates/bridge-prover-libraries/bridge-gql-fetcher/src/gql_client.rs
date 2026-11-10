@@ -852,12 +852,7 @@ impl GqlClient {
         let data = self
             .query_op("bk_set_update_last", &q, &["/blockchain/bkSetUpdates"])
             .await?;
-        Ok(data
-            .pointer("/blockchain/bkSetUpdates/edges")
-            .and_then(Value::as_array)
-            .and_then(|edges| edges.last())
-            .and_then(|edge| edge.pointer("/node/height"))
-            .and_then(Value::as_u64))
+        parse_last_bk_set_update(&data, height_end)
     }
 
     /// Fetch the first N bkSetUpdates (oldest first).
@@ -989,7 +984,6 @@ impl BkSetUpdateWithAttestations {
     }
 }
 
-
 /// Parse a `bkSetUpdates` page fetched with the light projection
 /// (`block_id bk_set_update height chain_order`). The second value is the
 /// cursor of the next page, `None` once the page is not full.
@@ -1043,6 +1037,7 @@ fn parse_light_bk_set_updates_page(
     };
     (updates, next)
 }
+
 /// The block-keeper set the server reports as the latest one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GqlLatestBkSet {
@@ -1129,7 +1124,10 @@ pub(crate) fn bk_set_updates_range_query(
         escape_graphql_string(thread_id_hex)
     );
     if let Some(h) = height_start {
-        args.push_str(&format!(", height_start: {}", graphql_int(h, "height_start")?));
+        args.push_str(&format!(
+            ", height_start: {}",
+            graphql_int(h, "height_start")?
+        ));
     }
     if let Some(h) = height_end {
         args.push_str(&format!(", height_end: {}", graphql_int(h, "height_end")?));
@@ -1138,9 +1136,39 @@ pub(crate) fn bk_set_updates_range_query(
         args.push_str(&format!(r#", after: "{}""#, escape_graphql_string(cur)));
     }
     Ok(format!(
-        "{{ blockchain {{ bkSetUpdates({args}) {{ edges {{ node {{ block_id bk_set_update \
-         height chain_order }} }} }} }} }}"
+        "{{ blockchain {{ bkSetUpdates({args}) {{ edges {{ node {{ block_id bk_set_update height \
+         chain_order }} }} }} }} }}"
     ))
+}
+
+/// Height out of the answer to [`last_bk_set_update_query`]. `Ok(None)` only
+/// for an empty `edges`; anything the query should not have produced (no
+/// `edges`, several edges, no integer `height`, a height above `height_end`)
+/// is an error rather than "no rotation".
+pub(crate) fn parse_last_bk_set_update(
+    data: &Value,
+    height_end: u64,
+) -> anyhow::Result<Option<u64>> {
+    let edges = data
+        .pointer("/blockchain/bkSetUpdates/edges")
+        .and_then(Value::as_array)
+        .context("bkSetUpdates.edges is missing or not an array")?;
+    let edge = match edges.as_slice() {
+        [] => return Ok(None),
+        [edge] => edge,
+        _ => bail!(
+            "bkSetUpdates(last: 1) returned {} edges, expected at most one",
+            edges.len()
+        ),
+    };
+    let height = edge
+        .pointer("/node/height")
+        .and_then(Value::as_u64)
+        .context("bkSetUpdates edge has no unsigned integer `height`")?;
+    if height > height_end {
+        bail!("bkSetUpdates returned height {height} above the requested height_end {height_end}");
+    }
+    Ok(Some(height))
 }
 
 pub(crate) fn last_bk_set_update_query(
@@ -2286,6 +2314,35 @@ mod bk_set_query_tests {
         assert!(q.contains("last: 1") && q.contains("height_end: 16384") && !q.contains("first:"));
     }
 
+    #[test]
+    fn last_update_parser_accepts_empty_and_one_edge() {
+        let empty = serde_json::json!({"blockchain": {"bkSetUpdates": {"edges": []}}});
+        assert_eq!(parse_last_bk_set_update(&empty, 10).unwrap(), None);
+        let one = serde_json::json!({"blockchain": {"bkSetUpdates":
+            {"edges": [{"node": {"height": 10}}]}}});
+        assert_eq!(parse_last_bk_set_update(&one, 10).unwrap(), Some(10));
+    }
+
+    #[test]
+    fn last_update_parser_rejects_malformed_answers() {
+        let bad = [
+            serde_json::json!({"blockchain": {"bkSetUpdates": {}}}),
+            serde_json::json!({"blockchain": {"bkSetUpdates": {"edges": null}}}),
+            serde_json::json!({"blockchain": {"bkSetUpdates": {"edges": [{"node": {}}]}}}),
+            serde_json::json!({"blockchain": {"bkSetUpdates":
+                {"edges": [{"node": {"height": null}}]}}}),
+            serde_json::json!({"blockchain": {"bkSetUpdates":
+                {"edges": [{"node": {"height": "7"}}]}}}),
+            serde_json::json!({"blockchain": {"bkSetUpdates":
+                {"edges": [{"node": {"height": 3}}, {"node": {"height": 4}}]}}}),
+            serde_json::json!({"blockchain": {"bkSetUpdates":
+                {"edges": [{"node": {"height": 11}}]}}}),
+        ];
+        for v in &bad {
+            assert!(parse_last_bk_set_update(v, 10).is_err(), "{v}");
+        }
+    }
+
     fn daemon_cfg() -> GqlClientConfig {
         GqlClientConfig {
             request_timeout: Duration::from_secs(5),
@@ -2334,12 +2391,36 @@ mod bk_set_query_tests {
     #[tokio::test]
     async fn old_and_flaky_endpoints_keep_the_round_policy() {
         let old = spawn(vec![Reply::Json(UNKNOWN_LATEST_BK_SET)]).await;
-        let flaky = spawn(vec![Reply::Status(503), Reply::Json(OK_LATEST_BK_SET)]).await;
+        let flaky = spawn(vec![
+            Reply::Status(503),
+            Reply::Status(503),
+            Reply::Status(503),
+            Reply::Json(OK_LATEST_BK_SET),
+        ])
+        .await;
         let c =
             create_client_with_failover(&old.url, std::slice::from_ref(&flaky.url), daemon_cfg())
-            .unwrap();
+                .unwrap();
         assert!(c.query_latest_bk_set().await.unwrap().is_some());
-        assert_eq!(old.hits.load(Ordering::SeqCst), 1);
-        assert_eq!(flaky.hits.load(Ordering::SeqCst), 2);
+        // The old endpoint is asked once per round; the flaky one exhausts
+        // round 1 (3 attempts) and succeeds on the first attempt of round 2.
+        assert_eq!(old.hits.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.hits.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn endpoints_unknown_about_different_fields_keep_the_round_policy() {
+        let unknown_other = r#"{"data":null,"errors":[{"message":"Unknown field \"otherField\" on type \"BlockchainQuery\"."}]}"#;
+        let a = spawn(vec![Reply::Json(UNKNOWN_LATEST_BK_SET)]).await;
+        let b = spawn(vec![Reply::Json(unknown_other)]).await;
+        let cfg = GqlClientConfig {
+            max_rounds: Some(2),
+            ..daemon_cfg()
+        };
+        let c = create_client_with_failover(&a.url, std::slice::from_ref(&b.url), cfg).unwrap();
+        let e = c.query_latest_bk_set().await.unwrap_err();
+        assert!(e.downcast_ref::<UnknownFieldError>().is_none(), "{e:#}");
+        assert_eq!(a.hits.load(Ordering::SeqCst), 2);
+        assert_eq!(b.hits.load(Ordering::SeqCst), 2);
     }
 }

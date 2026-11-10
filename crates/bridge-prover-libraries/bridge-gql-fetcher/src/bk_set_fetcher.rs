@@ -6,9 +6,7 @@ use anyhow::{bail, Context};
 use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
 use tracing::{debug, info};
 
-use crate::gql_client::{
-    BkSetUpdateWithAttestations, GqlClient, DEFAULT_THREAD_ID_HEX,
-};
+use crate::gql_client::{BkSetUpdateWithAttestations, GqlClient, DEFAULT_THREAD_ID_HEX};
 
 /// Page size for `next_update_after` cursor walk. Sized to match
 /// `BK_SET_AT_HEIGHT_PAGE_SIZE`: near-head callers (prover caught up to
@@ -121,10 +119,7 @@ pub async fn next_update_after(
 ///
 /// Linear in the number of events ≤ `cap_seq_no`. The 10_000-page ceiling
 /// of `next_update_after` is mirrored here as a defensive guard.
-pub async fn highest_bk_set_update_le(
-    client: &GqlClient,
-    cap_seq_no: u64,
-) -> anyhow::Result<u64> {
+pub async fn highest_bk_set_update_le(client: &GqlClient, cap_seq_no: u64) -> anyhow::Result<u64> {
     Ok(client
         .query_last_bk_set_update_at_or_below(DEFAULT_THREAD_ID_HEX, cap_seq_no)
         .await

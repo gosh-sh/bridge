@@ -17,6 +17,7 @@ use bridge_gql_fetcher::{
     gql_client::BLOCK_ID_TREE_LEAF_COUNT,
 };
 use bridge_poseidon as poseidon;
+use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
 
 /// The 16 leaves of a block-id tree.
 pub type BlockLeaves = [[u8; 32]; BLOCK_ID_TREE_LEAF_COUNT];
@@ -154,14 +155,49 @@ pub fn parse_changes(blob_hex: &str) -> Result<Vec<BkChange>, ReplayError> {
     Ok(changes)
 }
 
+/// Canonical form of a key: 48-byte big-endian compressed. 48-byte input is
+/// decoded as big-endian, then little-endian compressed (as the commitment
+/// does) and re-encoded; 96-byte input goes through `normalize_bk_set_pubkeys`.
+/// `None` for any other length or a key that is not a curve point.
+fn canonical_key(index: u16, key: &[u8]) -> Option<Vec<u8>> {
+    match key.len() {
+        48 => {
+            let bytes: [u8; 48] = key.try_into().ok()?;
+            let be = G1Affine::from_compressed_be(&bytes);
+            if bool::from(be.is_some()) {
+                return Some(be.unwrap().to_compressed_be().to_vec());
+            }
+            let le = G1Affine::from_compressed_le(&bytes);
+            if bool::from(le.is_some()) {
+                return Some(le.unwrap().to_compressed_be().to_vec());
+            }
+            None
+        },
+        96 => {
+            let mut one = HashMap::new();
+            one.insert(index, key.to_vec());
+            normalize_bk_set_pubkeys(one).ok()?.remove(&index)
+        },
+        _ => None,
+    }
+}
+
 fn compressed(index: u16, key: &[u8]) -> Result<Vec<u8>, ReplayError> {
-    let mut one = HashMap::new();
-    one.insert(index, key.to_vec());
-    let mut normalized = normalize_bk_set_pubkeys(one)
-        .map_err(|e| bad_row(format!("signer {index} has an invalid key: {e}")))?;
-    normalized
-        .remove(&index)
-        .ok_or_else(|| bad_row(format!("signer {index} lost its key")))
+    canonical_key(index, key).ok_or_else(|| bad_row(format!("signer {index} has an invalid key")))
+}
+
+/// Canonicalise every snapshot key; a bad key is a data error, never a panic.
+fn canonical_snapshot(
+    signers: &HashMap<u16, Vec<u8>>,
+) -> Result<HashMap<u16, Vec<u8>>, ReplayError> {
+    signers
+        .iter()
+        .map(|(index, key)| {
+            canonical_key(*index, key)
+                .map(|k| (*index, k))
+                .ok_or_else(|| bad_row(format!("snapshot signer {index} has an invalid key")))
+        })
+        .collect()
 }
 
 /// Apply a block's changes the way the node does: every removal first, then
@@ -333,7 +369,7 @@ pub fn replay_to(
     target: &BkTarget,
 ) -> Result<ReplayedSet, ReplayError> {
     let parsed = checked_rows(snapshot, rows, target.height)?;
-    let mut set = snapshot.signers.clone();
+    let mut set = canonical_snapshot(&snapshot.signers)?;
 
     if target.height >= snapshot.anchor_height {
         for (height, changes) in &parsed {
@@ -820,6 +856,53 @@ mod tests {
         };
         let text = e.to_string();
         assert!(text.contains("18000") && text.contains("final"));
+    }
+
+    #[test]
+    fn off_curve_snapshot_key_is_bad_row_not_a_panic() {
+        let mut s = snap(100, S0);
+        s.signers.insert(1, vec![0xff; 48]);
+        let mut lv = BTreeMap::new();
+        lv.insert(100, leaves(c(S0), c(S0)));
+        let err = replay_to(&s, &[], &lv, &target(100, FinalCheck::L3Of(100))).unwrap_err();
+        assert!(
+            matches!(&err, ReplayError::BadRow { reason } if reason.contains("snapshot signer 1"))
+        );
+    }
+
+    #[test]
+    fn wrong_length_snapshot_key_is_bad_row() {
+        let mut s = snap(100, S0);
+        s.signers.insert(1, vec![1; 47]);
+        let mut lv = BTreeMap::new();
+        lv.insert(100, leaves(c(S0), c(S0)));
+        let err = replay_to(&s, &[], &lv, &target(100, FinalCheck::L3Of(100))).unwrap_err();
+        assert!(matches!(err, ReplayError::BadRow { .. }));
+    }
+
+    #[test]
+    fn uncompressed_snapshot_replays_like_compressed() {
+        let rows = [row(100, &[(ADD, 2, 3)])];
+        let mut lv = BTreeMap::new();
+        lv.insert(100, leaves(c(S0), c(S1)));
+        let t = target(100, FinalCheck::L3Of(100));
+        let compressed_run = replay_to(&snap(100, S0), &rows, &lv, &t).unwrap();
+        let mut s = snap(100, S0);
+        for (seed, i) in [(1u64, 0u16), (2, 1)] {
+            s.signers
+                .insert(i, point(seed).to_uncompressed_be().to_vec());
+        }
+        let uncompressed_run = replay_to(&s, &rows, &lv, &t).unwrap();
+        assert_eq!(uncompressed_run, compressed_run);
+        // Undo compares keys too: an uncompressed snapshot must undo a blob row.
+        let t = target(99, FinalCheck::L2Of(100));
+        let mut s = snap(101, S1);
+        for (seed, i) in [(1u64, 0u16), (2, 1), (3, 2)] {
+            s.signers
+                .insert(i, point(seed).to_uncompressed_be().to_vec());
+        }
+        let back = replay_to(&s, &rows, &lv, &t).unwrap();
+        assert_eq!(back.pubkeys, set(S0));
     }
 
     #[test]

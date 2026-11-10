@@ -1,4 +1,7 @@
 //! Long-running loop with exponential backoff and SIGINT-aware shutdown.
+//!
+//! The beacon watcher runs in a task of its own beside the loop, at its own
+//! pace: the backoff, proving and sending never delay taking a checkpoint.
 
 use std::{
     future::Future,
@@ -9,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     error::RelayerError,
@@ -79,11 +82,12 @@ fn is_success(o: &TickOutcome) -> bool {
         TickOutcome::SubmittedUpdate { .. }
             | TickOutcome::AlreadyOnHead { .. }
             | TickOutcome::Unchanged { .. }
+            | TickOutcome::Proving { .. }
             | TickOutcome::Rotated { .. }
     )
 }
 
-impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
+impl<S: BeaconSource + 'static, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P, A> {
     pub async fn run_until_shutdown<F>(
         &mut self,
         backoff: BackoffConfig,
@@ -96,13 +100,17 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
         backoff.validate()?;
         tokio::pin!(shutdown);
         let mut delay = backoff.initial;
+        // Without the watcher no checkpoint is taken while every round still
+        // looks fine; the daemon stops instead, and its supervisor restarts it.
+        let mut watcher = self.spawn_watcher();
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
                     info!("shutdown signal; exiting after last tick");
                     return Ok(());
                 }
-                outcome = self.tick() => {
+                why = watcher.stopped() => return Err(watcher_stopped(why)),
+                outcome = self.work() => {
                     metrics.ticks_total.fetch_add(1, Ordering::Relaxed);
                     match outcome {
                         Ok(o) => {
@@ -123,10 +131,16 @@ impl<S: BeaconSource, P: ProofGenerator, A: AnSubmitter> Relayer<S, P, A> {
             }
             tokio::select! {
                 _ = &mut shutdown => return Ok(()),
+                why = watcher.stopped() => return Err(watcher_stopped(why)),
                 _ = tokio::time::sleep(delay) => {}
             }
         }
     }
+}
+
+fn watcher_stopped(why: String) -> RelayerError {
+    error!(why, "checkpoint watcher stopped; the daemon exits");
+    RelayerError::other(format!("checkpoint watcher stopped: {why}"))
 }
 
 fn record(m: &RelayerMetrics, o: &TickOutcome) {
@@ -166,6 +180,9 @@ fn record(m: &RelayerMetrics, o: &TickOutcome) {
             m.an_rejected_total.fetch_add(1, Ordering::Relaxed);
         },
         TickOutcome::WeakSubjectivityLag {
+            ..
+        }
+        | TickOutcome::Proving {
             ..
         } => {},
     }

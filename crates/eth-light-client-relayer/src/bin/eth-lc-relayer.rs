@@ -15,10 +15,11 @@
 //! - `ancestry-one` — parent-hash chain of an epoch vs a checkpoint hash
 //! - `daemon` — loop; `--dry-run` mocks AN, `--mock-prove` skips Halo2,
 //!   `--no-rotate` opts out of rotation, `--flip-owner` opts in to the owner
-//!   flip. `ETH_RPC_URL` fetches the span between the previous checkpoint and
-//!   the new one after each accepted checkpoint and runs `link_headers`
-//!   locally. On-chain `submitAncestry` stays off unless `--submit-ancestry` is
-//!   set.
+//!   flip. Every checkpoint the beacon node finalizes is queued as it appears
+//!   and proven in the background, `--parallel-proofs` at once. The blocks of
+//!   checkpoints it missed are closed with `submitAncestry` back from the next
+//!   one, from the headers of `ETH_RPC_URL`, which is required.
+//!   `--submit-ancestry` sends it between adjacent checkpoints too.
 //! - `arbitrum-anchors` — loop for a bridge on an Arbitrum chain: follows
 //!   batches and assertions on the parent chain and calls
 //!   `ArbitrumBlockVerifier.proveBlock` on Acki Nacki, so the blocks that hold
@@ -126,6 +127,8 @@ impl AnchorsDirs {
     }
 }
 
+// Parsed once at start; the size of the largest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Fetch and print the latest light-client finality update.
@@ -349,18 +352,31 @@ enum Cmd {
         /// units keep starting.
         #[arg(long, default_value_t = false)]
         no_flip_owner: bool,
-        /// Execution JSON-RPC. When set, each accepted `submitUpdate` fetches
-        /// the span between the previous checkpoint and the new one and runs
-        /// `link_headers` locally. Does **not** call `submitAncestry` unless
-        /// `--submit-ancestry` is also set.
+        /// Execution JSON-RPC of the followed chain. Required: the blocks of
+        /// checkpoints the daemon missed (it or the beacon node was down, or a
+        /// proof failed three times) are closed with `submitAncestry` back
+        /// from the next checkpoint on chain, from these headers.
         #[arg(long, env = "ETH_RPC_URL", hide_env_values = true)]
         eth_rpc_url: Option<String>,
-        /// Send `submitAncestry` after each checkpoint. Default **off**. The
-        /// span needs a proven anchor at both ends, so nothing is sent until a
-        /// previous checkpoint is on record, nor when the gap to it is wider
-        /// than a span. Needs `--eth-rpc-url`.
+        /// Also send `submitAncestry` between adjacent checkpoints, admitting
+        /// every block of the followed chain. Default **off**:
+        /// `arbitrum-anchors` sends what each assertion's block needs, and
+        /// nothing else uses the other blocks.
         #[arg(long, env = "SUBMIT_ANCESTRY", default_value_t = false)]
         submit_ancestry: bool,
+        /// Step proofs that run at once, for the oldest queued checkpoints.
+        /// Each one is a prover process with its own memory.
+        #[arg(
+            long,
+            env = "LIGHT_CLIENT_PARALLEL_PROOFS",
+            default_value_t = 2,
+            value_parser = clap::value_parser!(u16).range(1..=16)
+        )]
+        parallel_proofs: u16,
+        /// Serve Prometheus metrics at `http://<addr>/metrics`, among them
+        /// `eth_lc_relayer_checkpoint_failures_total`. Off without it.
+        #[arg(long, env = "ETH_LC_RELAYER_METRICS_ADDR")]
+        metrics_addr: Option<std::net::SocketAddr>,
         /// On a period jump the contract has no rotate for, prove a step of
         /// the new period and advance the committee with the owner key
         /// (`setCommitteeCommitment`) instead of waiting for a rotate proof.
@@ -398,9 +414,11 @@ enum Cmd {
         rotate_timeout_secs: u64,
     },
     /// Anchor the Arbitrum blocks that hold deposits: follow the parent
-    /// chain's batches and assertions and call `proveBlock` on the chain's
-    /// `ArbitrumBlockVerifier`. Runs next to `deposit-relayer daemon`, which
-    /// finalizes the deposits once their blocks are accepted.
+    /// chain's batches and assertions, send `submitAncestry` to the parent
+    /// chain's light client for the epoch each assertion landed in, and call
+    /// `proveBlock` on the chain's `ArbitrumBlockVerifier`. Runs next to
+    /// `deposit-relayer daemon`, which finalizes the deposits once their
+    /// blocks are accepted.
     ArbitrumAnchors {
         /// Parent-chain RPC: Sepolia for Arbitrum Sepolia, Ethereum for
         /// Arbitrum One. Must serve `eth_getBlockReceipts`.
@@ -421,8 +439,8 @@ enum Cmd {
         /// tvm_client 3.0 endpoint that serves GraphQL and `/v2/messages`.
         #[arg(long, env = "AN_GRAPHQL_URL")]
         an_graphql_url: String,
-        /// tvm-cli keys JSON that signs the `proveBlock` messages (any key:
-        /// the call is permissionless).
+        /// tvm-cli keys JSON that signs the `proveBlock` and `submitAncestry`
+        /// messages (any key: both calls are permissionless).
         #[arg(long, env = "AN_KEYS_PATH")]
         an_keys_path: String,
         /// Bridge contract address (`dapp_id::account_id`, SDK 3.0 form).
@@ -691,6 +709,8 @@ async fn real_main() -> anyhow::Result<()> {
             no_flip_owner,
             eth_rpc_url,
             submit_ancestry,
+            parallel_proofs,
+            metrics_addr,
             owner_hop,
             an_graphql_url,
             an_keys_path,
@@ -721,6 +741,9 @@ async fn real_main() -> anyhow::Result<()> {
             if let Some(v) = an_usdc_bridge {
                 an.usdc_bridge = v;
             }
+            if let Some(addr) = metrics_addr {
+                install_metrics_exporter(addr)?;
+            }
             run_daemon(
                 beacon_url,
                 dirs.into_service_dirs(),
@@ -738,6 +761,7 @@ async fn real_main() -> anyhow::Result<()> {
                 flip_owner && !no_flip_owner,
                 eth_rpc_url,
                 submit_ancestry,
+                usize::from(parallel_proofs),
                 owner_hop,
                 an,
                 allow_insecure_graphql,
@@ -1169,7 +1193,7 @@ fn wire_rotate<S, P, A>(
 ) -> Relayer<S, P, A>
 where
     S: BeaconSource,
-    P: ProofGenerator,
+    P: ProofGenerator + 'static,
     A: AnSubmitter,
 {
     match rotate {
@@ -1544,6 +1568,7 @@ async fn run_daemon(
     flip_owner: bool,
     eth_rpc_url: Option<String>,
     submit_ancestry: bool,
+    parallel_proofs: usize,
     owner_hop: bool,
     an: AnConfig,
     allow_insecure: bool,
@@ -1603,6 +1628,7 @@ async fn run_daemon(
     cfg.flip_owner = flip_owner;
     cfg.owner_hop = owner_hop;
     cfg.submit_ancestry = submit_ancestry;
+    cfg.parallel_proofs = parallel_proofs;
 
     if dry_run {
         info!("dry-run: MockAnSubmitter (no AN tx); Gloas slot from the beacon spec");
@@ -1725,33 +1751,16 @@ where
     P: ProofGenerator + 'static,
     A: AnSubmitter + 'static,
 {
-    match eth_rpc_url.filter(|u| !u.is_empty()) {
-        Some(url) => {
-            if submit_ancestry {
-                info!(
-                    %url,
-                    "ETH_RPC_URL set with --submit-ancestry: daemon will send submitAncestry \
-                     for the span between consecutive checkpoints"
-                );
-            } else {
-                info!(
-                    %url,
-                    "ETH_RPC_URL set: local link_headers after each checkpoint; \
-                     on-chain submitAncestry stays off (--submit-ancestry)"
-                );
-            }
-            Ok(relayer.with_execution(Arc::new(EthExecutionRpc::new(url)?)))
-        },
-        None => {
-            if submit_ancestry {
-                tracing::warn!(
-                    "--submit-ancestry set without --eth-rpc-url; on-chain ancestry cannot run"
-                );
-            }
-            info!("ETH_RPC_URL unset: checkpoints only (rePushAnchor still runs)");
-            Ok(relayer)
-        },
+    let Some(url) = eth_rpc_url.filter(|u| !u.is_empty()) else {
+        anyhow::bail!(
+            "ETH_RPC_URL (--eth-rpc-url) is required: the blocks of checkpoints the daemon missed \
+             are closed with submitAncestry from its headers"
+        );
+    };
+    if submit_ancestry {
+        info!("--submit-ancestry: submitAncestry between adjacent checkpoints too");
     }
+    Ok(relayer.with_execution(Arc::new(EthExecutionRpc::new(url)?)))
 }
 
 use eth_light_client_relayer::redact::{redact_urls, Redacting};
@@ -2075,6 +2084,18 @@ async fn arbitrum_vector(
         "no assertion ended at a batch seen within {} min",
         timeout.as_secs() / 60
     )
+}
+
+/// Serve the Prometheus text format at `http://<addr>/metrics` for the
+/// lifetime of the process.
+fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(addr)
+        .install()
+        .map_err(|e| anyhow::anyhow!("metrics exporter on {addr}: {e}"))?;
+    eth_light_client_relayer::describe_metrics();
+    info!(%addr, "metrics exporter listening (GET /metrics)");
+    Ok(())
 }
 
 async fn run<S, P, A>(mut relayer: Relayer<S, P, A>, backoff: BackoffConfig) -> anyhow::Result<()>

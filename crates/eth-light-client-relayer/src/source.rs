@@ -75,6 +75,15 @@ pub trait ExecutionSource: Send + Sync {
         older: [u8; 32],
         max: usize,
     ) -> Result<Option<Vec<Vec<u8>>>, RelayerError>;
+
+    /// The headers from `top` back, oldest first and `top` last: at most
+    /// `max`, and none past `stop`, which ends the list when it is reached.
+    async fn headers_back(
+        &self,
+        top: [u8; 32],
+        stop: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError>;
 }
 
 /// In-memory epoch chain for tests (`Relayer::with_execution`).
@@ -118,6 +127,36 @@ impl ExecutionSource for InMemoryExecution {
             return Ok(None);
         }
         Ok(Some(span))
+    }
+
+    async fn headers_back(
+        &self,
+        top: [u8; 32],
+        stop: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+        let chains = self.chains.lock().expect("poisoned");
+        let by_hash: std::collections::HashMap<[u8; 32], &Vec<u8>> = chains
+            .values()
+            .flatten()
+            .map(|h| (crate::header_rlp::keccak256(h), h))
+            .collect();
+        if !by_hash.contains_key(&top) {
+            return Err(RelayerError::other("in-memory execution: unknown block"));
+        }
+        let mut out = Vec::new();
+        let mut h = top;
+        // A parent the source does not hold ends the list, as the start of
+        // the chain would.
+        while let Some(rlp) = by_hash.get(&h) {
+            out.push((*rlp).clone());
+            if h == stop || out.len() >= max.max(1) {
+                break;
+            }
+            h = crate::header_rlp::rlp_parent_hash(rlp)?;
+        }
+        out.reverse();
+        Ok(out)
     }
 }
 
@@ -498,6 +537,35 @@ impl EthExecutionRpc {
         Ok(crate::header_rlp::encode_header_rlp(&header)?.to_vec())
     }
 
+    /// The headers from `top` back, oldest first and `top` last: at most
+    /// `max`, ending early at `stop`. Each one is checked to hash to the hash
+    /// it was fetched for.
+    pub async fn headers_back(
+        &self,
+        top: [u8; 32],
+        stop: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+        let mut headers = Vec::new();
+        let mut h = top;
+        loop {
+            let rlp = self.header_rlp(h).await?;
+            if crate::header_rlp::keccak256(&rlp) != h {
+                return Err(RelayerError::other(
+                    "eth_getBlockByHash RLP does not keccak to the requested hash",
+                ));
+            }
+            let parent = crate::header_rlp::rlp_parent_hash(&rlp)?;
+            headers.push(rlp);
+            if h == stop || headers.len() >= max.max(1) {
+                break;
+            }
+            h = parent;
+        }
+        headers.reverse();
+        Ok(headers)
+    }
+
     /// The span from `older` to `newer` inclusive, oldest first, at most `max`
     /// headers (3 to 33). Walks parents from `newer` and stops on `older`.
     ///
@@ -558,6 +626,15 @@ impl ExecutionSource for EthExecutionRpc {
         max: usize,
     ) -> Result<Option<Vec<Vec<u8>>>, RelayerError> {
         EthExecutionRpc::ancestry_span(self, newer, older, max).await
+    }
+
+    async fn headers_back(
+        &self,
+        top: [u8; 32],
+        stop: [u8; 32],
+        max: usize,
+    ) -> Result<Vec<Vec<u8>>, RelayerError> {
+        EthExecutionRpc::headers_back(self, top, stop, max).await
     }
 }
 

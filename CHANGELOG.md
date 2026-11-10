@@ -82,8 +82,40 @@ assigns it when the release is tagged.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
   bridge. `DeployRealBridge` defaults to `3`.
+- `EthBeaconLightClient` 1.7.0 keeps a proven Ethereum block hash 14 days instead of a year
+  (`PROVEN_WINDOW_SLOTS = 100_800`), and `slotsPerYear()` is now `provenWindowSlots()`. Upgrade a
+  running light client with `updateCode` (empty `userCell`): it then deletes the older hashes and
+  has the bridge forget them, at most 32 per transaction, two to three weeks for shellnet's backlog.
+  A block older than 14 days can no longer be accepted through the light client. Point anything
+  that reads `slotsPerYear()` at the new getter.
+- `eth-lc-relayer daemon` does not start without `ETH_RPC_URL` (`--eth-rpc-url`): set it to an
+  execution RPC of the followed chain.
+- The `eth-lc-relayer` container needs about 100 GB of memory: two step proofs at once
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) beside a rotate stage; 75 GB with `1`. Raise a
+  memory limit set for the previous 75 GB. A host running all of `docker/compose.yaml` needs 256 GB.
 
 ### New / Improvements
+
+- `eth-lc-relayer arbitrum-anchors` sends `submitAncestry` for the Ethereum epoch each Arbitrum
+  assertion landed in, to the light client the bridge's `getLightClient` names, once its head has
+  passed that epoch; at most three sends per block. Upgrade it first, then turn `SUBMIT_ANCESTRY`
+  (`--submit-ancestry`) off on `eth-lc-relayer daemon`: the daemon's spans admitted every block.
+  `docker/env/eth-lc-relayer.env.example` no longer sets it.
+- `eth-lc-relayer daemon` proves every Ethereum checkpoint: a watcher asks the beacon node every
+  slot, apart from proving and sending, and queues each checkpoint on disk in
+  `<state file>.steps/` as it appears; proofs run in the background, `--parallel-proofs`
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) at once. A checkpoint that fails is tried again
+  until it is on chain, and a version signed by fewer than 342 of the committee is not taken.
+- `eth-lc-relayer daemon --metrics-addr` (`ETH_LC_RELAYER_METRICS_ADDR`) serves `GET /metrics` with
+  the counter `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}`;
+  `docker/compose.yaml` publishes it on `ETH_LC_RELAYER_METRICS_PORT` (default 9468). Add it to
+  the scrape config.
+- `eth-lc-relayer daemon` closes the blocks of checkpoints it missed with `submitAncestry` back from
+  the next one and logs `checkpoints missed` as an ERROR.
+- `EthBeaconLightClient` 1.7.0 `submitAncestry` takes 2 to 33 headers and needs only the last one
+  proven; it admits every header before it.
+- `export_step_vk_blob` always keeps its proving key, in `STEP_KEY_DIR` or `step-key/` next to the
+  SRS, and replaces a key another build generated; `lc-keygen` is optional.
 
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted,

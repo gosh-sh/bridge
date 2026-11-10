@@ -68,18 +68,18 @@ pub fn dummy_linked_chain(n: usize) -> Vec<Vec<u8>> {
 }
 
 /// Check an ancestry payload in the shape `submitAncestry` takes: oldest
-/// first, 3 to 33 headers, each one naming its predecessor as parent. Returns
-/// the two end hashes, both of which the contract requires to be proven
-/// anchors — `(older, newer)`.
+/// first, 2 to 33 headers, each one naming its predecessor as parent. Returns
+/// the two end hashes — `(older, newer)`. The contract requires the newer one
+/// to be proven and admits every header before it.
 pub fn link_headers(rlps: &[Vec<u8>]) -> Result<([u8; 32], [u8; 32]), RelayerError> {
-    if rlps.len() < 3 {
+    if rlps.len() < 2 {
         return Err(RelayerError::other(
-            "need two anchors + ≥1 block between them",
+            "need a proven block and at least one header behind it",
         ));
     }
     if rlps.len() > 33 {
         return Err(RelayerError::other(
-            "ancestry longer than two anchors + one epoch",
+            "ancestry longer than a proven block and 32 behind it",
         ));
     }
     let older = keccak256(&rlps[0]);
@@ -139,12 +139,13 @@ mod tests {
     }
 
     #[test]
-    fn link_headers_refuses_a_span_without_room_between_the_anchors() {
-        assert!(link_headers(&dummy_linked_chain(2)).is_err());
+    fn link_headers_needs_a_header_behind_the_proven_one() {
+        assert!(link_headers(&dummy_linked_chain(1)).is_err());
+        assert!(link_headers(&dummy_linked_chain(2)).is_ok());
     }
 
     #[test]
-    fn link_headers_refuses_more_than_two_anchors_and_an_epoch() {
+    fn link_headers_refuses_more_than_a_proven_block_and_32_behind_it() {
         assert!(link_headers(&dummy_linked_chain(34)).is_err());
         assert!(link_headers(&dummy_linked_chain(33)).is_ok());
     }

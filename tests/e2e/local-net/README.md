@@ -99,9 +99,9 @@ Nothing is accepted by hand. The one trusted input is the Sepolia light client's
 `lc-prove` proves the latest finality update from the beacon chain
 (`https://lodestar-sepolia.chainsafe.io`, `BEACON_URL` in `prover-host/jobs/common.sh`), and
 `lc-bootstrap` sets the committee that signed it, then switches the owner off. From there the
-light client accepts one finalized checkpoint per epoch and, with `--submit-ancestry`, the
-blocks between two consecutive ones; `eth-lc-relayer arbitrum-anchors` proves the deposit's Arbitrum block
-from the assertion in one of those Sepolia blocks. The light client follows a new sync
+light client accepts one finalized checkpoint per epoch; `eth-lc-relayer arbitrum-anchors` sends it
+the blocks of the epoch an assertion landed in (`submitAncestry`) and proves the deposit's Arbitrum
+block from that assertion. The light client follows a new sync
 committee (every ~27 h) only by a rotate proof, which does not run live yet, so a run must
 not cross one: `test_02` refuses to start a run that would.
 

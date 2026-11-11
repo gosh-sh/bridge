@@ -73,6 +73,13 @@ pub enum RelayerError {
     )]
     AnChainBehindBridge { chain_head: u64, last_verified: u64 },
 
+    /// A rotation the contract has applied at its `last_bk_set_update_seq_no`
+    /// does not lead between the two sets the contract stores for it: the
+    /// prover follows a different BK-set history than the bridge. Terminal
+    /// like [`Self::Stuck`].
+    #[error("BK set diverged from the bridge at rotation {seq_no}: {reason}")]
+    BkSetDiverged { seq_no: u64, reason: String },
+
     /// An unexpected condition we don't have a finer-grained variant
     /// for. Use sparingly.
     #[error("relayer error: {0}")]

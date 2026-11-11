@@ -19,11 +19,13 @@ so that discharging them is one command rather than a judgement call:
 A `witness.json` is the `finalizeDeposit` input the deposit relayer's
 `prove-one` and the CLI's work directory hold; its header must hash to its
 `blockHash`. `--verify` resolves the hash over JSON-RPC and fails unless the
-node is on the anchor's chain (`eth_chainId` equals its `chainId`), agrees the
-block is canonical (its number maps back to the same hash) and has it buried at
-least `--min-confirmations` deep. Point `--rpc` at a node you trust
-and that the relayer does not control; verifying against the same endpoint that
-produced the witness proves nothing.
+node agrees the block is canonical (its number maps back to the same hash) and
+has it buried at least `--min-confirmations` deep. Point `--rpc` at a node of
+the anchor's chain that you trust and that the relayer does not control;
+verifying against the same endpoint that produced the witness proves nothing.
+Which chain the deposit came from is settled by `eccBridge` itself: its emitter
+must be trusted under the anchor's `chainId`, and an address is trusted under
+one chain only.
 
 The arguments printed are for the owner's `setAcceptedBlockHash`, the one anchor
 writer a person calls; `eccBridge` has no attester path. `--call` stays for
@@ -96,11 +98,6 @@ def rpc(url: str, method: str, params: list) -> object:
 def verify_canonical(url: str, chain_id: int, block_hash: int, min_confirmations: int) -> list[str]:
     """Return a list of reasons the anchor must not be admitted (empty = admit)."""
     hash_hex = f"0x{block_hash:064x}"
-    # The anchor binds the block to `chain_id` and nothing else does: a node of
-    # another chain must not vouch for it.
-    node_chain = int(rpc(url, "eth_chainId", []), 16)
-    if node_chain != chain_id:
-        return [f"the node is on chain {node_chain}, the anchor is for chain {chain_id}"]
     block = rpc(url, "eth_getBlockByHash", [hash_hex, False])
     if block is None:
         return [

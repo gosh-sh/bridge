@@ -54,7 +54,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.17.0";
+    string constant version = "1.18.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -145,6 +145,15 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // deliberately NOT carried through `onCodeUpgrade` — after a code upgrade
     // the bridge accepts no deposits until the owner re-seeds it (fail-closed).
     mapping(uint256 => mapping(uint256 => bool)) _trustedL1Bridge;
+
+    // The chain each trusted L1 bridge address is trusted under: l1Bridge ->
+    // chainId, absent when the address is trusted nowhere. The log carries no
+    // chain id, so one address trusted under two chains would let a block
+    // anchored under either chain mint a deposit made on the other; an address
+    // is therefore trusted under one chain at a time. Kept by
+    // `setTrustedL1Bridge` together with `_trustedL1Bridge` and, like it, NOT
+    // carried through `onCodeUpgrade`.
+    mapping(uint256 => uint256) _trustedL1BridgeChain;
 
     // Destination-chain EVM bridge: dstChainId -> the one `AckiNackiBridge`
     // that may pay this bridge's withdrawals to that chain. `initiateWithdrawal`
@@ -510,15 +519,24 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         the L1 address left-padded to uint256, exactly as the circuit
     ///         exposes it in the public inputs (fr[3]). `allowed=true` trusts it,
     ///         `false` revokes it; several addresses may be trusted on the same
-    ///         chain at once (rotation window). Applies to `finalizeDeposit`
-    ///         only — the outbound path and the TIP-3/owner-mint flows are
-    ///         unaffected.
+    ///         chain at once (rotation window). One address is trusted under
+    ///         one chain only: trusting an address that is trusted under
+    ///         another `chainId` is refused with ERR_L1_BRIDGE_ON_OTHER_CHAIN
+    ///         until it is revoked there, so the EVM bridges on different
+    ///         chains must sit at different addresses. Revoking an address
+    ///         under a chain it is not trusted under changes nothing. Applies
+    ///         to `finalizeDeposit` only — the outbound path and the
+    ///         TIP-3/owner-mint flows are unaffected.
     function setTrustedL1Bridge(uint256 chainId, uint256 l1Bridge, bool allowed) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         if (allowed) {
+            optional(uint256) trustedUnder = _trustedL1BridgeChain.fetch(l1Bridge);
+            require(!trustedUnder.hasValue() || trustedUnder.get() == chainId, ERR_L1_BRIDGE_ON_OTHER_CHAIN);
             _trustedL1Bridge[chainId][l1Bridge] = true;
-        } else {
+            _trustedL1BridgeChain[l1Bridge] = chainId;
+        } else if (_trustedL1Bridge[chainId][l1Bridge]) {
             delete _trustedL1Bridge[chainId][l1Bridge];
+            delete _trustedL1BridgeChain[l1Bridge];
         }
     }
 
@@ -545,6 +563,11 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     /// @notice Returns the trusted L1 bridge SET for `chainId` (address -> true).
     function getTrustedL1Bridges(uint256 chainId) external view returns (mapping(uint256 => bool)) {
         return _trustedL1Bridge[chainId];
+    }
+
+    /// @notice The chain `l1Bridge` is trusted under; null if it is trusted nowhere.
+    function getTrustedL1BridgeChain(uint256 l1Bridge) external view returns (optional(uint256)) {
+        return _trustedL1BridgeChain.fetch(l1Bridge);
     }
 
     /// @notice True if `l1Bridge` is in the trusted set of `chainId`.

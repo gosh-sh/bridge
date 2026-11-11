@@ -113,6 +113,15 @@
 			]
 		},
 		{
+			"name": "getTrustedL1BridgeChain",
+			"inputs": [
+				{"name":"l1Bridge","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"optional(uint256)"}
+			]
+		},
+		{
 			"name": "isTrustedL1Bridge",
 			"inputs": [
 				{"name":"chainId","type":"uint256"},
@@ -550,6 +559,7 @@
 		{"init":false,"name":"_bridgeTokenIds","type":"map(uint256,map(uint256,uint32))"},
 		{"init":false,"name":"_depositVoucherCode","type":"cell"},
 		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},
+		{"init":false,"name":"_trustedL1BridgeChain","type":"map(uint256,uint256)"},
 		{"init":false,"name":"_evmBridgeByChain","type":"map(uint256,uint160)"},
 		{"init":false,"name":"_acceptedBlockHash","type":"map(uint256,map(uint256,bool))"},
 		{"init":false,"name":"_lightClientCode","type":"cell"},

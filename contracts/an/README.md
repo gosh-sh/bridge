@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.17.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
@@ -52,7 +52,11 @@ log `logIndex` of that receipt — counted within the receipt, not the block-wid
 bytes32 anAccount, uint256 timestamp, address token)`: three topics, four data
 words, nothing more (244 otherwise). Its emitter must be a trusted L1 bridge
 for `chainId` (`setTrustedL1Bridge`; the zerostate seeds one, see below; 222
-otherwise). The token and limit checks follow, and only then does the bridge
+otherwise). The log names no chain, so one address is trusted under one chain
+only: `setTrustedL1Bridge` refuses an address trusted under another chain with
+228 until it is revoked there, and the EVM bridges on different chains must sit
+at different addresses. `getTrustedL1BridgeChain(l1Bridge)` returns the chain
+an address is trusted under. The token and limit checks follow, and only then does the bridge
 accept the message, so a refused deposit costs it nothing. A deposit already
 finalized is not refused before accept: it passes every check, the bridge pays
 for that transaction, and it ends at its existing voucher without a second
@@ -71,9 +75,10 @@ Three writers
 fill the anchor set: the owner, the light clients and the Arbitrum block
 verifiers. The owner admits or retracts hashes with `setAcceptedBlockHash`
 until the flip. The `Deposit` event carries no chain id, so the `chainId` a
-hash is admitted under is the only thing binding its block to a chain: an
-`AckiNackiBridge` deployed at the same address on two chains would otherwise
-let one deposit be finalized under both. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
+hash is admitted under binds its block to a chain, and the emitter must be
+trusted under that same `chainId`. Since an address is trusted under one chain
+only, a block admitted under the wrong chain finalizes nothing (222), and one
+deposit cannot be finalized under two chains. `disableOwnerAnchorsOn(chainId)` turns the owner writer off
 for one chain and needs a light client or an Arbitrum block verifier deployed
 for it (`ERR_LIGHT_CLIENT_UNSET` (226) otherwise, `ERR_NOT_LIGHT_CLIENT_CHAIN` (227)
 for chain id 0). A chain with an Arbitrum block verifier closes only after its

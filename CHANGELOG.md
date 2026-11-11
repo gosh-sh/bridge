@@ -23,6 +23,13 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `eccBridge` 1.18.0 (code hash `e0a653cc…`) trusts an EVM bridge address under one chain only:
+  `setTrustedL1Bridge(chainId, l1Bridge, true)` exits with 228 while `l1Bridge` is trusted under
+  another `chainId`; revoke it there first. EVM bridges on different chains must therefore be
+  deployed at different addresses. The new getter `getTrustedL1BridgeChain(uint256 l1Bridge)`
+  returns the chain an address is trusted under, or null. Upgrade with `updateCode` and an empty
+  `userCell`, then re-trust each EVM bridge under its own chain; the ABI in
+  `contracts/an/0.80.1_compiled/exchange/eccBridge.abi.json` gains the getter.
 - `eccBridge` 1.17.0 (code hash `c25d1ac0…`) proves a deposit from its Ethereum receipt instead of
   a ZK proof: `finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)`,
   `logIndex` counted within the receipt. Switch every caller to
@@ -42,7 +49,7 @@ assigns it when the release is tagged.
   `--max-data-byte-len`, `--max-log-num`, `--dapp-id`, `--work-dir` or `prove-one --log-dir`;
   `prove-one --out-dir` writes `witness.json`, which `finalize-one --bundle-dir` reads; the
   `deposit_relayer_prover_stage_*` metrics are removed.
-- `ackinacki-bridge` requires `eccBridge` 1.17.0 exactly; `deposit` drops `--deposit-prover-dir`,
+- `ackinacki-bridge` requires `eccBridge` 1.17.0 or 1.18.0; `deposit` drops `--deposit-prover-dir`,
   `--log-dir`, `--prover-timeout-s`, `BRIDGE_DEPOSIT_PROVER_DIR` and `BRIDGE_DEPOSIT_LOG_DIR`, writes
   `<work-dir>/<op-id>/receipt_proof.json` at step 7, and its success JSON drops
   `tx.access_list_len`. Upgrade the AN bridge, the CLI and `deposit-relayer` together.
@@ -50,8 +57,8 @@ assigns it when the release is tagged.
   (about 65 or more other events before `Deposit` in its transaction) cannot be finalized: CLI exit
   35, `deposit-relayer` `unprovable_deposit_ids`. Make every deposit a transaction of its own.
 - The EVM RPC for deposits must serve `eth_getBlockByHash` and `eth_getBlockReceipts`.
-- `scripts/deposit_anchor_params.py` takes a `witness.json`, or `--chain-id` with `--block-hash`;
-  `--verify` refuses a node whose `eth_chainId` is not the anchor's chain.
+- `scripts/deposit_anchor_params.py` takes a `witness.json`, or `--chain-id` with `--block-hash`.
+  `--verify` does not check the node's `eth_chainId`: point `--rpc` at a node of the anchor's chain.
 
 - Only USDC can be bridged: Acki Nacki has no other currency for the bridge to mint. `eccBridge`
   `setBridgeToken` refuses any ECC id but `3` with exit code 242, and `AckiNackiBridge` lists USDC

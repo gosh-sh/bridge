@@ -108,6 +108,18 @@ pub async fn build_bk_set_at<H: BkSetHistory>(
     h: &H,
     target: &BkTarget,
 ) -> Result<ReplayedSet, ReplayError> {
+    attempt(h, target, None, &mut None).await
+}
+
+/// [`build_bk_set_at`] that refuses a snapshot whose anchor is not above
+/// `min_anchor` (reported as a transient failure) and records the anchor of
+/// the snapshot it used in `used_anchor`.
+async fn attempt<H: BkSetHistory>(
+    h: &H,
+    target: &BkTarget,
+    min_anchor: Option<u64>,
+    used_anchor: &mut Option<u64>,
+) -> Result<ReplayedSet, ReplayError> {
     let snapshot = match h.latest_bk_set().await {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => return Err(ReplayError::NoSnapshot),
@@ -122,6 +134,17 @@ pub async fn build_bk_set_at<H: BkSetHistory>(
             });
         },
     };
+
+    if let Some(failed) = min_anchor {
+        if snapshot.anchor_height <= failed {
+            return Err(ReplayError::Query(anyhow::anyhow!(
+                "no fresh snapshot yet: its anchor {} is not above {failed}, the anchor of the \
+                 snapshot that failed its checks",
+                snapshot.anchor_height
+            )));
+        }
+    }
+    *used_anchor = Some(snapshot.anchor_height);
 
     let rows = match rows_to_fetch(snapshot.anchor_height, target.height) {
         Some((from, to)) => h
@@ -154,8 +177,9 @@ pub struct BuildPolicy {
     /// Data failures (a check against the leaves failed) before giving up,
     /// counted over the whole call.
     pub data_attempts: u32,
-    /// Bound on the backoff slept on transient failures, since the start or
-    /// the last data failure; `None` retries them forever.
+    /// Bound on the total time slept on transient failures (the last sleep is
+    /// cut short to fit), counted from the start or the last data failure;
+    /// `None` retries them forever.
     pub transient_budget: Option<Duration>,
     pub backoff_initial: Duration,
     pub backoff_max: Duration,
@@ -175,6 +199,16 @@ impl Default for BuildPolicy {
 }
 
 impl BuildPolicy {
+    /// How long to sleep now, or `None` when the budget is spent. The sleep is
+    /// cut to what is left of the budget.
+    fn next_sleep(&self, waited: Duration, backoff: Duration) -> Option<Duration> {
+        match self.transient_budget {
+            None => Some(backoff),
+            Some(budget) if waited >= budget => None,
+            Some(budget) => Some(backoff.min(budget - waited)),
+        }
+    }
+
     fn next_backoff(&self, current: Duration) -> Duration {
         current
             .saturating_mul(self.backoff_multiplier)
@@ -185,10 +219,10 @@ impl BuildPolicy {
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error(
-        "the block-keeper set failed its checks on {attempts} fresh snapshots: {last}. Either \
-         `bkSetUpdates` returned an incomplete range, or a change the node applies implicitly \
-         (owner re-added under another index, overwrite, removal of an absent index) is not in \
-         the rows"
+        "the block-keeper set failed its checks on {attempts} snapshots with a newer anchor each: \
+         {last}. Either `bkSetUpdates` returned an incomplete range, or a change the node applies \
+         implicitly (owner re-added under another index, overwrite, removal of an absent index) \
+         is not in the rows"
     )]
     Data { attempts: u32, last: ReplayError },
     #[error("the block-keeper set queries kept failing for {waited:?}: {last}")]
@@ -211,27 +245,28 @@ pub async fn build_bk_set_with_retry<H: BkSetHistory>(
     let mut data_failures = 0u32;
     let mut waited = Duration::ZERO;
     let mut backoff = policy.backoff_initial;
+    // After a data failure only a snapshot anchored above the failed one counts.
+    let mut min_anchor: Option<u64> = None;
     loop {
-        let err = match build_bk_set_at(h, target).await {
+        let mut used_anchor = None;
+        let err = match attempt(h, target, min_anchor, &mut used_anchor).await {
             Ok(set) => return Ok(set),
             Err(ReplayError::ServerTooOld) => return Err(BuildError::NoLatestBkSetField),
             Err(e) => e,
         };
         if err.is_transient() {
-            if policy
-                .transient_budget
-                .is_some_and(|budget| waited >= budget)
-            {
+            let Some(sleep) = policy.next_sleep(waited, backoff) else {
                 return Err(BuildError::Transient {
                     waited,
                     last: err,
                 });
-            }
-            warn!(error = %err, retry_in = ?backoff, "bk set build failed, will retry");
-            tokio::time::sleep(backoff).await;
-            waited = waited.saturating_add(backoff);
+            };
+            warn!(error = %err, retry_in = ?sleep, "bk set build failed, will retry");
+            tokio::time::sleep(sleep).await;
+            waited = waited.saturating_add(sleep);
             backoff = policy.next_backoff(backoff);
         } else {
+            min_anchor = used_anchor;
             data_failures += 1;
             if data_failures >= policy.data_attempts {
                 return Err(BuildError::Data {
@@ -315,21 +350,18 @@ pub async fn genesis_bk_for_seed<H: BkSetHistory>(
             Ok(found) => break found.unwrap_or(0),
             Err(e) if e.downcast_ref::<UnknownFieldError>().is_some() => return Err(e),
             Err(e) => {
-                if policy
-                    .transient_budget
-                    .is_some_and(|budget| waited >= budget)
-                {
+                let Some(sleep) = policy.next_sleep(waited, backoff) else {
                     return Err(e.context(format!(
                         "last bk set update at or below {seed} kept failing for {waited:?}"
                     )));
-                }
+                };
                 warn!(
                     error = %e,
-                    retry_in = ?backoff,
+                    retry_in = ?sleep,
                     "last bk set update query failed, will retry"
                 );
-                tokio::time::sleep(backoff).await;
-                waited = waited.saturating_add(backoff);
+                tokio::time::sleep(sleep).await;
+                waited = waited.saturating_add(sleep);
                 backoff = policy.next_backoff(backoff);
             },
         }
@@ -437,7 +469,13 @@ mod tests {
         rows: Vec<BkSetUpdateRow>,
         leaves: BTreeMap<u64, BlockLeaves>,
         last_le: BTreeMap<u64, u64>,
+        /// `last_update_at_or_below` fails transiently this many times first.
+        last_le_failures: AtomicUsize,
+        last_le_always_fails: bool,
+        last_le_unknown_field: bool,
+        last_le_calls: AtomicUsize,
         latest_calls: AtomicUsize,
+        updates_calls: AtomicUsize,
     }
 
     impl FakeHistory {
@@ -490,6 +528,7 @@ mod tests {
             height_start: u64,
             height_end: u64,
         ) -> anyhow::Result<Vec<BkSetUpdateRow>> {
+            self.updates_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self
                 .rows
                 .iter()
@@ -506,6 +545,20 @@ mod tests {
         }
 
         async fn last_update_at_or_below(&self, height: u64) -> anyhow::Result<Option<u64>> {
+            self.last_le_calls.fetch_add(1, Ordering::SeqCst);
+            if self.last_le_unknown_field {
+                return Err(anyhow::Error::new(UnknownFieldError {
+                    field: "lastBkSetUpdate".into(),
+                }));
+            }
+            if self.last_le_always_fails {
+                anyhow::bail!("connection reset");
+            }
+            let left = self.last_le_failures.load(Ordering::SeqCst);
+            if left > 0 {
+                self.last_le_failures.store(left - 1, Ordering::SeqCst);
+                anyhow::bail!("connection reset");
+            }
             Ok(self.last_le.get(&height).copied())
         }
     }
@@ -528,7 +581,7 @@ mod tests {
     async fn bad_snapshot_key_is_retried_not_fatal() {
         let mut bad = snap(19000, S2);
         bad.signers.insert(0, vec![0xff; 48]);
-        let h = FakeHistory::with_snapshots(vec![Some(bad), Some(snap(19000, S2))]).chain();
+        let h = FakeHistory::with_snapshots(vec![Some(bad), Some(snap(19001, S2))]).chain();
         let out = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
             .await
             .unwrap();
@@ -538,7 +591,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn data_error_stops_after_three_attempts() {
-        let mut h = FakeHistory::with_snapshots(vec![Some(snap(19000, S2))]).chain();
+        // Every attempt gets a newer snapshot, so every attempt replays.
+        let mut h = FakeHistory::with_snapshots(vec![
+            Some(snap(19000, S2)),
+            Some(snap(19001, S2)),
+            Some(snap(19002, S2)),
+        ])
+        .chain();
         h.rows.retain(|r| r.height != Some(17000));
         let e = build_bk_set_with_retry(&h, &back_target(), &BuildPolicy::default())
             .await
@@ -551,6 +610,7 @@ mod tests {
             "{e}"
         );
         assert_eq!(h.latest_calls(), 3);
+        assert_eq!(h.updates_calls.load(Ordering::SeqCst), 3);
         let msg = e.to_string();
         assert!(
             msg.contains("incomplete") && msg.contains("implicitly"),
@@ -565,8 +625,8 @@ mod tests {
         let mut h = FakeHistory::with_snapshots(vec![
             Some(snap(19000, S2)),
             None,
-            Some(snap(19000, S2)),
-            Some(snap(19000, S2)),
+            Some(snap(19001, S2)),
+            Some(snap(19002, S2)),
         ])
         .chain();
         h.rows.retain(|r| r.height != Some(17000));
@@ -584,19 +644,50 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn bounded_transient_budget_gives_up() {
-        let h = FakeHistory::with_snapshots(vec![None]).chain();
+    async fn stale_snapshot_after_a_data_failure_is_not_replayed() {
+        let mut h = FakeHistory::with_snapshots(vec![
+            Some(snap(19000, S2)),
+            Some(snap(19000, S2)),
+            Some(snap(19000, S2)),
+            Some(snap(19001, S2)),
+        ])
+        .chain();
+        h.rows.retain(|r| r.height != Some(17000));
         let p = BuildPolicy {
-            transient_budget: Some(Duration::from_secs(180)),
+            data_attempts: 2,
             ..BuildPolicy::default()
         };
         let e = build_bk_set_with_retry(&h, &back_target(), &p)
             .await
             .unwrap_err();
         assert!(
-            matches!(e, BuildError::Transient { waited, .. } if waited >= Duration::from_secs(180)),
+            matches!(e, BuildError::Data {
+                attempts: 2,
+                ..
+            }),
             "{e}"
         );
+        // Four snapshots asked for, only the first and the newer one replayed.
+        assert_eq!(h.latest_calls(), 4);
+        assert_eq!(h.updates_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_transient_budget_gives_up() {
+        let h = FakeHistory::with_snapshots(vec![None]).chain();
+        let p = BuildPolicy {
+            transient_budget: Some(Duration::from_secs(180)),
+            ..BuildPolicy::default()
+        };
+        let started = Instant::now();
+        let e = build_bk_set_with_retry(&h, &back_target(), &p)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(e, BuildError::Transient { waited, .. } if waited == Duration::from_secs(180)),
+            "{e}"
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(180));
     }
 
     #[tokio::test(start_paused = true)]
@@ -640,6 +731,45 @@ mod tests {
         // The backward walk only sees 17000 and 18000.
         assert_eq!(g.last_bk_set_update_seq_no, 15000);
         assert_eq!(g.set.pubkeys, set(S0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cursor_query_retries_transient_failures() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(19000, S2))]).chain();
+        h.last_le.insert(16384, 15000);
+        h.last_le_failures = AtomicUsize::new(3);
+        let g = genesis_bk_for_seed(&h, 16384, &BuildPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(g.last_bk_set_update_seq_no, 15000);
+        assert_eq!(h.last_le_calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cursor_query_gives_up_when_the_budget_is_spent() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(19000, S2))]).chain();
+        h.last_le_always_fails = true;
+        let p = BuildPolicy {
+            transient_budget: Some(Duration::from_secs(180)),
+            ..BuildPolicy::default()
+        };
+        let started = Instant::now();
+        let e = genesis_bk_for_seed(&h, 16384, &p).await.unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_secs(180));
+        assert!(e.to_string().contains("kept failing"), "{e}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cursor_query_unknown_field_fails_at_once() {
+        let mut h = FakeHistory::with_snapshots(vec![Some(snap(19000, S2))]).chain();
+        h.last_le_unknown_field = true;
+        let started = Instant::now();
+        let e = genesis_bk_for_seed(&h, 16384, &BuildPolicy::default())
+            .await
+            .unwrap_err();
+        assert!(e.downcast_ref::<UnknownFieldError>().is_some(), "{e}");
+        assert_eq!(h.last_le_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
     #[tokio::test]

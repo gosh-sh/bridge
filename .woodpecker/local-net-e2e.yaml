@@ -19,11 +19,14 @@ variables:
   # nginx0 is not pinned: acki-nacki's compose names docker.gosh.sh/ackinacki-nginx without
   # a tag and up.sh does not pull it.
   - &acki_repo "https://github.com/gosh-sh/acki-nacki.git"
-  - &acki_branch "dev"
-  # The build shellnet runs: acki-nacki b31c9d8b pins tvm-sdk 8b108bac, which has the
-  # KECCAK256 instruction ArbitrumBlockVerifier needs; br_dev (c8c9e67e, tvm-sdk v3.0.6.an)
-  # does not. gql-server and block-manager fall back to br_dev when the tag lacks them.
-  - &acki_image_tag "b31c9d8bcda724887afb02f0016a3bb305027792"
+  # The branch whose gql-server (>= 1.5.0) serves blockchain.latestBkSet and whose
+  # block-manager keeps the bkSetUpdates history: daemon-live's cold start and
+  # compute_bridge_anchors build the starting BK set from them. Its images are tagged
+  # br_<branch> with "/" as "_". Back to dev once that work is on dev.
+  - &acki_branch "feature/bri-162-l2-and-bk-set-updates-historical"
+  # gql-server and block-manager fall back to br_dev when the tag lacks them; br_dev
+  # serves no latestBkSet, so a run on the fallback fails at the test's first step.
+  - &acki_image_tag "br_feature_bri-162-l2-and-bk-set-updates-historical"
   - &acki_aux_fallback_tag "br_dev"
   - &registry "docker.gosh.sh"
   # Contract toolchain for zerostate generation and for the test on the host (the checkout's

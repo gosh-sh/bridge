@@ -347,9 +347,13 @@ INFO relayer: daemon-live starting gql=https://shellnet.ackinacki.org/graphql pa
 INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq_no=<S>, height=<S>, layers=2
 ```
 
-- `C` is `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, `K` is
-  `GENESIS_BK_SET_COMMITMENT`, and `prover_state` must be
+- `C` is `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and `prover_state` must be
   `./L2_config/state`.
+- `K` is the commitment `GENESIS_BK_SET_COMMITMENT` names, but printed as
+  its 32 bytes in little-endian order without `0x`, while the deploy log
+  prints `GENESIS_BK_SET_COMMITMENT` big-endian with `0x`: the two strings
+  differ. To compare, reverse the bytes of the deploy log's value:
+  `echo "${GENESIS_BK_SET_COMMITMENT#0x}" | fold -w2 | tac | tr -d '\n'`.
 - A contract deployed with another BK set stops here, with exit status 1:
   `the BK set built from GraphQL at height … has commitment …, but the
   contract expects …`. `BRIDGE_ADDRESS` and `BRIDGE_GQL_ENDPOINT` name

@@ -303,10 +303,14 @@ usdc_token_id=$(call_word "$BRIDGE_ADDRESS" 'usdcTokenId()(uint32)')
 [[ "$usdc_token_id" == "$EXPECTED_USDC_TOKEN_ID" ]] || die "USDC token id mismatch"
 
 if [[ ! -f "$BRIDGE_STATE_DIR/prover_state.json" ]]; then
-  [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]] ||
-    die "cold start has no local state but contract cursor $last_seen != bootstrap $BRIDGE_BOOTSTRAP_SEQNO"
-  expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
-  [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+  # At its seed the contract still expects the genesis anchor. Past it,
+  # daemon-live rebuilds the local state from the contract on start.
+  if [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]]; then
+    expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
+    [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+  else
+    ok "no local state; daemon-live rebuilds it from the contract at cursor $last_seen (BK set from GraphQL, gql-server >= 1.5.0)"
+  fi
 else
   jq -e '.initialized == true and .anchor_level == 2' "$BRIDGE_STATE_DIR/prover_state.json" >/dev/null ||
     die "existing prover state is not initialized L2 state"

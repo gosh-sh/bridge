@@ -76,7 +76,7 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
 ```
 
 `daemon-live` has no BK-set input. It resumes from `prover_bk_set.json` in its `state/`;
-without that file (the first start, or once it is lost) it builds the set from GraphQL
+without that file (the first start, a new host, or once it is lost) it builds the set from GraphQL
 (`blockchain.latestBkSet`, then `bkSetUpdates`) and checks it against the contract, which
 needs gql-server 1.5.0 or later at `BRIDGE_GQL_ENDPOINT`. A `prover_bk_set.json` that does
 not fit the prover state is renamed `prover_bk_set.json.mismatch-<unix time>` and rebuilt; such

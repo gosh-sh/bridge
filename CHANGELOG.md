@@ -108,12 +108,14 @@ assigns it when the release is tagged.
   `ERR_TVL_CAP`. Close deposits on EVM or lower the EVM TVL cap to throttle intake. Closing the AN
   switch or lowering AN `maxTransfer` also holds back deposits already locked on EVM.
 - `relayer daemon-live` starts under a running bridge with no local state, in the rotation hold
-  window too: it builds the BK set from GraphQL and checks it against the contract.
+  window too: it builds the BK set from GraphQL and checks it against the contract. The Compose
+  `preflight` no longer refuses that start once the contract has moved past
+  `BRIDGE_BOOTSTRAP_SEQNO`.
 - `bkSetUpdates` queries filter by `thread_id` and height instead of paging through the whole
   rotation history.
-- `daemon-live` and `bridge-prover-daemon` rename a `prover_bk_set.json` that does not fit to
-  `prover_bk_set.json.mismatch-<unix time>` in the state directory and rebuild it; delete such
-  files once inspected.
+- `daemon-live` renames a `prover_bk_set.json` that does not fit `state/` to
+  `prover_bk_set.json.mismatch-<unix time>` and rebuilds it; `bridge-prover-daemon` does so for a
+  file left by a start that never acknowledged a bundle. Delete such files once inspected.
 
 ### Fixes
 

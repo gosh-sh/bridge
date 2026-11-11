@@ -1,68 +1,33 @@
 # bridge-prover-daemon examples
 
-Two tools that share the same core primitive (`bk_set_at_height`, folding
-`bkSetUpdates` from a genesis snapshot) but produce different artifacts for
-different consumers.
+## `capture_bk_update_fixture.rs`
 
-| | `seed_prover_bk_set.rs` | `capture_bk_update_fixture.rs` |
-|---|---|---|
-| Produces | Runtime state file for the daemon | Test fixture for `parity_bk_update` |
-| Says | "BK set as of height N" | "BK set before N, delta at N, BK set after N" |
-| Height flag | `--cap-height N` | `--height N` (rotation block) |
-| Fold cutoff | `<= N` (state already includes update N) | `< N`, then delta at N applied separately |
-| Extra fetches | none | target block's 16 Merkle leaves + `bkSetUpdates` event + block_id cross-check |
-| Uses `bridge_prover_lib` | yes (`ProverBkSet::from_pubkeys`) | no |
-| Default out path | `state/prover_bk_set.json` | `tests/fixtures/bk_update_shellnet.json` |
-| Genesis source | `--genesis` or env `BRIDGE_BK_SET_CONFIG` | `--genesis-bk-set` (required) |
+Captures a live-chain rotation as the fixture `parity_bk_update` checks
+(`bridge-prover-lib/tests/fixtures/bk_update_shellnet.json`): the BK set
+before the rotation at `--height`, the rotation's delta blob, the rotation
+block's 16 Merkle leaves and block id, and the BK set after the rotation.
 
-## Why the fold cutoff differs
+Both sets are built from GraphQL with `bk_set_history::build_bk_set_with_retry`:
+the set before is checked against leaf 2 of the rotation block, the set after
+against leaf 3. The delta is then applied to the set before in node order
+(`bk_set_replay::{parse_changes, apply_block_changes}`) and must give the set
+after, so a broken capture fails here instead of shipping a bad fixture.
 
-Both answer different questions.
+Use it to add or refresh a real-chain regression test for rotation
+transitions, e.g. after touching `parse_changes`, `normalize_bk_set_pubkeys`
+or the 16-leaf handling.
 
-- **Seeder** folds `<= N` so the state file already includes update N; the
-  daemon resumes at N+1.
-- **Capture** folds `< N` to get `old_pubkeys` (the input to rotation N),
-  then applies the delta at N separately to derive `expected_new_pubkeys`.
-  If it folded `<= N` like the seeder, old and new would be identical and
-  the fixture would be tautological.
-
-## When to use which
-
-- Standing up a daemon without walking the whole chain → `seed_prover_bk_set`.
-- Re-bootstrapping an existing daemon against a chain that has rotated past
-  the committed `bk_set.shellnet.json`, when only public GQL is reachable
-  (no AN REST on port 8600) → `seed_prover_bk_set`. The full procedure is in
-  the live relayer runbook: [§5.4](../../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#54-new-machine-contract-already-advanced)
-  for a contract that has already advanced (`--cap-height
-  <storedLastBkSetUpdateSeqNo>`), [§3.1–§3.2](../../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#31-pick-the-seed)
-  for a fresh seed. They cover what this example alone does not: which
-  `--cap-height` to pick, that GraphQL must still serve every change since
-  rotations began, and the startup check of the set's commitment against the
-  chain.
-- Adding / refreshing a real-chain regression test for rotation transitions
-  (e.g. after touching `parse_bk_set_changes_pub`, `normalize_bk_set_pubkeys`,
-  or the 16-leaf handling) → `capture_bk_update_fixture`.
+The endpoint must serve `blockchain.latestBkSet` (gql-server >= 1.5.0) and
+still hold the `bkSetUpdates` rows between its snapshot and `--height`.
 
 ## Usage
 
 ```sh
-# Seed daemon state at height N
-BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql \
-BRIDGE_BK_SET_CONFIG=state/genesis_bk_set.json \
-    cargo run --release --example seed_prover_bk_set -- \
-    --cap-height 2608018 --out state/prover_bk_set.json
-
-# Capture a rotation fixture at height N
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql \
     cargo run --release --example capture_bk_update_fixture -- \
     --height 2584711 \
-    --genesis-bk-set path/to/bk_set.shellnet.json \
     --out crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json
 ```
 
-## Gotcha
-
-`capture_bk_update_fixture` calls `query_bk_set_updates_paged(N, 500, None)`
-and reads only page 1. If the target rotation isn't in the first 500 events
-returned, it silently bails with "no bkSetUpdates event at height N" —
-switch to full pagination if you hit this on a rotation-heavy chain.
+`--height` is the seq_no of the block that emits the rotation, not the block
+before it.

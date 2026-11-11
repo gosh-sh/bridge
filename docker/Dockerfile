@@ -49,7 +49,7 @@ RUN channel() { sed -n 's/^channel = "\(.*\)"/\1/p' "$1"; } \
          "$(channel deposit-prover/rust-toolchain.toml)" --profile minimal
 COPY . .
 
-# relayer daemon-live, compute_bridge_anchors, the CLI and the BK-set seeder:
+# relayer daemon-live, compute_bridge_anchors and the CLI:
 # the bridge-prover-libraries workspace, root rust-toolchain.toml.
 # CLI_FEATURES: cargo features for ackinacki-bridge; the local-network e2e
 # passes `ackinacki-bridge/dev-unfixed-bridge`, a release passes none.
@@ -62,10 +62,9 @@ RUN --mount=type=cache,id=cargo-home,target=/cargo \
          -p bridge-relayer-daemon --bin relayer \
          -p bridge-prover-lib --bin compute_bridge_anchors \
          -p ackinacki-bridge --bin ackinacki-bridge ${CLI_FEATURES:+--features "$CLI_FEATURES"} \
-    && cargo build --release --locked -p bridge-prover-daemon --example seed_prover_bk_set \
     && install -D -m 0755 -t /out \
          target/release/relayer target/release/compute_bridge_anchors \
-         target/release/ackinacki-bridge target/release/examples/seed_prover_bk_set
+         target/release/ackinacki-bridge
 
 # aggregate-proof: the SHPLONK aggregator the withdraw relayer and the CLI run.
 FROM source AS build-aggregator
@@ -165,11 +164,10 @@ LABEL org.opencontainers.image.source="https://github.com/gosh-sh/bridge" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}"
 RUN printf '%s\n' "${SOURCE_COMMIT}" >/opt/bridge/SOURCE_COMMIT && chmod 0444 /opt/bridge/SOURCE_COMMIT
 
-# relayer daemon-live: the withdraw relayer, with its preflight. The BK set
-# file is a mounted input (/run/config/bk_set.json), not part of the image.
+# relayer daemon-live: the withdraw relayer, with its preflight.
 FROM runtime-base AS bridge-relayer
 LABEL org.opencontainers.image.title="GOSH bridge: Acki Nacki -> EVM relayer (daemon-live)"
-COPY --from=build-prover-libs /out/relayer /out/compute_bridge_anchors /out/seed_prover_bk_set /opt/bridge/bin/
+COPY --from=build-prover-libs /out/relayer /out/compute_bridge_anchors /opt/bridge/bin/
 COPY --from=build-aggregator /out/aggregate-proof /opt/bridge/bin/
 COPY --from=foundry /out/cast /opt/bridge/bin/
 COPY contracts/ethereum/verifiers/PrimaryAggregatorVerifier.bin \

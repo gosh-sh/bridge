@@ -51,6 +51,15 @@ assigns it when the release is tagged.
 - Deployment scripts use `USDC_TOKEN_ID` instead of `WITHDRAW_ALT_TOKEN_ID`; shellnet preflight
   uses `EXPECTED_USDC_TOKEN_ID` and reads `usdcTokenId()`. Use ECC id `3` with the current AN
   bridge. `DeployRealBridge` defaults to `3`.
+- The BK-set file is gone: `--bk-set-config` / `BRIDGE_BK_SET_CONFIG` (`relayer daemon-live`,
+  `compute_bridge_anchors`, `bridge-prover-daemon`, `bridge-verifier-daemon`),
+  `BRIDGE_BK_SET_BOOTSTRAP`, `BRIDGE_BK_SET_TARGET_SEQNO`, the `seed_prover_bk_set` example, the
+  Compose service `fold-bk-set`, the `keys/bk_set.json` mount, `BRIDGE_BK_SET_EXPECTED_SHA256`
+  and `bk_set.shellnet.json` / `bk_set.local.json` are removed. Drop them from env files and
+  scripts (`--bk-set-config` is refused now); keep `state/`.
+- A cold start of `daemon-live` or `bridge-prover-daemon` without `state/prover_bk_set.json`, and
+  every `compute_bridge_anchors` run, need gql-server >= 1.5.0 serving `blockchain.latestBkSet`;
+  against an older server they exit 1 at once. A restart with an intact `state/` does not.
 
 ### New / Improvements
 
@@ -98,6 +107,13 @@ assigns it when the release is tagged.
   deposits finalized against the same headroom can still leave the later confirmation refused with
   `ERR_TVL_CAP`. Close deposits on EVM or lower the EVM TVL cap to throttle intake. Closing the AN
   switch or lowering AN `maxTransfer` also holds back deposits already locked on EVM.
+- `relayer daemon-live` starts under a running bridge with no local state, in the rotation hold
+  window too: it builds the BK set from GraphQL and checks it against the contract.
+- `bkSetUpdates` queries filter by `thread_id` and height instead of paging through the whole
+  rotation history.
+- `daemon-live` and `bridge-prover-daemon` rename a `prover_bk_set.json` that does not fit to
+  `prover_bk_set.json.mismatch-<unix time>` in the state directory and rebuild it; delete such
+  files once inspected.
 
 ### Fixes
 
@@ -112,6 +128,17 @@ assigns it when the release is tagged.
 - The web UI checks USDC's current `tokenInfo` transfer limit, TVL capacity and deposit switch
   before approval and again before deposit. A closed, absent or unreadable listing refuses the request.
 - `eth-lc-relayer arbitrum-anchors` discovers the new token-bearing `Deposit` event.
+- `daemon-live` catches up rotations another relayer applied to the bridge, at startup and while
+  running, instead of stalling.
+- `daemon-live` no longer gets stuck after a stop between a bundle and a rotation at the same height.
+- `daemon-live` no longer proves again a rotation the contract already holds.
+- `daemon-live` on a bridge seeded at 0 (`BRIDGE_BOOTSTRAP_SEQNO=0`) no longer stops when restarted
+  in the rotation hold window before its first `verifyBlock`.
+- `daemon-live` and `bridge-prover-daemon` can prove a rotation when the bundle at its height was
+  verified first.
+- `daemon-live` exits with code 1 (`BK set diverged from the bridge at rotation …`), naming both
+  sides, when a rotation it catches up does not match the contract's BK set; a supervisor
+  restarts it.
 
 ## [0.8.0] – 2026-11-06
 

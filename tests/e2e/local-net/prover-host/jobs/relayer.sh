@@ -7,7 +7,7 @@
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 load genesis.env; load evm.env
 export RELAYER_PRIVATE_KEY; RELAYER_PRIVATE_KEY=$(derive_key "$(tr -d '[:space:]' </run/input)" relayer)
-export RPC_URL=$ARB_RPC RPC_FAILOVER_URLS= BRIDGE_GQL_ENDPOINT=$GQL BRIDGE_BK_SET_CONFIG=$OUT/bk_set.json
+export RPC_URL=$ARB_RPC RPC_FAILOVER_URLS= BRIDGE_GQL_ENDPOINT=$GQL
 export BRIDGE_BOOTSTRAP_SEQNO=$GENESIS_SEED_SEQNO BRIDGE_ANCHOR_LEVEL=2
 export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache
 # The three directories (bridge-audit#132): relayer-state.json sits in the state directory

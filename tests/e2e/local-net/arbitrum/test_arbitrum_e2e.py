@@ -26,17 +26,21 @@ import json
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO, SEPOLIA_BEACON_GENESIS,
                       SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
-GENESIS_SECS = 600          # the genesis at seq_no 0 reads nothing from the chain
+GENESIS_SECS = 600          # the genesis at seq_no 0 reads only the BK set from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
 RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: 103 min)
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
+# The local network's GraphQL behind nginx0, on this runner's end of the tunnels fixture.
+GRAPHQL = "http://127.0.0.1:18080/graphql"
 
 
 # ── 0 · the run ─────────────────────────────────────────────────────────────
@@ -105,24 +109,39 @@ def test_12_prover_host_reaches_the_network(ph, run, tunnels):
 # ── 2 · contracts ───────────────────────────────────────────────────────────
 
 
-def test_20_genesis_from_the_network(run, ctx):
+def graphql(query):
+    """The local network's GraphQL answer to `query`, errors included."""
+    req = urllib.request.Request(GRAPHQL, json.dumps({"query": query}).encode(),
+                                 {"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as answer:
+            return json.load(answer)
+    except urllib.error.HTTPError as e:  # a query the schema refuses can come back as HTTP 400
+        body = e.read()
+        try:
+            return json.loads(body)
+        except ValueError:
+            raise AssertionError(f"GraphQL answered HTTP {e.code}: {body[:500]!r}") from e
+
+
+def test_20_genesis_from_the_network(run, ctx, tunnels):
     """The bridge's genesis is the network's own start, seq_no 0, at L2 anchoring as the live
-    relayer runs: zero anchor, and the zerostate's keepers as the BK set (genesis.sh). Nothing
-    waits for a key block, so the bridge is deployed and the deposit sent right away."""
-    # The keepers the zerostate generator put in the zerostate. Not config/block_keeper*_bls
-    # files: acki-nacki ships nine of them, and a five-keeper network regenerates only 0..4.
-    with open(os.path.join(env("ACKI_CONFIG"), "keys_config.json")) as f:
-        nodes = json.load(f)["bk_nodes"]
-    bk_set = {i: nodes[i]["bls_pubkey"] for i in sorted(nodes, key=int)}
-    assert bk_set, "keys_config.json in ACKI_CONFIG records no bk_nodes"
-    print(f"  {len(bk_set)} block keepers in the zerostate")
-    run.job("genesis", stdin=json.dumps(bk_set))
+    relayer runs: zero anchor, and the BK set at 0 read from the network's GraphQL (genesis.sh).
+    Nothing waits for a key block, so the bridge is deployed and the deposit sent right away."""
+    # compute_bridge_anchors and daemon-live take the BK set from blockchain.latestBkSet: a
+    # gql-server without it fails them both, so say that here instead of in a job log.
+    got = graphql("{ blockchain { latestBkSet { height } } }")
+    errors = [e.get("message", "") for e in got.get("errors") or []]
+    assert not errors, ("the local network's GraphQL refuses blockchain.latestBkSet, which "
+                        f"compute_bridge_anchors and daemon-live need (gql-server >= 1.5.0): {errors}")
+    print(f"  blockchain.latestBkSet: {((got.get('data') or {}).get('blockchain') or {}).get('latestBkSet')}")
+    run.job("genesis")
     run.finish("genesis", GENESIS_SECS)
     g = kv(run.get("genesis.env"))
     assert int(g["GENESIS_SEED_SEQNO"]) == 0 and int(g["BUNDLE_STRIDE"]) == 16384, g
     assert int(g["GENESIS_PREV_MAX_LEVEL_LAYER_HASH"], 16) == 0 and int(g["GENESIS_LAST_BK_SET_UPDATE_SEQNO"]) == 0, g
     assert int(g["GENESIS_BK_SET_COMMITMENT"], 16) != 0, g
-    ctx.update(genesis=g, bk_signers=len(bk_set))
+    ctx.update(genesis=g)
 
 
 def test_21_evm_contracts_deployed(run, arb, ctx):

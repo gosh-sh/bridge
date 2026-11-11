@@ -58,11 +58,6 @@ services:
         read_only: true
         bind: { create_host_path: false }
       - type: bind
-        source: ${BRIDGE_OPT}/keys/bk_set.json
-        target: /run/config/bk_set.json
-        read_only: true
-        bind: { create_host_path: false }
-      - type: bind
         source: ${BRIDGE_OPT}/daemon-live/state
         target: /data/state
         bind: { create_host_path: false }
@@ -246,11 +241,6 @@ services:
         read_only: true
         bind: { create_host_path: false }
       - type: bind
-        source: ${BRIDGE_OPT}/keys/bk_set.json
-        target: /run/config/bk_set.json
-        read_only: true
-        bind: { create_host_path: false }
-      - type: bind
         source: ${BRIDGE_OPT}/daemon-live/state
         target: /data/state
         bind: { create_host_path: false }
@@ -296,42 +286,6 @@ services:
       - type: bind
         source: ${BRIDGE_DATA}/params/lc-prover
         target: /data/params
-        bind: { create_host_path: false }
-
-  # The BK set file for a (re)deploy: the genesis set (keys/bk_set.json,
-  # BRIDGE_BK_SET_CONFIG) folded forward to the seed height.
-  # `docker compose run --rm fold-bk-set --cap-height <seed> --out /data/work/bk_set.json`
-  fold-bk-set:
-    <<: *service
-    profiles: [ops]
-    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-relayer:${BRIDGE_IMAGE_TAG:?}
-    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
-    restart: "no"
-    # Reads one value, BRIDGE_GQL_ENDPOINT, out of the withdraw relayer's env
-    # file: the file is mounted like a secret, not loaded as the container's
-    # environment, so the EOA key stays out of `docker inspect`.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - 'export BRIDGE_GQL_ENDPOINT="$(sed -n -E "s/^(export )?BRIDGE_GQL_ENDPOINT=[\"'']?([^\"'']*).*/\2/p" /run/secrets/runtime-env)"; exec /opt/bridge/bin/seed_prover_bk_set "$@"'
-      - fold-bk-set
-    command: ["--help"]
-    environment:
-      BRIDGE_BK_SET_CONFIG: /run/config/bk_set.json
-    volumes:
-      - type: bind
-        source: ${BRIDGE_OPT}/env/daemon-live.env
-        target: /run/secrets/runtime-env
-        read_only: true
-        bind: { create_host_path: false }
-      - type: bind
-        source: ${BRIDGE_OPT}/keys/bk_set.json
-        target: /run/config/bk_set.json
-        read_only: true
-        bind: { create_host_path: false }
-      - type: bind
-        source: ${BRIDGE_DATA}/daemon-live/work
-        target: /data/work
         bind: { create_host_path: false }
 
   # The operator's CLI with the provers and the aggregator it starts.

@@ -13,7 +13,7 @@ knows a host path, an address or a key.
 
 | Image | Target | Holds | Runs |
 |---|---|---|---|
-| `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `seed_prover_bk_set`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight`, `fold-bk-set` |
+| `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight` |
 | `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer`, `fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`, `downsize_srs`, `circuit_params.json` | `deposit-relayer daemon` |
 | `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
 | `bridge-cli` | `bridge-cli` | `ackinacki-bridge` with the deposit tools, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
@@ -57,7 +57,6 @@ $BRIDGE_OPT/                         # e.g. /opt/bridge-shellnet, root:bridge
   env/cli.env                        # optional, for `compose run cli`
   keys/an-owner.keys.json            # bridge:bridge 0600: the light client's owner (eth-lc-relayer)
   keys/deposit-sender.keys.json      # bridge:bridge 0600: finalizeDeposit and proveBlock signer
-  keys/bk_set.json                   # the BK set the bridge was deployed with
   daemon-live/state/                 # relayer-state.json, prover_state.json, prover_bk_set.json
   deposit-relayer/state/             # deposit-relayer-state.json, .lock
   eth-lc-relayer/state/              # eth-lc-relayer-state.json, .lock
@@ -76,6 +75,17 @@ $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:br
                                      #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
 ```
 
+`daemon-live` has no BK-set input. It resumes from `prover_bk_set.json` in its `state/`;
+without that file (the first start, or once it is lost) it builds the set from GraphQL
+(`blockchain.latestBkSet`, then `bkSetUpdates`) and checks it against the contract, which
+needs gql-server 1.5.0 or later at `BRIDGE_GQL_ENDPOINT`. A `prover_bk_set.json` that does
+not fit the prover state is renamed `prover_bk_set.json.mismatch-<unix time>` and rebuilt; such
+a file can be deleted. When a rotation the daemon catches up does not match the contract's BK
+set, it exits with code 1, naming both, and `restart: unless-stopped` starts it again. The
+bridge's seed, `BRIDGE_BOOTSTRAP_SEQNO`, must be at or above L3\*, the first L3 boundary the
+block managers' history covers
+([relayer runbook §3.1](../crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#31-pick-the-seed)).
+
 Each daemon logs to stdout and to one file per day in its `logs/` directory, keeping the newest
 14; the prover transcripts it writes beside them are not pruned, so that directory needs a
 retention rule of its own (logrotate, a cron `find -mtime`).
@@ -84,15 +94,14 @@ Inside every container the same four paths: `/data/state`, `/data/work`, `/data/
 `/data/params` (read-only for the relayer except `pk_cache`, writable for the two provers that
 generate keys). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and
 sourced by its entrypoint; the other services get theirs as container environment
-(`env_file`). Keys are mounted read-only at `/run/keys`, the BK set at
-`/run/config/bk_set.json`.
+(`env_file`). Keys are mounted read-only at `/run/keys`.
 
 ## Settings
 
 | File | Template | Holds |
 |---|---|---|
 | `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the two metrics ports |
-| `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, BK set sha256 and commitment |
+| `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, the deployed BK-set commitment |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
 | `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `SUBMIT_ANCESTRY`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
 | `$BRIDGE_OPT/env/arbitrum-anchors.env` | `env/arbitrum-anchors.env.example` | `PARENT_RPC_URL`, `ARBITRUM_RPC_URL`, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE` |
@@ -130,8 +139,7 @@ next to it.
 
    The rotate keys are not an install step: the daemon writes them to `rotate-keys/` during
    its first rotate after an image upgrade, and writes them again when the image changes.
-3. Fill `.env` and the four env files from the templates; the keys and `bk_set.json` into
-   `keys/`.
+3. Fill `.env` and the four env files from the templates; the keys into `keys/`.
 4. `docker compose --profile ops run --rm preflight`: the withdraw relayer's checks, no
    transaction, no daemon.
 5. `docker compose up -d`.
@@ -140,16 +148,15 @@ The old Docker Compose kit under `crates/bridge-relayer-daemon/deploy/shellnet-l
 directory now: its scripts are `docker/relayer/`, its runtime env template is
 `env/daemon-live.env.example`, its compose service `relayer` is `daemon-live`. A host that
 ran the kit moves `L2_config/relayer-state.json` and `L2_config/state/*` into
-`$BRIDGE_OPT/daemon-live/state/`, `params/` into `$BRIDGE_DATA/params/relayer/` and the BK
-set file into `keys/bk_set.json`; `EXPECTED_BRIDGE_COMMIT` becomes the commit of the image,
-since the BK set is no longer baked into it; `RELAYER_STATE_PATH` and `BRIDGE_CONFIG_DIR` in a
-reused env file are ignored. A host that ran the systemd units moves each state file into its
-service's `state/` directory **under the name the daemon expects** (`deposit-relayer-state.json`,
-`eth-lc-relayer-state.json`, `arbitrum-anchors-state.json`): a daemon that finds other JSON files
-there but not its own refuses to start rather than begin from an empty state, and an old
-`--state` flag or `*_STATE` variable fails with the hint. `eth-lc-relayer set-committee` and
-`submit-rotate` write the daemon's state file and take its lock: stop `eth-lc-relayer` first,
-start it again after.
+`$BRIDGE_OPT/daemon-live/state/` and `params/` into `$BRIDGE_DATA/params/relayer/`; the BK
+set file is not carried over. `EXPECTED_BRIDGE_COMMIT` becomes the commit of the image;
+`RELAYER_STATE_PATH` and `BRIDGE_CONFIG_DIR` in a reused env file are ignored. A host that
+ran the systemd units moves each state file into its service's `state/` directory **under the
+name the daemon expects** (`deposit-relayer-state.json`, `eth-lc-relayer-state.json`,
+`arbitrum-anchors-state.json`): a daemon that finds other JSON files there but not its own
+refuses to start rather than begin from an empty state, and an old `--state` flag or `*_STATE`
+variable fails with the hint. `eth-lc-relayer set-committee` and `submit-rotate` write the
+daemon's state file and take its lock: stop `eth-lc-relayer` first, start it again after.
 
 ## Upgrade
 

@@ -63,7 +63,6 @@ BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql
 # Optional for `relayer daemon-live`: comma-separated failover GraphQL URLs
 # tried after BRIDGE_GQL_ENDPOINT exhausts its retries (see TECHNICAL_README).
 # BRIDGE_GQL_FAILOVER_ENDPOINTS=
-BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.json
 
 # --- local dirs ---------------------------------------------------------------
 # `params/` holds ~17 GB of pre-built SRS + per-circuit vk/pk files.

@@ -117,7 +117,7 @@ pub async fn build_bk_set_at<H: BkSetHistory>(
 /// [`build_bk_set_at`] that refuses a snapshot whose anchor is not above
 /// `min_anchor` (reported as a transient failure) and records the anchor of
 /// the snapshot it used in `used_anchor`. A snapshot that cannot be read is a
-/// [`ReplayError::BadRow`] and records no anchor.
+/// [`ReplayError::BadSnapshot`] and records no anchor.
 async fn attempt<H: BkSetHistory>(
     h: &H,
     target: &BkTarget,
@@ -136,8 +136,8 @@ async fn attempt<H: BkSetHistory>(
             }
             // Asking again gets the same answer: a data failure.
             if let Some(m) = e.downcast_ref::<MalformedResponseError>() {
-                return Err(ReplayError::BadRow {
-                    reason: m.to_string(),
+                return Err(ReplayError::BadSnapshot {
+                    reason: m.what.clone(),
                 });
             }
             return Err(ReplayError::Query(e));
@@ -227,12 +227,8 @@ impl BuildPolicy {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
-    #[error(
-        "the block-keeper set failed its checks on {attempts} snapshots with a newer anchor each: \
-         {last}. Either `bkSetUpdates` returned an incomplete range, or a change the node applies \
-         implicitly (owner re-added under another index, overwrite, removal of an absent index) \
-         is not in the rows"
-    )]
+    /// `data_attempts` data failures; the message explains the last one.
+    #[error("{}", data_failure(*attempts, last))]
     Data { attempts: u32, last: ReplayError },
     #[error("the block-keeper set queries kept failing for {waited:?}: {last}")]
     Transient { waited: Duration, last: ReplayError },
@@ -241,6 +237,32 @@ pub enum BuildError {
          blockchain.latestBkSet"
     )]
     NoLatestBkSetField,
+}
+
+/// What [`BuildError::Data`] tells the operator, by the kind of its last
+/// failure.
+fn data_failure(attempts: u32, last: &ReplayError) -> String {
+    match last {
+        ReplayError::BadSnapshot {
+            ..
+        } => format!(
+            "the GraphQL server's `latestBkSet` answer could not be used on {attempts} attempts: \
+             {last}. Check that the GraphQL endpoint serves the network the bridge follows and \
+             that its gql-server version is one this release supports"
+        ),
+        ReplayError::BadRow {
+            ..
+        } => format!(
+            "`bkSetUpdates` returned a row that cannot be replayed, on {attempts} snapshots: \
+             {last}"
+        ),
+        _ => format!(
+            "the block-keeper set failed its checks on {attempts} snapshots with a newer anchor \
+             each: {last}. Either `bkSetUpdates` returned an incomplete range, or a change the \
+             node applies implicitly (owner re-added under another index, overwrite, removal of \
+             an absent index) is not in the rows"
+        ),
+    }
 }
 
 /// [`build_bk_set_at`] with retries: transient failures back off and repeat,
@@ -980,11 +1002,68 @@ mod tests {
             }),
             "{e}"
         );
+        let msg = e.to_string();
         assert!(
-            e.to_string()
-                .contains("latestBkSet.signers[0].pubkey has 98 hex chars"),
-            "{e}"
+            msg.contains("`latestBkSet` answer could not be used")
+                && msg.contains("latestBkSet.signers[0].pubkey has 98 hex chars"),
+            "{msg}"
         );
+        assert!(!msg.contains("incomplete range"), "{msg}");
         assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    /// The explanation follows the last failure: only a set that fails its
+    /// checks against the leaves points at the rows.
+    #[test]
+    fn data_error_text_follows_the_last_failure() {
+        let data = |last| {
+            BuildError::Data {
+                attempts: 3,
+                last,
+            }
+            .to_string()
+        };
+        let snapshot = data(ReplayError::BadSnapshot {
+            reason: "latestBkSet.signers[0].pubkey has 98 hex chars, expected 96".into(),
+        });
+        assert!(
+            snapshot.contains("`latestBkSet` answer could not be used on 3 attempts")
+                && snapshot.contains("has 98 hex chars")
+                && snapshot.contains("gql-server version"),
+            "{snapshot}"
+        );
+        assert!(
+            !snapshot.contains("incomplete range")
+                && !snapshot.contains("failed its checks")
+                && !snapshot.contains("update row"),
+            "{snapshot}"
+        );
+
+        let row = data(ReplayError::BadRow {
+            reason: "row has no height".into(),
+        });
+        assert!(
+            row.contains("`bkSetUpdates` returned a row") && !row.contains("incomplete range"),
+            "{row}"
+        );
+
+        let mismatch = data(ReplayError::Mismatch {
+            height: 18_000,
+            step: "final",
+            expected: [0; 32],
+            actual: [1; 32],
+        });
+        assert!(
+            mismatch.contains("failed its checks on 3 snapshots")
+                && mismatch.contains("incomplete range")
+                && mismatch.contains("implicitly"),
+            "{mismatch}"
+        );
+        let undo = data(ReplayError::Undo {
+            height: 18_000,
+            signer_index: 1,
+            reason: "absent",
+        });
+        assert!(undo.contains("incomplete range"), "{undo}");
     }
 }

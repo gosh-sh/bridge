@@ -111,6 +111,10 @@ pub enum ReplayError {
     },
     #[error("bad bk set update row: {reason}")]
     BadRow { reason: String },
+    /// The `latestBkSet` answer could not be read, or holds a key that is not
+    /// a BLS public key. Not transient: asking again gets the same answer.
+    #[error("unusable latestBkSet snapshot: {reason}")]
+    BadSnapshot { reason: String },
     #[error("block-id-tree leaves of height {height} are not available")]
     MissingLeaves { height: u64 },
     #[error("the server returned no latestBkSet snapshot")]
@@ -195,7 +199,9 @@ fn canonical_snapshot(
         .map(|(index, key)| {
             canonical_key(*index, key)
                 .map(|k| (*index, k))
-                .ok_or_else(|| bad_row(format!("snapshot signer {index} has an invalid key")))
+                .ok_or_else(|| ReplayError::BadSnapshot {
+                    reason: format!("signer {index} has an invalid key"),
+                })
         })
         .collect()
 }
@@ -859,25 +865,26 @@ mod tests {
     }
 
     #[test]
-    fn off_curve_snapshot_key_is_bad_row_not_a_panic() {
+    fn off_curve_snapshot_key_is_a_bad_snapshot_not_a_panic() {
         let mut s = snap(100, S0);
         s.signers.insert(1, vec![0xff; 48]);
         let mut lv = BTreeMap::new();
         lv.insert(100, leaves(c(S0), c(S0)));
         let err = replay_to(&s, &[], &lv, &target(100, FinalCheck::L3Of(100))).unwrap_err();
         assert!(
-            matches!(&err, ReplayError::BadRow { reason } if reason.contains("snapshot signer 1"))
+            matches!(&err, ReplayError::BadSnapshot { reason } if reason.contains("signer 1")),
+            "{err}"
         );
     }
 
     #[test]
-    fn wrong_length_snapshot_key_is_bad_row() {
+    fn wrong_length_snapshot_key_is_a_bad_snapshot() {
         let mut s = snap(100, S0);
         s.signers.insert(1, vec![1; 47]);
         let mut lv = BTreeMap::new();
         lv.insert(100, leaves(c(S0), c(S0)));
         let err = replay_to(&s, &[], &lv, &target(100, FinalCheck::L3Of(100))).unwrap_err();
-        assert!(matches!(err, ReplayError::BadRow { .. }));
+        assert!(matches!(err, ReplayError::BadSnapshot { .. }), "{err}");
     }
 
     #[test]
@@ -914,6 +921,10 @@ mod tests {
         .is_transient());
         assert!(ReplayError::Query(anyhow::anyhow!("x")).is_transient());
         assert!(!ReplayError::BadRow {
+            reason: String::new()
+        }
+        .is_transient());
+        assert!(!ReplayError::BadSnapshot {
             reason: String::new()
         }
         .is_transient());

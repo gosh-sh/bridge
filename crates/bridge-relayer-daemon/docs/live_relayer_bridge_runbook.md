@@ -362,6 +362,10 @@ INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq
   GraphQL did not return every rotation between its snapshot and the
   target height — below F ([§3.1](#31-pick-the-seed)) it no longer has
   them.
+- `the GraphQL server's latestBkSet answer could not be used on 3 attempts …`,
+  exit status 1: the snapshot has a field or a key this release cannot read;
+  check that `BRIDGE_GQL_ENDPOINT` serves the bridge's network and runs a
+  supported gql-server version.
 - `Resurrect` or `WarmResume` instead of `Cold` means old local state was
   not archived.
 - A daemon at another anchor level than the bridge's stops with

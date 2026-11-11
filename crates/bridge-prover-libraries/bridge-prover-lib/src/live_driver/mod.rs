@@ -863,10 +863,24 @@ impl LiveProverDriver {
     }
 
     /// The next rotation past the driver's cursor, if it is at or below
-    /// `applied_on_chain_up_to`, checked against its block. Never proves:
-    /// `None` when the driver is caught up, while it waits for the seed
-    /// height, or when the next rotation is above `applied_on_chain_up_to`
-    /// (its block is not read then).
+    /// `applied_on_chain_up_to`, checked against its block. Never proves.
+    ///
+    /// `None` only when there is nothing to take:
+    ///
+    /// * the driver is caught up on rotations;
+    /// * the next row has no height, or one not past the cursor;
+    /// * the next rotation is above `applied_on_chain_up_to` (its block is not
+    ///   read then);
+    /// * the driver still waits for the seed height.
+    ///
+    /// A failed lookup of the next row or of its block is
+    /// [`DriverError::GqlTransient`]: retry, it does not mean "nothing
+    /// applied". Other errors are classified as in
+    /// [`Self::poll_next_bk_update`]: a block without leaves, or whose tree
+    /// does not match its id, is [`DriverError::GqlSchema`]; a block that does
+    /// not lead from the driver's set to its leaf `[3]` is
+    /// [`DriverError::StateInconsistent`] (wrong leaf `[2]`) or
+    /// [`DriverError::GqlSchema`].
     pub async fn poll_next_applied_bk_update(
         &mut self,
         applied_on_chain_up_to: u64,

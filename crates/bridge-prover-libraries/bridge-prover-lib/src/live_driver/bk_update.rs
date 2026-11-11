@@ -29,6 +29,7 @@ use anyhow::Context;
 use bridge_gql_fetcher::{
     attestation_fetcher::{self, AttestationEvidence},
     bk_set_fetcher,
+    gql_client::BkSetUpdateWithAttestations,
 };
 use tracing::{error, info, warn};
 
@@ -108,8 +109,7 @@ fn row_error(seq_no: u64, e: ReplayError) -> DriverError {
 async fn next_row(driver: &LiveProverDriver) -> Option<(u64, String)> {
     let cursor = driver.state().stored_last_bk_set_update_seq_no;
     let upd = match bk_set_fetcher::next_update_after(driver.gql(), cursor).await {
-        Ok(Some(u)) => u,
-        Ok(None) => return None, // caught up on rotations
+        Ok(u) => u,
         Err(e) => {
             warn!(
                 "bk-update drain: next_update_after failed ({}); returning None so caller retries",
@@ -118,6 +118,33 @@ async fn next_row(driver: &LiveProverDriver) -> Option<(u64, String)> {
             return None;
         }
     };
+    row_past(cursor, upd)
+}
+
+/// [`next_row`] for the applied poll: a failed lookup is a
+/// [`DriverError::GqlTransient`], so it cannot pass for "nothing to take".
+async fn next_applied_row(driver: &LiveProverDriver) -> DriverResult<Option<(u64, String)>> {
+    let cursor = driver.state().stored_last_bk_set_update_seq_no;
+    applied_row(
+        cursor,
+        bk_set_fetcher::next_update_after(driver.gql(), cursor).await,
+    )
+}
+
+fn applied_row(
+    cursor: u64,
+    lookup: anyhow::Result<Option<BkSetUpdateWithAttestations>>,
+) -> DriverResult<Option<(u64, String)>> {
+    Ok(row_past(
+        cursor,
+        lookup.map_err(DriverError::gql_transient)?,
+    ))
+}
+
+/// The height and change blob of `upd`, or `None` when there is no row
+/// (caught up on rotations) or its height is missing or not past `cursor`.
+fn row_past(cursor: u64, upd: Option<BkSetUpdateWithAttestations>) -> Option<(u64, String)> {
+    let upd = upd?;
     match upd.height {
         Some(h) if h > cursor => Some((h, upd.bk_set_update_hex)),
         _ => {
@@ -194,12 +221,13 @@ pub(super) async fn drive_next_bk_update(
 
 /// The next rotation past the driver's cursor, prepared, if it is at or
 /// below `applied_on_chain_up_to`. Never proves; a rotation above that
-/// height is not prepared either.
+/// height is not prepared either. A failed row lookup is an error, not
+/// `None`.
 pub(super) async fn drive_next_applied_bk_update(
     driver: &LiveProverDriver,
     applied_on_chain_up_to: u64,
 ) -> DriverResult<Option<BkUpdateDelta>> {
-    let Some((upd_seqno, blob_hex)) = next_row(driver).await else {
+    let Some((upd_seqno, blob_hex)) = next_applied_row(driver).await? else {
         return Ok(None);
     };
     if upd_seqno > applied_on_chain_up_to {
@@ -555,5 +583,35 @@ mod tests {
         let err = row_error(100, bad);
         assert!(matches!(err, DriverError::GqlSchema(_)));
         assert!(err.to_string().contains("bk-update 100"), "{err}");
+    }
+
+    fn row_at(height: Option<u64>) -> BkSetUpdateWithAttestations {
+        BkSetUpdateWithAttestations {
+            block_id: String::new(),
+            bk_set_update_hex: "ab".into(),
+            height,
+            attestations: Vec::new(),
+            chain_order: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_row_lookup_is_a_transient_error_for_the_applied_poll() {
+        let err = applied_row(15_000, Err(anyhow::anyhow!("connection refused"))).unwrap_err();
+        assert!(matches!(err, DriverError::GqlTransient(_)), "{err:?}");
+    }
+
+    #[test]
+    fn applied_row_is_none_only_when_there_is_no_row_past_the_cursor() {
+        assert_eq!(applied_row(15_000, Ok(None)).unwrap(), None);
+        assert_eq!(applied_row(15_000, Ok(Some(row_at(None)))).unwrap(), None);
+        assert_eq!(
+            applied_row(15_000, Ok(Some(row_at(Some(15_000))))).unwrap(),
+            None
+        );
+        assert_eq!(
+            applied_row(15_000, Ok(Some(row_at(Some(18_000))))).unwrap(),
+            Some((18_000, "ab".to_string()))
+        );
     }
 }

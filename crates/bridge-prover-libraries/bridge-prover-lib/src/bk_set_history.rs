@@ -10,7 +10,9 @@ use std::{
     time::Duration,
 };
 
-use bridge_gql_fetcher::gql_client::{GqlClient, UnknownFieldError, DEFAULT_THREAD_ID_HEX};
+use bridge_gql_fetcher::gql_client::{
+    GqlClient, MalformedResponseError, UnknownFieldError, DEFAULT_THREAD_ID_HEX,
+};
 use tracing::warn;
 
 use crate::bk_set_replay::{
@@ -28,7 +30,8 @@ const LATEST_BK_SET_FIELD: &str = "latestBkSet";
 #[allow(async_fn_in_trait)]
 pub trait BkSetHistory {
     /// The set that signs the newest snapshot block; `None` while the server
-    /// has no snapshot yet.
+    /// has no snapshot yet. An answer that cannot be read fails with a
+    /// [`MalformedResponseError`].
     async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>>;
     /// Every `bkSetUpdates` row with a height in `[height_start, height_end]`,
     /// all pages.
@@ -113,7 +116,8 @@ pub async fn build_bk_set_at<H: BkSetHistory>(
 
 /// [`build_bk_set_at`] that refuses a snapshot whose anchor is not above
 /// `min_anchor` (reported as a transient failure) and records the anchor of
-/// the snapshot it used in `used_anchor`.
+/// the snapshot it used in `used_anchor`. A snapshot that cannot be read is a
+/// [`ReplayError::BadRow`] and records no anchor.
 async fn attempt<H: BkSetHistory>(
     h: &H,
     target: &BkTarget,
@@ -127,11 +131,16 @@ async fn attempt<H: BkSetHistory>(
             let too_old = e
                 .downcast_ref::<UnknownFieldError>()
                 .is_some_and(|u| u.field == LATEST_BK_SET_FIELD);
-            return Err(if too_old {
-                ReplayError::ServerTooOld
-            } else {
-                ReplayError::Query(e)
-            });
+            if too_old {
+                return Err(ReplayError::ServerTooOld);
+            }
+            // Asking again gets the same answer: a data failure.
+            if let Some(m) = e.downcast_ref::<MalformedResponseError>() {
+                return Err(ReplayError::BadRow {
+                    reason: m.to_string(),
+                });
+            }
+            return Err(ReplayError::Query(e));
         },
     };
 
@@ -174,8 +183,8 @@ async fn attempt<H: BkSetHistory>(
 /// How hard [`build_bk_set_with_retry`] tries.
 #[derive(Clone, Copy, Debug)]
 pub struct BuildPolicy {
-    /// Data failures (a check against the leaves failed) before giving up,
-    /// counted over the whole call.
+    /// Data failures (a check against the leaves failed, or the snapshot
+    /// could not be read) before giving up, counted over the whole call.
     pub data_attempts: u32,
     /// Bound on the total time slept on transient failures (the last sleep is
     /// cut short to fit), counted from the start or the last data failure;
@@ -235,8 +244,9 @@ pub enum BuildError {
 }
 
 /// [`build_bk_set_at`] with retries: transient failures back off and repeat,
-/// data failures repeat on a fresh snapshot up to `policy.data_attempts`,
-/// a server without `latestBkSet` fails at once.
+/// data failures repeat up to `policy.data_attempts`, each on a snapshot
+/// anchored above the last one that was read and failed its checks, a server
+/// without `latestBkSet` fails at once.
 pub async fn build_bk_set_with_retry<H: BkSetHistory>(
     h: &H,
     target: &BkTarget,
@@ -266,7 +276,10 @@ pub async fn build_bk_set_with_retry<H: BkSetHistory>(
             waited = waited.saturating_add(sleep);
             backoff = policy.next_backoff(backoff);
         } else {
-            min_anchor = used_anchor;
+            // A snapshot that could not be read has no anchor to compare: the
+            // bound of an earlier failure stays, and with none the next
+            // attempt may take the same snapshot again.
+            min_anchor = used_anchor.or(min_anchor);
             data_failures += 1;
             if data_failures >= policy.data_attempts {
                 return Err(BuildError::Data {
@@ -391,7 +404,7 @@ mod tests {
     };
 
     use bridge_gql_fetcher::gql_client::{
-        create_client, UnknownFieldError, BLOCK_ID_TREE_LEAF_COUNT,
+        create_client, MalformedResponseError, UnknownFieldError, BLOCK_ID_TREE_LEAF_COUNT,
     };
     use halo2_base::halo2_proofs::halo2curves::{
         bls12_381::{Fr as BlsScalar, G1},
@@ -466,6 +479,9 @@ mod tests {
         late_snapshot: Option<(Duration, BkSetSnapshot)>,
         started: Option<Instant>,
         unknown_field: bool,
+        /// Calls of `latest_bk_set` (counted from 1) answered with an answer
+        /// that cannot be read; the snapshot queue does not move on them.
+        malformed_calls: Vec<usize>,
         rows: Vec<BkSetUpdateRow>,
         leaves: BTreeMap<u64, BlockLeaves>,
         last_le: BTreeMap<u64, u64>,
@@ -502,7 +518,12 @@ mod tests {
 
     impl BkSetHistory for FakeHistory {
         async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>> {
-            self.latest_calls.fetch_add(1, Ordering::SeqCst);
+            let call = self.latest_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.malformed_calls.contains(&call) {
+                return Err(anyhow::Error::new(MalformedResponseError {
+                    what: "latestBkSet.height is missing or not an unsigned integer".into(),
+                }));
+            }
             if self.unknown_field {
                 return Err(anyhow::Error::new(UnknownFieldError {
                     field: "latestBkSet".into(),
@@ -672,6 +693,37 @@ mod tests {
         assert_eq!(h.updates_calls.load(Ordering::SeqCst), 2);
     }
 
+    /// An answer that cannot be read counts as a data failure and has no
+    /// anchor: the bar of the failure before it stays.
+    #[tokio::test(start_paused = true)]
+    async fn unreadable_snapshot_is_a_data_failure_that_keeps_the_bar() {
+        // 19000 fails its checks; call 2 cannot be read; 19000 again is
+        // stale, not replayed; 19001 fails its checks.
+        let mut h = FakeHistory::with_snapshots(vec![
+            Some(snap(19000, S2)),
+            Some(snap(19000, S2)),
+            Some(snap(19001, S2)),
+        ])
+        .chain();
+        h.malformed_calls = vec![2];
+        h.rows.retain(|r| r.height != Some(17000));
+        let (target, policy) = (back_target(), BuildPolicy::default());
+        let run = build_bk_set_with_retry(&h, &target, &policy);
+        let e = tokio::time::timeout(Duration::from_secs(3600), run)
+            .await
+            .expect("an unreadable snapshot must not be retried forever")
+            .unwrap_err();
+        assert!(
+            matches!(e, BuildError::Data {
+                attempts: 3,
+                ..
+            }),
+            "{e}"
+        );
+        assert_eq!(h.latest_calls(), 4);
+        assert_eq!(h.updates_calls.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn bounded_transient_budget_gives_up() {
         let h = FakeHistory::with_snapshots(vec![None]).chain();
@@ -834,11 +886,9 @@ mod tests {
         });
     }
 
-    /// The unknown-field answer of an old gql-server survives the real
-    /// adapter and is recognised after one request.
-    #[tokio::test]
-    async fn old_server_over_http_is_named_after_one_request() {
-        const BODY: &str = r#"{"data":null,"errors":[{"message":"Unknown field \"latestBkSet\" on type \"BlockchainQuery\".","locations":[{"line":1,"column":16}]}]}"#;
+    /// A GraphQL server on a local port that answers every request with
+    /// `body`: its URL, the number of requests answered, and its task.
+    async fn serve(body: &'static str) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(AtomicUsize::new(0));
@@ -878,15 +928,23 @@ mod tests {
                     counter.fetch_add(1, Ordering::SeqCst);
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
-                         {}\r\nconnection: close\r\n\r\n{BODY}",
-                        BODY.len()
+                         {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
                     );
                     let _ = sock.write_all(resp.as_bytes()).await;
                     let _ = sock.shutdown().await;
                 });
             }
         });
+        (url, requests, server)
+    }
 
+    /// The unknown-field answer of an old gql-server survives the real
+    /// adapter and is recognised after one request.
+    #[tokio::test]
+    async fn old_server_over_http_is_named_after_one_request() {
+        const BODY: &str = r#"{"data":null,"errors":[{"message":"Unknown field \"latestBkSet\" on type \"BlockchainQuery\".","locations":[{"line":1,"column":16}]}]}"#;
+        let (url, requests, server) = serve(BODY).await;
         let client = create_client(&url).unwrap();
         let e = build_bk_set_with_retry(&client, &seed_target(16384), &BuildPolicy::default())
             .await
@@ -894,5 +952,39 @@ mod tests {
         server.abort();
         assert!(matches!(e, BuildError::NoLatestBkSetField), "{e}");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    /// A `latestBkSet` that cannot be read, here a key with a `0x` prefix,
+    /// fails the build after three requests instead of being retried as a
+    /// failed query forever.
+    #[tokio::test]
+    async fn unreadable_snapshot_over_http_fails_after_three_requests() {
+        const BODY: &str = r#"{"data":{"blockchain":{"latestBkSet":{"thread_id":"00000000000000000000000000000000000000000000000000000000000000000000","seq_no":19000,"block_id":"bb","height":19000,"chain_order":"x","updated_at":1,"signers":[{"signer_index":0,"pubkey":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}}}"#;
+        let (url, requests, server) = serve(BODY).await;
+        let client = create_client(&url).unwrap();
+        let policy = BuildPolicy {
+            transient_budget: None,
+            ..BuildPolicy::default()
+        };
+        let target = seed_target(16384);
+        let run = build_bk_set_with_retry(&client, &target, &policy);
+        let e = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("an unreadable snapshot must not be retried forever")
+            .unwrap_err();
+        server.abort();
+        assert!(
+            matches!(e, BuildError::Data {
+                attempts: 3,
+                ..
+            }),
+            "{e}"
+        );
+        assert!(
+            e.to_string()
+                .contains("latestBkSet.signers[0].pubkey has 98 hex chars"),
+            "{e}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 }

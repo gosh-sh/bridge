@@ -184,6 +184,29 @@ impl std::fmt::Display for UnknownFieldError {
 
 impl std::error::Error for UnknownFieldError {}
 
+/// An answer this client cannot read: a field missing or of the wrong type,
+/// a key that is not 96 hex characters. Asking again gets the same answer.
+/// Carried inside [`anyhow::Error`]; recognise it with
+/// `err.downcast_ref::<MalformedResponseError>()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedResponseError {
+    pub what: String,
+}
+
+impl std::fmt::Display for MalformedResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "malformed GraphQL answer: {}", self.what)
+    }
+}
+
+impl std::error::Error for MalformedResponseError {}
+
+fn malformed(what: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(MalformedResponseError {
+        what: what.into(),
+    })
+}
+
 /// The field name out of the first `Unknown field "<f>" on type …` message
 /// in a GraphQL `errors` array.
 pub(crate) fn unknown_field_in(errors: &Value) -> Option<String> {
@@ -1051,6 +1074,7 @@ pub struct GqlLatestBkSet {
 const BK_PUBKEY_HEX_LEN: usize = 96;
 
 /// Parse `data` of the `latestBkSet` query. `latestBkSet: null` is `Ok(None)`.
+/// Every rejection is a bare [`MalformedResponseError`].
 pub(crate) fn parse_latest_bk_set(data: &Value) -> anyhow::Result<Option<GqlLatestBkSet>> {
     let node = match data.pointer("/blockchain/latestBkSet") {
         None | Some(Value::Null) => return Ok(None),
@@ -1060,37 +1084,43 @@ pub(crate) fn parse_latest_bk_set(data: &Value) -> anyhow::Result<Option<GqlLate
         Ok(node
             .get(key)
             .and_then(Value::as_str)
-            .with_context(|| format!("latestBkSet.{key} is missing or not a string"))?
+            .ok_or_else(|| malformed(format!("latestBkSet.{key} is missing or not a string")))?
             .to_string())
     };
     let number = |key: &str| -> anyhow::Result<u64> {
-        node.get(key)
-            .and_then(Value::as_u64)
-            .with_context(|| format!("latestBkSet.{key} is missing or not an unsigned integer"))
+        node.get(key).and_then(Value::as_u64).ok_or_else(|| {
+            malformed(format!(
+                "latestBkSet.{key} is missing or not an unsigned integer"
+            ))
+        })
     };
     let raw_signers = node
         .get("signers")
         .and_then(Value::as_array)
-        .context("latestBkSet.signers is missing or not an array")?;
+        .ok_or_else(|| malformed("latestBkSet.signers is missing or not an array"))?;
     let mut signers = Vec::with_capacity(raw_signers.len());
     for (i, signer) in raw_signers.iter().enumerate() {
         let index = signer
             .get("signer_index")
             .and_then(Value::as_u64)
             .and_then(|v| u16::try_from(v).ok())
-            .with_context(|| format!("latestBkSet.signers[{i}].signer_index is not a u16"))?;
+            .ok_or_else(|| {
+                malformed(format!(
+                    "latestBkSet.signers[{i}].signer_index is not a u16"
+                ))
+            })?;
         let pubkey_hex = signer
             .get("pubkey")
             .and_then(Value::as_str)
-            .with_context(|| format!("latestBkSet.signers[{i}].pubkey is missing"))?;
+            .ok_or_else(|| malformed(format!("latestBkSet.signers[{i}].pubkey is missing")))?;
         if pubkey_hex.len() != BK_PUBKEY_HEX_LEN {
-            bail!(
+            return Err(malformed(format!(
                 "latestBkSet.signers[{i}].pubkey has {} hex chars, expected {BK_PUBKEY_HEX_LEN}",
                 pubkey_hex.len()
-            );
+            )));
         }
         let pubkey = hex::decode(pubkey_hex)
-            .with_context(|| format!("latestBkSet.signers[{i}].pubkey is not hex"))?;
+            .map_err(|e| malformed(format!("latestBkSet.signers[{i}].pubkey is not hex: {e}")))?;
         signers.push((index, pubkey));
     }
     Ok(Some(GqlLatestBkSet {
@@ -2286,6 +2316,32 @@ mod bk_set_query_tests {
     fn latest_bk_set_rejects_bad_pubkey() {
         for bad in ["zz".repeat(48), "ab".repeat(47)] {
             assert!(parse_latest_bk_set(&latest_with_pubkey(&bad)).is_err());
+        }
+    }
+
+    /// Every rejection is typed, so a caller can tell it from a failed query.
+    #[test]
+    fn latest_bk_set_rejections_are_malformed_answers() {
+        let prefixed = latest_with_pubkey(&format!("0x{}", "ab".repeat(48)));
+        let uncompressed = latest_with_pubkey(&"ab".repeat(96));
+        let not_hex = latest_with_pubkey(&"zz".repeat(48));
+        let mut no_height = latest_with_pubkey(&"ab".repeat(48));
+        no_height["blockchain"]["latestBkSet"]
+            .as_object_mut()
+            .unwrap()
+            .remove("height");
+        let cases = [
+            (prefixed, "has 98 hex chars"),
+            (uncompressed, "has 192 hex chars"),
+            (not_hex, "is not hex"),
+            (no_height, "latestBkSet.height is missing"),
+        ];
+        for (data, what) in cases {
+            let e = parse_latest_bk_set(&data).unwrap_err();
+            let m = e
+                .downcast_ref::<MalformedResponseError>()
+                .unwrap_or_else(|| panic!("not typed: {e:#}"));
+            assert!(m.what.contains(what), "{}", m.what);
         }
     }
 

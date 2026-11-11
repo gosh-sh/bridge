@@ -15,6 +15,7 @@ abstract contract eccBridgeModifiers is eccBridgeErrors {
     uint64 constant MIN_BALANCE = 100 vmshell;
 
     uint32 constant USDC_ECC_ID = 3;
+    uint32 constant NACKL_ECC_ID = 1;
     uint128 constant USDC_DECIMALS_FACTOR = 1_000_000;
 
     address constant ACCUMULATOR_ADDRESS = address.makeAddrStd(0, 0x3535353535353535353535353535353535353535353535353535353535353535);

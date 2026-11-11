@@ -51,6 +51,9 @@ interface IShellAccumulator {
 ///            (`ERR_BURN_EXCEEDS_BRIDGED`). Owner-mint (`mintAndSend`,
 ///            `mintAndSendAccumulator`) and TIP-3 mint do not increment
 ///            the bridged counters; `mintAndSendBridged` does.
+///            NACKL (ECC[1]) is never minted or burned: a withdrawal locks
+///            it here and a deposit unlocks it, and the amount locked for
+///            each chain is the `outstanding` of that chain's NACKL entry.
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
@@ -350,6 +353,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
     /// @notice Owner recovery for an aborted registered-token deposit.
     ///         Match the source receipt, currency, recipient and amount exactly once.
+    ///         For NACKL it unlocks rather than mints, within what the chain has locked.
     function mintAndSendTokenBridged(address recipient, uint128 value, uint64 nonce,
                                      uint256 chainId, uint32 tokenId)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
@@ -361,11 +365,22 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                 ERR_TOKEN_CONFIG);
         _mintNonce = nonce;
         ensureBalance();
-        gosh.mintecc(uint64(value), tokenId);
-        _creditToken(chainId, tokenId, value);
+        _payDeposit(chainId, tokenId, value);
         mapping(uint32 => varuint32) ecc;
         ecc[tokenId] = varuint32(value);
         recipient.transfer({value: 1 vmshell, bounce: false, flag: 1, currencies: ecc});
+    }
+
+    /// @dev Mints a deposit's ECC and books it as bridged, or for NACKL,
+    ///      which is never minted, unlocks it from what the chain has locked.
+    ///      `_requireDepositToken` has already bounded a NACKL amount by the lock.
+    function _payDeposit(uint256 chainId, uint32 tokenId, uint128 amount) private {
+        if (tokenId == NACKL_ECC_ID) {
+            _bridgeTokens[chainId][tokenId].outstanding -= amount;
+        } else {
+            gosh.mintecc(uint64(amount), tokenId);
+            _creditToken(chainId, tokenId, amount);
+        }
     }
 
     // ========================================================
@@ -401,7 +416,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
     /// @notice Burns the ECC currency attached to this message and emits an event
     ///         carrying the data needed to mint the equivalent on the destination
-    ///         chain. Exactly one ECC currency must be attached; its id and amount
+    ///         chain; NACKL is not burned but locked for that chain, and only a
+    ///         deposit from it unlocks it. Exactly one ECC currency must be attached; its id and amount
     ///         are taken from `msg.currencies`. The destination chain is opaque
     ///         to this contract — `dstChainId` is just passed through to the event.
     /// @param dstChainId — opaque destination chain identifier (passed through to event)
@@ -438,28 +454,36 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
-        uint128 minted = _totalMintedBridgeByToken[tokenId];
-        uint128 burned = _totalBurnedBridgeByToken[tokenId];
-        if (burned > minted || amount > minted - burned) {
-            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_BURN_EXCEEDS_BRIDGED);
-            return;
-        }
-        if (amount > _tokenOutstanding(dstChainId, tokenId)) {
-            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_CHAIN_BALANCE_EXCEEDED);
-            return;
+        // A NACKL withdrawal locks what it brings, so it has no bridged
+        // inventory to stay within.
+        if (tokenId != NACKL_ECC_ID) {
+            uint128 minted = _totalMintedBridgeByToken[tokenId];
+            uint128 burned = _totalBurnedBridgeByToken[tokenId];
+            if (burned > minted || amount > minted - burned) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                                  ERR_BURN_EXCEEDS_BRIDGED);
+                return;
+            }
+            if (amount > _tokenOutstanding(dstChainId, tokenId)) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                                  ERR_CHAIN_BALANCE_EXCEEDED);
+                return;
+            }
         }
 
         tvm.accept();
         ensureBalance();
 
-        gosh.burnecc(uint64(amount), tokenId);
-        _totalBurnedBridgeByToken[tokenId] += amount;
-        if (tokenId == USDC_ECC_ID) {
-            _outstandingByChain[dstChainId] -= amount;
+        if (tokenId == NACKL_ECC_ID) {
+            _bridgeTokens[dstChainId][tokenId].outstanding += amount;
         } else {
-            _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+            gosh.burnecc(uint64(amount), tokenId);
+            _totalBurnedBridgeByToken[tokenId] += amount;
+            if (tokenId == USDC_ECC_ID) {
+                _outstandingByChain[dstChainId] -= amount;
+            } else {
+                _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+            }
         }
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
@@ -708,9 +732,11 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _paused = paused;
     }
 
-    /// @notice Register USDC for a source chain once, then update its deposit limits.
-    ///         ECC id 3 is the only id accepted: Acki Nacki has no other currency
-    ///         for the bridge to mint, and a new one takes a new version of this code.
+    /// @notice Register USDC or NACKL for a source chain once, then update its deposit limits.
+    ///         ECC ids 3 (USDC, minted and burned) and 1 (NACKL, locked and
+    ///         unlocked) are the only ids accepted; another currency takes a new
+    ///         version of this code. For NACKL `maxTvl` bounds nothing: a deposit
+    ///         is bounded by what the chain has locked.
     ///         The token/id association is immutable; TVL can only increase.
     ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
     function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
@@ -718,7 +744,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(chainId != 0 && evmToken != 0 && evmToken < (uint256(1) << 160), ERR_TOKEN_CONFIG);
-        require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);
+        require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID, ERR_TOKEN_CONFIG);
         require(maxTransfer > 0 && maxTransfer <= uint128(type(uint64).max)
                 && maxTvl >= maxTransfer, ERR_TOKEN_CONFIG);
         if (tokenId == USDC_ECC_ID) {
@@ -749,7 +775,14 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint128 cap = newDeposit ? config.maxTransfer : config.maxWithdrawal;
         require(amount <= cap, ERR_TRANSFER_TOO_LARGE);
         uint128 outstanding = _tokenOutstanding(chainId, tokenId);
-        require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding, ERR_TVL_CAP);
+        if (tokenId == NACKL_ECC_ID) {
+            require(amount <= outstanding
+                    && varuint32(amount) <= address(this).currencies[NACKL_ECC_ID],
+                    ERR_CHAIN_BALANCE_EXCEEDED);
+        } else {
+            require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding,
+                    ERR_TVL_CAP);
+        }
     }
 
     function _creditToken(uint256 chainId, uint32 tokenId, uint128 amount) private {
@@ -1057,8 +1090,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         tvm.accept();
         ensureBalance();
 
-        gosh.mintecc(uint64(amount), tokenId);
-        _creditToken(chainId, tokenId, amount);
+        _payDeposit(chainId, tokenId, amount);
 
         mapping(uint32 => varuint32) ecc;
         ecc[tokenId] = varuint32(amount);

@@ -7,9 +7,10 @@ receipt proof: `finalize` builds a block whose receipt trie holds the deposit
 (`scripts/deposit-receipt/vectors.py`) and a test hook anchors its hash. Directed events are
 omitted because tvm-debugger tries to decode them as function return values; `WithdrawalRefused` is replaced by a hook that
 records its reason, so a refusal's cause is still asserted. Test hooks seed
-balances and derive voucher addresses. The bridge registers USDC alone; a test hook lifts that check
+balances and derive voucher addresses. The bridge registers USDC and NACKL alone; a test hook lifts that check
 for one case so the per-token accounting stays covered, and `test_only_usdc_can_be_registered` runs
-with it in place. The accounting, sender checks, refunds and upgrade code execute unchanged. The
+with it in place. tvm-debugger gives every call a fixed balance without ECC, so the NACKL the bridge
+holds is a value a test sets, and mints and burns are counted per currency by a wrapper. The accounting, sender checks, refunds and upgrade code execute unchanged. The
 production voucher is executed unchanged for its replay test.
 """
 
@@ -36,6 +37,9 @@ TVL = 10_000_000_000
 USDC_TOKEN = 68
 SECOND_TOKEN = 85
 THIRD_TOKEN = 102
+NACKL_TOKEN = 119
+NACKL_MAX = 10**15
+LOCK = 10**12
 EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
 EMITTER = {1: 42, 2: 44}
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
@@ -63,10 +67,19 @@ class BridgeLimits(unittest.TestCase):
         shutil.copytree(REPO / "contracts/an", src)
         bridge = src / "exchange/eccBridge.sol"
         source = bridge.read_text()
-        usdc_only = "require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);"
+        usdc_only = "require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID, ERR_TOKEN_CONFIG);"
         assert source.count(usdc_only) == 1
-        source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || "
+        source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID || "
                                 "(_testAllowOtherTokens && tokenId > USDC_ECC_ID), ERR_TOKEN_CONFIG);")
+        # tvm-debugger runs every call with a fixed balance and no ECC, so the NACKL the bridge
+        # holds is a value the test sets; unset, it does not bound the unlock.
+        held = "address(this).currencies[NACKL_ECC_ID]"
+        assert source.count(held) == 1
+        source = source.replace(held, "_testNacklHeld()")
+        # Every mint and burn is counted per currency, so a test can assert NACKL saw none.
+        for op in ("mintecc", "burnecc"):
+            assert source.count(f"gosh.{op}(") >= 1
+            source = source.replace(f"gosh.{op}(", f"_test_{op}(")
         accept = "tvm.accept();\n        _saveMsg();\n        tvm.commit();"
         assert source.count(accept) == 1
         source = source.replace(accept, f"require(!_testStopAtAccept, {ACCEPT_REACHED});\n        " + accept)
@@ -78,6 +91,29 @@ class BridgeLimits(unittest.TestCase):
         source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         hooks = """
+    mapping(uint32 => uint128) _testMinted;
+    mapping(uint32 => uint128) _testBurned;
+    function _test_mintecc(uint64 value, uint32 id) private {
+        _testMinted[id] += value;
+        gosh.mintecc(value, id);
+    }
+    function _test_burnecc(uint64 value, uint32 id) private {
+        _testBurned[id] += value;
+        gosh.burnecc(value, id);
+    }
+    function testEccMoved(uint32 tokenId) public view returns (uint128 minted, uint128 burned) {
+        return (_testMinted[tokenId], _testBurned[tokenId]);
+    }
+    bool _testNacklHeldSet;
+    uint128 _testNacklHeldValue;
+    function testSetNacklHeld(uint128 value) public {
+        tvm.accept();
+        _testNacklHeldSet = true;
+        _testNacklHeldValue = value;
+    }
+    function _testNacklHeld() private view returns (varuint32) {
+        return varuint32(_testNacklHeldSet ? _testNacklHeldValue : uint128(type(uint64).max));
+    }
     function testLegacyUpgrade() public {
         tvm.accept();
         TvmCell userCell;
@@ -252,7 +288,7 @@ class BridgeLimits(unittest.TestCase):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
                          source=SENDER, ecc=amount, shell=shell)
 
-    def refund(self, result, amount, shell, reason):
+    def refund(self, result, amount, shell, reason, token_id=3):
         self.assertTrue(result["vm_success"])
         self.assertEqual(len(result["messages"]), 1)
         self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), reason)
@@ -260,7 +296,7 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(msg["destination"], SENDER)
         decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", msg["boc"],
                                       "--abi", str(self.abi)]))["Header"]
-        self.assertEqual(int(decoded["value"]["other"]["3"]), amount)
+        self.assertEqual(int(decoded["value"]["other"][str(token_id)]), amount)
         self.assertEqual(int(decoded["value"]["value"]), min(shell, 100_000_000))
         self.assertEqual(decoded["bounce"], "false")
 
@@ -288,6 +324,197 @@ class BridgeLimits(unittest.TestCase):
     def withdraw_token(self, amount, token_id=4, chain=1):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
                          source=SENDER, ecc={str(token_id): str(amount)})
+
+    def register_nackl(self, chain=1, max_transfer=NACKL_MAX, max_tvl=NACKL_MAX * 10, enabled=True,
+                       expect=0):
+        return self.set_bridge_token(NACKL_TOKEN, 1, max_transfer, max_tvl, chain, enabled, expect)
+
+    def locked(self, chain=1):
+        return int(self.token_limits(1, chain)["outstanding"])
+
+    def ecc_moved(self, token_id):
+        moved = self.call("testEccMoved", {"tokenId": token_id})["response"]
+        return int(moved["minted"]), int(moved["burned"])
+
+    def bridged(self, token_id):
+        total = self.call("getTotalBridged", {"tokenId": token_id})["response"]
+        return int(total["minted"]), int(total["burned"])
+
+    def sent(self, result, token_id):
+        """(destination, amount) of every outbound message that carries `token_id`."""
+        out = []
+        for msg in result["messages"]:
+            header = json.loads(command(["tvm-cli", "-j", "decode", "msg", msg["boc"],
+                                         "--abi", str(self.abi)]))["Header"]
+            other = header["value"].get("other") or {}
+            if str(token_id) in other:
+                out.append((msg["destination"], int(other[str(token_id)])))
+        return out
+
+    def lock(self, amount, chain=1):
+        result = self.withdraw_token(amount, token_id=1, chain=chain)
+        self.assertTrue(result["vm_success"])
+        self.assertEqual(result["messages"], [])
+        return result
+
+    def unlock(self, amount, deposit, chain=1, expect=0):
+        """Prove and confirm a NACKL deposit; returns the confirmation."""
+        self.finalize(deposit=deposit, amount=amount, chain=chain, token=NACKL_TOKEN, expect=expect)
+        if expect:
+            return None
+        return self.confirm_token(token=NACKL_TOKEN, amount=amount, deposit=deposit, chain=chain)
+
+    def test_nackl_and_usdc_are_the_only_ids_registered(self):
+        """AN-1: NACKL takes no USDC ceiling and its withdrawal cap never falls."""
+        self.register_nackl(max_transfer=NACKL_MAX)
+        config = self.token_limits(1)
+        self.assertTrue(config["listed"])
+        self.assertEqual(int(config["evmToken"], 0), NACKL_TOKEN)
+        self.assertEqual(int(config["maxWithdrawal"]), NACKL_MAX)
+        self.register_nackl(max_transfer=NACKL_MAX // 2)
+        self.assertEqual(int(self.token_limits(1)["maxTransfer"]), NACKL_MAX // 2)
+        self.assertEqual(int(self.token_limits(1)["maxWithdrawal"]), NACKL_MAX)
+        self.register_nackl(max_transfer=1 << 64, max_tvl=1 << 70, expect=242)
+        self.set_bridge_token(SECOND_TOKEN, 1, 100, 1000, expect=242)
+        for token_id in (0, 2, 4, 5):
+            self.set_bridge_token(SECOND_TOKEN, token_id, 100, 1000, expect=242)
+
+    def test_nackl_withdrawal_locks_without_burning(self):
+        """AN-2, AN-4, AN-9: no bridged inventory is needed and nothing is burned."""
+        self.register_nackl()
+        self.assertEqual(self.bridged(1), (0, 0))
+        self.lock(LOCK)
+        self.lock(LOCK, chain=1)
+        self.assertEqual(self.locked(), 2 * LOCK)
+        self.assertEqual(self.bridged(1), (0, 0))
+        self.assertEqual(self.ecc_moved(1), (0, 0))
+
+    def test_a_refused_nackl_withdrawal_returns_the_nackl(self):
+        """AN-3: refusals return the NACKL and lock nothing."""
+        self.register_nackl(max_transfer=LOCK)
+        self.refund(self.withdraw_token(LOCK, token_id=1, chain=2), LOCK, 1_000_000_000, 241, 1)
+        self.refund(self.withdraw_token(LOCK + 1, token_id=1), LOCK + 1, 1_000_000_000, 234, 1)
+        self.register_nackl(chain=3)
+        self.refund(self.withdraw_token(LOCK, token_id=1, chain=3), LOCK, 1_000_000_000, 239, 1)
+        for chain in (1, 2, 3):
+            self.assertEqual(self.locked(chain), 0)
+        self.assertEqual(self.ecc_moved(1), (0, 0))
+
+    def test_a_nackl_deposit_unlocks_what_was_locked(self):
+        """AN-5, AN-9, AN-12: the recipient gets held NACKL and the lock shrinks by as much."""
+        self.register_nackl()
+        self.lock(LOCK)
+        result = self.unlock(LOCK // 4, deposit=300)
+        self.assertEqual(self.sent(result, 1), [("0:" + "%064x" % 43, LOCK // 4)])
+        self.assertEqual(self.locked(), LOCK - LOCK // 4)
+        deposit_view = self.call("getTokenDepositConfig", {"chainId": "1", "evmToken": str(NACKL_TOKEN)})
+        self.assertEqual(int(deposit_view["response"]["outstanding"]), LOCK - LOCK // 4)
+        self.unlock(LOCK - LOCK // 4, deposit=301)
+        self.assertEqual(self.locked(), 0)
+        self.assertEqual(self.bridged(1), (0, 0))
+        self.assertEqual(self.ecc_moved(1), (0, 0))
+
+    def test_a_nackl_deposit_above_the_lock_is_refused(self):
+        """AN-6: before accept, at confirmation and in recovery; per chain; within what is held."""
+        self.register_nackl()
+        self.register_nackl(chain=2)
+        self.lock(LOCK)
+        self.call("testStopAtAccept")
+        self.unlock(LOCK + 1, deposit=310, expect=236)
+        self.unlock(1, deposit=311, chain=2, expect=236)
+        self.unlock(LOCK, deposit=312, expect=ACCEPT_REACHED)
+        self.confirm_token(token=NACKL_TOKEN, amount=LOCK + 1, deposit=313, expect=236)
+        self.confirm_token(token=NACKL_TOKEN, amount=1, deposit=314, chain=2, expect=236)
+        args = {"recipient": SENDER, "value": str(LOCK + 1), "nonce": "1", "chainId": "1",
+                "tokenId": 1}
+        self.call("mintAndSendTokenBridged", args, signed=True, expect=236)
+        self.call("testSetNacklHeld", {"value": str(LOCK - 1)})
+        self.confirm_token(token=NACKL_TOKEN, amount=LOCK, deposit=315, expect=236)
+        self.assertEqual(self.locked(), LOCK)
+        self.assertEqual(self.ecc_moved(1), (0, 0))
+
+    def test_a_nackl_deposit_keeps_the_token_checks(self):
+        """AN-7: the deposit cap and the deposit switch still apply; the TVL cap does not."""
+        self.register_nackl(max_transfer=LOCK, max_tvl=LOCK)
+        self.lock(LOCK)
+        self.lock(LOCK)
+        self.unlock(LOCK + 1, deposit=320, expect=234)
+        self.register_nackl(max_transfer=LOCK, max_tvl=LOCK, enabled=False)
+        self.unlock(1, deposit=321, expect=243)
+        self.register_nackl(max_transfer=LOCK, max_tvl=LOCK)
+        # The lock is above maxTvl, which would refuse a minted token with 235.
+        self.unlock(LOCK, deposit=322)
+        self.assertEqual(self.locked(), LOCK)
+
+    def test_owner_recovery_unlocks_nackl(self):
+        """AN-8, AN-9: the recovery call pays from the lock, once per lock."""
+        self.register_nackl()
+        self.lock(LOCK)
+        args = {"recipient": SENDER, "value": str(LOCK), "nonce": "1", "chainId": "1", "tokenId": 1}
+        result = self.call("mintAndSendTokenBridged", args, signed=True)
+        self.assertEqual(self.sent(result, 1), [(SENDER, LOCK)])
+        self.assertEqual(self.locked(), 0)
+        args["nonce"] = "2"
+        self.call("mintAndSendTokenBridged", args, signed=True, expect=236)
+        self.assertEqual(self.ecc_moved(1), (0, 0))
+        self.assertEqual(self.bridged(1), (0, 0))
+
+    def test_the_nackl_lock_survives_upgrade(self):
+        """AN-11."""
+        self.register_nackl()
+        self.register_nackl(chain=2)
+        self.lock(LOCK)
+        self.lock(3 * LOCK, chain=2)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.assertEqual((self.locked(1), self.locked(2)), (LOCK, 3 * LOCK))
+        result = self.confirm_token(token=NACKL_TOKEN, amount=LOCK, deposit=330)
+        self.assertEqual(self.sent(result, 1), [("0:" + "%064x" % 43, LOCK)])
+        self.assertEqual(self.locked(1), 0)
+
+    def test_the_usdc_chain_counter_does_not_touch_the_nackl_lock(self):
+        """AN-13, AN-14."""
+        self.register_nackl()
+        self.lock(LOCK)
+        usdc = int(self.limits()["outstanding"])
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": "0"}, signed=True)
+        self.assertEqual(self.locked(), LOCK)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": str(usdc)}, signed=True)
+        usdc_bridged = self.bridged(3)
+        self.unlock(LOCK, deposit=340)
+        self.assertEqual(int(self.limits()["outstanding"]), usdc)
+        self.assertEqual(self.bridged(3), usdc_bridged)
+
+    def test_nackl_balance_covers_locked_after_every_step(self):
+        """P-1, AN-10: a model of the NACKL the bridge holds — what locks brought in less what
+        unlocks sent out — stays at or above the sum of the locks after every step."""
+        for chain in (1, 2):
+            self.register_nackl(chain=chain)
+        held, locked, nonce = 0, {1: 0, 2: 0}, 0
+        steps = [("lock", 1, 5 * LOCK), ("lock", 2, 2 * LOCK), ("unlock", 1, LOCK),
+                 ("unlock", 2, 2 * LOCK), ("unlock", 2, 1), ("lock", 1, LOCK), ("recover", 1, 3 * LOCK),
+                 ("unlock", 1, 2 * LOCK + 1), ("unlock", 1, 2 * LOCK), ("lock", 2, 7)]
+        for i, (op, chain, amount) in enumerate(steps):
+            with self.subTest(step=i, op=op):
+                if op == "lock":
+                    self.lock(amount, chain=chain)
+                    held += amount
+                    locked[chain] += amount
+                    continue
+                if amount > locked[chain]:
+                    self.unlock(amount, deposit=400 + i, chain=chain, expect=236)
+                    continue
+                if op == "unlock":
+                    result = self.unlock(amount, deposit=400 + i, chain=chain)
+                else:
+                    nonce += 1
+                    result = self.call("mintAndSendTokenBridged", {
+                        "recipient": SENDER, "value": str(amount), "nonce": str(nonce),
+                        "chainId": str(chain), "tokenId": 1}, signed=True)
+                held -= sum(a for _, a in self.sent(result, 1))
+                locked[chain] -= amount
+                self.assertEqual((self.locked(1), self.locked(2)), (locked[1], locked[2]))
+                self.assertGreaterEqual(held, locked[1] + locked[2])
+        self.assertEqual(self.ecc_moved(1), (0, 0))
 
     def test_only_usdc_can_be_registered(self):
         for token, token_id in ((SECOND_TOKEN, 4), (THIRD_TOKEN, 5), (SECOND_TOKEN, 2), (SECOND_TOKEN, 0)):

@@ -13,23 +13,37 @@
 //! expected keys under another cursor, or a set with another commitment, and
 //! [`classify_bk_file`] turns these into [`BkFileAction::Keep`],
 //! [`BkFileAction::FixCursor`] and [`BkFileAction::Rebuild`].
+//!
+//! [`startup_bk`] is the entry point: it takes the startup decision, picks
+//! the mirror the driver starts with and the set that mirror needs, and
+//! writes what changed. [`startup_bk_or_shutdown`] runs it until a shutdown
+//! signal.
 
 use std::{
     ffi::OsString,
+    future::Future,
     io::ErrorKind,
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
+use bridge_gql_fetcher::gql_client::UnknownFieldError;
 pub use bridge_prover_lib::bk_set_history::bk_target;
 use bridge_prover_lib::{
     bk_set_history::{build_bk_set_with_retry, BkSetHistory, BuildError, BuildPolicy},
     bk_set_replay::{commitment, BkTarget, FinalCheck},
     bridge_state::{BridgeState, EthBridgeContractState},
+    live_driver::{SeedBk, SeedPolicy},
     prover_bk_set::ProverBkSet,
 };
 use halo2_base::halo2_proofs::halo2curves::bls12_381::G1Affine;
 use tracing::{info, warn};
+
+use crate::{
+    live_source::{persist_bk_pair, StatePaths},
+    startup_decide::StartupDecision,
+};
 
 /// The BK fields a mirror takes from the contract, and the height the
 /// prover's set is built for.
@@ -59,7 +73,7 @@ pub struct ContractBk {
 /// store, so the build would wait for them forever. A real rotation below N
 /// is a rotation block, and its leaves are kept.
 ///
-/// Makes at most one query and does not retry it.
+/// Makes at most one query and does not retry it; [`startup_bk`] does.
 pub async fn contract_bk_fields<H: BkSetHistory>(
     chain: &EthBridgeContractState,
     stride: u64,
@@ -78,27 +92,38 @@ pub async fn contract_bk_fields<H: BkSetHistory>(
             target,
         });
     }
-    anyhow::ensure!(
-        chain.prev_bk_set_commitment != [0u8; 32],
-        "the contract is in the hold window of rotation {n} (last seen block {last_seen}), but \
-         its storedPrevBkSetCommitment is zero, which it is only before the first applyBkSetUpdate"
-    );
+    if chain.prev_bk_set_commitment == [0u8; 32] {
+        return Err(Inconsistent(format!(
+            "the contract is in the hold window of rotation {n} (last seen block {last_seen}), \
+             but its storedPrevBkSetCommitment is zero, which it is only before the first \
+             applyBkSetUpdate"
+        ))
+        .into());
+    }
     let below = n - 1;
     let cursor = h
         .last_update_at_or_below(below)
         .await
         .with_context(|| format!("look up the newest BK set update at or below {below}"))?
         .unwrap_or(0);
-    anyhow::ensure!(
-        cursor <= below,
-        "the newest BK set update at or below {below} is reported at {cursor}"
-    );
+    if cursor > below {
+        return Err(Inconsistent(format!(
+            "the newest BK set update at or below {below} is reported at {cursor}"
+        ))
+        .into());
+    }
     Ok(ContractBk {
         commitment: chain.prev_bk_set_commitment,
         last_bk_set_update_seq_no: cursor,
         target,
     })
 }
+
+/// An answer from the contract or the server that cannot be right and that
+/// no retry changes.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct Inconsistent(String);
 
 /// Put the contract's BK fields into a mirror whose windows come from
 /// elsewhere: the contract on Resurrect, the local state on a resync.
@@ -319,6 +344,15 @@ pub enum BkStartupError {
         expected: [u8; 32],
         built: [u8; 32],
     },
+    /// The contract's BK fields could not be completed from GraphQL.
+    #[error("take the BK fields from the contract: {0:#}")]
+    ContractFields(anyhow::Error),
+    /// Startup routing found local state and contract inconsistent.
+    #[error("startup routing STOP: {reason}")]
+    Stop { reason: String },
+    /// A state file could not be written or moved aside.
+    #[error("write the prover state files: {0:#}")]
+    Write(anyhow::Error),
 }
 
 /// Move a `prover_bk_set.json` that startup does not use to
@@ -354,6 +388,274 @@ pub fn backup_mismatched_bk_file(path: &Path, now_unix: u64) -> anyhow::Result<O
     Ok(Some(backup))
 }
 
+/// What `daemon-live` starts the driver with.
+#[derive(Debug)]
+pub struct StartupBk {
+    /// The mirror the driver starts from. On Cold it is the local state as
+    /// loaded, not yet seeded: the driver seeds it and writes it.
+    pub state: BridgeState,
+    pub seed_policy: SeedPolicy,
+    /// The contract's BK fields for the seed: `Some` on Cold only.
+    pub seed_bk: Option<SeedBk>,
+    /// Carries the commitment and the rotation cursor of `state`, or of
+    /// `seed_bk` on Cold.
+    pub prover_bk_set: ProverBkSet,
+}
+
+/// The mirror a startup decision starts with and the set it needs.
+struct MirrorPlan {
+    state: BridgeState,
+    /// The mirror is built here, not read from disk, and is written after
+    /// the set.
+    new_mirror: bool,
+    seed_policy: SeedPolicy,
+    seed_bk: Option<SeedBk>,
+    commitment: [u8; 32],
+    cursor: u64,
+    target: BkTarget,
+}
+
+impl MirrorPlan {
+    /// A mirror that takes its BK fields from the contract.
+    fn with_contract_bk(mut state: BridgeState, bk: &ContractBk) -> Self {
+        apply_contract_bk(&mut state, bk);
+        Self {
+            state,
+            new_mirror: true,
+            seed_policy: SeedPolicy::Resume,
+            seed_bk: None,
+            commitment: bk.commitment,
+            cursor: bk.last_bk_set_update_seq_no,
+            target: bk.target,
+        }
+    }
+}
+
+/// The mirror and the BK set the driver starts with, for the `decision`
+/// startup routing took on `local` and `chain`:
+///
+/// * WarmResume keeps the local mirror: the set must have its commitment and
+///   cursor, and is built for `bk_target(L, N)` of that mirror;
+/// * Resurrect and a resync of the BK fields put the contract's BK fields
+///   ([`contract_bk_fields`]) into their mirror;
+/// * Cold keeps the local state, which the driver seeds, and hands it the
+///   contract's BK fields as `seed_bk`;
+/// * Stop is an error.
+///
+/// The set comes from [`resolve_bk_set`]. Nothing is written before it is in
+/// hand. Then a set file that did not fit is moved aside, and the set is
+/// written when it changed or the mirror is new, followed by the mirror if
+/// it is new ([`persist_bk_pair`]). Cold writes no mirror: the driver writes
+/// it after its first ack.
+///
+/// The contract lookup is retried like the build: failed queries with the
+/// policy's backoff, within its transient budget; a server that does not
+/// know a queried field and an answer that cannot be right fail at once.
+pub async fn startup_bk<H: BkSetHistory>(
+    decision: StartupDecision,
+    local: BridgeState,
+    chain: &EthBridgeContractState,
+    paths: &StatePaths,
+    stride: u64,
+    h: &H,
+    policy: &BuildPolicy,
+) -> Result<StartupBk, BkStartupError> {
+    // `waited` is what the contract lookup slept.
+    let (plan, waited) = match decision {
+        StartupDecision::Stop {
+            reason,
+        } => {
+            return Err(BkStartupError::Stop {
+                reason,
+            })
+        },
+        StartupDecision::WarmResume => {
+            let last_seen = local.stored_last_seen_block_seq_no;
+            let last_bk = local.stored_last_bk_set_update_seq_no;
+            if last_seen < chain.last_seen_block_seq_no || last_bk < chain.last_bk_set_update_seq_no
+            {
+                info!(
+                    local_last_seen = last_seen,
+                    chain_last_seen = chain.last_seen_block_seq_no,
+                    local_bk_upd = last_bk,
+                    chain_bk_upd = chain.last_bk_set_update_seq_no,
+                    "startup: WarmResume — local cursor is behind the contract in the BK-set hold \
+                     window; bundles the chain already verified are acked before the rotation"
+                );
+            } else {
+                info!(
+                    last_seen,
+                    "startup: WarmResume — local state matches the chain"
+                );
+            }
+            let plan = MirrorPlan {
+                commitment: local.stored_bk_set_commitment,
+                cursor: last_bk,
+                target: bk_target(last_seen, last_bk, stride),
+                state: local,
+                new_mirror: false,
+                seed_policy: SeedPolicy::Resume,
+                seed_bk: None,
+            };
+            (plan, Duration::ZERO)
+        },
+        StartupDecision::Resurrect {
+            fresh_state,
+        } => {
+            info!(
+                chain_last_seen = chain.last_seen_block_seq_no,
+                chain_bk_upd = chain.last_bk_set_update_seq_no,
+                "startup: Resurrect — rebuilding the mirror from the contract"
+            );
+            let (bk, waited) = contract_bk_with_retry(chain, stride, h, policy).await?;
+            (MirrorPlan::with_contract_bk(*fresh_state, &bk), waited)
+        },
+        StartupDecision::ResyncBkFromContract {
+            state,
+        } => {
+            info!(
+                last_seen = state.stored_last_seen_block_seq_no,
+                local_bk_upd = state.stored_last_bk_set_update_seq_no,
+                chain_bk_upd = chain.last_bk_set_update_seq_no,
+                "startup: the contract applied BK set updates the local mirror has not; taking \
+                 its BK fields over the local windows"
+            );
+            let (bk, waited) = contract_bk_with_retry(chain, stride, h, policy).await?;
+            (MirrorPlan::with_contract_bk(*state, &bk), waited)
+        },
+        StartupDecision::Cold {
+            policy: seed_policy,
+        } => {
+            let (bk, waited) = contract_bk_with_retry(chain, stride, h, policy).await?;
+            info!(
+                ?seed_policy,
+                commitment = %hex::encode(bk.commitment),
+                last_bk_set_update_seq_no = bk.last_bk_set_update_seq_no,
+                "startup: Cold — seeding with the contract's BK fields"
+            );
+            let plan = MirrorPlan {
+                state: local,
+                new_mirror: false,
+                seed_policy,
+                seed_bk: Some(SeedBk {
+                    commitment: bk.commitment,
+                    last_bk_set_update_seq_no: bk.last_bk_set_update_seq_no,
+                }),
+                commitment: bk.commitment,
+                cursor: bk.last_bk_set_update_seq_no,
+                target: bk.target,
+            };
+            (plan, waited)
+        },
+    };
+
+    // The contract lookup spent part of a bounded transient budget.
+    let policy = BuildPolicy {
+        transient_budget: policy.transient_budget.map(|b| b.saturating_sub(waited)),
+        ..*policy
+    };
+    let resolved = resolve_bk_set(
+        load_bk_file(&paths.prover_bk_set_json),
+        plan.commitment,
+        plan.cursor,
+        plan.target,
+        h,
+        &policy,
+    )
+    .await?;
+
+    // Nothing below waits: a shutdown that drops this future while it waits
+    // above leaves the files as they were.
+    if matches!(resolved.action, BkFileAction::Rebuild { .. }) {
+        backup_mismatched_bk_file(&paths.prover_bk_set_json, now_unix())
+            .map_err(BkStartupError::Write)?;
+    }
+    if resolved.action != BkFileAction::Keep || plan.new_mirror {
+        persist_bk_pair(
+            paths,
+            &resolved.prover_bk_set,
+            plan.new_mirror.then_some(&plan.state),
+        )
+        .map_err(|e| BkStartupError::Write(e.into()))?;
+    }
+    Ok(StartupBk {
+        state: plan.state,
+        seed_policy: plan.seed_policy,
+        seed_bk: plan.seed_bk,
+        prover_bk_set: resolved.prover_bk_set,
+    })
+}
+
+/// [`contract_bk_fields`], with failed queries retried on the policy's
+/// backoff, and the time slept. A server that does not know a queried field
+/// and an [`Inconsistent`] answer fail at once.
+async fn contract_bk_with_retry<H: BkSetHistory>(
+    chain: &EthBridgeContractState,
+    stride: u64,
+    h: &H,
+    policy: &BuildPolicy,
+) -> Result<(ContractBk, Duration), BkStartupError> {
+    let mut waited = Duration::ZERO;
+    let mut backoff = policy.backoff_initial;
+    loop {
+        let e = match contract_bk_fields(chain, stride, h).await {
+            Ok(bk) => return Ok((bk, waited)),
+            Err(e) => e,
+        };
+        if e.downcast_ref::<UnknownFieldError>().is_some()
+            || e.downcast_ref::<Inconsistent>().is_some()
+        {
+            return Err(BkStartupError::ContractFields(e));
+        }
+        let sleep = match policy.transient_budget {
+            None => backoff,
+            Some(budget) if waited >= budget => {
+                return Err(BkStartupError::ContractFields(
+                    e.context(format!("kept failing for {waited:?}")),
+                ))
+            },
+            Some(budget) => backoff.min(budget - waited),
+        };
+        let reason = format!("{e:#}");
+        warn!(
+            error = %reason,
+            retry_in = ?sleep,
+            "looking up the contract's BK fields failed, will retry"
+        );
+        tokio::time::sleep(sleep).await;
+        waited = waited.saturating_add(sleep);
+        backoff = backoff
+            .saturating_mul(policy.backoff_multiplier)
+            .min(policy.backoff_max);
+    }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Run `startup` until it finishes or `shutdown` resolves. `Ok(None)` is the
+/// shutdown: [`startup_bk`] is then dropped while it waits, before it has
+/// written anything.
+pub async fn startup_bk_or_shutdown<F, S>(
+    startup: F,
+    shutdown: S,
+) -> Result<Option<StartupBk>, BkStartupError>
+where
+    F: Future<Output = Result<StartupBk, BkStartupError>>,
+    S: Future<Output = ()>,
+{
+    tokio::select! {
+        started = startup => started.map(Some),
+        () = shutdown => {
+            info!("shutdown while building the prover BK set; no state file was written");
+            Ok(None)
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -363,7 +665,7 @@ mod tests {
     };
 
     use alloy::primitives::U256;
-    use bridge_gql_fetcher::gql_client::BLOCK_ID_TREE_LEAF_COUNT;
+    use bridge_gql_fetcher::gql_client::{UnknownFieldError, BLOCK_ID_TREE_LEAF_COUNT};
     use bridge_prover_lib::{
         bk_set_replay::{commitment, BkSetSnapshot, BkSetUpdateRow, BlockLeaves, FinalCheck},
         bridge_state::{HistoryWindow, MAX_LAYERS},
@@ -374,11 +676,11 @@ mod tests {
         bls12_381::{Fr as BlsScalar, G1Affine, G1},
         group::Curve,
     };
+    use tokio::time::Instant;
 
     use super::*;
     use crate::{
-        live_source::{persist_bk_pair, StatePaths},
-        startup_decide::{decide, DecideInputs, StartupDecision},
+        startup_decide::{decide, DecideInputs},
         types::BkSetUpdateData,
     };
 
@@ -442,7 +744,12 @@ mod tests {
         snapshot: Option<BkSetSnapshot>,
         rows: Vec<BkSetUpdateRow>,
         leaves: BTreeMap<u64, BlockLeaves>,
+        /// `last_update_at_or_below` fails this many times before it answers.
+        cursor_failures: AtomicUsize,
+        /// `last_update_at_or_below` answers as a server without the field.
+        cursor_unknown_field: bool,
         snapshot_calls: AtomicUsize,
+        cursor_calls: AtomicUsize,
         other_calls: AtomicUsize,
     }
 
@@ -452,8 +759,12 @@ mod tests {
             self.snapshot_calls.load(Ordering::SeqCst)
         }
 
+        fn cursor_calls(&self) -> usize {
+            self.cursor_calls.load(Ordering::SeqCst)
+        }
+
         fn calls(&self) -> usize {
-            self.snapshot_calls() + self.other_calls.load(Ordering::SeqCst)
+            self.snapshot_calls() + self.cursor_calls() + self.other_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -486,13 +797,45 @@ mod tests {
         }
 
         async fn last_update_at_or_below(&self, height: u64) -> anyhow::Result<Option<u64>> {
-            self.other_calls.fetch_add(1, Ordering::SeqCst);
+            self.cursor_calls.fetch_add(1, Ordering::SeqCst);
+            if self.cursor_unknown_field {
+                return Err(anyhow::Error::new(UnknownFieldError {
+                    field: "bkSetUpdates".into(),
+                }));
+            }
+            let failures_left = self.cursor_failures.load(Ordering::SeqCst);
+            if failures_left > 0 {
+                self.cursor_failures
+                    .store(failures_left - 1, Ordering::SeqCst);
+                anyhow::bail!("connection reset by peer");
+            }
             Ok(self
                 .rows
                 .iter()
                 .filter_map(|r| r.height)
                 .filter(|&h| h <= height)
                 .max())
+        }
+    }
+
+    /// A gql-server the scenario must not ask at all.
+    struct NoGraphql;
+
+    impl BkSetHistory for NoGraphql {
+        async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>> {
+            panic!("asked for latestBkSet")
+        }
+
+        async fn bk_set_updates(&self, _: u64, _: u64) -> anyhow::Result<Vec<BkSetUpdateRow>> {
+            panic!("asked for bkSetUpdates")
+        }
+
+        async fn block_leaves(&self, _: u64) -> anyhow::Result<Option<BlockLeaves>> {
+            panic!("asked for block leaves")
+        }
+
+        async fn last_update_at_or_below(&self, _: u64) -> anyhow::Result<Option<u64>> {
+            panic!("asked for the last rotation")
         }
     }
 
@@ -875,122 +1218,145 @@ mod tests {
         );
     }
 
-    /// What a restart takes from the files: the commitment and cursor it
-    /// expects, the target, and the mirror it writes after the set (`None`
-    /// on Cold, whose mirror the driver writes).
-    struct Restart {
-        decision: &'static str,
-        commitment: [u8; 32],
-        cursor: u64,
-        target: BkTarget,
-        mirror: Option<BridgeState>,
+    fn json(state: &BridgeState) -> serde_json::Value {
+        serde_json::to_value(state).unwrap()
     }
 
-    async fn from_contract_bk(
-        decision: &'static str,
-        mut state: BridgeState,
-        chain: &EthBridgeContractState,
-        h: &FakeHistory,
-    ) -> Restart {
-        let bk = contract_bk_fields(chain, STRIDE, h).await.unwrap();
-        apply_contract_bk(&mut state, &bk);
-        assert_eq!(state.stored_bk_set_commitment, bk.commitment);
-        assert_eq!(
-            state.stored_last_bk_set_update_seq_no,
-            bk.last_bk_set_update_seq_no
-        );
-        Restart {
-            decision,
-            commitment: bk.commitment,
-            cursor: bk.last_bk_set_update_seq_no,
-            target: bk.target,
-            mirror: Some(state),
+    fn decision_kind(d: &StartupDecision) -> &'static str {
+        match d {
+            StartupDecision::Cold {
+                ..
+            } => "cold",
+            StartupDecision::WarmResume => "warm",
+            StartupDecision::Resurrect {
+                ..
+            } => "resurrect",
+            StartupDecision::ResyncBkFromContract {
+                ..
+            } => "resync",
+            StartupDecision::Stop {
+                ..
+            } => "stop",
         }
     }
 
-    /// The mirror `startup_decide` picks for the files in `paths`.
-    async fn plan_restart(
-        paths: &StatePaths,
-        chain: &EthBridgeContractState,
-        h: &FakeHistory,
-    ) -> Restart {
-        let local = BridgeState::load(paths.prover_state_json.to_str().unwrap(), W).unwrap();
-        match decide(DecideInputs {
-            local: &local,
+    fn decide_on(local: &BridgeState, chain: &EthBridgeContractState) -> StartupDecision {
+        decide(DecideInputs {
+            local,
             chain,
             bootstrap_seqno: None,
             window_size: W,
             anchor_level: 1,
-        }) {
-            StartupDecision::WarmResume => Restart {
-                decision: "warm",
-                commitment: local.stored_bk_set_commitment,
-                cursor: local.stored_last_bk_set_update_seq_no,
-                target: bk_target(
-                    local.stored_last_seen_block_seq_no,
-                    local.stored_last_bk_set_update_seq_no,
-                    STRIDE,
-                ),
-                mirror: Some(local),
-            },
-            StartupDecision::Resurrect {
-                fresh_state,
-            } => from_contract_bk("resurrect", *fresh_state, chain, h).await,
-            StartupDecision::ResyncBkFromContract {
-                state,
-            } => from_contract_bk("resync", *state, chain, h).await,
-            StartupDecision::Cold {
-                ..
-            } => {
-                let bk = contract_bk_fields(chain, STRIDE, h).await.unwrap();
-                Restart {
-                    decision: "cold",
-                    commitment: bk.commitment,
-                    cursor: bk.last_bk_set_update_seq_no,
-                    target: bk.target,
-                    mirror: None,
-                }
-            },
-            StartupDecision::Stop {
-                reason,
-            } => panic!("startup stops: {reason}"),
-        }
+        })
     }
 
+    fn load_mirror(paths: &StatePaths) -> BridgeState {
+        BridgeState::load(paths.prover_state_json.to_str().unwrap(), W).unwrap()
+    }
+
+    /// Files in `dir` other than the pair of state files.
+    fn other_files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "prover_state.json" && n != "prover_bk_set.json")
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn backups(dir: &Path) -> usize {
+        other_files(dir)
+            .iter()
+            .filter(|n| n.starts_with("prover_bk_set.json.mismatch-"))
+            .count()
+    }
+
+    /// One restart on the files in `paths`: the decision `startup_decide`
+    /// takes on them and what [`startup_bk`] starts the driver with.
     async fn restart(
         name: &str,
         paths: &StatePaths,
         chain: &EthBridgeContractState,
         h: &FakeHistory,
-    ) -> (Restart, ResolvedBk) {
-        let plan = plan_restart(paths, chain, h).await;
-        let resolved = resolve_bk_set(
-            load_bk_file(&paths.prover_bk_set_json),
-            plan.commitment,
-            plan.cursor,
-            plan.target,
-            h,
-            &no_wait(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    ) -> (&'static str, StartupBk) {
+        let local = load_mirror(paths);
+        let decision = decide_on(&local, chain);
+        let kind = decision_kind(&decision);
+        let started = startup_bk(decision, local, chain, paths, STRIDE, h, &no_wait())
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        // The set fits the BK fields the driver starts with: the mirror's,
+        // or the seed's on Cold.
+        let (commitment, cursor) = match started.seed_bk {
+            Some(bk) => (bk.commitment, bk.last_bk_set_update_seq_no),
+            None => (
+                started.state.stored_bk_set_commitment,
+                started.state.stored_last_bk_set_update_seq_no,
+            ),
+        };
         assert_eq!(
-            classify_bk_file(Some(&resolved.prover_bk_set), plan.commitment, plan.cursor),
+            classify_bk_file(Some(&started.prover_bk_set), commitment, cursor),
             BkFileAction::Keep,
             "{name}"
         );
-        (plan, resolved)
+        // Both are what is on disk; Cold leaves the mirror to the driver.
+        let on_disk = load_bk_file(&paths.prover_bk_set_json)
+            .unwrap_or_else(|| panic!("{name}: no prover BK set on disk"));
+        assert_eq!(
+            (
+                on_disk.commitment,
+                &on_disk.pubkeys_hex,
+                on_disk.last_applied_update_seq_no
+            ),
+            (
+                started.prover_bk_set.commitment,
+                &started.prover_bk_set.pubkeys_hex,
+                started.prover_bk_set.last_applied_update_seq_no
+            ),
+            "{name}"
+        );
+        if paths.prover_state_json.exists() {
+            assert_eq!(json(&load_mirror(paths)), json(&started.state), "{name}");
+        } else {
+            assert_eq!(kind, "cold", "{name}: no mirror on disk");
+        }
+        (kind, started)
     }
 
-    fn action_kind(a: &BkFileAction) -> &'static str {
-        match a {
-            BkFileAction::Keep => "keep",
-            BkFileAction::FixCursor {
-                ..
-            } => "fix-cursor",
-            BkFileAction::Rebuild {
-                ..
-            } => "rebuild",
+    /// What a restart did with the set file, read from its effects: a build
+    /// asks GraphQL for a snapshot, a cursor fix keeps the keys under another
+    /// cursor, a keep leaves the set as it was.
+    fn observed_action(
+        before: Option<&ProverBkSet>,
+        after: &ProverBkSet,
+        built: bool,
+    ) -> &'static str {
+        if built {
+            return "rebuild";
+        }
+        let before = before.expect("a set that was not built comes from the file");
+        assert_eq!(
+            (before.commitment, &before.pubkeys_hex),
+            (after.commitment, &after.pubkeys_hex)
+        );
+        if before.last_applied_update_seq_no == after.last_applied_update_seq_no {
+            "keep"
+        } else {
+            "fix-cursor"
+        }
+    }
+
+    /// Put the mirror file back as it was: what a restart cut short between
+    /// the set and the mirror leaves.
+    fn restore(path: &Path, bytes: Option<&[u8]>) {
+        match bytes {
+            Some(bytes) => std::fs::write(path, bytes).unwrap(),
+            None => {
+                if path.exists() {
+                    std::fs::remove_file(path).unwrap();
+                }
+            },
         }
     }
 
@@ -1087,36 +1453,380 @@ mod tests {
             if let Some(s) = &case.set_on_disk {
                 s.save(paths.prover_bk_set_json.to_str().unwrap()).unwrap();
             }
+            let mirror_before = std::fs::read(&paths.prover_state_json).ok();
 
             // The restart after the cut.
+            let set_before = load_bk_file(&paths.prover_bk_set_json);
             let builds = h.snapshot_calls();
-            let (plan, first) = restart(name, &paths, &case.chain, &h).await;
-            assert_eq!(plan.decision, case.decision, "{name}");
-            assert_eq!(action_kind(&first.action), case.action, "{name}");
-            if case.action != "rebuild" {
-                assert_eq!(h.snapshot_calls(), builds, "{name}: built without need");
-            }
+            let (decision, first) = restart(name, &paths, &case.chain, &h).await;
+            assert_eq!(decision, case.decision, "{name}");
+            let built = h.snapshot_calls() > builds;
+            assert_eq!(
+                observed_action(set_before.as_ref(), &first.prover_bk_set, built),
+                case.action,
+                "{name}"
+            );
+            // A set file that did not fit is kept aside, never deleted.
+            let backed_up = usize::from(case.action == "rebuild" && case.set_on_disk.is_some());
+            assert_eq!(backups(dir.path()), backed_up, "{name}");
 
-            // That restart is cut short after the set: the next one takes the
-            // set as it is and builds nothing.
-            persist_bk_pair(&paths, &first.prover_bk_set, None).unwrap();
+            // That restart is cut short after the set, with the mirror still
+            // the one it found: the next one takes the set as it is and
+            // builds nothing.
+            restore(&paths.prover_state_json, mirror_before.as_deref());
+            let set_before = load_bk_file(&paths.prover_bk_set_json);
             let builds = h.snapshot_calls();
-            let (plan, second) = restart(name, &paths, &case.chain, &h).await;
-            assert_eq!(plan.decision, case.decision, "{name}");
-            assert_eq!(second.action, BkFileAction::Keep, "{name}");
+            let (decision, second) = restart(name, &paths, &case.chain, &h).await;
+            assert_eq!(decision, case.decision, "{name}");
+            let built = h.snapshot_calls() > builds;
+            assert_eq!(
+                observed_action(set_before.as_ref(), &second.prover_bk_set, built),
+                "keep",
+                "{name}"
+            );
 
             // That restart completes, set then mirror: the next one resumes
             // on both.
-            persist_bk_pair(&paths, &second.prover_bk_set, plan.mirror.as_ref()).unwrap();
-            let (plan, third) = restart(name, &paths, &case.chain, &h).await;
+            let set_before = load_bk_file(&paths.prover_bk_set_json);
+            let (decision, third) = restart(name, &paths, &case.chain, &h).await;
             let resumes = if case.decision == "cold" {
                 "cold"
             } else {
                 "warm"
             };
-            assert_eq!(plan.decision, resumes, "{name}");
-            assert_eq!(third.action, BkFileAction::Keep, "{name}");
+            assert_eq!(decision, resumes, "{name}");
+            let built = h.snapshot_calls() > builds;
+            assert_eq!(
+                observed_action(set_before.as_ref(), &third.prover_bk_set, built),
+                "keep",
+                "{name}"
+            );
             assert_eq!(h.snapshot_calls(), builds, "{name}: rebuilt a set on disk");
+            assert_eq!(backups(dir.path()), backed_up, "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn cold_after_rotations_starts_on_the_contract_set() {
+        // Seeded at S = L = 16384. Rotation 20000 added signer 2 before the
+        // first bundle: the contract holds S1 under N = 20000, while the seed
+        // block is still signed by S0.
+        let mut h = FakeHistory {
+            snapshot: Some(BkSetSnapshot {
+                anchor_height: 30000,
+                signers: set(S1),
+            }),
+            rows: vec![row(20000, ADD, 2, 3)],
+            ..Default::default()
+        };
+        h.leaves.insert(16384, leaves(S0, S0));
+        h.leaves.insert(20000, leaves(S0, S1));
+        let chain = chain_state(16384, 20000, S1, c(S0), &[]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        assert!(
+            matches!(decision, StartupDecision::Cold {
+                policy: SeedPolicy::Explicit(16384)
+            }),
+            "{decision:?}"
+        );
+
+        let started = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &no_wait())
+            .await
+            .unwrap();
+        assert_eq!(
+            started.seed_bk,
+            Some(SeedBk {
+                commitment: c(S1),
+                last_bk_set_update_seq_no: 20000,
+            })
+        );
+        assert_eq!(started.seed_policy, SeedPolicy::Explicit(16384));
+        assert!(!started.state.initialized);
+        assert_eq!(started.prover_bk_set.pubkeys().unwrap(), set(S1));
+        assert_eq!(started.prover_bk_set.last_applied_update_seq_no, 20000);
+        // The set is written. The mirror is the driver's to write once it
+        // has seeded.
+        let on_disk = load_bk_file(&paths.prover_bk_set_json).unwrap();
+        assert_eq!(
+            (on_disk.commitment, on_disk.last_applied_update_seq_no),
+            (c(S1), 20000)
+        );
+        assert!(!paths.prover_state_json.exists());
+        assert!(other_files(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn resurrect_in_hold_window_takes_the_outgoing_set() {
+        let h = world();
+        // Rotation 40000 is on the contract; the bundle at 32768, signed by
+        // S0, is still owed.
+        let chain = chain_state(16384, 40000, S1, c(S0), &[16384]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        assert_eq!(decision_kind(&decision), "resurrect");
+
+        let started = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &no_wait())
+            .await
+            .unwrap();
+        assert_eq!(
+            started.state.stored_bk_set_commitment,
+            chain.prev_bk_set_commitment
+        );
+        // The rotation below N, so that the driver takes N next.
+        assert_eq!(started.state.stored_last_bk_set_update_seq_no, 20000);
+        assert_eq!(started.state.stored_last_seen_block_seq_no, 16384);
+        assert_eq!(started.seed_policy, SeedPolicy::Resume);
+        assert_eq!(started.seed_bk, None);
+        assert_eq!(started.prover_bk_set.pubkeys().unwrap(), set(S0));
+        assert_eq!(started.prover_bk_set.last_applied_update_seq_no, 20000);
+
+        // Both files are written, and a restart resumes on them.
+        let saved = load_mirror(&paths);
+        assert_eq!(json(&saved), json(&started.state));
+        assert!(matches!(
+            decide_on(&saved, &chain),
+            StartupDecision::WarmResume
+        ));
+    }
+
+    #[tokio::test]
+    async fn warm_resume_with_good_file_never_queries_graphql() {
+        let w3 = [16384, 32768, 49152];
+        let chain = chain_state(49152, 40000, S1, c(S0), &w3);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        mirror(49152, 40000, S1, &w3)
+            .save(paths.prover_state_json.to_str().unwrap())
+            .unwrap();
+        file(S1, 40000)
+            .save(paths.prover_bk_set_json.to_str().unwrap())
+            .unwrap();
+        let set_bytes = std::fs::read(&paths.prover_bk_set_json).unwrap();
+        let mirror_bytes = std::fs::read(&paths.prover_state_json).unwrap();
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        assert_eq!(decision_kind(&decision), "warm");
+
+        let started = startup_bk(
+            decision,
+            local,
+            &chain,
+            &paths,
+            STRIDE,
+            &NoGraphql,
+            &no_wait(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(started.seed_policy, SeedPolicy::Resume);
+        assert_eq!(started.seed_bk, None);
+        assert_eq!(
+            (
+                started.state.stored_bk_set_commitment,
+                started.state.stored_last_bk_set_update_seq_no
+            ),
+            (c(S1), 40000)
+        );
+        assert_eq!(started.prover_bk_set.pubkeys().unwrap(), set(S1));
+        assert_eq!(started.prover_bk_set.last_applied_update_seq_no, 40000);
+        // Nothing is written.
+        assert_eq!(std::fs::read(&paths.prover_bk_set_json).unwrap(), set_bytes);
+        assert_eq!(
+            std::fs::read(&paths.prover_state_json).unwrap(),
+            mirror_bytes
+        );
+        assert!(other_files(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn resync_keeps_local_windows() {
+        let h = world();
+        // Seeded at 16384: the local layer-1 window still holds the seed root
+        // ahead of the bundles, which the contract keeps only as
+        // `storedPrevMaxLevelLayerHash`. Another relayer applied rotations
+        // 50000 and 60000.
+        let seed_root = [0x5e; 32];
+        let mut chain = chain_state(49152, 60000, S2, c(S2), &[32768, 49152]);
+        chain.genesis_prev_max_level_layer_hash = seed_root;
+        let mut local = mirror(49152, 40000, S1, &[]);
+        local.layer_windows[0].append(seed_root, 16384);
+        for (hash, height) in chain.layer_windows[0]
+            .data
+            .iter()
+            .zip(&chain.layer_windows[0].heights)
+            .take(chain.layer_windows[0].data_len)
+        {
+            local.layer_windows[0].append(*hash, *height);
+        }
+        local.stored_last_seen_block_height = 777;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        local
+            .save(paths.prover_state_json.to_str().unwrap())
+            .unwrap();
+        file(S1, 40000)
+            .save(paths.prover_bk_set_json.to_str().unwrap())
+            .unwrap();
+        let decision = decide_on(&local, &chain);
+        assert_eq!(decision_kind(&decision), "resync");
+
+        let started = startup_bk(
+            decision,
+            local.clone(),
+            &chain,
+            &paths,
+            STRIDE,
+            &h,
+            &no_wait(),
+        )
+        .await
+        .unwrap();
+        // The local windows and block height, not the contract's.
+        assert_eq!(started.state.layer_windows, local.layer_windows);
+        assert_eq!(started.state.stored_last_seen_block_height, 777);
+        // The contract's BK fields.
+        assert_eq!(
+            (
+                started.state.stored_bk_set_commitment,
+                started.state.stored_last_bk_set_update_seq_no
+            ),
+            (c(S2), 60000)
+        );
+        assert_eq!(started.seed_policy, SeedPolicy::Resume);
+        assert_eq!(started.prover_bk_set.pubkeys().unwrap(), set(S2));
+        assert_eq!(started.prover_bk_set.last_applied_update_seq_no, 60000);
+        // Set and mirror are written; the old set is kept aside.
+        assert_eq!(json(&load_mirror(&paths)), json(&started.state));
+        assert_eq!(
+            load_bk_file(&paths.prover_bk_set_json).unwrap().commitment,
+            c(S2)
+        );
+        assert_eq!(backups(dir.path()), 1);
+    }
+
+    fn unbounded() -> BuildPolicy {
+        BuildPolicy {
+            data_attempts: 1,
+            transient_budget: None,
+            ..BuildPolicy::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contract_lookup_is_retried_until_it_answers() {
+        let h = FakeHistory {
+            cursor_failures: AtomicUsize::new(3),
+            ..world()
+        };
+        // The hold window of rotation 40000 needs the rotation below it.
+        let chain = chain_state(16384, 40000, S1, c(S0), &[16384]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        let t0 = Instant::now();
+        let started = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &unbounded())
+            .await
+            .unwrap();
+        assert_eq!(started.state.stored_last_bk_set_update_seq_no, 20000);
+        assert_eq!(h.cursor_calls(), 4);
+        // The policy's backoff: 2 s, 4 s, 8 s.
+        assert_eq!(t0.elapsed(), Duration::from_secs(14));
+
+        // A bounded policy gives up once its budget is spent, the last sleep
+        // cut to fit, and writes nothing.
+        let h = FakeHistory {
+            cursor_failures: AtomicUsize::new(usize::MAX),
+            ..world()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        let bounded = BuildPolicy {
+            transient_budget: Some(Duration::from_secs(5)),
+            ..unbounded()
+        };
+        let t0 = Instant::now();
+        let e = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &bounded)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, BkStartupError::ContractFields(_)), "{e}");
+        assert_eq!(t0.elapsed(), Duration::from_secs(5));
+        assert_eq!(h.snapshot_calls(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contract_lookup_fails_at_once_on_what_a_retry_cannot_cure() {
+        // A server without the field: one question, no wait.
+        let h = FakeHistory {
+            cursor_unknown_field: true,
+            ..world()
+        };
+        let chain = chain_state(16384, 40000, S1, c(S0), &[16384]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        let t0 = Instant::now();
+        let e = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &unbounded())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, BkStartupError::ContractFields(_)), "{e}");
+        assert!(e.to_string().contains("does not know field"), "{e}");
+        assert_eq!(h.cursor_calls(), 1);
+        assert_eq!(t0.elapsed(), Duration::ZERO);
+
+        // A hold window with no previous commitment on the contract.
+        let h = world();
+        let chain = chain_state(16384, 40000, S1, [0u8; 32], &[16384]);
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        let e = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &unbounded())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, BkStartupError::ContractFields(_)), "{e}");
+        assert!(e.to_string().contains("storedPrevBkSetCommitment"), "{e}");
+        assert_eq!(h.calls(), 0);
+        assert_eq!(t0.elapsed(), Duration::ZERO);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn contract_mismatch_and_stop_write_nothing() {
+        let h = world();
+        // The leaves say S1 signs 49152; the contract is taken to hold S0.
+        let chain = chain_state(49152, 40000, S0, c(S0), &[16384, 32768, 49152]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let local = load_mirror(&paths);
+        let decision = decide_on(&local, &chain);
+        assert_eq!(decision_kind(&decision), "resurrect");
+        let e = startup_bk(decision, local, &chain, &paths, STRIDE, &h, &no_wait())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, BkStartupError::ContractMismatch { .. }), "{e}");
+
+        let e = startup_bk(
+            StartupDecision::Stop {
+                reason: "windows diverge".into(),
+            },
+            load_mirror(&paths),
+            &chain,
+            &paths,
+            STRIDE,
+            &NoGraphql,
+            &no_wait(),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("windows diverge"), "{e}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

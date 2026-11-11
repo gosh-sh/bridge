@@ -380,8 +380,9 @@ enum Cmd {
     /// Live AN→ETH daemon: GraphQL + `LiveProverDriver` → `verifyBlock` /
     /// `applyBkSetUpdate` (Alina live-integration plan).
     ///
-    /// Requires SRS/PKs under `--params-dir`, shellnet (or local) GQL, and a
-    /// BK-set JSON fallback. Prover state lives under `--prover-state-dir`.
+    /// Requires SRS/PKs under `--params-dir` and a GraphQL server that serves
+    /// `blockchain.latestBkSet` (gql-server >= 1.5.0): the starting BK set is
+    /// built from it. Prover state lives under `--prover-state-dir`.
     DaemonLive {
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
@@ -424,13 +425,6 @@ enum Cmd {
         /// when missing.
         #[arg(long, env = "BRIDGE_LOG_DIR")]
         log_dir: PathBuf,
-        /// Fallback BK-set JSON if GQL fetch fails at startup.
-        #[arg(
-            long,
-            env = "BRIDGE_BK_SET_CONFIG",
-            default_value = "../bridge-prover-libraries/bk_set.shellnet.json"
-        )]
-        bk_set_config: PathBuf,
         /// Optional explicit bootstrap seqno (`SeedPolicy::Explicit`).
         #[arg(long, env = "BRIDGE_BOOTSTRAP_SEQNO")]
         bootstrap_seqno: Option<u64>,
@@ -912,7 +906,6 @@ async fn main() -> anyhow::Result<()> {
             prover_state_dir,
             work_dir,
             log_dir: _,
-            bk_set_config,
             bootstrap_seqno,
             backoff_initial_secs,
             backoff_max_secs,
@@ -989,7 +982,6 @@ async fn main() -> anyhow::Result<()> {
                 params_dir,
                 prover_state_dir,
                 work_dir,
-                bk_set_config,
                 bootstrap_seqno,
                 backoff,
                 aggregation,
@@ -2323,6 +2315,20 @@ struct C12AggregationCfg {
     pk_cache_dir: PathBuf,
 }
 
+/// How `daemon-live` builds its starting BK set: transient failures back off
+/// like the tick (`--backoff-initial-secs`, `--backoff-max-secs`,
+/// `--backoff-multiplier`) and are retried without a ceiling; three data
+/// failures stop the daemon.
+fn build_policy_from(backoff: &BackoffConfig) -> bridge_prover_lib::bk_set_history::BuildPolicy {
+    bridge_prover_lib::bk_set_history::BuildPolicy {
+        data_attempts: 3,
+        transient_budget: None,
+        backoff_initial: backoff.initial,
+        backoff_max: backoff.max,
+        backoff_multiplier: backoff.multiplier,
+    }
+}
+
 // Daemon wiring handler: the args mirror distinct CLI flags, so grouping them
 // into a struct would only add indirection.
 #[allow(clippy::too_many_arguments)]
@@ -2336,7 +2342,6 @@ async fn run_daemon_live(
     params_dir: PathBuf,
     prover_state_dir: PathBuf,
     work_dir: PathBuf,
-    bk_set_config: PathBuf,
     bootstrap_seqno: Option<u64>,
     backoff: BackoffConfig,
     aggregation: C12AggregationCfg,
@@ -2345,13 +2350,12 @@ async fn run_daemon_live(
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
     use bridge_prover_lib::{
-        bk_set_bootstrap,
         bridge_state::BridgeState,
         keys::KeyManager,
-        live_driver::{LiveProverConfig, LiveProverDriver, SeedPolicy, HISTORY_WINDOW_SIZE},
-        prover_bk_set::ProverBkSet,
+        live_driver::{LiveProverConfig, LiveProverDriver, HISTORY_WINDOW_SIZE},
         transcript::TranscriptKind,
     };
+    use bridge_relayer_daemon::bk_startup::{startup_bk, startup_bk_or_shutdown, StartupBk};
     use tokio::sync::Mutex;
 
     std::fs::create_dir_all(&prover_state_dir)?;
@@ -2368,8 +2372,6 @@ async fn run_daemon_live(
         "daemon-live: service directories",
     );
     let state_paths = StatePaths::under(&prover_state_dir);
-    let prover_state_path = state_paths.prover_state_json.clone();
-    let prover_bk_set_path = state_paths.prover_bk_set_json.clone();
 
     // Primary + failover endpoints with the daemon's retry policy: any
     // failed attempt (transport, HTTP status, GraphQL `errors`, missing
@@ -2389,85 +2391,19 @@ async fn run_daemon_live(
         "daemon-live: GraphQL endpoints",
     );
 
-    // Load BK set via the shared bootstrap helper (aligned with
-    // `bridge-prover-daemon/src/main.rs`). Mode is selected by
-    // `BRIDGE_BK_SET_BOOTSTRAP=file|fold_at_height`; `fold_at_height`
-    // uses `bk_set_at_height` to reconstruct the committee at
-    // `BRIDGE_BK_SET_TARGET_SEQNO` (falls back to `bootstrap_seqno`)
-    // by folding `bkSetUpdates` onto the JSON genesis anchor.
-    let bk_set_config_str = bk_set_config
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("bk_set_config path not UTF-8"))?
-        .to_string();
-    let bk_set = bk_set_bootstrap::load_bk_set(&gql, &bk_set_config_str, bootstrap_seqno)
-        .await
-        .map_err(|e| anyhow::anyhow!("load BK set: {e}"))?;
-
-    info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
-    let mut key_manager = KeyManager::new(&params_dir);
-    key_manager
-        .ensure_primary_keys(&bk_set)
-        .map_err(|e| anyhow::anyhow!("ensure_primary_keys: {e}"))?;
-    key_manager
-        .ensure_fallback_keys(&bk_set)
-        .map_err(|e| anyhow::anyhow!("ensure_fallback_keys: {e}"))?;
-    key_manager
-        .ensure_layer_keys()
-        .map_err(|e| anyhow::anyhow!("ensure_layer_keys: {e}"))?;
-
-    let state_path_str = prover_state_path
+    let state_path_str = state_paths
+        .prover_state_json
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("prover_state path not UTF-8"))?;
     let state = BridgeState::load(state_path_str, HISTORY_WINDOW_SIZE as usize)
         .map_err(|e| anyhow::anyhow!("load BridgeState: {e}"))?;
 
-    let bk_path_str = prover_bk_set_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("prover_bk_set path not UTF-8"))?;
-    let prover_bk_set = match ProverBkSet::load(bk_path_str)
-        .map_err(|e| anyhow::anyhow!("load ProverBkSet: {e}"))?
-    {
-        Some(loaded) => {
-            if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
-                anyhow::bail!(
-                    "prover_bk_set commitment {} disagrees with prover_state {} — delete BOTH \
-                     under {} or restore a paired backup",
-                    hex::encode(loaded.commitment),
-                    hex::encode(state.stored_bk_set_commitment),
-                    prover_state_dir.display(),
-                );
-            }
-            loaded
-        },
-        None => {
-            let pbs = ProverBkSet::from_pubkeys(&bk_set, 0);
-            pbs.save(bk_path_str)
-                .map_err(|e| anyhow::anyhow!("save ProverBkSet: {e}"))?;
-            info!(
-                signers = pbs.pubkeys_hex.len(),
-                "bootstrapped prover_bk_set.json"
-            );
-            pbs
-        },
-    };
-
-    // Shared startup guard (parity with bridge-prover-daemon): reject the
-    // "stale ./state on top of a re-initialised chain" configuration
-    // before we hand off to LiveProverDriver.
-    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(&bk_set_config_str, &prover_bk_set)?;
-
-    // Since bridge-prover-lib's 2026-07-27 refactor, `LiveProverDriver`
-    // owns `prover_bk_set` as the sole BK-pubkey source and derives its
-    // in-driver pubkey table on demand via `prover_bk_set.pubkeys()`.
-    // The relayer no longer passes a separate `bk_set` argument.
-
     // ── Startup routing ────────────────────────────────────────────
     // Read the *full* on-chain state (four scalars + all 10 layer
     // windows) once, then hand it to `startup_decide::decide()` which
-    // returns one of {Cold, WarmResume, Resurrect, Stop}. This replaces
-    // both the old 3-arm seed_policy match AND the late "startup
-    // drift" bail below — a shared test bridge that a co-tester has
-    // advanced now cleanly resurrects instead of aborting.
+    // returns one of {Cold, WarmResume, Resurrect, ResyncBkFromContract,
+    // Stop}. `bk_startup::startup_bk` then builds the mirror the driver
+    // starts with and the BK set that mirror needs.
     info!(
         request_timeout_secs = rpc_request_timeout_from_env()?.as_secs(),
         "daemon-live: Ethereum RPC",
@@ -2535,63 +2471,56 @@ async fn run_daemon_live(
         window_size: HISTORY_WINDOW_SIZE as usize,
         anchor_level: anchor_mode.level(),
     });
-    let (state, seed_policy) = match decision {
-        bridge_relayer_daemon::StartupDecision::Cold {
-            policy,
-        } => {
-            info!(
-                ?policy,
-                "startup: Cold — contract at genesis, bootstrapping"
-            );
-            (state, policy)
-        },
-        bridge_relayer_daemon::StartupDecision::ResyncBkFromContract {
-            ..
-        } => anyhow::bail!("startup routing: ResyncBkFromContract is not wired yet"),
-        bridge_relayer_daemon::StartupDecision::WarmResume => {
-            let behind = state.stored_last_seen_block_seq_no < chain_full.last_seen_block_seq_no
-                || state.stored_last_bk_set_update_seq_no < chain_full.last_bk_set_update_seq_no;
-            if behind {
-                info!(
-                    local_last_seen = state.stored_last_seen_block_seq_no,
-                    chain_last_seen = chain_full.last_seen_block_seq_no,
-                    local_bk_upd = state.stored_last_bk_set_update_seq_no,
-                    chain_bk_upd = chain_full.last_bk_set_update_seq_no,
-                    "startup: WarmResume — local cursor is behind the contract in the BK-set hold \
-                     window; bundles the chain already verified are acked before the rotation"
-                );
-            } else {
-                info!(
-                    last_seen = state.stored_last_seen_block_seq_no,
-                    "startup: WarmResume — local state matches the chain",
-                );
-            }
-            (state, SeedPolicy::Resume)
-        },
-        bridge_relayer_daemon::StartupDecision::Resurrect {
-            fresh_state,
-        } => {
-            let rebuilt = *fresh_state;
-            info!(
-                chain_last_seen = chain_full.last_seen_block_seq_no,
-                "startup: Resurrect — rebuilding BridgeState from on-chain snapshot",
-            );
-            // Persist the resurrected state atomically before we build
-            // the driver, so a subsequent crash-and-restart sees a
-            // matching local mirror (which would then take the
-            // WarmResume path).
-            rebuilt
-                .save(state_path_str)
-                .map_err(|e| anyhow::anyhow!("save resurrected BridgeState: {e}"))?;
-            (rebuilt, SeedPolicy::Resume)
-        },
-        bridge_relayer_daemon::StartupDecision::Stop {
-            reason,
-        } => {
-            anyhow::bail!("startup routing STOP: {reason}");
-        },
+    // The BK set comes from `prover_bk_set.json` when it fits the mirror,
+    // otherwise from GraphQL, checked against the contract. Nothing is
+    // written until it is in hand, so a signal while it waits for GraphQL
+    // stops the daemon with the files as they were.
+    //
+    // One shutdown future serves the startup and the loop: once polled, the
+    // process handles SIGINT/SIGTERM itself, and a signal that arrives while
+    // the keys load is kept for the loop instead of being lost.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let policy = build_policy_from(&backoff);
+    let started = startup_bk_or_shutdown(
+        startup_bk(
+            decision,
+            state,
+            &chain_full,
+            &state_paths,
+            anchor_mode.stride(),
+            &gql,
+            &policy,
+        ),
+        &mut shutdown,
+    )
+    .await?;
+    let Some(StartupBk {
+        state,
+        seed_policy,
+        seed_bk,
+        prover_bk_set,
+    }) = started
+    else {
+        info!("daemon-live: stopped during startup");
+        return Ok(());
     };
     info!(?seed_policy, "LiveProverDriver seed policy");
+
+    let bk_set = prover_bk_set
+        .pubkeys()
+        .map_err(|e| anyhow::anyhow!("prover BK set keys: {e}"))?;
+    info!(params_dir = %params_dir.display(), "loading KeyManager (ensure keys)");
+    let mut key_manager = KeyManager::new(&params_dir);
+    key_manager
+        .ensure_primary_keys(&bk_set)
+        .map_err(|e| anyhow::anyhow!("ensure_primary_keys: {e}"))?;
+    key_manager
+        .ensure_fallback_keys(&bk_set)
+        .map_err(|e| anyhow::anyhow!("ensure_fallback_keys: {e}"))?;
+    key_manager
+        .ensure_layer_keys()
+        .map_err(|e| anyhow::anyhow!("ensure_layer_keys: {e}"))?;
 
     let driver = LiveProverDriver::new(gql, key_manager, state, prover_bk_set, LiveProverConfig {
         seed_policy,
@@ -2601,6 +2530,8 @@ async fn run_daemon_live(
         // independently re-fetched + re-proved every bundle.
         transcript: TranscriptKind::Poseidon,
         anchor_mode,
+        // On Cold, the contract's BK fields rather than the seed block's.
+        seed_bk,
         ..Default::default()
     })
     .map_err(|e| anyhow::anyhow!("LiveProverDriver::new: {e}"))?;
@@ -2615,7 +2546,7 @@ async fn run_daemon_live(
     // `Resurrect` rebuilds the local mirror before the driver is even
     // constructed, and `WarmResume` is also the hold window, where the
     // local cursor is behind a rotation the contract already accepted.
-    // The log just above says which of the two it was.
+    // `startup_bk` logs which of the two it was.
     let bridge = Arc::new(bridge_probe);
 
     // Anchor-level cross-check. Decision logic and the full truth table
@@ -2708,16 +2639,17 @@ async fn run_daemon_live(
         &gql_endpoint,
         &params_dir,
         &prover_state_dir,
+        shutdown,
     )
     .await
 }
 
 /// Build a Relayer, run the startup drift audit, then drive
-/// `run_until_shutdown`. Generic over the source types so both aggregation-on
-/// and aggregation-off paths in [`run_daemon_live`] share the same startup +
-/// run wiring.
+/// `run_until_shutdown` until `shutdown` resolves. Generic over the source
+/// types so both aggregation-on and aggregation-off paths in
+/// [`run_daemon_live`] share the same startup + run wiring.
 #[allow(clippy::too_many_arguments)]
-async fn spawn_and_run<S, U, B>(
+async fn spawn_and_run<S, U, B, D>(
     cfg: RelayerConfig,
     source: Arc<S>,
     bk_update_source: Arc<U>,
@@ -2726,11 +2658,13 @@ async fn spawn_and_run<S, U, B>(
     gql_endpoint: &str,
     params_dir: &Path,
     prover_state_dir: &Path,
+    shutdown: D,
 ) -> anyhow::Result<()>
 where
     S: bridge_relayer_daemon::source::BlockSource + 'static,
     U: bridge_relayer_daemon::source::BkUpdateSource + 'static,
     B: bridge_relayer_daemon::bridge::BridgeClient + 'static,
+    D: std::future::Future<Output = ()>,
 {
     let bundle_stride = cfg.bundle_stride;
     let mut relayer = Relayer::new(cfg, source, bk_update_source, bridge)?;
@@ -2756,7 +2690,6 @@ where
     }
 
     let metrics = RelayerMetrics::new();
-    let shutdown = shutdown_signal();
     info!(
         gql = %gql_endpoint,
         params = %params_dir.display(),
@@ -3196,5 +3129,123 @@ mod help_tests {
     #[test]
     fn help_prints_no_credential_from_the_environment() {
         assert_hidden(&Args::command(), "relayer");
+    }
+}
+
+#[cfg(test)]
+mod daemon_live_startup_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bridge_prover_lib::{
+        bk_set_history::BkSetHistory,
+        bk_set_replay::{BkSetSnapshot, BkSetUpdateRow, BlockLeaves},
+        bridge_state::{BridgeState, EthBridgeContractState, HistoryWindow},
+    };
+    use bridge_relayer_daemon::{
+        bk_startup::{startup_bk, startup_bk_or_shutdown},
+        StartupDecision,
+    };
+
+    use super::*;
+
+    #[test]
+    fn daemon_live_has_no_bk_set_config_flag() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let live = cmd.find_subcommand("daemon-live").unwrap();
+        assert!(live
+            .get_arguments()
+            .all(|a| a.get_long() != Some("bk-set-config")
+                && a.get_env().is_none_or(|e| e != "BRIDGE_BK_SET_CONFIG")));
+    }
+
+    #[test]
+    fn build_policy_follows_the_backoff_flags() {
+        let p = build_policy_from(&BackoffConfig {
+            initial: Duration::from_secs(5),
+            max: Duration::from_secs(90),
+            multiplier: 3,
+        });
+        assert_eq!(
+            (
+                p.backoff_initial,
+                p.backoff_max,
+                p.backoff_multiplier,
+                p.transient_budget,
+                p.data_attempts
+            ),
+            (Duration::from_secs(5), Duration::from_secs(90), 3, None, 3)
+        );
+    }
+
+    /// A gql-server that has no snapshot yet, however often it is asked.
+    #[derive(Default)]
+    struct NoSnapshotYet {
+        asked: AtomicUsize,
+    }
+
+    impl BkSetHistory for NoSnapshotYet {
+        async fn latest_bk_set(&self) -> anyhow::Result<Option<BkSetSnapshot>> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        async fn bk_set_updates(&self, _: u64, _: u64) -> anyhow::Result<Vec<BkSetUpdateRow>> {
+            Ok(Vec::new())
+        }
+
+        async fn block_leaves(&self, _: u64) -> anyhow::Result<Option<BlockLeaves>> {
+            Ok(None)
+        }
+
+        async fn last_update_at_or_below(&self, _: u64) -> anyhow::Result<Option<u64>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_while_waiting_for_a_snapshot_leaves_disk_untouched() {
+        const W: usize = 4;
+        const STRIDE: u64 = 16384;
+        let mut windows: [HistoryWindow; bridge_prover_lib::bridge_state::MAX_LAYERS] =
+            std::array::from_fn(|_| HistoryWindow::new(W));
+        windows[0].append([1; 32], STRIDE);
+        let chain = EthBridgeContractState {
+            last_seen_block_seq_no: STRIDE,
+            bk_set_commitment: [7; 32],
+            last_bk_set_update_seq_no: 0,
+            prev_bk_set_commitment: [0; 32],
+            genesis_prev_max_level_layer_hash: [0; 32],
+            layer_windows: windows,
+        };
+        // A Resurrect writes both files once the set is built.
+        let local = BridgeState::new(W);
+        let decision = bridge_relayer_daemon::startup_decide(bridge_relayer_daemon::DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 1,
+        });
+        assert!(
+            matches!(decision, StartupDecision::Resurrect { .. }),
+            "{decision:?}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let h = NoSnapshotYet::default();
+        let policy = build_policy_from(&BackoffConfig::default());
+
+        let started = startup_bk_or_shutdown(
+            startup_bk(decision, local, &chain, &paths, STRIDE, &h, &policy),
+            tokio::time::sleep(Duration::from_secs(600)),
+        )
+        .await;
+        assert!(matches!(started, Ok(None)), "{started:?}");
+        assert!(
+            h.asked.load(Ordering::SeqCst) > 1,
+            "the build was not waiting for a snapshot"
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

@@ -169,6 +169,24 @@ pub enum DriverError {
     #[error("driver state inconsistent with chain: {0}")]
     StateInconsistent(#[source] anyhow::Error),
 
+    /// The driver's set does not hash to leaf `[2]` of the rotation block at
+    /// `seq_no`, the set that signs it: the driver follows another BK-set
+    /// history than the chain GraphQL serves. Non-retryable — the same set
+    /// meets the same block again.
+    #[error(
+        "BK set out of sync with the chain at rotation {seq_no}: leaf [2] of its block is {}, the \
+         prover's set hashes to {}",
+        hex::encode(expected),
+        hex::encode(actual)
+    )]
+    BkSetOutOfSync {
+        seq_no: u64,
+        /// Leaf `[2]` of the rotation block.
+        expected: [u8; 32],
+        /// Commitment of the driver's set.
+        actual: [u8; 32],
+    },
+
     /// `ack_bk_update` refused because the next key block at
     /// `cursor + stride` still lies at or below the rotation's
     /// `block_seq_no` — under the `_expectedBkSetFor` rule
@@ -878,7 +896,7 @@ impl LiveProverDriver {
     /// [`Self::poll_next_bk_update`]: a block without leaves, or whose tree
     /// does not match its id, is [`DriverError::GqlSchema`]; a block that does
     /// not lead from the driver's set to its leaf `[3]` is
-    /// [`DriverError::StateInconsistent`] (wrong leaf `[2]`) or
+    /// [`DriverError::BkSetOutOfSync`] (wrong leaf `[2]`) or
     /// [`DriverError::GqlSchema`].
     pub async fn poll_next_applied_bk_update(
         &mut self,

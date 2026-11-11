@@ -105,6 +105,19 @@ enum AckStubKind {
 struct AckStub {
     last_bk_seq: u64,
     kind: AckStubKind,
+    /// What both rotation polls of the driver fail with. `None`: a poll is
+    /// not expected, and fails saying so.
+    poll_error: Option<fn() -> DriverError>,
+}
+
+#[cfg(test)]
+impl AckStub {
+    fn poll_err(&self, unexpected: &str) -> RelayerError {
+        match self.poll_error {
+            Some(err) => map_driver_err(err()),
+            None => RelayerError::other(unexpected),
+        }
+    }
 }
 
 /// Live source sharing one [`LiveProverDriver`] across both lanes.
@@ -157,6 +170,7 @@ impl LiveBlockSource {
             stub: Mutex::new(Some(AckStub {
                 last_bk_seq: 0,
                 kind,
+                poll_error: None,
             })),
             poll_bk_calls: Mutex::new(0),
         }
@@ -366,6 +380,21 @@ fn map_driver_err(e: DriverError) -> RelayerError {
         DriverError::StateInconsistent(inner) => {
             RelayerError::Other(format!("driver state inconsistent: {inner:#}"))
         },
+        // Read as `PendingRotation::rotation` reads commitments: the field
+        // elements the contract stores.
+        DriverError::BkSetOutOfSync {
+            seq_no,
+            expected,
+            actual,
+        } => RelayerError::BkSetDiverged {
+            seq_no,
+            reason: format!(
+                "the prover holds BK set {:#x}, Acki Nacki signs the rotation block with {:#x} \
+                 (its leaf [2])",
+                U256::from_le_bytes(actual),
+                U256::from_le_bytes(expected)
+            ),
+        },
         DriverError::AckTooEarly {
             cursor,
             rotation_seqno,
@@ -459,9 +488,9 @@ impl BkUpdateSource for LiveBlockSource {
         }
 
         #[cfg(test)]
-        if self.stub.lock().await.is_some() {
+        if let Some(stub) = self.stub.lock().await.as_ref() {
             *self.poll_bk_calls.lock().await += 1;
-            return Err(RelayerError::other(
+            return Err(stub.poll_err(
                 "poll_next_bk_update called while the pending rotation should have been reused",
             ));
         }
@@ -510,9 +539,9 @@ impl BkUpdateSource for LiveBlockSource {
         }
 
         #[cfg(test)]
-        if self.stub.lock().await.is_some() {
+        if let Some(stub) = self.stub.lock().await.as_ref() {
             *self.poll_bk_calls.lock().await += 1;
-            return Err(RelayerError::other(
+            return Err(stub.poll_err(
                 "poll_next_applied_bk_update called while a pending rotation should have answered",
             ));
         }
@@ -539,7 +568,11 @@ impl BkUpdateSource for LiveBlockSource {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::Arc,
+        time::Duration,
+    };
 
     use alloy::primitives::U256;
     use anyhow::Context;
@@ -555,8 +588,11 @@ mod tests {
         StatePaths,
     };
     use crate::{
-        bridge::BridgeOnChainState,
-        source::{AckOutcome, AppliedRotation, BkUpdateSource},
+        bridge::{BridgeOnChainState, MockBridgeClient},
+        daemon::BackoffConfig,
+        error::RelayerError,
+        relayer::{Relayer, RelayerConfig},
+        source::{AckOutcome, AppliedRotation, BkUpdateSource, InMemoryBlockSource},
         types::BkSetUpdateData,
     };
 
@@ -768,6 +804,76 @@ mod tests {
                 "{msg}"
             );
         }
+    }
+
+    /// Leaf `[2]` of rotation 20000 is `0xc1c1`; the prover holds `0xf0f0`.
+    fn out_of_sync() -> DriverError {
+        DriverError::BkSetOutOfSync {
+            seq_no: 20_000,
+            expected: U256::from(0xC1C1u64).to_le_bytes(),
+            actual: U256::from(0xF0F0u64).to_le_bytes(),
+        }
+    }
+
+    fn assert_diverged_at_20000(err: &RelayerError) {
+        let RelayerError::BkSetDiverged {
+            seq_no: 20_000,
+            reason,
+        } = err
+        else {
+            panic!("expected BkSetDiverged at 20000, got {err:?}");
+        };
+        assert!(
+            reason.contains("0xf0f0") && reason.contains("0xc1c1"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn an_out_of_sync_set_is_a_diverged_set_naming_both_sides() {
+        assert_diverged_at_20000(&map_driver_err(out_of_sync()));
+    }
+
+    /// Both rotation polls go through the same check of leaf `[2]`.
+    #[tokio::test]
+    async fn both_rotation_polls_report_an_out_of_sync_set_as_diverged() {
+        let src = LiveBlockSource::stubbed(AckStubKind::Accept);
+        src.stub.lock().await.as_mut().unwrap().poll_error = Some(out_of_sync);
+        assert_diverged_at_20000(&src.next_applied_rotation(20_000).await.unwrap_err());
+        assert_diverged_at_20000(&src.fetch_bk_update(20_001).await.unwrap_err());
+        assert_eq!(*src.poll_bk_calls.lock().await, 2);
+    }
+
+    /// The daemon loop stops on it at once instead of retrying the poll.
+    #[tokio::test]
+    async fn the_daemon_stops_when_the_prover_set_is_out_of_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Arc::new(LiveBlockSource::stubbed(AckStubKind::Accept));
+        src.stub.lock().await.as_mut().unwrap().poll_error = Some(out_of_sync);
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(0xC0C0u64),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let mut r = Relayer::new(
+            RelayerConfig::new(dir.path().join("state.json"), 1),
+            Arc::new(InMemoryBlockSource::new()),
+            src.clone(),
+            bridge,
+        )
+        .unwrap();
+        let backoff = BackoffConfig {
+            initial: Duration::from_millis(1),
+            max: Duration::from_millis(10),
+            multiplier: 2,
+        };
+        let run = r.run_until_shutdown(backoff, None, std::future::pending());
+        let err = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the daemon must stop on an out-of-sync BK set")
+            .unwrap_err();
+        assert_diverged_at_20000(&err);
+        assert_eq!(*src.poll_bk_calls.lock().await, 1);
     }
 
     #[test]

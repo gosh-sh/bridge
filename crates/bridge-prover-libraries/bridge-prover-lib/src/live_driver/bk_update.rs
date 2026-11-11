@@ -89,16 +89,21 @@ fn expect_commitment(
 }
 
 /// A row that does not lead from the driver's set to the block's leaf `[3]`.
-/// A wrong leaf `[2]` means the driver is out of sync with the chain; any
-/// other failure is bad data from the node.
+/// A wrong leaf `[2]` means the driver is out of sync with the chain
+/// ([`DriverError::BkSetOutOfSync`]); any other failure is bad data from the
+/// node.
 fn row_error(seq_no: u64, e: ReplayError) -> DriverError {
     match &e {
         ReplayError::Mismatch {
             step: "l2-before-apply",
+            expected,
+            actual,
             ..
-        } => DriverError::state_inconsistent(anyhow::anyhow!(
-            "bk-update {seq_no}: {e} — prover out of sync"
-        )),
+        } => DriverError::BkSetOutOfSync {
+            seq_no,
+            expected: *expected,
+            actual: *actual,
+        },
         _ => DriverError::gql_schema(anyhow::anyhow!("bk-update {seq_no}: {e}")),
     }
 }
@@ -559,17 +564,29 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_l2_is_a_state_mismatch_and_other_row_errors_are_schema_errors() {
+    fn a_wrong_l2_is_out_of_sync_and_other_row_errors_are_schema_errors() {
         let l2 = ReplayError::Mismatch {
             height: 100,
             step: "l2-before-apply",
             expected: [1; 32],
             actual: [2; 32],
         };
-        assert!(matches!(
-            row_error(100, l2),
-            DriverError::StateInconsistent(_)
-        ));
+        let err = row_error(100, l2);
+        assert!(
+            matches!(err, DriverError::BkSetOutOfSync {
+                seq_no: 100,
+                expected: [1, ..],
+                actual: [2, ..],
+            }),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rotation 100")
+                && msg.contains(&hex::encode([1u8; 32]))
+                && msg.contains(&hex::encode([2u8; 32])),
+            "{msg}"
+        );
         let l3 = ReplayError::Mismatch {
             height: 100,
             step: "l3-after-apply",

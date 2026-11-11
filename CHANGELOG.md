@@ -139,9 +139,9 @@ assigns it when the release is tagged.
 - `daemon-live` and `bridge-prover-daemon` can prove a rotation when the bundle at its height was
   verified first.
 - `daemon-live` exits with code 1 (`BK set diverged from the bridge at rotation …`), naming both
-  sides, when a rotation it catches up does not match the contract's BK set; if it stops the same
-  way again after a restart, check that `BRIDGE_GQL_ENDPOINT` serves the network the bridge was
-  deployed for.
+  sides, when its BK set is not the one that signs the next rotation on Acki Nacki or a rotation it
+  catches up does not match the contract's BK set; if it stops the same way again after a restart,
+  check that `BRIDGE_GQL_ENDPOINT` serves the network the bridge was deployed for.
 
 ## [0.8.0] – 2026-11-06
 

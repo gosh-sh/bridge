@@ -346,23 +346,25 @@ pub(crate) fn persist_bk_pair_with(
     Ok(())
 }
 
+/// Anyhow payloads are printed with `{:#}`, so the message keeps every
+/// cause, not only the outermost context.
 fn map_driver_err(e: DriverError) -> RelayerError {
     match e {
-        DriverError::GqlTransient(inner) => RelayerError::AckiNacki(inner.to_string()),
+        DriverError::GqlTransient(inner) => RelayerError::AckiNacki(format!("{inner:#}")),
         DriverError::Bootstrapping {
             seed_seqno,
             chain_head_seqno,
             source,
         } => RelayerError::AckiNacki(format!(
-            "bootstrap seed={seed_seqno} head={chain_head_seqno}: {source}"
+            "bootstrap seed={seed_seqno} head={chain_head_seqno}: {source:#}"
         )),
-        DriverError::GqlSchema(inner) => RelayerError::AckiNacki(format!("gql schema: {inner}")),
+        DriverError::GqlSchema(inner) => RelayerError::AckiNacki(format!("gql schema: {inner:#}")),
         DriverError::ProofGen {
             seq_no,
             source,
-        } => RelayerError::Other(format!("proof-gen failed for {seq_no}: {source}")),
+        } => RelayerError::Other(format!("proof-gen failed for {seq_no}: {source:#}")),
         DriverError::StateInconsistent(inner) => {
-            RelayerError::Other(format!("driver state inconsistent: {inner}"))
+            RelayerError::Other(format!("driver state inconsistent: {inner:#}"))
         },
         DriverError::AckTooEarly {
             cursor,
@@ -371,7 +373,7 @@ fn map_driver_err(e: DriverError) -> RelayerError {
             "ack_bk_update deferred: cursor {cursor} + stride ≤ rotation {rotation_seqno}; retry \
              after the next bundle ack"
         )),
-        DriverError::Other(inner) => RelayerError::Other(inner.to_string()),
+        DriverError::Other(inner) => RelayerError::Other(format!("{inner:#}")),
     }
 }
 
@@ -540,14 +542,18 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use alloy::primitives::U256;
+    use anyhow::Context;
     use bridge_prover_lib::{
         bridge_state::BridgeState,
-        live_driver::{BkUpdateDelta, BkUpdateProofArtifacts, BundleFinalizationType},
+        live_driver::{BkUpdateDelta, BkUpdateProofArtifacts, BundleFinalizationType, DriverError},
         prover_bk_set::ProverBkSet,
         transcript::TranscriptKind,
     };
 
-    use super::{persist_bk_pair_with, AckStubKind, LiveBlockSource, PendingRotation, StatePaths};
+    use super::{
+        map_driver_err, persist_bk_pair_with, AckStubKind, LiveBlockSource, PendingRotation,
+        StatePaths,
+    };
     use crate::{
         bridge::BridgeOnChainState,
         source::{AckOutcome, AppliedRotation, BkUpdateSource},
@@ -729,6 +735,39 @@ mod tests {
         assert_eq!(src.next_applied_rotation(20_000).await.unwrap(), None);
         assert!(src.fetch_bk_update(20_001).await.unwrap().is_some());
         assert_eq!(*src.poll_bk_calls.lock().await, 0);
+    }
+
+    /// The operator needs the cause, not only the outermost context.
+    #[test]
+    fn mapped_driver_errors_keep_the_cause() {
+        fn chained() -> anyhow::Error {
+            Err::<(), _>(anyhow::anyhow!("connection refused"))
+                .context("bk-update 20000: GQL block fetch")
+                .unwrap_err()
+        }
+        let mapped = [
+            map_driver_err(DriverError::GqlTransient(chained())),
+            map_driver_err(DriverError::GqlSchema(chained())),
+            map_driver_err(DriverError::ProofGen {
+                seq_no: 20_000,
+                source: chained(),
+            }),
+            map_driver_err(DriverError::StateInconsistent(chained())),
+            map_driver_err(DriverError::Bootstrapping {
+                seed_seqno: 16_384,
+                chain_head_seqno: 100,
+                source: chained(),
+            }),
+            map_driver_err(DriverError::Other(chained())),
+        ];
+        for err in mapped {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("bk-update 20000: GQL block fetch")
+                    && msg.contains("connection refused"),
+                "{msg}"
+            );
+        }
     }
 
     #[test]

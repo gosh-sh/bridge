@@ -2476,9 +2476,12 @@ async fn run_daemon_live(
     // written until it is in hand, so a signal while it waits for GraphQL
     // stops the daemon with the files as they were.
     //
-    // One shutdown future serves the startup and the loop: once polled, the
-    // process handles SIGINT/SIGTERM itself, and a signal that arrives while
-    // the keys load is kept for the loop instead of being lost.
+    // One shutdown future serves the startup and the loop. Once it has been
+    // polled, the process handles SIGINT/SIGTERM itself instead of dying on
+    // them. Key loading below is synchronous and cannot be interrupted: a
+    // signal that arrives while the keys load, or later during startup, is
+    // acted on only when startup is over, and `spawn_and_run` then exits
+    // before the first tick.
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let policy = build_policy_from(&backoff);
@@ -2644,6 +2647,19 @@ async fn run_daemon_live(
     .await
 }
 
+/// Whether `shutdown` has already resolved, without waiting for it. Once it
+/// has, it must not be polled again.
+async fn shutdown_already_requested<F>(shutdown: std::pin::Pin<&mut F>) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        () = shutdown => true,
+        () = std::future::ready(()) => false,
+    }
+}
+
 /// Build a Relayer, run the startup drift audit, then drive
 /// `run_until_shutdown` until `shutdown` resolves. Generic over the source
 /// types so both aggregation-on and aggregation-off paths in
@@ -2690,6 +2706,14 @@ where
     }
 
     let metrics = RelayerMetrics::new();
+    // The loop looks at `shutdown` only after its first tick. A stop asked
+    // for while the daemon was starting is honoured here instead, so no
+    // tick runs and no transaction is sent after it.
+    tokio::pin!(shutdown);
+    if shutdown_already_requested(shutdown.as_mut()).await {
+        info!("daemon-live: stop requested during startup; exiting before the first tick");
+        return Ok(());
+    }
     info!(
         gql = %gql_endpoint,
         params = %params_dir.display(),
@@ -3247,5 +3271,78 @@ mod daemon_live_startup_tests {
             "the build was not waiting for a snapshot"
         );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_already_requested_never_waits() {
+        let fired = std::future::ready(());
+        tokio::pin!(fired);
+        assert!(shutdown_already_requested(fired.as_mut()).await);
+        let pending = std::future::pending::<()>();
+        tokio::pin!(pending);
+        assert!(!shutdown_already_requested(pending.as_mut()).await);
+    }
+
+    /// A block source with nothing to offer, counting how often a tick asks.
+    #[derive(Default)]
+    struct CountingSource {
+        fetches: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for CountingSource {
+        async fn fetch(
+            &self,
+            _: u64,
+        ) -> Result<Option<bridge_relayer_daemon::AnBlockData>, RelayerError> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    /// Ticks the loop of `spawn_and_run` ran before `shutdown` stopped it.
+    async fn ticks_until(shutdown: impl std::future::Future<Output = ()>) -> usize {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(CountingSource::default());
+        let bridge = Arc::new(bridge_relayer_daemon::MockBridgeClient::with_genesis(
+            alloy::primitives::U256::from(1u64),
+            alloy::primitives::U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        spawn_and_run(
+            RelayerConfig::new(
+                dir.path().join(RELAYER_STATE_FILE_NAME),
+                bridge_prover_lib::BUNDLE_STRIDE_L1,
+            ),
+            Arc::clone(&source),
+            Arc::new(EmptyBkUpdateSource),
+            bridge,
+            BackoffConfig::default(),
+            "http://gql.invalid",
+            dir.path(),
+            dir.path(),
+            shutdown,
+        )
+        .await
+        .unwrap();
+        source.fetches.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_requested_during_startup_runs_no_tick() {
+        // Polled while the startup waited, signalled while the keys loaded.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async {
+            let _ = rx.await;
+        };
+        tokio::pin!(shutdown);
+        assert!(!shutdown_already_requested(shutdown.as_mut()).await);
+        tx.send(()).unwrap();
+        assert_eq!(ticks_until(shutdown).await, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_stop_request_the_loop_runs() {
+        assert!(ticks_until(tokio::time::sleep(Duration::from_secs(10))).await > 0);
     }
 }

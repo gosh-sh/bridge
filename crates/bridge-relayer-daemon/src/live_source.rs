@@ -374,11 +374,17 @@ impl BkUpdateSource for LiveBlockSource {
         }
 
         let mut d = self.live().lock().await;
-        match d.poll_next_bk_update().await.map_err(map_driver_err)? {
+        match d.poll_next_bk_update(0).await.map_err(map_driver_err)? {
             LiveBkUpdateEvent::Bootstrapping {
                 ..
             }
             | LiveBkUpdateEvent::Nothing => Ok(None),
+            // `0` asks the driver to prove every rotation, so it never answers
+            // with an unproven one.
+            LiveBkUpdateEvent::Applied(delta) => Err(RelayerError::other(format!(
+                "poll_next_bk_update(0) returned an unproven rotation at {}",
+                delta.block_seq_no
+            ))),
             LiveBkUpdateEvent::BkUpdate(u) => {
                 if u.block_seq_no < target {
                     // Re-discovered after a restart, or applied on-chain

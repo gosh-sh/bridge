@@ -298,6 +298,75 @@ pub fn expected_seed_bk_commitment(
     if last_bk_set_update_seq_no == seed_seqno { leaves[3] } else { leaves[2] }
 }
 
+/// The BK fields of a seed: the commitment the state is stamped with and the
+/// rotation cursor past which rotations are drained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedBk {
+    pub commitment: [u8; 32],
+    pub last_bk_set_update_seq_no: u64,
+}
+
+/// What a seed takes from the seed block itself: its layer roots and height.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedWindows {
+    pub layer_hashes: Vec<([u8; 32], u8)>,
+    pub block_height: u64,
+}
+
+async fn query_seed_block(
+    gql: &bridge_gql_fetcher::gql_client::GqlClient,
+    seed_seqno: u64,
+) -> anyhow::Result<bridge_gql_fetcher::gql_client::GqlProofBlock> {
+    gql.query_proof_block_by_seqno(seed_seqno)
+        .await
+        .with_context(|| format!("could not fetch first key block at seq_no={}", seed_seqno))
+}
+
+fn seed_windows_of(
+    block: &bridge_gql_fetcher::gql_client::GqlProofBlock,
+    seed_seqno: u64,
+    anchor_level: u8,
+) -> anyhow::Result<SeedWindows> {
+    let layer_hashes = build_layer_hashes_for_seed(&block.history_proofs, anchor_level)
+        .with_context(|| format!("seed block at seq_no={}", seed_seqno))?;
+    Ok(SeedWindows {
+        layer_hashes,
+        block_height: block.height,
+    })
+}
+
+/// Layer roots and height of the seed block. Its BK-set leaves are not read.
+pub async fn fetch_seed_windows(
+    gql: &bridge_gql_fetcher::gql_client::GqlClient,
+    seed_seqno: u64,
+    anchor_level: u8,
+) -> anyhow::Result<SeedWindows> {
+    seed_windows_of(
+        &query_seed_block(gql, seed_seqno).await?,
+        seed_seqno,
+        anchor_level,
+    )
+}
+
+/// A seed from the seed block's windows and BK fields supplied by the caller.
+/// Nothing here checks `bk` against the seed block.
+pub fn seed_from_windows(
+    w: SeedWindows,
+    seed_seqno: u64,
+    anchor_level: u8,
+    bk: SeedBk,
+) -> BootstrapSeed {
+    BootstrapSeed {
+        schema_version: SEED_SCHEMA_VERSION,
+        layer_hashes: w.layer_hashes,
+        block_height: w.block_height,
+        block_seq_no: seed_seqno,
+        bk_set_commitment: bk.commitment,
+        anchor_level,
+        last_bk_set_update_seq_no: bk.last_bk_set_update_seq_no,
+    }
+}
+
 /// [`fetch_from_node`] plus a chain cross-check of `bk_set_commitment`.
 ///
 /// `fetch_from_node` stamps whatever commitment the caller derived from its
@@ -315,12 +384,7 @@ pub async fn fetch_from_node_verified(
     anchor_level: u8,
     last_bk_set_update_seq_no: u64,
 ) -> anyhow::Result<BootstrapSeed> {
-    let block = gql
-        .query_proof_block_by_seqno(first_key_seqno)
-        .await
-        .with_context(|| {
-            format!("could not fetch first key block at seq_no={}", first_key_seqno)
-        })?;
+    let block = query_seed_block(gql, first_key_seqno).await?;
     let leaves = block.block_merkle_tree_leaves.as_ref().with_context(|| {
         format!(
             "seed block at seq_no={} has no block_merkle_tree_leaves — cannot check the \
@@ -343,18 +407,16 @@ pub async fn fetch_from_node_verified(
         last_bk_set_update_seq_no,
         first_key_seqno,
     );
-    let block_height = block.height;
-    let layer_hashes = build_layer_hashes_for_seed(&block.history_proofs, anchor_level)
-        .with_context(|| format!("seed block at seq_no={}", first_key_seqno))?;
-    Ok(BootstrapSeed {
-        schema_version: SEED_SCHEMA_VERSION,
-        layer_hashes,
-        block_height,
-        block_seq_no: first_key_seqno,
-        bk_set_commitment,
+    let windows = seed_windows_of(&block, first_key_seqno, anchor_level)?;
+    Ok(seed_from_windows(
+        windows,
+        first_key_seqno,
         anchor_level,
-        last_bk_set_update_seq_no,
-    })
+        SeedBk {
+            commitment: bk_set_commitment,
+            last_bk_set_update_seq_no,
+        },
+    ))
 }
 
 #[cfg(test)]

@@ -298,7 +298,8 @@ async fn main() -> anyhow::Result<()> {
         // re-prove Circuit 1, and re-submit the IPC request the verifier
         // already ACK'd.
         if deferred_bk_ack.is_none() {
-            match driver.poll_next_bk_update().await {
+            // `0`: every rotation is proved; this daemon submits each one.
+            match driver.poll_next_bk_update(0).await {
                 Ok(LiveBkUpdateEvent::Bootstrapping {
                     seed_seqno,
                     chain_head_seqno,
@@ -326,6 +327,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Ok(LiveBkUpdateEvent::Nothing) => { /* fall through to bundle poll */ }
+                // Not expected with `0`; handled as a failed poll.
+                Ok(LiveBkUpdateEvent::Applied(delta)) => {
+                    error!(
+                        "poll_next_bk_update(0) returned an unproven rotation at {} — retrying",
+                        delta.block_seq_no
+                    );
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                },
                 Err(e) => {
                     warn!("poll_next_bk_update: {} — retrying", e);
                     tokio::time::sleep(POLL_INTERVAL).await;

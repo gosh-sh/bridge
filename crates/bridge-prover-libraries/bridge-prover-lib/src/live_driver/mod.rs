@@ -27,10 +27,15 @@
 //!   `fr.to_repr()` bytes) so consumers do not transitively pull the halo2
 //!   field type. Our IPC verifier and Sergey's `AnBlockData` both convert
 //!   with a trivial `From` impl on their side.
-//! * **Idempotent acks.** [`LiveProverDriver::ack_bundle`] and
-//!   [`LiveProverDriver::ack_bk_update`] compare `block_seq_no` to the
-//!   in-memory cursor and no-op if the state is already past. This means the
-//!   caller can re-ack after a crash-restart without corrupting state.
+//! * **Idempotent acks.** [`LiveProverDriver::ack_bundle`],
+//!   [`LiveProverDriver::ack_bk_update`] and [`LiveProverDriver::ack_bk_delta`]
+//!   compare `block_seq_no` to the in-memory cursor and no-op if the state is
+//!   already past. This means the caller can re-ack after a crash-restart
+//!   without corrupting state.
+//! * **Rotations already on chain are not proved.** Given the height of the
+//!   last rotation the contract applied, the rotation polls hand back a
+//!   rotation at or below it as a [`BkUpdateDelta`] checked against its block's
+//!   leaves, without a proof.
 //! * **Pending rotations no longer block bundles.** On-chain
 //!   `applyBkSetUpdate(N)` may land before `verifyBlock` covers N.
 //!   The relayer acks this driver only once the next bundle
@@ -101,6 +106,8 @@ mod bundle;
 pub mod thinning;
 
 pub use thinning::find_next_thinned_key_block;
+
+pub use crate::bootstrap::SeedBk;
 
 /// History window `W` — pulled from the vendored `poseidon_dense` constant so
 /// the driver and its callers always agree without depending on any node
@@ -289,6 +296,19 @@ pub struct LiveProverConfig {
     /// [`BkUpdateProofArtifacts::transcript_kind`] so downstream consumers
     /// know which verifier / aggregator path to route to.
     pub transcript: TranscriptKind,
+    /// BK fields to seed the state with, taken from the contract. Used only
+    /// when the driver seeds an uninitialized state:
+    ///
+    /// * `SeedPolicy::Explicit(0)` stamps this commitment and rotation cursor
+    ///   at genesis;
+    /// * any other seed takes only the layer windows and height from the seed
+    ///   block, and these BK fields instead of the seed block's leaf and the
+    ///   last rotation GraphQL reports at the seed.
+    ///
+    /// The commitment must be that of the [`ProverBkSet`] the driver is built
+    /// with. `None` keeps the seed-block checks of
+    /// [`crate::bootstrap::fetch_from_node_verified`].
+    pub seed_bk: Option<SeedBk>,
 }
 
 impl Default for LiveProverConfig {
@@ -298,6 +318,7 @@ impl Default for LiveProverConfig {
             max_bk_updates_per_iter: DEFAULT_MAX_BK_UPDATES_PER_ITER,
             seed_policy: SeedPolicy::Resume,
             transcript: TranscriptKind::Blake2b,
+            seed_bk: None,
         }
     }
 }
@@ -386,6 +407,27 @@ pub enum LiveBkUpdateEvent {
     /// caller MUST call [`LiveProverDriver::ack_bk_update`] once the update
     /// has been successfully applied downstream.
     BkUpdate(BkUpdateProofArtifacts),
+    /// The next rotation is at or below the height the caller reported as
+    /// already applied on chain. It was checked against its block's leaves
+    /// and carries no proof, so it cannot be submitted. The caller acks it
+    /// with [`LiveProverDriver::ack_bk_delta`] once the gate allows.
+    Applied(BkUpdateDelta),
+}
+
+/// A rotation checked against its block, without a proof: the block's
+/// leaf `[2]` matched the driver's set, and the set after the block's changes
+/// matched leaf `[3]`. Enough to rotate the driver, not to call
+/// `applyBkSetUpdate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BkUpdateDelta {
+    pub block_seq_no: u64,
+    pub block_height: u64,
+    /// Leaf `[2]` of the rotation block: the set that signs it.
+    pub old_bk_set_commitment_be: [u8; 32],
+    /// Leaf `[3]` of the rotation block: the set after it.
+    pub new_bk_set_commitment_be: [u8; 32],
+    /// Post-rotation pubkey table, 48-byte compressed BLS pubkeys.
+    pub new_pubkeys: HashMap<u16, Vec<u8>>,
 }
 
 /// Payload for a proven Circuit 1A/1B + Circuit 2 bundle. Pure data —
@@ -479,6 +521,19 @@ pub struct BkUpdateProofArtifacts {
     /// pre-rotation table.
     pub new_pubkeys: HashMap<u16, Vec<u8>>,
     pub attestation_proof_gen_ms: u64,
+}
+
+impl BkUpdateProofArtifacts {
+    /// The rotation these artifacts prove, without the proof.
+    pub fn delta(&self) -> BkUpdateDelta {
+        BkUpdateDelta {
+            block_seq_no: self.block_seq_no,
+            block_height: self.block_height,
+            old_bk_set_commitment_be: self.old_bk_set_commitment_be,
+            new_bk_set_commitment_be: self.new_bk_set_commitment_be,
+            new_pubkeys: self.new_pubkeys.clone(),
+        }
+    }
 }
 
 /// Which attestation circuit was used. Mirrors
@@ -579,10 +634,11 @@ impl LiveProverDriver {
     ///
     /// * **Proof-generating (require `ensure_*_keys` up front, drive
     ///   on-demand PK load/unload internally):** [`poll_next_bundle`],
-    ///   [`poll_next_bk_update`].
-    /// * **State-only, no key access:** [`ack_bundle`], [`ack_bk_update`]
-    ///   (cursor advance + in-memory commitment rotation only),
-    ///   [`snapshot_state`], [`snapshot_prover_bk_set`] (borrow-only
+    ///   [`poll_next_bk_update`] (not for a rotation it reports as applied).
+    /// * **GraphQL only, no key access:** [`poll_next_applied_bk_update`].
+    /// * **State-only, no key access:** [`ack_bundle`], [`ack_bk_update`],
+    ///   [`ack_bk_delta`] (cursor advance + in-memory commitment rotation
+    ///   only), [`snapshot_state`], [`snapshot_prover_bk_set`] (borrow-only
     ///   reads for the caller to persist).
     ///
     /// A read-only consumer that only calls the `snapshot_*` / `ack_*`
@@ -591,8 +647,10 @@ impl LiveProverDriver {
     ///
     /// [`poll_next_bundle`]: Self::poll_next_bundle
     /// [`poll_next_bk_update`]: Self::poll_next_bk_update
+    /// [`poll_next_applied_bk_update`]: Self::poll_next_applied_bk_update
     /// [`ack_bundle`]: Self::ack_bundle
     /// [`ack_bk_update`]: Self::ack_bk_update
+    /// [`ack_bk_delta`]: Self::ack_bk_delta
     /// [`snapshot_state`]: Self::snapshot_state
     /// [`snapshot_prover_bk_set`]: Self::snapshot_prover_bk_set
     pub fn new(
@@ -647,47 +705,7 @@ impl LiveProverDriver {
             );
         }
 
-        // Validate an Explicit seed policy up-front so a mis-configured
-        // daemon fails at construction rather than at the first poll.
-        let stage = match (cfg.seed_policy, state.initialized) {
-            (_, true) => DriverStage::Steady,
-            (SeedPolicy::Resume, false) => {
-                anyhow::bail!(
-                    "LiveProverDriver::new: SeedPolicy::Resume requires an initialized \
-                     BridgeState — got initialized=false"
-                );
-            }
-            // Seed 0 is the network's genesis: a bridge deployed with
-            // `genesisLastSeenBlockSeqNo = 0` and a zero anchor, whose BK set
-            // is the zerostate's. No block is fetched: the state starts
-            // initialized at seq_no 0 with empty windows, so the first bundle
-            // carries last_seen 0 and the zero anchor the contract expects.
-            (SeedPolicy::Explicit(0), false) => {
-                state.initialize_bk_set_commitment(bk_set_commitment_bytes)?;
-                state.initialized = true;
-                state.anchor_level = cfg.anchor_mode.level();
-                info!(
-                    "live_driver: genesis seed — seq_no=0, bk_set_commitment={}",
-                    hex::encode(bk_set_commitment_bytes),
-                );
-                DriverStage::Steady
-            },
-            (SeedPolicy::Explicit(n), false) => {
-                let step = cfg.bundle_stride();
-                anyhow::ensure!(
-                    n % step == 0,
-                    "SeedPolicy::Explicit({}) invalid: must be 0 (genesis) or divisible by \
-                     bundle_stride={} (anchor_mode={:?}, W={}, P={})",
-                    n,
-                    step,
-                    cfg.anchor_mode,
-                    HISTORY_WINDOW_SIZE,
-                    crate::THINNING_FACTOR_P,
-                );
-                DriverStage::NeedsSeed { seed_seqno: Some(n) }
-            }
-            (SeedPolicy::Auto, false) => DriverStage::NeedsSeed { seed_seqno: None },
-        };
+        let stage = initial_stage(&cfg, &mut state, bk_set_commitment_bytes)?;
 
         Ok(Self {
             gql,
@@ -808,18 +826,29 @@ impl LiveProverDriver {
         }
     }
 
-    /// Non-blocking poll for the next bk-set rotation proof.
+    /// Non-blocking poll for the next bk-set rotation.
+    ///
+    /// `applied_on_chain_up_to` is the height of the last rotation the
+    /// contract has applied; `0` proves every rotation.
     ///
     /// Emits [`LiveBkUpdateEvent::Bootstrapping`] while the driver is still
     /// waiting for the seed height, [`LiveBkUpdateEvent::Nothing`] when the
-    /// prover is caught up on rotations, and
+    /// prover is caught up on rotations, [`LiveBkUpdateEvent::Applied`] when
+    /// the next rotation is at or below `applied_on_chain_up_to` (checked
+    /// against its block, no keys loaded, no proof built), and
     /// [`LiveBkUpdateEvent::BkUpdate`] when a fully-proven rotation is
     /// ready for the caller to submit downstream.
-    pub async fn poll_next_bk_update(&mut self) -> DriverResult<LiveBkUpdateEvent> {
-        self.poll_next_bk_update_inner().await
+    pub async fn poll_next_bk_update(
+        &mut self,
+        applied_on_chain_up_to: u64,
+    ) -> DriverResult<LiveBkUpdateEvent> {
+        self.poll_next_bk_update_inner(applied_on_chain_up_to).await
     }
 
-    async fn poll_next_bk_update_inner(&mut self) -> DriverResult<LiveBkUpdateEvent> {
+    async fn poll_next_bk_update_inner(
+        &mut self,
+        applied_on_chain_up_to: u64,
+    ) -> DriverResult<LiveBkUpdateEvent> {
         if let DriverStage::NeedsSeed { .. } = self.stage {
             let (chain_head, still_waiting) = self.advance_bootstrap().await?;
             if let Some(seed_seqno) = still_waiting {
@@ -830,10 +859,29 @@ impl LiveProverDriver {
             }
         }
 
-        match bk_update::drive_next_bk_update(self).await? {
-            Some(artifacts) => Ok(LiveBkUpdateEvent::BkUpdate(artifacts)),
-            None => Ok(LiveBkUpdateEvent::Nothing),
+        bk_update::drive_next_bk_update(self, applied_on_chain_up_to).await
+    }
+
+    /// The next rotation past the driver's cursor, if it is at or below
+    /// `applied_on_chain_up_to`, checked against its block. Never proves:
+    /// `None` when the driver is caught up, while it waits for the seed
+    /// height, or when the next rotation is above `applied_on_chain_up_to`
+    /// (its block is not read then).
+    pub async fn poll_next_applied_bk_update(
+        &mut self,
+        applied_on_chain_up_to: u64,
+    ) -> DriverResult<Option<BkUpdateDelta>> {
+        if let DriverStage::NeedsSeed {
+            ..
+        } = self.stage
+        {
+            let (_, still_waiting) = self.advance_bootstrap().await?;
+            if still_waiting.is_some() {
+                return Ok(None);
+            }
         }
+
+        bk_update::drive_next_applied_bk_update(self, applied_on_chain_up_to).await
     }
 
     /// Acknowledge that `artifacts` was successfully verified and submitted
@@ -875,89 +923,26 @@ impl LiveProverDriver {
     /// downstream. Advances the in-memory [`BridgeState`] +
     /// [`ProverBkSet`] cursors and rotates the driver's in-memory pubkey
     /// table + Poseidon commitment. Idempotent by `block_seq_no`.
+    /// Same as [`Self::ack_bk_delta`] on [`BkUpdateProofArtifacts::delta`].
     pub fn ack_bk_update(
         &mut self,
         artifacts: &BkUpdateProofArtifacts,
     ) -> DriverResult<()> {
-        // Structural guard on the two-slot BK-set model.
-        //
-        // The rotation on-chain (`applyBkSetUpdate(N)`) may land BEFORE
-        // `verifyBlock` has caught up to N — that's the whole point of
-        // `storedPrevBkSetCommitment`. But the prover-side
-        // rotation (this call) must NOT land while any OLD-signed key
-        // block ≤ N still needs bundling: rotating `prover_bk_set` +
-        // `bk_set_commitment_fr` to NEW discards the OLD pubkey table
-        // Circuit 1 witness gen needs for those bundles.
-        //
-        // Threshold: `cursor + stride <= N`. In words: the next key
-        // block at height `cursor + stride` is still ≤ N and therefore
-        // OLD-signed under `_expectedBkSetFor` — must be bundled before
-        // ack. Once `cursor + stride > N`, every OLD-signed key block ≤
-        // N has been covered by an on-chain `verifyBlock`, and the
-        // prover is free to rotate its in-memory set.
-        //
-        // Concretely (stride=16):
-        //   * N=100, cursor=80: cursor+16=96 ≤ 100 → block. Bundle 96
-        //     (OLD-signed) still pending.
-        //   * N=100, cursor=96: cursor+16=112 > 100 → safe. Bundles 80,
-        //     96 done; 112 is post-rotation NEW-signed.
-        //   * N=112 (KB boundary), cursor=96: cursor+16=112 ≤ 112 →
-        //     block. Bundle 112 itself is OLD-signed
-        //     (`_expectedBkSetFor(112)` returns OLD when
-        //     storedLastBkSetUpdateSeqNo == 112).
-        //   * N=112, cursor=112: cursor+16=128 > 112 → safe.
-        //
-        // Idempotent replays (block_seq_no already <= stored cursor) are
-        // handled by the no-op branch inside `ack_bk_update_inner` and
-        // must not trip this guard.
-        let stride = self.cfg.bundle_stride();
-        if artifacts.block_seq_no > self.state.stored_last_bk_set_update_seq_no
-            && self
-                .state
-                .stored_last_seen_block_seq_no
-                .saturating_add(stride)
-                <= artifacts.block_seq_no
-        {
-            return Err(DriverError::AckTooEarly {
-                cursor: self.state.stored_last_seen_block_seq_no,
-                rotation_seqno: artifacts.block_seq_no,
-            });
-        }
-        self.ack_bk_update_inner(artifacts).map_err(DriverError::StateInconsistent)
+        self.ack_bk_delta(&artifacts.delta())
     }
 
-    fn ack_bk_update_inner(
-        &mut self,
-        artifacts: &BkUpdateProofArtifacts,
-    ) -> anyhow::Result<()> {
-        if artifacts.block_seq_no <= self.state.stored_last_bk_set_update_seq_no {
-            info!(
-                "ack_bk_update: no-op — artifacts.block_seq_no={} <= stored_last_bk_set_update={}",
-                artifacts.block_seq_no, self.state.stored_last_bk_set_update_seq_no,
-            );
-            return Ok(());
-        }
-        self.state
-            .apply_bk_set_update(
-                artifacts.old_bk_set_commitment_be,
-                artifacts.new_bk_set_commitment_be,
-                artifacts.block_seq_no,
-            )
-            .context("ack_bk_update: apply_bk_set_update failed")?;
-        self.prover_bk_set
-            .rotate(
-                artifacts.new_bk_set_commitment_be,
-                artifacts.new_pubkeys.clone(),
-                artifacts.block_seq_no,
-            )
-            .context("ack_bk_update: prover_bk_set.rotate failed")?;
-        // Refresh the cached Fr commitment so subsequent bundle /
-        // bk-update proofs use the rotated set. Callers reading the
-        // rotated pubkey table go through `prover_bk_set.pubkeys()`
-        // — no separate in-memory table to sync any more.
-        let (new_fr, _) = poseidon::compute_bk_set_poseidon(&artifacts.new_pubkeys);
-        self.bk_set_commitment_fr = new_fr;
-        Ok(())
+    /// Acknowledge a rotation the contract has applied, proven by this
+    /// driver or taken as [`LiveBkUpdateEvent::Applied`]. Same effect, gate
+    /// ([`DriverError::AckTooEarly`]) and idempotency as
+    /// [`Self::ack_bk_update`].
+    pub fn ack_bk_delta(&mut self, delta: &BkUpdateDelta) -> DriverResult<()> {
+        ack_delta(
+            &mut self.state,
+            &mut self.prover_bk_set,
+            &mut self.bk_set_commitment_fr,
+            self.cfg.bundle_stride(),
+            delta,
+        )
     }
 
     /// Read-only snapshot of the contract-mirror state. Caller persists
@@ -1084,6 +1069,70 @@ impl LiveProverDriver {
         }
 
         // Chain has caught up. Fetch, apply, and transition to Steady.
+        let seed = match self.cfg.seed_bk {
+            Some(bk) => self.seed_with_bk(bk, seed_seqno, chain_head).await?,
+            None => {
+                self.seed_checked_against_the_seed_block(seed_seqno, chain_head)
+                    .await?
+            },
+        };
+        seed.apply(&mut self.state)
+            .map_err(|e| DriverError::Bootstrapping {
+                seed_seqno,
+                chain_head_seqno: chain_head,
+                source: e,
+            })?;
+        info!(
+            "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
+            seed.block_seq_no,
+            seed.block_height,
+            seed.layer_hashes.len(),
+        );
+        self.seed = Some(seed);
+        self.stage = DriverStage::Steady;
+        Ok((chain_head, None))
+    }
+
+    /// The seed with BK fields supplied by the caller
+    /// ([`LiveProverConfig::seed_bk`]). Only the layer windows and the height
+    /// come from the seed block: its leaf is not compared with the set,
+    /// because a rotation applied before the first bundle makes it differ
+    /// from the set in force.
+    async fn seed_with_bk(
+        &self,
+        bk: SeedBk,
+        seed_seqno: u64,
+        chain_head: u64,
+    ) -> DriverResult<BootstrapSeed> {
+        ensure_seed_bk_matches(&bk, self.prover_bk_set.commitment)
+            .map_err(DriverError::StateInconsistent)?;
+        let level = self.cfg.anchor_mode.level();
+        let windows = crate::bootstrap::fetch_seed_windows(&self.gql, seed_seqno, level)
+            .await
+            .map_err(|e| DriverError::Bootstrapping {
+                seed_seqno,
+                chain_head_seqno: chain_head,
+                source: e,
+            })?;
+        info!(
+            "live_driver: seed BK fields from the caller — bk_set_commitment={}, \
+             last_bk_set_update_seq_no={} (seed_seqno={})",
+            hex::encode(bk.commitment),
+            bk.last_bk_set_update_seq_no,
+            seed_seqno,
+        );
+        Ok(crate::bootstrap::seed_from_windows(
+            windows, seed_seqno, level, bk,
+        ))
+    }
+
+    /// The seed with the rotation cursor GraphQL reports at the seed and the
+    /// driver's set checked against the seed block's leaf.
+    async fn seed_checked_against_the_seed_block(
+        &self,
+        seed_seqno: u64,
+        chain_head: u64,
+    ) -> DriverResult<BootstrapSeed> {
         // Both failures below are bootstrap-phase — classify explicitly so
         // callers can distinguish "still waiting for chain head" from
         // "bootstrap machinery itself failed".
@@ -1111,7 +1160,7 @@ impl LiveProverDriver {
         // Verified variant: a bootstrap BK set that is not the chain's set at
         // the seed fails here, naming both commitments, instead of at the
         // first drained rotation.
-        let seed = crate::bootstrap::fetch_from_node_verified(
+        crate::bootstrap::fetch_from_node_verified(
             &self.gql,
             seed_seqno,
             bk_hash_bytes,
@@ -1123,21 +1172,7 @@ impl LiveProverDriver {
             seed_seqno,
             chain_head_seqno: chain_head,
             source: e,
-        })?;
-        seed.apply(&mut self.state).map_err(|e| DriverError::Bootstrapping {
-            seed_seqno,
-            chain_head_seqno: chain_head,
-            source: e,
-        })?;
-        info!(
-            "live_driver: bootstrap seed applied — seq_no={}, height={}, layers={}",
-            seed.block_seq_no,
-            seed.block_height,
-            seed.layer_hashes.len(),
-        );
-        self.seed = Some(seed);
-        self.stage = DriverStage::Steady;
-        Ok((chain_head, None))
+        })
     }
 
     // Accessors used by the sub-modules (crate-visible only).
@@ -1164,9 +1199,173 @@ impl LiveProverDriver {
     }
 }
 
+/// The stage a new driver starts in. `bk_set_commitment` is that of the
+/// driver's [`ProverBkSet`]. Validates an Explicit seed policy up-front so a
+/// mis-configured daemon fails at construction rather than at the first
+/// poll, and stamps the genesis seed into `state`.
+fn initial_stage(
+    cfg: &LiveProverConfig,
+    state: &mut BridgeState,
+    bk_set_commitment: [u8; 32],
+) -> anyhow::Result<DriverStage> {
+    Ok(match (cfg.seed_policy, state.initialized) {
+        (_, true) => DriverStage::Steady,
+        (SeedPolicy::Resume, false) => {
+            anyhow::bail!(
+                "LiveProverDriver::new: SeedPolicy::Resume requires an initialized BridgeState — \
+                 got initialized=false"
+            );
+        },
+        // Seed 0 is the network's genesis: a bridge deployed with
+        // `genesisLastSeenBlockSeqNo = 0` and a zero anchor, whose BK set
+        // is the zerostate's. No block is fetched: the state starts
+        // initialized at seq_no 0 with empty windows, so the first bundle
+        // carries last_seen 0 and the zero anchor the contract expects.
+        // `seed_bk` supplies the commitment and the rotation cursor.
+        (SeedPolicy::Explicit(0), false) => {
+            let (commitment, last_bk_set_update_seq_no) = match cfg.seed_bk {
+                Some(bk) => {
+                    ensure_seed_bk_matches(&bk, bk_set_commitment)?;
+                    (bk.commitment, bk.last_bk_set_update_seq_no)
+                },
+                None => (bk_set_commitment, state.stored_last_bk_set_update_seq_no),
+            };
+            state.initialize_bk_set_commitment(commitment)?;
+            state.stored_last_bk_set_update_seq_no = last_bk_set_update_seq_no;
+            state.initialized = true;
+            state.anchor_level = cfg.anchor_mode.level();
+            info!(
+                "live_driver: genesis seed — seq_no=0, bk_set_commitment={}, \
+                 last_bk_set_update_seq_no={}",
+                hex::encode(commitment),
+                last_bk_set_update_seq_no,
+            );
+            DriverStage::Steady
+        },
+        (SeedPolicy::Explicit(n), false) => {
+            let step = cfg.bundle_stride();
+            anyhow::ensure!(
+                n % step == 0,
+                "SeedPolicy::Explicit({}) invalid: must be 0 (genesis) or divisible by \
+                 bundle_stride={} (anchor_mode={:?}, W={}, P={})",
+                n,
+                step,
+                cfg.anchor_mode,
+                HISTORY_WINDOW_SIZE,
+                crate::THINNING_FACTOR_P,
+            );
+            DriverStage::NeedsSeed {
+                seed_seqno: Some(n),
+            }
+        },
+        (SeedPolicy::Auto, false) => DriverStage::NeedsSeed {
+            seed_seqno: None,
+        },
+    })
+}
+
+/// `seed_bk` must describe the set the driver holds, or the state and the
+/// pubkey table disagree from the first poll on.
+fn ensure_seed_bk_matches(bk: &SeedBk, prover_bk_set_commitment: [u8; 32]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        bk.commitment == prover_bk_set_commitment,
+        "seed_bk commitment {} is not the prover_bk_set commitment {}",
+        hex::encode(bk.commitment),
+        hex::encode(prover_bk_set_commitment),
+    );
+    Ok(())
+}
+
+/// [`LiveProverDriver::ack_bk_delta`] on the driver's BK fields.
+fn ack_delta(
+    state: &mut BridgeState,
+    prover_bk_set: &mut ProverBkSet,
+    bk_set_commitment_fr: &mut Fr,
+    stride: u64,
+    delta: &BkUpdateDelta,
+) -> DriverResult<()> {
+    // Structural guard on the two-slot BK-set model.
+    //
+    // The rotation on-chain (`applyBkSetUpdate(N)`) may land BEFORE
+    // `verifyBlock` has caught up to N — that's the whole point of
+    // `storedPrevBkSetCommitment`. But the prover-side
+    // rotation (this call) must NOT land while any OLD-signed key
+    // block ≤ N still needs bundling: rotating `prover_bk_set` +
+    // `bk_set_commitment_fr` to NEW discards the OLD pubkey table
+    // Circuit 1 witness gen needs for those bundles.
+    //
+    // Threshold: `cursor + stride <= N`. In words: the next key
+    // block at height `cursor + stride` is still ≤ N and therefore
+    // OLD-signed under `_expectedBkSetFor` — must be bundled before
+    // ack. Once `cursor + stride > N`, every OLD-signed key block ≤
+    // N has been covered by an on-chain `verifyBlock`, and the
+    // prover is free to rotate its in-memory set.
+    //
+    // Concretely (stride=16):
+    //   * N=100, cursor=80: cursor+16=96 ≤ 100 → block. Bundle 96 (OLD-signed)
+    //     still pending.
+    //   * N=100, cursor=96: cursor+16=112 > 100 → safe. Bundles 80, 96 done; 112 is
+    //     post-rotation NEW-signed.
+    //   * N=112 (KB boundary), cursor=96: cursor+16=112 ≤ 112 → block. Bundle 112
+    //     itself is OLD-signed (`_expectedBkSetFor(112)` returns OLD when
+    //     storedLastBkSetUpdateSeqNo == 112).
+    //   * N=112, cursor=112: cursor+16=128 > 112 → safe.
+    //
+    // Idempotent replays (block_seq_no already <= stored cursor) are
+    // handled by the no-op branch inside `apply_delta` and must not trip
+    // this guard.
+    if delta.block_seq_no > state.stored_last_bk_set_update_seq_no
+        && state.stored_last_seen_block_seq_no.saturating_add(stride) <= delta.block_seq_no
+    {
+        return Err(DriverError::AckTooEarly {
+            cursor: state.stored_last_seen_block_seq_no,
+            rotation_seqno: delta.block_seq_no,
+        });
+    }
+    apply_delta(state, prover_bk_set, bk_set_commitment_fr, delta)
+        .map_err(DriverError::StateInconsistent)
+}
+
+fn apply_delta(
+    state: &mut BridgeState,
+    prover_bk_set: &mut ProverBkSet,
+    bk_set_commitment_fr: &mut Fr,
+    delta: &BkUpdateDelta,
+) -> anyhow::Result<()> {
+    if delta.block_seq_no <= state.stored_last_bk_set_update_seq_no {
+        info!(
+            "ack_bk_update: no-op — artifacts.block_seq_no={} <= stored_last_bk_set_update={}",
+            delta.block_seq_no, state.stored_last_bk_set_update_seq_no,
+        );
+        return Ok(());
+    }
+    state
+        .apply_bk_set_update(
+            delta.old_bk_set_commitment_be,
+            delta.new_bk_set_commitment_be,
+            delta.block_seq_no,
+        )
+        .context("ack_bk_update: apply_bk_set_update failed")?;
+    prover_bk_set
+        .rotate(
+            delta.new_bk_set_commitment_be,
+            delta.new_pubkeys.clone(),
+            delta.block_seq_no,
+        )
+        .context("ack_bk_update: prover_bk_set.rotate failed")?;
+    // Refresh the cached Fr commitment so subsequent bundle /
+    // bk-update proofs use the rotated set. Callers reading the
+    // rotated pubkey table go through `prover_bk_set.pubkeys()`
+    // — no separate in-memory table to sync any more.
+    let (new_fr, _) = poseidon::compute_bk_set_poseidon(&delta.new_pubkeys);
+    *bk_set_commitment_fr = new_fr;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::{seed_from_windows, SeedWindows};
 
     #[test]
     fn seed_policy_explicit_validates_alignment() {
@@ -1237,5 +1436,218 @@ mod tests {
         // site does not classify explicitly.
         let via_from: DriverError = src().into();
         assert!(matches!(via_from, DriverError::Other(_)));
+    }
+
+    #[test]
+    fn seed_bk_defaults_to_none() {
+        assert!(LiveProverConfig::default().seed_bk.is_none());
+    }
+
+    #[test]
+    fn delta_of_artifacts_keeps_commitments_and_keys() {
+        let keys: HashMap<u16, Vec<u8>> = [(3u16, vec![0xab; 48])].into_iter().collect();
+        let artifacts = BkUpdateProofArtifacts {
+            block_seq_no: 18_000,
+            block_height: 18_001,
+            last_seen_bk_update_seq_no: 16_384,
+            block_id_be: [1; 32],
+            fin_type: BundleFinalizationType::Primary,
+            old_bk_set_commitment_be: [2; 32],
+            new_bk_set_commitment_be: [3; 32],
+            merkle_sibling_h01_be: [4; 32],
+            merkle_sibling_h4_7_be: [5; 32],
+            merkle_sibling_h8_15_be: [6; 32],
+            transcript_kind: TranscriptKind::Poseidon,
+            attestation_proof: vec![7; 8],
+            new_pubkeys: keys.clone(),
+            attestation_proof_gen_ms: 9,
+        };
+        assert_eq!(artifacts.delta(), BkUpdateDelta {
+            block_seq_no: 18_000,
+            block_height: 18_001,
+            old_bk_set_commitment_be: [2; 32],
+            new_bk_set_commitment_be: [3; 32],
+            new_pubkeys: keys,
+        });
+    }
+
+    #[test]
+    fn seed_with_bk_does_not_need_the_seed_leaf() {
+        let (c0, c1) = ([0xc0; 32], [0xc1; 32]);
+        // The seed block's leaves carry C0: the leaf check would refuse C1.
+        let mut leaves = [[0u8; 32]; crate::block_id_tree::BLOCK_ID_TREE_LEAF_COUNT];
+        leaves[2] = c0;
+        leaves[3] = c0;
+        assert_eq!(
+            crate::bootstrap::expected_seed_bk_commitment(&leaves, 16_384, 20_000),
+            c0
+        );
+
+        let windows = SeedWindows {
+            layer_hashes: vec![([0x11; 32], 1), ([0x12; 32], 2)],
+            block_height: 16_390,
+        };
+        let seed = seed_from_windows(windows, 16_384, 2, SeedBk {
+            commitment: c1,
+            last_bk_set_update_seq_no: 20_000,
+        });
+        assert_eq!(
+            (seed.bk_set_commitment, seed.last_bk_set_update_seq_no),
+            (c1, 20_000)
+        );
+        assert_eq!(
+            (seed.block_seq_no, seed.block_height, seed.anchor_level),
+            (16_384, 16_390, 2)
+        );
+        assert_eq!(seed.layer_hashes, vec![([0x11; 32], 1), ([0x12; 32], 2)]);
+        assert_eq!(seed.schema_version, crate::bootstrap::SEED_SCHEMA_VERSION);
+
+        let mut state = BridgeState::new(HISTORY_WINDOW_SIZE as usize);
+        seed.apply(&mut state).unwrap();
+        assert_eq!(state.stored_bk_set_commitment, c1);
+        assert_eq!(state.stored_last_bk_set_update_seq_no, 20_000);
+        assert_eq!(state.stored_last_seen_block_seq_no, 16_384);
+    }
+
+    fn signers(seeds: &[(u16, u64)]) -> HashMap<u16, Vec<u8>> {
+        use halo2_base::halo2_proofs::halo2curves::{
+            bls12_381::{Fr as BlsScalar, G1},
+            group::Curve,
+        };
+        seeds
+            .iter()
+            .map(|(i, s)| {
+                let point = (G1::generator() * BlsScalar::from(*s)).to_affine();
+                (*i, point.to_compressed_be().to_vec())
+            })
+            .collect()
+    }
+
+    /// The BK fields of a warm L2 driver: bundles at 16384, rotations up to
+    /// 15000, set `s0`.
+    fn warm_bk_fields(s0: &HashMap<u16, Vec<u8>>) -> (BridgeState, ProverBkSet, Fr) {
+        let (fr, c0) = poseidon::compute_bk_set_poseidon(s0);
+        let mut state = BridgeState::new(HISTORY_WINDOW_SIZE as usize);
+        state.initialize_bk_set_commitment(c0).unwrap();
+        state
+            .append_bundle(&[([0x11; 32], 1), ([0x12; 32], 2)], 16_384, 16_384)
+            .unwrap();
+        state.anchor_level = 2;
+        state.stored_last_bk_set_update_seq_no = 15_000;
+        (state, ProverBkSet::from_pubkeys(s0, 15_000), fr)
+    }
+
+    #[test]
+    fn ack_bk_delta_keeps_the_too_early_gate() {
+        let s0 = signers(&[(0, 1), (1, 2)]);
+        let s1 = signers(&[(0, 1), (1, 2), (2, 3)]);
+        let (c0, c1) = (
+            crate::bk_set_replay::commitment(&s0),
+            crate::bk_set_replay::commitment(&s1),
+        );
+        let (mut state, mut set, mut fr) = warm_bk_fields(&s0);
+        let stride = crate::AnchorMode::L2.stride();
+        let delta = |seq_no: u64| BkUpdateDelta {
+            block_seq_no: seq_no,
+            block_height: seq_no,
+            old_bk_set_commitment_be: c0,
+            new_bk_set_commitment_be: c1,
+            new_pubkeys: s1.clone(),
+        };
+
+        // 16384 + 16384 <= 40000: the key block at 32768 is still signed by s0.
+        let err = ack_delta(&mut state, &mut set, &mut fr, stride, &delta(40_000)).unwrap_err();
+        assert!(
+            matches!(err, DriverError::AckTooEarly {
+                cursor: 16_384,
+                rotation_seqno: 40_000
+            }),
+            "{err:?}"
+        );
+        assert_eq!(
+            (
+                state.stored_bk_set_commitment,
+                state.stored_last_bk_set_update_seq_no
+            ),
+            (c0, 15_000)
+        );
+        assert_eq!(
+            (set.commitment, set.last_applied_update_seq_no),
+            (c0, 15_000)
+        );
+
+        ack_delta(&mut state, &mut set, &mut fr, stride, &delta(18_000)).unwrap();
+        assert_eq!(
+            (
+                state.stored_bk_set_commitment,
+                state.stored_last_bk_set_update_seq_no
+            ),
+            (c1, 18_000)
+        );
+        assert_eq!(
+            (set.commitment, set.last_applied_update_seq_no),
+            (c1, 18_000)
+        );
+        assert_eq!(set.pubkeys().unwrap(), s1);
+        assert_eq!(fr.to_repr(), c1);
+
+        // The same rotation acked again changes nothing.
+        ack_delta(&mut state, &mut set, &mut fr, stride, &delta(18_000)).unwrap();
+        assert_eq!(
+            (
+                state.stored_bk_set_commitment,
+                state.stored_last_bk_set_update_seq_no
+            ),
+            (c1, 18_000)
+        );
+        assert_eq!(set.last_applied_update_seq_no, 18_000);
+    }
+
+    #[test]
+    fn genesis_seed_takes_the_bk_fields_from_seed_bk() {
+        let c1 = [0xc1; 32];
+        let cfg = LiveProverConfig {
+            anchor_mode: crate::AnchorMode::L2,
+            seed_policy: SeedPolicy::Explicit(0),
+            seed_bk: Some(SeedBk {
+                commitment: c1,
+                last_bk_set_update_seq_no: 20_000,
+            }),
+            ..Default::default()
+        };
+        let mut state = BridgeState::new(HISTORY_WINDOW_SIZE as usize);
+        let stage = initial_stage(&cfg, &mut state, c1).unwrap();
+        assert!(matches!(stage, DriverStage::Steady));
+        assert!(state.initialized);
+        assert_eq!(state.stored_bk_set_commitment, c1);
+        assert_eq!(state.stored_last_bk_set_update_seq_no, 20_000);
+        assert_eq!(state.stored_last_seen_block_seq_no, 0);
+        assert_eq!(state.anchor_level, 2);
+
+        // Without `seed_bk` the cursor stays where the state had it.
+        let cfg = LiveProverConfig {
+            seed_bk: None,
+            ..cfg
+        };
+        let mut state = BridgeState::new(HISTORY_WINDOW_SIZE as usize);
+        initial_stage(&cfg, &mut state, c1).unwrap();
+        assert_eq!(state.stored_bk_set_commitment, c1);
+        assert_eq!(state.stored_last_bk_set_update_seq_no, 0);
+    }
+
+    #[test]
+    fn genesis_seed_refuses_a_seed_bk_of_another_set() {
+        let cfg = LiveProverConfig {
+            seed_policy: SeedPolicy::Explicit(0),
+            seed_bk: Some(SeedBk {
+                commitment: [0xc1; 32],
+                last_bk_set_update_seq_no: 20_000,
+            }),
+            ..Default::default()
+        };
+        let mut state = BridgeState::new(HISTORY_WINDOW_SIZE as usize);
+        let err = initial_stage(&cfg, &mut state, [0xc0; 32]).unwrap_err();
+        assert!(err.to_string().contains("seed_bk"), "{err}");
+        assert!(!state.initialized);
     }
 }

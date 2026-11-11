@@ -1,10 +1,14 @@
 //! Single-iteration bk-set-update handler.
 //! This function does exactly one drain step:
 //! it looks for the next rotation event past
-//! `state.stored_last_bk_set_update_seq_no`, validates the L2/L3 Merkle
-//! constraints, generates the Circuit 1A/1B proof against the OLD set, and
-//! returns the artifacts. Caller advances the driver's cursor via
-//! [`super::LiveProverDriver::ack_bk_update`] after successful downstream
+//! `state.stored_last_bk_set_update_seq_no` and prepares it — fetches the
+//! rotation block, checks its block-id tree, and applies the block's changes
+//! to the driver's set the way the node does, checking leaf `[2]` before and
+//! leaf `[3]` after. A rotation the contract has already applied stops there
+//! and comes back as a [`BkUpdateDelta`] without a proof; any other one gets
+//! the Circuit 1A/1B proof against the OLD set. Caller advances the driver's
+//! cursor via [`super::LiveProverDriver::ack_bk_update`] or
+//! [`super::LiveProverDriver::ack_bk_delta`] after successful downstream
 //! verification.
 //!
 //! Differences from the pre-refactor main.rs:
@@ -19,52 +23,201 @@
 //!   driver ready to re-emit the same event on the next poll — that's the
 //!   intended retry semantics.
 
+use std::{collections::HashMap, time::Instant};
+
 use anyhow::Context;
+use bridge_gql_fetcher::{
+    attestation_fetcher::{self, AttestationEvidence},
+    bk_set_fetcher,
+};
 use tracing::{error, info, warn};
-use std::time::Instant;
 
-use bridge_gql_fetcher::attestation_fetcher::{self, AttestationEvidence};
-use bridge_gql_fetcher::bk_set_fetcher::{self, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED};
-use crate::block_id_tree::BlockIdMerkleTree;
-use bridge_poseidon as poseidon;
-use crate::prover;
+use super::{
+    BkUpdateDelta, BkUpdateProofArtifacts, BundleFinalizationType, DriverError, DriverResult,
+    LiveBkUpdateEvent, LiveProverDriver,
+};
+use crate::{
+    bk_set_replay::{self, ReplayError},
+    block_id_tree::BlockIdMerkleTree,
+    prover,
+};
 
-use super::{BkUpdateProofArtifacts, BundleFinalizationType, DriverError, DriverResult, LiveProverDriver};
+/// `lastSeen` of a rotation proof: the driver's layer cursor, but below the
+/// rotation. Circuit 1A/1B requires the rotation's height above `lastSeen`,
+/// and `applyBkSetUpdate` takes any value below it; the bundle at the
+/// rotation's own height may have landed before the rotation.
+pub(crate) fn rotation_last_seen(layer_cursor: u64, rotation_seq_no: u64) -> u64 {
+    layer_cursor.min(rotation_seq_no.saturating_sub(1))
+}
 
-/// Drive one bk-set-update step. Returns `Some(artifacts)` when a rotation
-/// is ready for downstream submission, `None` when the prover is caught up
+/// The set after a rotation row. `current` must hash to `l2`; the row's
+/// changes are applied the way the node does (every removal, then every
+/// addition), and the result must hash to `l3`. `height` labels errors.
+pub(crate) fn next_set_for_row(
+    current: &HashMap<u16, Vec<u8>>,
+    blob_hex: &str,
+    l2: [u8; 32],
+    l3: [u8; 32],
+    height: u64,
+) -> Result<HashMap<u16, Vec<u8>>, ReplayError> {
+    expect_commitment(height, "l2-before-apply", l2, current)?;
+    let changes = bk_set_replay::parse_changes(blob_hex)?;
+    let mut next = current.clone();
+    bk_set_replay::apply_block_changes(&mut next, &changes)?;
+    expect_commitment(height, "l3-after-apply", l3, &next)?;
+    Ok(next)
+}
+
+fn expect_commitment(
+    height: u64,
+    step: &'static str,
+    expected: [u8; 32],
+    set: &HashMap<u16, Vec<u8>>,
+) -> Result<(), ReplayError> {
+    let actual = bk_set_replay::commitment(set);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ReplayError::Mismatch {
+            height,
+            step,
+            expected,
+            actual,
+        })
+    }
+}
+
+/// A row that does not lead from the driver's set to the block's leaf `[3]`.
+/// A wrong leaf `[2]` means the driver is out of sync with the chain; any
+/// other failure is bad data from the node.
+fn row_error(seq_no: u64, e: ReplayError) -> DriverError {
+    match &e {
+        ReplayError::Mismatch {
+            step: "l2-before-apply",
+            ..
+        } => DriverError::state_inconsistent(anyhow::anyhow!(
+            "bk-update {seq_no}: {e} — prover out of sync"
+        )),
+        _ => DriverError::gql_schema(anyhow::anyhow!("bk-update {seq_no}: {e}")),
+    }
+}
+
+/// The next rotation row past the driver's cursor: its height and change
+/// blob. `None` when caught up, and when the lookup failed (logged; the
+/// caller retries on the next poll).
+async fn next_row(driver: &LiveProverDriver) -> Option<(u64, String)> {
+    let cursor = driver.state().stored_last_bk_set_update_seq_no;
+    let upd = match bk_set_fetcher::next_update_after(driver.gql(), cursor).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return None, // caught up on rotations
+        Err(e) => {
+            warn!(
+                "bk-update drain: next_update_after failed ({}); returning None so caller retries",
+                e,
+            );
+            return None;
+        }
+    };
+    match upd.height {
+        Some(h) if h > cursor => Some((h, upd.bk_set_update_hex)),
+        _ => {
+            warn!("bk-update drain: skipping event with missing/stale height");
+            None
+        },
+    }
+}
+
+/// A rotation checked against its block, not proved.
+struct PreparedRotation {
+    seq_no: u64,
+    block_height: u64,
+    tree: BlockIdMerkleTree,
+    /// The set that signs the rotation block.
+    old_pubkeys: HashMap<u16, Vec<u8>>,
+    new_pubkeys: HashMap<u16, Vec<u8>>,
+}
+
+impl PreparedRotation {
+    fn l2(&self) -> [u8; 32] {
+        self.tree.leaves[2]
+    }
+
+    fn l3(&self) -> [u8; 32] {
+        self.tree.leaves[3]
+    }
+
+    fn into_delta(self) -> BkUpdateDelta {
+        BkUpdateDelta {
+            block_seq_no: self.seq_no,
+            block_height: self.block_height,
+            old_bk_set_commitment_be: self.l2(),
+            new_bk_set_commitment_be: self.l3(),
+            new_pubkeys: self.new_pubkeys,
+        }
+    }
+}
+
+/// Drive one bk-set-update step: [`LiveBkUpdateEvent::Applied`] when the
+/// next rotation is at or below `applied_on_chain_up_to` (prepared, not
+/// proved), [`LiveBkUpdateEvent::BkUpdate`] when it is ready for downstream
+/// submission, [`LiveBkUpdateEvent::Nothing`] when the prover is caught up
 /// (no pending rotation).
 ///
-/// On any transient GQL / decode failure, returns `Ok(None)` after logging
+/// On any transient GQL / decode failure, returns `Nothing` after logging
 /// so the caller can retry on the next poll cycle. Only genuinely fatal
 /// errors (proof gen failure, structural mismatch) propagate. Fatal errors
 /// are classified into [`DriverError`] variants at each site so consumers
 /// can pattern-match on failure kind without inspecting the message.
 pub(super) async fn drive_next_bk_update(
     driver: &mut LiveProverDriver,
-) -> DriverResult<Option<BkUpdateProofArtifacts>> {
-    let cursor = driver.state().stored_last_bk_set_update_seq_no;
-    let upd = match bk_set_fetcher::next_update_after(driver.gql(), cursor).await {
-        Ok(Some(u)) => u,
-        Ok(None) => return Ok(None), // caught up on rotations
-        Err(e) => {
-            warn!(
-                "bk-update drain: next_update_after failed ({}); returning None so caller retries",
-                e,
-            );
-            return Ok(None);
-        }
-    };
-    let upd_seqno = match upd.height {
-        Some(h) if h > cursor => h,
-        _ => {
-            warn!("bk-update drain: skipping event with missing/stale height");
-            return Ok(None);
-        }
+    applied_on_chain_up_to: u64,
+) -> DriverResult<LiveBkUpdateEvent> {
+    let Some((upd_seqno, blob_hex)) = next_row(driver).await else {
+        return Ok(LiveBkUpdateEvent::Nothing);
     };
 
     info!("=== bk-update drain: processing event at seq_no {} ===", upd_seqno);
 
+    let rotation = prepare(driver, upd_seqno, &blob_hex).await?;
+    if upd_seqno <= applied_on_chain_up_to {
+        info!(
+            "bk-update {}: applied on chain (up to {}); taken without a proof",
+            upd_seqno, applied_on_chain_up_to,
+        );
+        return Ok(LiveBkUpdateEvent::Applied(rotation.into_delta()));
+    }
+    Ok(match prove(driver, rotation).await? {
+        Some(artifacts) => LiveBkUpdateEvent::BkUpdate(artifacts),
+        None => LiveBkUpdateEvent::Nothing,
+    })
+}
+
+/// The next rotation past the driver's cursor, prepared, if it is at or
+/// below `applied_on_chain_up_to`. Never proves; a rotation above that
+/// height is not prepared either.
+pub(super) async fn drive_next_applied_bk_update(
+    driver: &LiveProverDriver,
+    applied_on_chain_up_to: u64,
+) -> DriverResult<Option<BkUpdateDelta>> {
+    let Some((upd_seqno, blob_hex)) = next_row(driver).await else {
+        return Ok(None);
+    };
+    if upd_seqno > applied_on_chain_up_to {
+        return Ok(None);
+    }
+    Ok(Some(
+        prepare(driver, upd_seqno, &blob_hex).await?.into_delta(),
+    ))
+}
+
+/// Fetch the rotation block, check its tree against the header, and build
+/// the set after it from the driver's set ([`next_set_for_row`]). Reads no
+/// keys and changes no driver state.
+async fn prepare(
+    driver: &LiveProverDriver,
+    upd_seqno: u64,
+    blob_hex: &str,
+) -> DriverResult<PreparedRotation> {
     // Fetch the bk-update block's 16 Merkle leaves to derive L2/L3 and the
     // three open siblings h01 / h4_7 / h8_15 for the depth-4 fold.
     let upd_block = driver
@@ -100,71 +253,41 @@ pub(super) async fn drive_next_bk_update(
         )));
     }
 
-    let l2 = tree.leaves[2];
-    let l3 = tree.leaves[3];
-
-    // Cross-check: L2 must equal our currently-applied commitment. If not,
-    // the prover is out-of-sync with the chain's bk-set history — bail so
-    // an operator investigates.
-    let cur_commitment = driver.prover_bk_set().commitment;
-    if l2 != cur_commitment {
-        return Err(DriverError::state_inconsistent(anyhow::anyhow!(
-            "bk-update {}: L2 {} != prover_bk_set.commitment {} — prover out of sync",
-            upd_seqno,
-            hex::encode(l2),
-            hex::encode(cur_commitment),
-        )));
-    }
-
-    // Apply the bk_set_update_hex deltas to the OLD pubkey table to derive
-    // the NEW one, and verify it hashes to L3.
-    let blob = hex::decode(&upd.bk_set_update_hex)
-        .with_context(|| format!("bk-update {}: bk_set_update_hex decode", upd_seqno))
-        .map_err(DriverError::gql_schema)?;
-    let changes = bk_set_fetcher::parse_bk_set_changes_pub(&blob);
-    if changes.is_empty() {
-        return Err(DriverError::gql_schema(anyhow::anyhow!(
-            "bk-update {}: parsed 0 changes from blob",
-            upd_seqno,
-        )));
-    }
-    let cur_pubkeys = driver
+    // The OLD set must hash to L2; the block's changes, applied to it in the
+    // node's order, must hash to L3. A wrong L2 means the prover is
+    // out-of-sync with the chain's bk-set history — bail so an operator
+    // investigates.
+    let old_pubkeys = driver
         .prover_bk_set()
         .pubkeys()
         .with_context(|| format!("bk-update {}: prover_bk_set.pubkeys()", upd_seqno))
         .map_err(DriverError::state_inconsistent)?;
-    let mut new_pubkeys = cur_pubkeys.clone();
-    for (variant, idx, pk) in &changes {
-        match *variant {
-            BK_CHANGE_VARIANT_ADDED => {
-                new_pubkeys.insert(*idx, pk.clone());
-            }
-            BK_CHANGE_VARIANT_REMOVED => {
-                new_pubkeys.remove(idx);
-            }
-            other => {
-                warn!(
-                    "bk-update {}: ignoring unknown change variant {}",
-                    upd_seqno, other,
-                );
-            }
-        }
-    }
-    // Delta entries arrive as 96-byte uncompressed BLS pubkeys; the base
-    // set is 48-byte compressed. Normalize before feeding to any BLS-aware
-    // helper.
-    let new_pubkeys = bk_set_fetcher::normalize_bk_set_pubkeys(new_pubkeys)
-        .with_context(|| format!("bk-update {}: pubkey normalization", upd_seqno))
-        .map_err(DriverError::gql_schema)?;
-    let (_, recomp_c) = poseidon::compute_bk_set_poseidon(&new_pubkeys);
-    if recomp_c != l3 {
-        return Err(DriverError::gql_schema(anyhow::anyhow!(
-            "bk-update {}: Poseidon(new_pubkeys) {} != L3 {}",
-            upd_seqno,
-            hex::encode(recomp_c),
-            hex::encode(l3),
-        )));
-    }
+    let new_pubkeys = next_set_for_row(
+        &old_pubkeys,
+        blob_hex,
+        tree.leaves[2],
+        tree.leaves[3],
+        upd_seqno,
+    )
+    .map_err(|e| row_error(upd_seqno, e))?;
+
+    Ok(PreparedRotation {
+        seq_no: upd_seqno,
+        block_height: upd_block.height,
+        tree,
+        old_pubkeys,
+        new_pubkeys,
+    })
+}
+
+/// Prove a prepared rotation with Circuit 1A/1B against the OLD set.
+/// `Ok(None)` when its attestations cannot be fetched yet.
+async fn prove(
+    driver: &mut LiveProverDriver,
+    rotation: PreparedRotation,
+) -> DriverResult<Option<BkUpdateProofArtifacts>> {
+    let upd_seqno = rotation.seq_no;
+    let cur_pubkeys = &rotation.old_pubkeys;
 
     // Fetch attestation evidence for the bk-update block. These signatures
     // are produced by the OLD signer set (the block that *announces* the
@@ -188,10 +311,11 @@ pub(super) async fn drive_next_bk_update(
     // driver config so a Poseidon-configured driver emits aggregator-ready
     // bytes here — same one-flavour-per-poll discipline as the bundle path.
     // The attestation `lastSeen` instance is the driver's layer cursor
-    // at prove time. The caller forwards that word as
-    // `attestationLastSeen`; `applyBkSetUpdate` does not substitute
-    // `storedLastSeenBlockSeqNo`.
-    let last_seen_for_upd = driver.state().stored_last_seen_block_seq_no as u32;
+    // at prove time, capped below the rotation ([`rotation_last_seen`]).
+    // The caller forwards that word as `attestationLastSeen`;
+    // `applyBkSetUpdate` does not substitute `storedLastSeenBlockSeqNo`.
+    let last_seen_for_upd =
+        rotation_last_seen(driver.state().stored_last_seen_block_seq_no, upd_seqno) as u32;
     let transcript = driver.cfg().transcript;
     let t_upd_proof = Instant::now();
     let (fin_type, upd_proof) = match &upd_evidence {
@@ -208,7 +332,7 @@ pub(super) async fn drive_next_bk_update(
             let res = prover::generate_primary_proof_with_transcript(
                 driver.key_manager_mut(),
                 &att.raw_bytes,
-                &cur_pubkeys,
+                cur_pubkeys,
                 last_seen_for_upd,
                 transcript,
             );
@@ -235,7 +359,7 @@ pub(super) async fn drive_next_bk_update(
                 driver.key_manager_mut(),
                 &primary.raw_bytes,
                 &fallback.raw_bytes,
-                &cur_pubkeys,
+                cur_pubkeys,
                 last_seen_for_upd,
                 transcript,
             );
@@ -259,7 +383,7 @@ pub(super) async fn drive_next_bk_update(
     // The proof commits to the height it read from the attestation bytes; the
     // calldata carries `upd_seqno`. A mismatch is a bug on this side, and the
     // chain would only say `AttestationProofRejected()`.
-    if u64::from(upd_proof.block_seq_no) != u64::from(upd_seqno) {
+    if u64::from(upd_proof.block_seq_no) != upd_seqno {
         return Err(DriverError::proof_gen(
             upd_seqno,
             anyhow::anyhow!(
@@ -280,26 +404,156 @@ pub(super) async fn drive_next_bk_update(
     // agrees with the fold of the raw hash so a byte-order regression pages
     // loudly at build time.
     debug_assert_eq!(
-        crate::ipc::fold_hash_be_to_fr(&tree.root),
+        crate::ipc::fold_hash_be_to_fr(&rotation.tree.root),
         upd_proof.block_id_fr,
         "bk-update: fold(reverse(tree.root)) must equal Circuit 1's committed \
          block_id_fr; a mismatch means the wire hash and the proof disagree",
     );
-    let l2_l3_siblings = tree.siblings_for_l2_l3();
+    let l2_l3_siblings = rotation.tree.siblings_for_l2_l3();
     Ok(Some(BkUpdateProofArtifacts {
         block_seq_no: upd_seqno,
-        block_height: upd_block.height,
+        block_height: rotation.block_height,
         last_seen_bk_update_seq_no: last_seen_for_upd as u64,
-        block_id_be: tree.root,
+        block_id_be: rotation.tree.root,
         fin_type,
-        old_bk_set_commitment_be: l2,
-        new_bk_set_commitment_be: l3,
+        old_bk_set_commitment_be: rotation.l2(),
+        new_bk_set_commitment_be: rotation.l3(),
         merkle_sibling_h01_be: l2_l3_siblings[0],
         merkle_sibling_h4_7_be: l2_l3_siblings[1],
         merkle_sibling_h8_15_be: l2_l3_siblings[2],
         transcript_kind: transcript,
         attestation_proof: upd_proof.proof_bytes,
-        new_pubkeys,
+        new_pubkeys: rotation.new_pubkeys,
         attestation_proof_gen_ms,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use halo2_base::halo2_proofs::halo2curves::{
+        bls12_381::{Fr as BlsScalar, G1Affine, G1},
+        group::Curve,
+    };
+
+    use super::*;
+    use crate::bk_set_replay::commitment;
+
+    const ADD: u32 = 0;
+    const REMOVE: u32 = 1;
+
+    fn point(seed: u64) -> G1Affine {
+        (G1::generator() * BlsScalar::from(seed)).to_affine()
+    }
+
+    /// Compressed key, as the sets hold them.
+    fn key(seed: u64) -> Vec<u8> {
+        point(seed).to_compressed_be().to_vec()
+    }
+
+    fn set(entries: &[(u16, u64)]) -> HashMap<u16, Vec<u8>> {
+        entries.iter().map(|(i, s)| (*i, key(*s))).collect()
+    }
+
+    /// A blob in the node's wire format with 96-byte uncompressed keys.
+    fn blob(changes: &[(u32, u16, u64)]) -> String {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(changes.len() as u64).to_le_bytes());
+        for (variant, index, seed) in changes {
+            buf.extend_from_slice(&variant.to_le_bytes());
+            buf.extend_from_slice(&index.to_le_bytes());
+            buf.extend_from_slice(&96u64.to_le_bytes());
+            buf.extend_from_slice(&point(*seed).to_uncompressed_be());
+        }
+        hex::encode(buf)
+    }
+
+    #[test]
+    fn rotation_last_seen_never_reaches_the_rotation() {
+        // The bundle at the boundary landed before the rotation at the same height.
+        assert_eq!(rotation_last_seen(32768, 32768), 32767);
+        assert_eq!(rotation_last_seen(16384, 20000), 16384);
+    }
+
+    #[test]
+    fn next_set_for_row_uses_node_order() {
+        // In blob order the addition would be undone by the removal that follows it.
+        let current = set(&[(0, 5), (1, 1)]);
+        let expected = set(&[(0, 5), (1, 9)]);
+        let next = next_set_for_row(
+            &current,
+            &blob(&[(ADD, 1, 9), (REMOVE, 1, 1)]),
+            commitment(&current),
+            commitment(&expected),
+            100,
+        )
+        .unwrap();
+        assert_eq!(next[&1], key(9));
+        assert_eq!(next, expected);
+    }
+
+    #[test]
+    fn next_set_for_row_rejects_wrong_l2() {
+        let current = set(&[(0, 5), (1, 1)]);
+        let after = set(&[(0, 5), (1, 1), (2, 3)]);
+        let err = next_set_for_row(
+            &current,
+            &blob(&[(ADD, 2, 3)]),
+            [9; 32],
+            commitment(&after),
+            100,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ReplayError::Mismatch {
+            height: 100,
+            step: "l2-before-apply",
+            ..
+        }));
+    }
+
+    #[test]
+    fn next_set_for_row_rejects_wrong_l3() {
+        let current = set(&[(0, 5), (1, 1)]);
+        let err = next_set_for_row(
+            &current,
+            &blob(&[(ADD, 2, 3)]),
+            commitment(&current),
+            [9; 32],
+            100,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ReplayError::Mismatch {
+            height: 100,
+            step: "l3-after-apply",
+            ..
+        }));
+    }
+
+    #[test]
+    fn a_wrong_l2_is_a_state_mismatch_and_other_row_errors_are_schema_errors() {
+        let l2 = ReplayError::Mismatch {
+            height: 100,
+            step: "l2-before-apply",
+            expected: [1; 32],
+            actual: [2; 32],
+        };
+        assert!(matches!(
+            row_error(100, l2),
+            DriverError::StateInconsistent(_)
+        ));
+        let l3 = ReplayError::Mismatch {
+            height: 100,
+            step: "l3-after-apply",
+            expected: [1; 32],
+            actual: [2; 32],
+        };
+        assert!(matches!(row_error(100, l3), DriverError::GqlSchema(_)));
+        let bad = ReplayError::BadRow {
+            reason: "blob holds no changes".into(),
+        };
+        let err = row_error(100, bad);
+        assert!(matches!(err, DriverError::GqlSchema(_)));
+        assert!(err.to_string().contains("bk-update 100"), "{err}");
+    }
 }

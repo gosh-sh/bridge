@@ -5,8 +5,10 @@
 //! 1A/1B + 2 proof generation, in-memory state advance) lives inside the
 //! library. This binary owns only what a library shouldn't:
 //!
-//!   * env-driven configuration (`BRIDGE_GQL_ENDPOINT`, `BRIDGE_BOOTSTRAP_SEQNO`,
-//!     `BRIDGE_BK_SET_CONFIG`),
+//!   * env-driven configuration (`BRIDGE_GQL_ENDPOINT`,
+//!     `BRIDGE_BOOTSTRAP_SEQNO`, `BRIDGE_ANCHOR_LEVEL`),
+//!   * the starting BK set: `state/prover_bk_set.json`, else built from GraphQL
+//!     ([`bridge_prover_lib::bk_set_history`]),
 //!   * Ctrl-C graceful shutdown flag,
 //!   * disk persistence (`./state/*.json`, `./bootstrap_seed.json`),
 //!   * verifier IPC (`./proofs/{proof,result,bkupd,bkupd_result}_NNN.json`), and
@@ -23,7 +25,9 @@ use std::time::Duration;
 use anyhow::Context;
 use tracing::{error, info, warn};
 
-use bridge_prover_lib::bk_set_bootstrap;
+use bridge_prover_lib::bk_set_history::{
+    bk_target, build_bk_set_with_retry, genesis_bk_for_seed, BuildPolicy,
+};
 use bridge_prover_lib::bootstrap;
 use bridge_prover_lib::bridge_state::BridgeState;
 use bridge_gql_fetcher::gql_client;
@@ -32,7 +36,7 @@ use bridge_prover_lib::keys::KeyManager;
 use bridge_prover_lib::live_driver::{
     BkUpdateProofArtifacts, BundleFinalizationType, BundleProofArtifacts,
     DriverError, HISTORY_WINDOW_SIZE, LiveBkUpdateEvent, LiveBundleEvent, LiveProverConfig,
-    LiveProverDriver, SeedPolicy,
+    LiveProverDriver, SeedBk, SeedPolicy,
 };
 use bridge_poseidon as poseidon;
 use bridge_prover_lib::prover_bk_set::ProverBkSet;
@@ -59,6 +63,9 @@ const LOGS_DIR: &str = "./logs";
 // `BRIDGE_CONFIG_DIR` for the per-mode L1/L2 config layout.
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// How often the chain head is polled while the BK set waits for the seed
+/// block to exist.
+const SEED_WAIT_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(not(feature = "self-verify"))]
 const VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -166,65 +173,38 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Resolve prover_bk_set: warm-load from disk if present, else
-    // cold-seed from BRIDGE_BK_SET_CONFIG (bk_set.local.json /
-    // bk_set.shellnet.json / fold_at_height).
+    // Resolve prover_bk_set: `prover_bk_set.json` when present, else built
+    // from GraphQL at the height the state needs, or at the seed.
     //
     // Once `prover_bk_set.json` exists, IT is the sole source of truth
     // for the BK-pubkey table — intermediate rotations advance it via
-    // the bk-update lane in `LiveProverDriver`. `bk_set.local.json` is
-    // only read on first-ever startup.
-    let prover_bk_set = match ProverBkSet::load(&prover_bk_set_file)? {
-        Some(loaded) => {
-            if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
-                anyhow::bail!(
-                    "prover_bk_set.json commitment {} disagrees with \
-                     prover_state.json {} — delete BOTH files or restore \
-                     them from a paired backup",
-                    hex::encode(loaded.commitment),
-                    hex::encode(state.stored_bk_set_commitment),
-                );
-            }
-            info!(
-                "prover_bk_set: loaded {} signers, last_applied_update_seq_no={}",
-                loaded.pubkeys_hex.len(),
-                loaded.last_applied_update_seq_no,
-            );
-            loaded
-        }
-        None => {
-            // Cold boot: this is the ONLY code path that reads the seed
-            // file directly. Once saved, `prover_bk_set.json` takes over.
-            let bk_set_from_file = bk_set_bootstrap::load_bk_set(
-                &gql,
-                &bk_set_bootstrap::resolve_bk_set_config_path(),
-                explicit_bootstrap_seqno,
-            )
-            .await?;
-            let pbs = ProverBkSet::from_pubkeys(&bk_set_from_file, 0);
-            pbs.save(&prover_bk_set_file)?;
-            info!(
-                "prover_bk_set: cold-boot seeded {} signers → {}",
-                pbs.pubkeys_hex.len(),
-                prover_bk_set_file,
-            );
-            pbs
-        }
+    // the bk-update lane in `LiveProverDriver`.
+    let seed_policy = match (explicit_bootstrap_seqno, state.initialized) {
+        (_, true) => SeedPolicy::Resume,
+        (Some(n), false) => SeedPolicy::Explicit(n),
+        (None, false) => SeedPolicy::Auto,
     };
-
-    // Guard against the "fresh chain + stale ./state/" footgun without a
-    // GQL round-trip: if BRIDGE_BK_SET_CONFIG points to a readable file,
-    // compare its commitment against `prover_bk_set.commitment`. On
-    // devnet, `bk_set.local.json` gets rewritten every time zerostate is
-    // regenerated — mismatch + prover never rotated (`last_applied=0`)
-    // is a strong signal that state/ is stale relative to the current
-    // chain instance and must be wiped. On shellnet the file is a
-    // genesis snapshot, so mismatch + prover has rotated is expected
-    // and only logged.
-    bk_set_bootstrap::verify_prover_bk_set_matches_config_file(
-        &bk_set_bootstrap::resolve_bk_set_config_path(),
-        &prover_bk_set,
-    )?;
+    let build_policy = BuildPolicy::default();
+    let start = tokio::select! {
+        start = startup_bk(
+            &gql,
+            &state,
+            &state_file,
+            &prover_bk_set_file,
+            seed_policy,
+            bundle_size,
+            &build_policy,
+        ) => start?,
+        () = shutdown_requested(&shutdown) => {
+            info!("shutdown while resolving the prover BK set; exiting");
+            return Ok(());
+        },
+    };
+    let StartupBk {
+        prover_bk_set,
+        seed_policy,
+        seed_bk,
+    } = start;
 
     let bk_set = prover_bk_set
         .pubkeys()
@@ -243,12 +223,6 @@ async fn main() -> anyhow::Result<()> {
     key_manager.ensure_layer_keys()?;
     info!("keys ready (primary, fallback, layer)");
 
-    let seed_policy = match (explicit_bootstrap_seqno, state.initialized) {
-        (_, true) => SeedPolicy::Resume,
-        (Some(n), false) => SeedPolicy::Explicit(n),
-        (None, false) => SeedPolicy::Auto,
-    };
-
     let mut driver = LiveProverDriver::new(
         gql,
         key_manager,
@@ -257,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
         LiveProverConfig {
             seed_policy,
             anchor_mode,
+            seed_bk,
             ..Default::default()
         },
     )?;
@@ -406,6 +381,174 @@ fn install_ctrl_c_flag() -> Arc<AtomicBool> {
         }
     });
     shutdown
+}
+
+/// Resolves once Ctrl-C has set `flag`.
+async fn shutdown_requested(flag: &AtomicBool) {
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// What the driver starts with.
+struct StartupBk {
+    prover_bk_set: ProverBkSet,
+    seed_policy: SeedPolicy,
+    /// BK fields of the seed: `Some` only when the set was built at the seed.
+    seed_bk: Option<SeedBk>,
+}
+
+/// The BK set the driver starts with.
+///
+/// * `prover_bk_set_file` exists: it is taken, and must have the commitment of
+///   an initialized `state`.
+/// * It does not, and `state` is initialized: the set is built from GraphQL at
+///   [`bk_target`] of the state's last seen block and last rotation, must have
+///   the state's commitment, and carries the state's rotation cursor.
+/// * Neither: the set is built at the seed S — `BRIDGE_BOOTSTRAP_SEQNO`, or
+///   under `Auto` the next stride boundary past the chain head. The block S
+///   must exist first, so this waits for the chain head to reach S. The driver
+///   then seeds at S (`SeedPolicy::Explicit(S)`) with the built set's
+///   commitment and the newest rotation at or below S.
+///
+/// A built set is written to `prover_bk_set_file` before this returns.
+/// Transient GraphQL failures are retried without a bound; a server without
+/// `latestBkSet` and a set that keeps failing its checks are errors.
+async fn startup_bk(
+    gql: &gql_client::GqlClient,
+    state: &BridgeState,
+    state_file: &str,
+    prover_bk_set_file: &str,
+    seed_policy: SeedPolicy,
+    stride: u64,
+    policy: &BuildPolicy,
+) -> anyhow::Result<StartupBk> {
+    if let Some(loaded) = ProverBkSet::load(prover_bk_set_file)? {
+        if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
+            anyhow::bail!(
+                "prover_bk_set.json commitment {} disagrees with prover_state.json {} — delete \
+                 BOTH files or restore them from a paired backup",
+                hex::encode(loaded.commitment),
+                hex::encode(state.stored_bk_set_commitment),
+            );
+        }
+        info!(
+            "prover_bk_set: loaded {} signers, last_applied_update_seq_no={}",
+            loaded.pubkeys_hex.len(),
+            loaded.last_applied_update_seq_no,
+        );
+        return Ok(StartupBk {
+            prover_bk_set: loaded,
+            seed_policy,
+            seed_bk: None,
+        });
+    }
+
+    if state.initialized {
+        let cursor = state.stored_last_bk_set_update_seq_no;
+        let target = bk_target(state.stored_last_seen_block_seq_no, cursor, stride);
+        info!(
+            "prover_bk_set: {} not found; building it from GraphQL at height {} (check {:?})",
+            prover_bk_set_file, target.height, target.check,
+        );
+        let built = build_bk_set_with_retry(gql, &target, policy)
+            .await
+            .with_context(|| format!("build the prover BK set at height {}", target.height))?;
+        let pbs = ProverBkSet::from_pubkeys(&built.pubkeys, cursor);
+        anyhow::ensure!(
+            pbs.commitment == state.stored_bk_set_commitment,
+            "the BK set built from GraphQL at height {} has commitment {}, but {} holds {}: the \
+             state follows another network or another BK set",
+            built.height,
+            hex::encode(pbs.commitment),
+            state_file,
+            hex::encode(state.stored_bk_set_commitment),
+        );
+        pbs.save(prover_bk_set_file)?;
+        info!(
+            "prover_bk_set: built {} signers at height {}, last_applied_update_seq_no={} → {}",
+            pbs.pubkeys_hex.len(),
+            built.height,
+            cursor,
+            prover_bk_set_file,
+        );
+        return Ok(StartupBk {
+            prover_bk_set: pbs,
+            seed_policy,
+            seed_bk: None,
+        });
+    }
+
+    let seed = match seed_policy {
+        SeedPolicy::Explicit(n) => n,
+        SeedPolicy::Auto => {
+            let head = loop {
+                match chain_head(gql).await {
+                    Ok(head) => break head,
+                    Err(e) => {
+                        warn!("bootstrap: {:#} — retrying", e);
+                        tokio::time::sleep(SEED_WAIT_INTERVAL).await;
+                    },
+                }
+            };
+            let seed = (head / stride + 1) * stride;
+            info!(
+                "bootstrap: Auto seed pinned at seq_no={} (chain head at {})",
+                seed, head
+            );
+            seed
+        },
+        SeedPolicy::Resume => anyhow::bail!("SeedPolicy::Resume needs an initialized state"),
+    };
+    wait_for_block(gql, seed).await;
+    info!(
+        "prover_bk_set: {} not found; building it from GraphQL at the seed {}",
+        prover_bk_set_file, seed,
+    );
+    let genesis = genesis_bk_for_seed(gql, seed, policy)
+        .await
+        .with_context(|| format!("build the prover BK set at the seed {seed}"))?;
+    let cursor = genesis.last_bk_set_update_seq_no;
+    let pbs = ProverBkSet::from_pubkeys(&genesis.set.pubkeys, cursor);
+    pbs.save(prover_bk_set_file)?;
+    info!(
+        "prover_bk_set: built {} signers at the seed {}, last_applied_update_seq_no={} → {}",
+        pbs.pubkeys_hex.len(),
+        seed,
+        cursor,
+        prover_bk_set_file,
+    );
+    let seed_bk = SeedBk {
+        commitment: pbs.commitment,
+        last_bk_set_update_seq_no: cursor,
+    };
+    Ok(StartupBk {
+        prover_bk_set: pbs,
+        seed_policy: SeedPolicy::Explicit(seed),
+        seed_bk: Some(seed_bk),
+    })
+}
+
+/// The highest seq_no among the newest blocks GraphQL reports.
+async fn chain_head(gql: &gql_client::GqlClient) -> anyhow::Result<u64> {
+    let blocks = gql
+        .query_latest_blocks(5)
+        .await
+        .context("query the chain head")?;
+    Ok(blocks.iter().map(|(_, seq_no)| *seq_no).max().unwrap_or(0))
+}
+
+/// Polls the chain head every [`SEED_WAIT_INTERVAL`] until it reaches `seed`.
+/// A failed query is logged and retried.
+async fn wait_for_block(gql: &gql_client::GqlClient, seed: u64) {
+    loop {
+        match chain_head(gql).await {
+            Ok(head) if head >= seed => return,
+            Ok(head) => info!("bootstrap: waiting for seed {} (chain head {})", seed, head),
+            Err(e) => warn!("bootstrap: waiting for seed {}: {:#} — retrying", seed, e),
+        }
+        tokio::time::sleep(SEED_WAIT_INTERVAL).await;
+    }
 }
 
 fn parse_explicit_bootstrap(bundle_size: u64) -> anyhow::Result<Option<u64>> {

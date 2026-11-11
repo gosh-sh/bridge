@@ -16,7 +16,6 @@ use bridge_prover_lib::bridge_state::{BridgeState, MAX_LAYERS};
 use bridge_event_prover_lib as event_verifier;
 use bridge_prover_lib::ipc;
 use bridge_prover_lib::keys::KeyManager;
-use bridge_poseidon as poseidon;
 use bridge_prover_lib::verifier;
 use bridge_prover_lib::Fr;
 
@@ -34,17 +33,12 @@ const STATS_LOG_INTERVAL: Duration = Duration::from_secs(60);
 // `BRIDGE_STATE_DIR` / `BRIDGE_CONFIG_DIR` for the per-mode L1/L2 layout.
 /// Default GraphQL endpoint when `BRIDGE_GQL_ENDPOINT` is not set. Same env
 /// var the prover daemon honours, so a single export in the shell selects the
-/// network for both daemons. Used only by [`load_bk_set_commitment`] — the
-/// verifier has no other GQL traffic; the per-network BK-set genesis file is
-/// the fallback if GQL is unreachable or (as on shellnet) returns an empty
-/// `bkSetUpdates` log.
+/// network for both daemons. The verifier makes no GraphQL calls: the
+/// endpoint is only logged. The BK-set commitment comes from the verifier
+/// state, or from the prover's `bootstrap_seed.json` before the state is
+/// initialized.
 const DEFAULT_GQL_ENDPOINT: &str = "http://localhost/graphql";
 const ENV_GQL_ENDPOINT: &str = "BRIDGE_GQL_ENDPOINT";
-/// Genesis BK-set anchor. Same semantics as the prover daemon's constant of
-/// the same name — see `bridge-prover-daemon/src/main.rs`. Selected per-network
-/// via `BRIDGE_BK_SET_CONFIG` (default: `./bk_set.local.json`).
-const DEFAULT_BK_SET_CONFIG: &str = "./bk_set.local.json";
-const ENV_BK_SET_CONFIG: &str = "BRIDGE_BK_SET_CONFIG";
 
 // History window size — must match the prover daemon and the node. Sourced
 // from the vendored poseidon_dense constant so it can never drift.
@@ -90,12 +84,9 @@ async fn main() -> anyhow::Result<()> {
 
     let gql_endpoint = std::env::var(ENV_GQL_ENDPOINT)
         .unwrap_or_else(|_| DEFAULT_GQL_ENDPOINT.to_string());
-    let bk_set_config = std::env::var(ENV_BK_SET_CONFIG)
-        .unwrap_or_else(|_| DEFAULT_BK_SET_CONFIG.to_string());
 
     info!("=== Bridge Verifier Daemon (Circuit 1a + Circuit 2) ===");
     info!("GQL endpoint: {} (unused since 2026-07-22 refactor)", gql_endpoint);
-    info!("BK-set config: {}", bk_set_config);
     info!("running indefinitely; send SIGINT (Ctrl-C) to shut down cleanly");
 
     // Graceful-shutdown flag flipped by the Ctrl-C handler. Checked at the top
@@ -111,11 +102,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 1. Load BK set commitment (for Circuit 1a verification reference).
-    let bk_set_commitment = load_bk_set_commitment(&gql_endpoint, &bk_set_config).await?;
-    info!("BK set commitment: {:?}", bk_set_commitment);
-
-    // 2. Load key manager (SRS + VKs only, no PKs needed).
+    // 1. Load key manager (SRS + VKs only, no PKs needed).
     info!("loading SRS and VKs...");
     let key_manager = KeyManager::new(Path::new(PARAMS_DIR));
     if key_manager.primary.vk_opt().is_none() {
@@ -145,14 +132,22 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("VKs loaded (primary + fallback + layer + event)");
 
-    // 3. Load state.
+    // 2. Load state. Its BK set commitment is the reference for Circuit 1a
+    //    verification; an uninitialized state takes it from the seed below.
     let mut state = BridgeState::load(&state_file, HISTORY_WINDOW_SIZE)?;
     info!(
         "state loaded: initialized={}, last_key_block={}",
         state.initialized, state.stored_last_seen_block_seq_no
     );
+    if state.initialized {
+        info!(
+            "BK set commitment: {} (from {})",
+            hex::encode(state.stored_bk_set_commitment),
+            state_file,
+        );
+    }
 
-    // 3a. Cold-start bootstrap from the seed file written by the prover.
+    // 2a. Cold-start bootstrap from the seed file written by the prover.
     //
     //     This mirrors the on-chain contract receiving its genesis
     //     `GlobalHistoryData` via constructor arguments at deployment:
@@ -175,20 +170,23 @@ async fn main() -> anyhow::Result<()> {
                 seed.apply(&mut state)?;
                 state.save(&state_file)?;
                 info!(
-                    "initialized from seed: seqno={}, height={}",
-                    state.stored_last_seen_block_seq_no, state.stored_last_seen_block_height,
+                    "initialized from seed: seqno={}, height={}, bk_set_commitment={}",
+                    state.stored_last_seen_block_seq_no,
+                    state.stored_last_seen_block_height,
+                    hex::encode(state.stored_bk_set_commitment),
                 );
             }
             None => {
                 info!(
-                    "no bootstrap seed at {} yet — waiting for prover to write it",
+                    "no bootstrap seed at {} yet — waiting for prover to write it (it carries the \
+                     BK set commitment)",
                     seed_path,
                 );
             }
         }
     }
 
-    // 4. Watch for proof files and verify.
+    // 3. Watch for proof files and verify.
     let mut last_seen_seqno: u32 = state.stored_last_seen_block_seq_no as u32;
     // Bk-set-update cursor. Mirrors what the future ETH contract will track
     // as `storedLastBkUpdateSeq`. Starts from the persisted v4 field so a
@@ -276,6 +274,10 @@ async fn main() -> anyhow::Result<()> {
                     seed.apply(&mut state)?;
                     state.save(&state_file)?;
                     last_seen_seqno = state.stored_last_seen_block_seq_no as u32;
+                    info!(
+                        "initialized from seed: bk_set_commitment={}",
+                        hex::encode(state.stored_bk_set_commitment),
+                    );
                 }
                 None => {
                     // Seed file not yet written. Stay idle and try again on the
@@ -674,19 +676,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Load the genesis BK set commitment from the JSON config file.
-///
-/// The `_gql_endpoint` parameter is retained for signature/CLI-plumbing
-/// stability. The old GraphQL-first path (`fetch_bk_set`) was disabled on
-/// 2026-07-22 as architecturally broken — it replayed the `bkSetUpdates`
-/// delta log from ∅ but AN does not emit genesis as a synthetic `Added`
-/// event. Use `bk_set_at_height` (planned) for distant-block cold starts.
-async fn load_bk_set_commitment(_gql_endpoint: &str, bk_set_config: &str) -> anyhow::Result<Fr> {
-    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_config)?;
-    info!("BK set loaded from config: {} signers", bk_set.len());
-    Ok(poseidon::compute_bk_set_poseidon(&bk_set).0)
 }
 
 /// Scan proofs/ for any proof file with seq_no > last_seen.

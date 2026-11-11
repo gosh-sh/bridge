@@ -369,12 +369,12 @@ pub fn seed_from_windows(
 
 /// [`fetch_from_node`] plus a chain cross-check of `bk_set_commitment`.
 ///
-/// `fetch_from_node` stamps whatever commitment the caller derived from its
-/// BK-set file. A file folded to a different rotation than
-/// `last_bk_set_update_seq_no` (e.g. written before a rotation that landed
-/// below the seed) makes the seed inconsistent: the bridge is stamped with one
-/// set while its rotation cursor skips to another, and the daemon only finds
-/// out at the first drained rotation (`L2 != prover_bk_set.commitment`). This
+/// `fetch_from_node` stamps whatever commitment the caller passes. A set taken
+/// at a different rotation than `last_bk_set_update_seq_no` (e.g. written
+/// before a rotation that landed below the seed) makes the seed inconsistent:
+/// the bridge is stamped with one set while its rotation cursor skips to
+/// another, and the daemon only finds out at the first drained rotation
+/// (`L2 != prover_bk_set.commitment`). This
 /// variant compares the commitment with [`expected_seed_bk_commitment`] and
 /// refuses to build the seed on mismatch.
 pub async fn fetch_from_node_verified(
@@ -397,15 +397,14 @@ pub async fn fetch_from_node_verified(
     anyhow::ensure!(
         chain_commitment == bk_set_commitment,
         "BK-set commitment {} does not match the chain's {} at seed seq_no={} (leaf {} of the \
-         seed block; last rotation <= seed at {}). The BK-set file is not the set active at \
-         the seed: rebuild it by folding bkSetUpdates up to the seed \
-         (`seed_prover_bk_set --cap-height {}`, then `jq .pubkeys_hex`) and retry.",
+         seed block; last rotation <= seed at {}). The BK set is not the set active at the seed. \
+         In bridge-prover-daemon a prover_bk_set.json written for another seed causes this: move \
+         it aside and restart, and the set is built from GraphQL at the seed.",
         hex::encode(bk_set_commitment),
         hex::encode(chain_commitment),
         first_key_seqno,
         if last_bk_set_update_seq_no == first_key_seqno { 3 } else { 2 },
         last_bk_set_update_seq_no,
-        first_key_seqno,
     );
     let windows = seed_windows_of(&block, first_key_seqno, anchor_level)?;
     Ok(seed_from_windows(

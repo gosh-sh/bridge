@@ -57,11 +57,10 @@
 //!    `ensure_fallback_keys` / `ensure_layer_keys` once at startup,
 //! 3. loading or bootstrapping a [`BridgeState`] + [`ProverBkSet`] from
 //!    their own persistence layer,
-//! 4. bootstrapping the initial BK-set map by folding rotation events on top
-//!    of a genesis anchor via
-//!    [`bridge_gql_fetcher::bk_set_fetcher::bk_set_at_height`] (the old
-//!    `fetch_bk_set` replayed the delta log from ∅ and missed the un-emitted
-//!    genesis committee — disabled 2026-07-22), and
+//! 4. building the initial BK-set map from GraphQL with
+//!    [`crate::bk_set_history::build_bk_set_with_retry`], at the height
+//!    [`crate::bk_set_history::bk_target`] or
+//!    [`crate::bk_set_history::seed_target`] picks, and
 //! 5. constructing [`LiveProverDriver`] with a [`LiveProverConfig`] whose
 //!    [`SeedPolicy`] matches the desired bootstrap mode.
 //!

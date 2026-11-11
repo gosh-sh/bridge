@@ -613,9 +613,9 @@ impl GqlClient {
     /// cursor. Combining "first N" + "last N" to synthesize the full history
     /// is the deleted `fetch_bk_set` antipattern (truncated non-contiguous
     /// sample, folded from ∅ which misses the un-emitted genesis committee).
-    /// For cold-start, use `bk_set_fetcher::bk_set_at_height` (which pages via
-    /// [`Self::query_bk_set_updates_paged`]) against a caller-supplied
-    /// genesis snapshot.
+    /// For cold-start, use `bridge_prover_lib::bk_set_history`, which replays
+    /// the rows from the [`Self::query_latest_bk_set`] snapshot to the height
+    /// it needs and checks the result against the block leaves.
     pub async fn query_bk_set_updates_light(
         &self,
         count: u32,
@@ -673,8 +673,7 @@ impl GqlClient {
     /// Intended for diagnostic/probe use: dashboards, incident triage, and
     /// monitoring recent rotation cadence + who signed each rotation. NOT
     /// for cold-start BK-set reconstruction — see
-    /// [`Self::query_bk_set_updates_paged`] and
-    /// `bk_set_fetcher::bk_set_at_height` for that path.
+    /// `bridge_prover_lib::bk_set_history` for that path.
     pub async fn query_bk_set_updates_last(
         &self,
         last: u32,

@@ -97,7 +97,7 @@ async fn test_v3_fetch_attestation_envelope() {
     assert_eq!(inner_target, att.target_type, "inner target_type mismatch");
 
     // Off-circuit BLS verification against live bk_set.
-    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_fixture_json(bk_set_path)
         .expect("failed to load BK set");
     println!("bk_set has {} signers", bk_set.len());
 

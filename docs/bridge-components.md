@@ -7,6 +7,13 @@
 > (bridge-audit#154); the daemon's checkpoint queue and the step proving key against `b06de7a4`
 > (bridge-audit#154). Every connection and every state file below is drawn from the code that makes or names
 > it, not from prose; the tables give each one's `file:line` at that commit.
+>
+> **Deposits without a ZK proof (bridge-audit#139).** The rows for `deposit-receipt`, the
+> `DepositVoucher` citation and the executables bullet describe that change: the deposit prover is
+> gone, and the CLI and `deposit-relayer daemon` build the receipt proof with the
+> `deposit-receipt` library. Citations into `crates/ackinacki-bridge` and
+> `crates/deposit-relayer-daemon` name the function rather than a line, because those crates were
+> still changing.
 
 A UML component diagram of the whole bridge as deployed on Arbitrum Sepolia: the contracts on the
 three chains, the relayers and the end-user CLI between them, and the interfaces that connect them.
@@ -23,7 +30,8 @@ three chains, the relayers and the end-user CLI between them, and the interfaces
   around a ball) — a component that uses it. When several components use one interface, each gets its
   own ball with the same label.
 - **Color** — each relayer and the CLI has its own: its box and every connection it makes.
-- **Dashed arrow** — a dependency: a process the component starts, or a contract that reads another.
+- **Dashed arrow** — a dependency: a process the component starts, a library it links, or a contract
+  that reads another.
 - Writes are drawn to the contract interface they call; physically they go through the chain's node:
   the RPC node on Arbitrum, the Block Manager's `REST /v2/messages` on Acki Nacki. Reads go through the
   RPC node (Arbitrum, Sepolia) or the Block Manager (Acki Nacki). A getter called through the SDK
@@ -44,7 +52,7 @@ Paths are relative to the repository root.
 |---|---|---|---|
 | `ackinacki-bridge` (CLI) | USDC | `approve` | `crates/ackinacki-bridge/src/deposit/evm.rs:220` |
 | `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `deposit` | `crates/ackinacki-bridge/src/deposit/evm.rs:210` |
-| `ackinacki-bridge` (CLI) | `deposit-prover` | process | `crates/ackinacki-bridge/src/deposit/prover.rs:206` |
+| `ackinacki-bridge` (CLI) | `deposit-receipt` | library: `fetch` | `deposit_witness` in `crates/ackinacki-bridge/src/deposit/evm.rs` |
 | `ackinacki-bridge` (CLI) | `eccBridge` | `finalizeDeposit` | `crates/ackinacki-bridge/src/deposit/an.rs:754` |
 | `ackinacki-bridge` (CLI) | user multisig | `sendTransaction` carrying `initiateWithdrawal` | `crates/ackinacki-bridge/src/burn.rs:267`, payload `burn.rs:497` |
 | `ackinacki-bridge` (CLI) | Block Manager | `REST /v2/account`, `/v2/messages`: getters, `finalizeDeposit`, `sendTransaction` | getters `crates/ackinacki-bridge/src/deposit/an.rs:484`, `deposit/an_preflight.rs:69`, `:297`, `:349`; messages `deposit/an.rs:837`, `burn.rs:359` |
@@ -52,8 +60,8 @@ Paths are relative to the repository root.
 | `ackinacki-bridge` (CLI) | WalletConnect relay | wss | `crates/ackinacki-bridge/src/deposit/args.rs:290`, `deposit/wc/mod.rs:168` |
 | `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1394`, called from `crates/ackinacki-bridge/src/orchestrator.rs:1104` |
 | `ackinacki-bridge` (CLI), `relayer daemon-live` | `aggregate-proof` | process | started at `crates/bridge-relayer-daemon/src/aggregator.rs:606`; the CLI hands it the binary at `crates/ackinacki-bridge/src/orchestrator.rs:973`, the daemon at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2525` |
-| `deposit-relayer daemon` | `deposit-prover` | process | `crates/deposit-relayer-daemon/src/prover.rs:313` |
-| `deposit-prover` | Arbitrum RPC node | JSON-RPC | `deposit-prover/src/ethereum_fetcher.rs:32`; the URL from `crates/deposit-relayer-daemon/src/prover.rs:382` and `crates/ackinacki-bridge/src/deposit/prover.rs:450` |
+| `deposit-relayer daemon` | `deposit-receipt` | library: `fetch` | `ReceiptWitnessBuilder::build` in `crates/deposit-relayer-daemon/src/witness.rs` |
+| `deposit-receipt` | Arbitrum RPC node | JSON-RPC: `eth_getTransactionReceipt`, `eth_getBlockByHash`, `eth_getBlockReceipts` | `crates/deposit-receipt/src/lib.rs:207`, `:219`, `:228`; through the caller's provider, so the same RPC node the CLI or the daemon uses |
 | `deposit-relayer daemon` | `eccBridge` | `finalizeDeposit` | `crates/acki-nacki-interface/src/tvm_client.rs:130` |
 | `deposit-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: `isAcceptedBlockHash`, voucher state, `finalizeDeposit` | `crates/deposit-relayer-daemon/src/submitter.rs:713`, `submitter.rs:725`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
 | `relayer daemon-live` | `AckiNackiBridge` | `verifyBlock` | `crates/bridge-relayer-daemon/src/bridge.rs:1350` |
@@ -71,11 +79,11 @@ Paths are relative to the repository root.
 | `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2056` |
 | `ArbitrumBlockVerifier` | `eccBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
 | `EthBeaconLightClient` | `eccBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
-| `DepositVoucher` | `eccBridge` | `confirmDeposit` | `contracts/an/exchange/DepositVoucher.sol:44` |
+| `DepositVoucher` | `eccBridge` | `confirmTokenDeposit` | `contracts/an/exchange/DepositVoucher.sol:53` |
 
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
 a no-op, because the `DepositVoucher` address is derived from the deposit's identity
-(`contracts/an/exchange/eccBridge.sol:1048`) and a voucher is deployed once.
+(`contracts/an/exchange/eccBridge.sol:980`) and a voucher is deployed once.
 
 ## Executables and state files
 
@@ -104,8 +112,8 @@ container layout is in [`docker/README.md`](../docker/README.md).
   one directory per stage, until the contract has the rotate, so a restart proves only the stage
   that had not finished.
 - One `eth-lc-relayer` executable runs two processes, the `daemon` and `arbitrum-anchors` commands.
-  `deposit-prover` is three executables from `deposit-prover/examples`, `eth-light-client-prover`
-  four from `eth-light-client-prover/examples`: the step and the rotate's three stages.
+  `eth-light-client-prover` is four executables from `eth-light-client-prover/examples`: the step
+  and the rotate's three stages.
 - Not drawn: the provers' own state, and the read-only inputs — SRS and keys (`--params-dir`,
   `--prover-dir`), verifier bytecode, ABIs. The exceptions are `<prover-dir>/rotate-keys/` and the
   step key directory: the provers write their proving keys there themselves.

@@ -7,22 +7,26 @@
 //!   starting id. No proving, no AN side. Handy for confirming the relayer can
 //!   see the deposits before running it in earnest.
 //!
-//! - `prove-one` — listens for a single `depositId`, runs the `deposit-prover`
-//!   pipeline out-of-process, and writes the three opcode operands (`vk_blob`,
-//!   `public_inputs`, `proof`) to an output directory. Exercises the full
-//!   listen→prove path without an AN node. Pass `--tx-hash` + `--log-index` to
-//!   skip `eth_getLogs` and locate the deposit via receipt only.
+//! - `prove-one` — finds a single `depositId`, collects its block header and
+//!   receipt proof, and writes them to `--out-dir` as `witness.json`: the
+//!   `finalizeDeposit` arguments, without an AN node. Pass `--tx-hash` +
+//!   `--log-index` to skip `eth_getLogs` and locate the deposit via receipt
+//!   only.
 //!
-//! - `daemon` — long-running loop: listen → prove → submit, with exponential
-//!   backoff and SIGINT/SIGTERM-aware shutdown. Live submit uses tvm_client 3.0
-//!   (`dapp_id::account_id` addresses); pass `--dry-run` to mock the AN side.
+//! - `finalize-one` — sends the `witness.json` of a `prove-one` to
+//!   `eccBridge.finalizeDeposit` on Acki Nacki.
+//!
+//! - `daemon` — long-running loop: listen → collect the receipt proof → submit,
+//!   with exponential backoff and SIGINT/SIGTERM-aware shutdown. Live submit
+//!   uses tvm_client 3.0 (`dapp_id::account_id` addresses); pass `--dry-run` to
+//!   mock the AN side.
 //!
 //! - `status` — print the state file path.
 //!
-//! `daemon` and `prove-one` write only into the directories they are given
-//! (`--state-dir`, `--work-dir`, `--log-dir`; bridge-audit#132): never the
-//! system temp directory, `$HOME` or the current directory. The bridge ABI is
-//! built in; no ABI file is read.
+//! `daemon` writes only into the directories it is given (`--state-dir`,
+//! `--log-dir`; bridge-audit#132), and `prove-one` only into `--out-dir`:
+//! never the system temp directory, `$HOME` or the current directory. The
+//! bridge ABI is built in; no ABI file is read.
 
 use std::{
     net::SocketAddr,
@@ -36,21 +40,25 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use clap::{Parser, Subcommand};
 use deposit_relayer_daemon::{
-    bridge_abi, fetch_deposit_from_receipt, parse_and_validate_dapp_id, prepare_dir,
+    bridge_abi, check_gas_credit, fetch_deposit_from_receipt, prepare_dir,
     refuse_unrecognised_state, resolve_from_block, AnConfig, AnInterfaceSubmitter, AnSubmitConfig,
-    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositProofBundle, DepositProverBins,
-    DepositSource, EthLogSource, MockAnSubmitter, ProofGenerator, Relayer, RelayerConfig,
-    RelayerMetrics, RelayerState, ServiceDirs, StateLock, SubmitOutcome, SubprocessProofGenerator,
-    SubprocessProverConfig, BRIDGE_DEPLOY_BLOCK_ENV, LOG_FILE_PREFIX, STATE_FILE_NAME,
+    AnSubmitter, BackoffConfig, DeploymentIdentity, DepositSource, DepositWitness, EthLogSource,
+    MockAnSubmitter, ReceiptWitnessBuilder, Relayer, RelayerConfig, RelayerMetrics, RelayerState,
+    ServiceDirs, StateLock, SubmitOutcome, WitnessBuilder, BRIDGE_DEPLOY_BLOCK_ENV,
+    LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
 
+/// What `prove-one` writes into `--out-dir` and `finalize-one` reads from
+/// `--bundle-dir`: the serialised `DepositWitness`.
+const WITNESS_FILE_NAME: &str = "witness.json";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "deposit-relayer",
-    about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, prove them, \
-             finalize on AN."
+    about = "EVM→Acki Nacki deposit bridge relayer: listen for Deposit events, collect their \
+             receipt proofs, finalize on AN."
 )]
 struct Args {
     /// Removed: the state is a directory now. Kept hidden so an old command
@@ -63,19 +71,15 @@ struct Args {
     cmd: Cmd,
 }
 
-/// The three directories of `daemon` (bridge-audit#132).
+/// The two directories of `daemon` (bridge-audit#132).
 #[derive(clap::Args, Debug)]
 struct DirArgs {
     /// Directory for `deposit-relayer-state.json`, its lock and the
     /// temporary file of its atomic write. Created when missing.
     #[arg(long, env = "DEPOSIT_RELAYER_STATE_DIR")]
     state_dir: PathBuf,
-    /// Directory for the provers' inputs and outputs: one subdirectory per
-    /// proof, removed when the proof is read back. Created when missing.
-    #[arg(long, env = "DEPOSIT_RELAYER_WORK_DIR")]
-    work_dir: PathBuf,
-    /// Directory for the daemon's own log (one file per day, beside stdout)
-    /// and the output of every prover run. Created when missing.
+    /// Directory for the daemon's own log (one file per day, beside stdout).
+    /// Created when missing.
     #[arg(long, env = "DEPOSIT_RELAYER_LOG_DIR")]
     log_dir: PathBuf,
 }
@@ -107,12 +111,11 @@ enum Cmd {
         #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
     },
-    /// Listen for one depositId, prove it, write the operands to `--out-dir`.
+    /// Find one depositId, write its `finalizeDeposit` arguments to
+    /// `--out-dir/witness.json`.
     ProveOne {
-        /// EVM JSON-RPC; `deposit-prover` uses it too unless `--prover-rpc-url`
-        /// is set. Must serve `eth_getLogs` and transaction receipts for at
-        /// least the last 7 days (30 preferred). One that keeps ~10 000 blocks
-        /// cannot prove an older deposit.
+        /// EVM JSON-RPC. Must serve `eth_getLogs`, transaction receipts and
+        /// `eth_getBlockReceipts` for at least the last 7 days (30 preferred).
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -132,60 +135,22 @@ enum Cmd {
         /// with `--tx-hash`.
         #[arg(long, requires = "tx_hash")]
         log_index: Option<u64>,
-        /// Directory for the provers' inputs and outputs (bridge-audit#132).
-        #[arg(long, env = "DEPOSIT_RELAYER_WORK_DIR")]
-        work_dir: PathBuf,
-        /// Directory for the output of every prover run.
-        #[arg(long, env = "DEPOSIT_RELAYER_LOG_DIR")]
-        log_dir: PathBuf,
-        /// Working directory of the `deposit-prover` examples: the proving
-        /// key under `data/` and `data/kzg_params_18.srs` are read there.
-        #[arg(long, env = "DEPOSIT_PROVER_DIR")]
-        deposit_prover_dir: PathBuf,
-        /// Prebuilt `fetch_deposit_data` example (`cargo build --release
-        /// --examples` in `deposit-prover/`). Checked to exist and be
-        /// executable at startup.
-        #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
-        fetch_deposit_data_bin: PathBuf,
-        /// Prebuilt `export_vk_blob` example.
-        #[arg(long, env = "DEPOSIT_EXPORT_VK_BLOB_BIN")]
-        export_vk_blob_bin: PathBuf,
-        /// Prebuilt `export_blake2b_proof` example.
-        #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
-        export_blake2b_proof_bin: PathBuf,
-        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`). Must
-        /// serve the receipts of the deposit's block under the same 7-day rule
-        /// as `--rpc-url`.
-        #[arg(long)]
-        prover_rpc_url: Option<String>,
-        #[arg(long, default_value_t = 18)]
-        degree: u32,
-        #[arg(long, default_value_t = 2048)]
-        max_data_byte_len: usize,
-        #[arg(long, default_value_t = 20)]
-        max_log_num: usize,
-        /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
-        /// bound as the dappId public inputs (not part of the deposit event).
-        /// `eccBridge` pins the deposit's dappId to 0 and ignores this
-        /// value, so the default `0` is correct (QC-OFF-09).
-        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
-        dapp_id: String,
-        /// Where to write `vk_blob.bin` / `public_inputs.bin` / `proof.bin`.
+        /// Where to write `witness.json`. Created when missing.
         #[arg(long)]
         out_dir: PathBuf,
         /// Optional expected `eth_chainId` (must be a supported deposit chain).
         #[arg(long, env = "EXPECT_CHAIN_ID")]
         expect_chain_id: Option<u64>,
     },
-    /// Long-running listen→prove→submit loop.
+    /// Long-running listen→collect→submit loop.
     Daemon {
         #[command(flatten)]
         dirs: DirArgs,
-        /// EVM JSON-RPC; `deposit-prover` uses it too unless `--prover-rpc-url`
-        /// is set. Must serve `eth_getLogs` and transaction receipts for at
-        /// least the last 7 days (30 preferred), and back to `--from-block` on
-        /// a start without a state file. One that keeps ~10 000 blocks cannot
-        /// catch up after a stall.
+        /// EVM JSON-RPC. Must serve `eth_getLogs`, transaction receipts and
+        /// `eth_getBlockReceipts` for at least the last 7 days (30 preferred),
+        /// and `eth_getLogs` back to `--from-block` on a start without a
+        /// state file. One that keeps ~10 000 blocks cannot catch up after a
+        /// stall.
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -199,38 +164,6 @@ enum Cmd {
         /// First depositId to target on a fresh start.
         #[arg(long, default_value_t = 0)]
         start_deposit_id: u64,
-        /// Working directory of the `deposit-prover` examples: the proving
-        /// key under `data/` and `data/kzg_params_18.srs` are read there.
-        #[arg(long, env = "DEPOSIT_PROVER_DIR")]
-        deposit_prover_dir: PathBuf,
-        /// Prebuilt `fetch_deposit_data` example (`cargo build --release
-        /// --examples` in `deposit-prover/`). Checked to exist and be
-        /// executable at startup.
-        #[arg(long, env = "DEPOSIT_FETCH_DEPOSIT_DATA_BIN")]
-        fetch_deposit_data_bin: PathBuf,
-        /// Prebuilt `export_vk_blob` example.
-        #[arg(long, env = "DEPOSIT_EXPORT_VK_BLOB_BIN")]
-        export_vk_blob_bin: PathBuf,
-        /// Prebuilt `export_blake2b_proof` example.
-        #[arg(long, env = "DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN")]
-        export_blake2b_proof_bin: PathBuf,
-        /// RPC URL passed to `deposit-prover` (defaults to `--rpc-url`). Must
-        /// serve the receipts of the deposit's block under the same 7-day rule
-        /// as `--rpc-url`.
-        #[arg(long)]
-        prover_rpc_url: Option<String>,
-        #[arg(long, default_value_t = 18)]
-        degree: u32,
-        #[arg(long, default_value_t = 2048)]
-        max_data_byte_len: usize,
-        #[arg(long, default_value_t = 20)]
-        max_log_num: usize,
-        /// Acki Nacki destination dApp identifier (UInt256), hex. Config tag
-        /// bound as the dappId public inputs (not part of the deposit event).
-        /// `eccBridge` pins the deposit's dappId to 0 and ignores this
-        /// value, so the default `0` is correct (QC-OFF-09).
-        #[arg(long, env = "AN_DAPP_ID", default_value = "0")]
-        dapp_id: String,
         /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
         /// `/v2/messages` (`send_message`). A public gateway that only
         /// answers `/graphql` is not enough. Example:
@@ -256,8 +189,8 @@ enum Cmd {
         backoff_max_secs: u64,
         #[arg(long, default_value_t = 2)]
         backoff_multiplier: u32,
-        /// Accept a state file stamped for another deployment (chain, bridge
-        /// or dappId) by starting it over: progress, scan cursor and parked
+        /// Accept a state file stamped for another deployment (chain or
+        /// bridge) by starting it over: progress, scan cursor and parked
         /// ids are discarded and the daemon begins at `--start-deposit-id`.
         #[arg(long)]
         force_state: bool,
@@ -293,18 +226,15 @@ enum Cmd {
         #[arg(long, env = "DEPOSIT_RELAYER_METRICS_ADDR")]
         metrics_addr: Option<SocketAddr>,
     },
-    /// Submit an already-generated proof bundle to `USDCBridge.finalizeDeposit`
-    /// on Acki Nacki, bypassing the Ethereum listen/prove stages.
+    /// Send the `witness.json` of a `prove-one` to `eccBridge.finalizeDeposit`
+    /// on Acki Nacki, bypassing the Ethereum stages.
     ///
-    /// Reads `public_inputs.bin` + `proof.bin` (the layout `prove-one` writes;
-    /// `vk_blob.bin` is optional — the deployed contract uses its embedded
-    /// `VK_BLOB`) from `--bundle-dir` and fires the live `(proof,
-    /// publicInputs)` call. This is the operator path for finalising a
-    /// specific deposit and the contract/node readiness self-test (does
-    /// shellnet's `ZKHALO2VERIFYWITHVK` accept a real deposit proof?).
+    /// This is the operator path for finalising a specific deposit — one the
+    /// daemon parked after `--skip-after-attempts` — and the contract/node
+    /// readiness self-test. The deposit's block must already be accepted by
+    /// the AN bridge (exit 224 otherwise).
     FinalizeOne {
-        /// Directory holding `public_inputs.bin`, `proof.bin` (and optionally
-        /// `vk_blob.bin`) — e.g. a `prove-one --out-dir`.
+        /// Directory holding `witness.json` — a `prove-one --out-dir`.
         #[arg(long)]
         bundle_dir: PathBuf,
         /// tvm_client 3.0 endpoint. The host must serve GraphQL *and*
@@ -363,9 +293,6 @@ async fn real_main() -> anyhow::Result<()> {
         Cmd::Daemon {
             dirs, ..
         } => Some(dirs.log_dir.clone()),
-        Cmd::ProveOne {
-            log_dir, ..
-        } => Some(log_dir.clone()),
         _ => None,
     };
     if let Some(dir) = &log_dir {
@@ -412,51 +339,21 @@ async fn real_main() -> anyhow::Result<()> {
             confirmations,
             tx_hash,
             log_index,
-            work_dir,
-            log_dir,
-            deposit_prover_dir,
-            fetch_deposit_data_bin,
-            export_vk_blob_bin,
-            export_blake2b_proof_bin,
-            prover_rpc_url,
-            degree,
-            max_data_byte_len,
-            max_log_num,
-            dapp_id,
             out_dir,
             expect_chain_id,
-        } => {
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
-            let prover_cfg = build_prover_cfg(
-                deposit_prover_dir,
-                DepositProverBins {
-                    fetch_deposit_data: fetch_deposit_data_bin,
-                    export_vk_blob: export_vk_blob_bin,
-                    export_blake2b_proof: export_blake2b_proof_bin,
-                },
-                prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
-                degree,
-                max_data_byte_len,
-                max_log_num,
-                dapp_id,
-                work_dir,
-                log_dir,
-            )?;
-            prove_one(
-                rpc_url,
-                bridge_address,
-                deposit_id,
-                resolve_from_block(from_block),
-                confirmations,
-                tx_hash,
-                log_index,
-                prover_cfg,
-                out_dir,
-                expect_chain_id,
-            )
-            .await
-            .map_err(log_err("prove-one"))
-        },
+        } => prove_one(
+            rpc_url,
+            bridge_address,
+            deposit_id,
+            resolve_from_block(from_block),
+            confirmations,
+            tx_hash,
+            log_index,
+            out_dir,
+            expect_chain_id,
+        )
+        .await
+        .map_err(log_err("prove-one")),
         Cmd::FinalizeOne {
             bundle_dir,
             an_graphql_url,
@@ -479,15 +376,6 @@ async fn real_main() -> anyhow::Result<()> {
             from_block,
             confirmations,
             start_deposit_id,
-            deposit_prover_dir,
-            fetch_deposit_data_bin,
-            export_vk_blob_bin,
-            export_blake2b_proof_bin,
-            prover_rpc_url,
-            degree,
-            max_data_byte_len,
-            max_log_num,
-            dapp_id,
             an_graphql_url,
             an_keys_path,
             an_token_bridge,
@@ -509,33 +397,14 @@ async fn real_main() -> anyhow::Result<()> {
             }
             let service_dirs = ServiceDirs {
                 state: dirs.state_dir,
-                work: dirs.work_dir,
                 log: dirs.log_dir,
             };
             service_dirs.prepare().map_err(|e| anyhow::anyhow!(e))?;
             info!(
                 state_dir = %service_dirs.state.display(),
-                work_dir = %service_dirs.work.display(),
                 log_dir = %service_dirs.log.display(),
                 "service directories",
             );
-            let dapp_id = parse_and_validate_dapp_id(&dapp_id).map_err(|e| anyhow::anyhow!(e))?;
-            info!(%dapp_id, dry_run, "configured AN_DAPP_ID for deposit proofs");
-            let prover_cfg = build_prover_cfg(
-                deposit_prover_dir,
-                DepositProverBins {
-                    fetch_deposit_data: fetch_deposit_data_bin,
-                    export_vk_blob: export_vk_blob_bin,
-                    export_blake2b_proof: export_blake2b_proof_bin,
-                },
-                prover_rpc_url.unwrap_or_else(|| rpc_url.clone()),
-                degree,
-                max_data_byte_len,
-                max_log_num,
-                dapp_id,
-                service_dirs.work.clone(),
-                service_dirs.log.clone(),
-            )?;
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
@@ -562,7 +431,6 @@ async fn real_main() -> anyhow::Result<()> {
                 resolve_from_block(from_block),
                 confirmations,
                 start_deposit_id,
-                prover_cfg,
                 an_cfg,
                 dry_run,
                 backoff,
@@ -586,26 +454,19 @@ async fn finalize_one(
     an_token_bridge: String,
     an_sender: String,
 ) -> anyhow::Result<()> {
-    // `vk_blob.bin` is optional: the deployed contract verifies against its own
-    // embedded `VK_BLOB`, so the bundle's copy is informational only.
-    let vk_blob = std::fs::read(bundle_dir.join("vk_blob.bin")).unwrap_or_default();
-    let public_inputs = std::fs::read(bundle_dir.join("public_inputs.bin"))
-        .map_err(|e| anyhow::anyhow!("read {}/public_inputs.bin: {e}", bundle_dir.display()))?;
-    let proof = std::fs::read(bundle_dir.join("proof.bin"))
-        .map_err(|e| anyhow::anyhow!("read {}/proof.bin: {e}", bundle_dir.display()))?;
-
-    let bundle = DepositProofBundle::from_operands(vk_blob, public_inputs, proof)?;
-    let pi = &bundle.parsed;
+    let path = bundle_dir.join(WITNESS_FILE_NAME);
+    let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+    let witness: DepositWitness = serde_json::from_slice(&raw)
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    check_gas_credit(&witness)?;
     info!(
-        deposit_id = %pi.deposit_id,
-        sender = %pi.sender,
-        amount = %pi.amount,
-        contract_address = %pi.contract_address,
-        an_account = %pi.an_account(),
-        dapp_id = %pi.dapp_id(),
-        proof_len = bundle.proof.len(),
-        public_inputs_len = bundle.public_inputs.len(),
-        "submitting finalizeDeposit(proof, publicInputs) to AN",
+        chain_id = witness.chain_id,
+        block_number = witness.block_number,
+        block_hash = %witness.block_hash,
+        tx_index = witness.tx_index,
+        log_index = witness.log_index,
+        payload_len = witness.payload_len(),
+        "submitting finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex) to AN",
     );
 
     let keys_json = std::fs::read_to_string(&an_keys_path)?;
@@ -624,7 +485,7 @@ async fn finalize_one(
     };
     let submitter = AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg);
 
-    match submitter.submit_bundle(&bundle).await? {
+    match submitter.submit_witness(&witness).await? {
         SubmitOutcome::Finalized {
             tx_hash,
         } => {
@@ -635,7 +496,7 @@ async fn finalize_one(
             Ok(())
         },
         SubmitOutcome::AlreadyFinalized => {
-            info!("deposit already finalised on AN (nullifier set)");
+            info!("deposit already finalised on AN (its voucher exists)");
             Ok(())
         },
         SubmitOutcome::Rejected {
@@ -645,42 +506,6 @@ async fn finalize_one(
             reason,
         } => anyhow::bail!("finalizeDeposit still pending on AN: {reason}"),
     }
-}
-
-/// The prover configuration, its binaries and working directory checked
-/// before anything connects: a wrong path is a configuration error, found
-/// at startup rather than at the first deposit.
-#[allow(clippy::too_many_arguments)]
-fn build_prover_cfg(
-    deposit_prover_dir: PathBuf,
-    bins: DepositProverBins,
-    rpc_url: String,
-    degree: u32,
-    max_data_byte_len: usize,
-    max_log_num: usize,
-    dapp_id: String,
-    work_dir: PathBuf,
-    log_dir: PathBuf,
-) -> anyhow::Result<SubprocessProverConfig> {
-    anyhow::ensure!(
-        deposit_prover_dir.is_dir(),
-        "--deposit-prover-dir {} is not a directory",
-        deposit_prover_dir.display()
-    );
-    prepare_dir("work", &work_dir).map_err(|e| anyhow::anyhow!(e))?;
-    prepare_dir("log", &log_dir).map_err(|e| anyhow::anyhow!(e))?;
-    let mut cfg = SubprocessProverConfig::new(
-        deposit_prover_dir,
-        bins.validated()?,
-        rpc_url,
-        work_dir,
-        log_dir,
-    );
-    cfg.degree = degree;
-    cfg.max_data_byte_len = max_data_byte_len;
-    cfg.max_log_num = max_log_num;
-    cfg.dapp_id = dapp_id;
-    Ok(cfg)
 }
 
 async fn ensure_supported_rpc_chain(
@@ -744,7 +569,6 @@ async fn prove_one(
     confirmations: u64,
     tx_hash: Option<String>,
     log_index: Option<u64>,
-    prover_cfg: SubprocessProverConfig,
     out_dir: PathBuf,
     expect_chain_id: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -756,7 +580,7 @@ async fn prove_one(
     }
 
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let _chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
+    ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
 
     let event = if let (Some(tx_hash), Some(log_index)) = (tx_hash, log_index) {
         let tx_hash = alloy::primitives::B256::from_str(&tx_hash)
@@ -786,7 +610,7 @@ async fn prove_one(
             },
         }
     } else {
-        let source = EthLogSource::new(provider, bridge_address, from_block, confirmations);
+        let source = EthLogSource::new(provider.clone(), bridge_address, from_block, confirmations);
         match source.fetch(deposit_id).await? {
             Some(e) => e,
             None => {
@@ -798,33 +622,27 @@ async fn prove_one(
         deposit_id = event.deposit_id,
         tx = %event.tx_hash,
         log_index = event.log_index,
-        "found deposit; generating proof (this runs the halo2 prover out-of-process)",
+        "found deposit; collecting its block header and receipt proof",
     );
 
-    let prover = SubprocessProofGenerator::new(prover_cfg);
-    let bundle = prover.generate(&event).await?;
+    let witness = ReceiptWitnessBuilder::new(provider, bridge_address)
+        .build(&event)
+        .await?;
+    check_gas_credit(&witness)?;
 
-    std::fs::create_dir_all(&out_dir)?;
-    std::fs::write(out_dir.join("vk_blob.bin"), &bundle.vk_blob)?;
-    std::fs::write(out_dir.join("public_inputs.bin"), &bundle.public_inputs)?;
-    std::fs::write(out_dir.join("proof.bin"), &bundle.proof)?;
-
+    prepare_dir("out", &out_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let path = out_dir.join(WITNESS_FILE_NAME);
+    std::fs::write(&path, serde_json::to_vec_pretty(&witness)?)
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
     info!(
-        out_dir = %out_dir.display(),
-        vk_blob_len = bundle.vk_blob.len(),
-        public_inputs_len = bundle.public_inputs.len(),
-        proof_len = bundle.proof.len(),
-        "wrote operands",
-    );
-    info!(
-        deposit_id = %bundle.parsed.deposit_id,
-        sender = %bundle.parsed.sender,
-        amount = %bundle.parsed.amount,
-        contract_address = %bundle.parsed.contract_address,
-        block_hash_high = %bundle.parsed.block_hash_high,
-        block_hash_low = %bundle.parsed.block_hash_low,
-        promise_commit = %bundle.parsed.promise_commit,
-        "public inputs",
+        file = %path.display(),
+        chain_id = witness.chain_id,
+        block_number = witness.block_number,
+        block_hash = %witness.block_hash,
+        tx_index = witness.tx_index,
+        log_index = witness.log_index,
+        payload_len = witness.payload_len(),
+        "wrote the finalizeDeposit arguments",
     );
     Ok(())
 }
@@ -837,7 +655,6 @@ async fn run_daemon(
     from_block: u64,
     confirmations: u64,
     start_deposit_id: u64,
-    prover_cfg: SubprocessProverConfig,
     an_cfg: AnConfig,
     dry_run: bool,
     backoff: BackoffConfig,
@@ -855,9 +672,8 @@ async fn run_daemon(
     let existing_state = RelayerState::load(&state_path)?.unwrap_or_default();
     let scan_cursor = Arc::new(Mutex::new(existing_state.scan_done_through_block));
 
-    // Same gate as `watch` / `prove-one`: an unsupported chain produces proofs
-    // the AN-side bridge has no allowlist entry for, so fail before the first
-    // deposit rather than after a long prove.
+    // Same gate as `watch` / `prove-one`: the AN-side bridge has no allowlist
+    // entry for an unsupported chain, so fail before the first deposit.
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let chain_id = ensure_supported_rpc_chain(&provider, expect_chain_id).await?;
     info!(
@@ -865,15 +681,15 @@ async fn run_daemon(
         chain = deposit_relayer_daemon::supported_deposit_chain_name(chain_id).unwrap_or("?"),
         "deposit source chain",
     );
-    let deployment = DeploymentIdentity::new(chain_id, bridge_address, prover_cfg.dapp_id.clone());
+    let deployment = DeploymentIdentity::new(chain_id, bridge_address);
 
+    let witness = Arc::new(ReceiptWitnessBuilder::new(provider.clone(), bridge_address));
     let source = Arc::new(
         EthLogSource::new(provider, bridge_address, from_block, confirmations)
             .with_scan_cursor(scan_cursor.clone()),
     );
     deposit_relayer_daemon::metrics::set_build_info();
     spawn_deposit_counter_poller(source.clone());
-    let prover = Arc::new(SubprocessProofGenerator::new(prover_cfg));
 
     let skip_after = if skip_after_attempts == 0 {
         None
@@ -883,8 +699,8 @@ async fn run_daemon(
 
     if dry_run {
         warn!(
-            "running in --dry-run mode: deposits are proven against the real chain but \
-             'finalized' only in an in-memory mock AN"
+            "running in --dry-run mode: receipt proofs are built from the real chain but deposits \
+             are 'finalized' only in an in-memory mock AN"
         );
         run_daemon_loop(
             state_path,
@@ -897,7 +713,7 @@ async fn run_daemon(
             anchor_wait_warn_after_secs,
             scan_cursor,
             source,
-            prover,
+            witness,
             Arc::new(MockAnSubmitter::accepting()),
         )
         .await
@@ -906,7 +722,7 @@ async fn run_daemon(
             anyhow::bail!(
                 "live submit requires --an-graphql-url, --an-keys-path, --an-token-bridge and \
                  --an-sender (addresses in dapp_id::account_id form). Or pass --dry-run to \
-                 exercise listen→prove only."
+                 exercise the Ethereum side only."
             );
         }
         an_cfg
@@ -940,7 +756,7 @@ async fn run_daemon(
             anchor_wait_warn_after_secs,
             scan_cursor,
             source,
-            prover,
+            witness,
             Arc::new(submitter),
         )
         .await
@@ -948,7 +764,7 @@ async fn run_daemon(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_daemon_loop<S, P, A>(
+async fn run_daemon_loop<S, W, A>(
     state_path: PathBuf,
     start_deposit_id: u64,
     backoff: BackoffConfig,
@@ -959,12 +775,12 @@ async fn run_daemon_loop<S, P, A>(
     anchor_wait_warn_after_secs: u64,
     scan_cursor: Arc<Mutex<Option<u64>>>,
     source: Arc<S>,
-    prover: Arc<P>,
+    witness: Arc<W>,
     submitter: Arc<A>,
 ) -> anyhow::Result<()>
 where
     S: DepositSource,
-    P: ProofGenerator,
+    W: WitnessBuilder,
     A: AnSubmitter,
 {
     let cfg = RelayerConfig {
@@ -978,7 +794,7 @@ where
         anchor_wait_warn_after_secs,
         scan_cursor: Some(scan_cursor),
     };
-    let mut relayer = Relayer::new(cfg, source, prover, submitter)?;
+    let mut relayer = Relayer::new(cfg, source, witness, submitter)?;
     let metrics = RelayerMetrics::new();
 
     let shutdown = async {
@@ -1016,7 +832,7 @@ where
 /// Serve the Prometheus text format at `http://<addr>/metrics` for the
 /// lifetime of the process. Every `metrics::*` macro in this binary and in
 /// `deposit_relayer_daemon` records into it. Same buckets as the AN→ETH
-/// relayer: sub-second RPC round-trips up to ten-minute proving stages.
+/// relayer, so one scrape config fits both.
 fn install_metrics_exporter(addr: SocketAddr) -> anyhow::Result<()> {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
@@ -1038,7 +854,8 @@ fn install_metrics_exporter(addr: SocketAddr) -> anyhow::Result<()> {
 const DEPOSIT_COUNTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Keep `deposit_relayer_eth_deposit_counter` fresh: one `eth_call` a minute,
-/// independent of the tick loop, so the backlog is visible while a proof runs.
+/// independent of the tick loop, so the backlog stays visible during long
+/// retries.
 fn spawn_deposit_counter_poller<P>(source: Arc<EthLogSource<P>>)
 where
     P: alloy::providers::Provider<alloy::network::Ethereum> + 'static,

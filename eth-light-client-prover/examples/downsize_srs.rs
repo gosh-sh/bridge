@@ -1,7 +1,7 @@
 //! Downsize a KZG SRS to a smaller `k`, preserving the ceremony (same tau).
 //!
-//! Twin of `deposit-prover/examples/downsize_srs.rs`, but built against the
-//! **gosh** halo2-base this crate (and `bridge-snark-utils`) use, so the written
+//! Built against the **gosh** halo2-base this crate (and `bridge-snark-utils`)
+//! use, so the written
 //! `kzg_bn254_{k}.srs` round-trips byte-for-byte through the `gen_srs` reader
 //! that `bridge-snark-utils::export_poseidon_snark` invokes (it sets
 //! `PARAMS_DIR = vk_path.parent()` and reads `kzg_bn254_{config.k}.srs`).

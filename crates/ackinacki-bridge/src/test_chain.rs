@@ -141,7 +141,7 @@ async fn deployed_multisig_for_token(ecc3: u128, token_id: u32) -> (String, Stri
 /// the one the CLI ships (`abi/USDCBridge.abi.json`, kept identical to the
 /// compiled one by CI).
 const USDC_BRIDGE_TVC: &[u8] =
-    include_bytes!("../../../contracts/an/0.80.0_compiled/exchange/eccBridge.tvc");
+    include_bytes!("../../../contracts/an/0.80.1_compiled/exchange/eccBridge.tvc");
 
 /// The EVM bridge [`deployed_usdc_bridge`] binds Sepolia withdrawals to, and
 /// the `--bridge-address` of [`fake_world`].
@@ -345,7 +345,8 @@ fn with_bridged_totals(boc: &str, minted: u128, burned: u128) -> String {
 
 /// A lane for a currency the production bridge refuses to register: register
 /// USDC through the owner method, move that entry to `token_id` in storage and
-/// seed its bridged inventory. The CLI is token-agnostic; this keeps that covered.
+/// seed its bridged inventory. The CLI is token-agnostic; this keeps that
+/// covered.
 async fn bridge_with_token_lane(
     boc: &str,
     account_id: &str,
@@ -355,14 +356,26 @@ async fn bridge_with_token_lane(
     let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
     let abi = Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string());
     let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
-        abi, address: Some(format!("0:{account_id}")),
-        call_set: Some(CallSet { function_name: "setBridgeToken".into(),
-            input: Some(json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
-                "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true})),
-            ..Default::default() }),
-        signer: Signer::Keys { keys: KeyPair { public: PAIR_PUBLIC.into(), secret: PAIR_SECRET.into() } },
+        abi,
+        address: Some(format!("0:{account_id}")),
+        call_set: Some(CallSet {
+            function_name: "setBridgeToken".into(),
+            input: Some(
+                json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
+                "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true}),
+            ),
+            ..Default::default()
+        }),
+        signer: Signer::Keys {
+            keys: KeyPair {
+                public: PAIR_PUBLIC.into(),
+                secret: PAIR_SECRET.into(),
+            },
+        },
         ..Default::default()
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let result = run_executor(ctx, ParamsOfRunExecutor {
         message: encoded.message,
         account: AccountForExecutor::Account {
@@ -1337,7 +1350,7 @@ mod tests {
         .account;
         assert_eq!(
             getter(boc.clone(), "getVersion", json!({})).await["value0"],
-            "1.16.0"
+            "1.17.0"
         );
         assert_eq!(
             getter(
@@ -1353,10 +1366,23 @@ mod tests {
         .await
         .expect("a special account records the refused call")
         .transaction;
-        assert_eq!(refused["compute"]["exit_code"].as_i64(), Some(242), "{refused}");
+        assert_eq!(
+            refused["compute"]["exit_code"].as_i64(),
+            Some(242),
+            "{refused}"
+        );
         let recovery = json!({"recipient": format!("0:{}", "ab".repeat(32)), "value": "1000000", "nonce": "1", "chainId": "11155111", "tokenId": 3});
-        boc = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
-            "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true})).await.unwrap().account;
+        boc = owner_call_for_upgrade(
+            &ctx,
+            &address,
+            &boc,
+            "setBridgeToken",
+            json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
+            "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true}),
+        )
+        .await
+        .unwrap()
+        .account;
         let reused_nonce = owner_call_for_upgrade(
             &ctx,
             &address,
@@ -1452,11 +1478,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.0 build of eccBridge 1.16.0: 1.15.0 plus per-token
-        // accounting, with USDC the only currency it registers.
+        // sold 0.80.1 build of eccBridge 1.17.0: 1.16.0 with the deposit
+        // checked against its receipt instead of a ZK proof.
         assert_eq!(
             &hash[..8],
-            "e6810f06",
+            "c25d1ac0",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

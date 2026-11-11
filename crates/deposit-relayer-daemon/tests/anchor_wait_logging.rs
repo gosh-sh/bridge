@@ -8,20 +8,20 @@ use std::sync::{
 
 use alloy::primitives::{Address, B256, U256};
 use deposit_relayer_daemon::{
-    state::unix_now_secs, AnSubmitter, DepositEvent, DepositProofBundle, InMemoryDepositSource,
-    MockAnSubmitter, MockProofGenerator, ProofGenerator, Relayer, RelayerConfig, RelayerError,
-    RelayerState, SubmitOutcome, TickOutcome,
+    state::unix_now_secs, AnSubmitter, DepositEvent, DepositWitness, InMemoryDepositSource,
+    MockAnSubmitter, MockWitnessBuilder, Relayer, RelayerConfig, RelayerError, RelayerState,
+    SubmitOutcome, TickOutcome, WitnessBuilder,
 };
 use tempfile::tempdir;
 
 #[derive(Default)]
-struct CountingProver(AtomicUsize);
+struct CountingBuilder(AtomicUsize);
 
 #[async_trait::async_trait]
-impl ProofGenerator for CountingProver {
-    async fn generate(&self, event: &DepositEvent) -> Result<DepositProofBundle, RelayerError> {
+impl WitnessBuilder for CountingBuilder {
+    async fn build(&self, event: &DepositEvent) -> Result<DepositWitness, RelayerError> {
         self.0.fetch_add(1, Ordering::Relaxed);
-        MockProofGenerator::new().generate(event).await
+        MockWitnessBuilder::new().build(event).await
     }
 }
 
@@ -52,9 +52,9 @@ impl AnSubmitter for AnchorGate {
     async fn submit(
         &self,
         event: &DepositEvent,
-        bundle: &DepositProofBundle,
+        witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
-        self.inner.submit(event, bundle).await
+        self.inner.submit(event, witness).await
     }
 }
 
@@ -111,7 +111,7 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
             let dir = tempdir().unwrap();
             let source = Arc::new(InMemoryDepositSource::new());
             source.insert(deposit(0));
-            let prover = Arc::new(CountingProver::default());
+            let builder = Arc::new(CountingBuilder::default());
             let gate = Arc::new(AnchorGate::default());
             let cfg = RelayerConfig {
                 outstanding_backoff_secs: 0,
@@ -120,7 +120,7 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
                 ..RelayerConfig::new(dir.path().join("state.json"))
             };
             let mut r =
-                Relayer::new(cfg.clone(), source.clone(), prover.clone(), gate.clone()).unwrap();
+                Relayer::new(cfg.clone(), source.clone(), builder.clone(), gate.clone()).unwrap();
             r.tick().await.unwrap();
             r.tick().await.unwrap();
             let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
@@ -152,11 +152,11 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
             state.save(&cfg.state_path).unwrap();
             drop(r);
             let mut r =
-                Relayer::new(cfg.clone(), source.clone(), prover.clone(), gate.clone()).unwrap();
+                Relayer::new(cfg.clone(), source.clone(), builder.clone(), gate.clone()).unwrap();
             r.tick().await.unwrap();
             r.tick().await.unwrap();
             drop(r);
-            let mut r = Relayer::new(cfg, source, prover.clone(), gate.clone()).unwrap();
+            let mut r = Relayer::new(cfg, source, builder.clone(), gate.clone()).unwrap();
             r.tick().await.unwrap();
             let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
             assert_eq!(output.matches("waiting for AN block anchor;").count(), 1);
@@ -185,7 +185,7 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
             assert!(warning.contains("setAcceptedBlockHash"));
             assert_eq!(r.state().outstanding(0).unwrap().attempts, 0);
             assert!(r.state().parked_deposit_ids.is_empty());
-            assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+            assert_eq!(builder.0.load(Ordering::Relaxed), 0);
             assert_eq!(gate.inner.finalized_count(), 0);
 
             gate.accepted.store(true, Ordering::Relaxed);
@@ -197,17 +197,17 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
         }
 
         // The diagnostics must remain available when the state cannot be
-        // saved: no proof/submission may follow the write error.
+        // saved: no submission may follow the write error.
         logs.0.lock().unwrap().clear();
         let dir = tempdir().unwrap();
         let source = Arc::new(InMemoryDepositSource::new());
         source.insert(deposit(0));
-        let prover = Arc::new(CountingProver::default());
+        let builder = Arc::new(CountingBuilder::default());
         let gate = Arc::new(AnchorGate::default());
         let mut r = Relayer::new(
             RelayerConfig::new(dir.path().join("blocked/state.json")),
             source,
-            prover.clone(),
+            builder.clone(),
             gate.clone(),
         )
         .unwrap();
@@ -217,7 +217,7 @@ async fn anchor_wait_logs_identify_the_deposit_and_warn_without_spamming_after_r
         assert!(output.contains("waiting for AN block anchor;"));
         assert!(output.contains("AN block anchor missing;"));
         assert!(output.contains("deposit_id=0"));
-        assert_eq!(prover.0.load(Ordering::Relaxed), 0);
+        assert_eq!(builder.0.load(Ordering::Relaxed), 0);
         assert_eq!(gate.inner.finalized_count(), 0);
     }
     .with_subscriber(subscriber)

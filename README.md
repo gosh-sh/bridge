@@ -1,9 +1,10 @@
 # Acki Nacki Bridge
 
-A cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/), with
-zero-knowledge proofs on both directions of travel. USDC is custodied by `AckiNackiBridge.sol` on
-Ethereum; Acki Nacki state is committed on-chain from Halo2 proofs verified by SHPLONK aggregator
-verifiers deployed as Yul bytecode.
+A cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/). USDC is
+custodied by `AckiNackiBridge.sol` on Ethereum; Acki Nacki state is committed on-chain from Halo2
+proofs verified by SHPLONK aggregator verifiers deployed as Yul bytecode. In the other direction,
+Acki Nacki checks a deposit's receipt-trie proof itself against an Ethereum block hash it has
+accepted.
 
 > **Where the truth is.** This README orients you; it is not a specification. The document derived
 > from the sources line by line, with a `file:line` citation for every behavioural claim, is
@@ -27,7 +28,7 @@ The CLI, relayers and web form take their addresses from configuration.
 | AAVE V3 pool | `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff` |
 | aUSDC | `0x460b97BD498E1157530AEb3086301d5225b91216` |
 
-This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.16.0
+This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.17.0
 for deposits. The deployment addresses below describe the existing shellnet pair.
 
 ### Acki Nacki (shellnet)
@@ -59,9 +60,13 @@ public endpoints do not (`crates/deposit-relayer-daemon/docs/operator_runbook.md
 **Ethereum → Acki Nacki (deposit).** The user approves USDC and calls
 `deposit(address token, uint256 amount, bytes32 anAccount)`. The contract takes custody via
 `transferFrom` and emits a `Deposit` event carrying the Acki Nacki destination. Nothing is verified on
-the Ethereum side. Off-chain, `deposit-prover/` proves the event's presence in a real Ethereum block
-(receipt-trie inclusion + log binding, with a keccak coprocessor), and the AN-side `USDCBridge`
-consumes that Halo2 proof natively through the `ZKHALO2VERIFYWITHVK` TVM opcode, then mints.
+the Ethereum side. There is no deposit proof to generate: the relayer or the CLI collects the block
+header, the receipt-trie path to the deposit transaction's receipt and the log's index in it
+(`crates/deposit-receipt/`), and the AN-side `eccBridge` checks them itself in `finalizeDeposit`. It
+hashes the header with the VM's keccak, requires the hash to be a block hash accepted for that chain
+id (anchored by the owner, the Ethereum light client or the Arbitrum block verifier), proves the
+receipt against the header's receipts root, and reads every deposit field out of the log, which must
+be a `Deposit` event emitted by a trusted EVM bridge. Then it mints.
 Each transfer is capped at 50 USDC, and the outstanding principal at 10,000 USDC
 per L1 chain.
 
@@ -98,12 +103,13 @@ Every component and the interface each connection goes through, with its call si
                                   │                                 │
                             custody (USDC)                    MPT receipt proof
                                   │                                 ▼
-                            AAVE V3 (optional)          deposit-prover (Halo2, off-chain)
+                            AAVE V3 (optional)          deposit-receipt (off-chain, RPC)
                                                                     │
-                                                        SHPLONK proof + 13 public inputs
+                                              block header + receipt proof + log index
                                                                     ▼
-                                                    AN USDCBridge.finalizeDeposit
-                                                    (ZKHALO2VERIFYWITHVK opcode)
+                                                    AN eccBridge.finalizeDeposit
+                                          (keccak(header) is an accepted block hash,
+                                           receipt proven against its receipts root)
 
                  Acki Nacki → Ethereum (state + payout)
   AN node ──GraphQL──▶ bridge-prover-libraries ──Circuits 1A/1B, 2, 4──▶ bridge-relayer-daemon
@@ -126,9 +132,9 @@ Every component and the interface each connection goes through, with its call si
 | `contracts/ethereum/src/` | The bridge, four verifier adapters, the SHPLONK shim, oracles. Solidity 0.8.19, Foundry. |
 | `contracts/ethereum/verifiers/` | Production SHPLONK Yul **creation bytecode** (`.bin`) per circuit, the generated Solidity source (`.sol`) it compiles from, and reference calldata. The `.bin` is what deploys; the `.sol` is what `aggregate-proof` self-checks a proof against. |
 | `contracts/ethereum/script/` | Deploy scripts; `ShplonkDeployLib.sol` wires `.bin` → shim → typed adapter. |
-| `deposit-prover/` | ETH → AN deposit proof (Halo2 on axiom-eth: receipt MPT, log binding, keccak coprocessor). |
-| `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, drives the prover, submits `finalizeDeposit` on AN. |
-| `crates/deposit-chain-ids/` | The single allowlist of deposit source chains, shared by prover and relayer. |
+| `crates/deposit-receipt/` | Builds the `finalizeDeposit` arguments for one deposit from an EVM RPC (block header, receipt-trie proof, log index), checking them the way the AN bridge will. |
+| `crates/deposit-relayer-daemon/` | Watches the `Deposit` log, builds the receipt proof, submits `finalizeDeposit` on AN. |
+| `crates/deposit-chain-ids/` | The single allowlist of deposit source chains, shared by the relayer and the CLI. |
 | `crates/bridge-prover-libraries/` | AN-side prover: block-id tree, bridge state, live driver, Circuit-4 event witness. Standalone workspace. |
 | `crates/bridge-relayer-daemon/` | AN → ETH relayer. `src/withdraw_e2e/` is the in-process withdrawal pipeline behind `relayer withdraw-e2e`. |
 | `crates/ackinacki-bridge/` | End-user CLI: `withdraw` moves USDC from an Acki Nacki multisig to an EVM recipient, `deposit` from an EVM wallet to an Acki Nacki account. Counterpart to the relayers — the daemons own the continuous streams, this owns one withdrawal or one deposit. Installed from published releases, see [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md). |
@@ -136,10 +142,11 @@ Every component and the interface each connection goes through, with its call si
 | `frontend/` | WASM deposit UI (Yew). |
 | `docs/` | [`EVM-contracts-spec.md`](docs/EVM-contracts-spec.md) and the rest of the current documentation; the register is [`DOCS.md`](DOCS.md). |
 
-**Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`
-and `crates/deposit-chain-ids`. Everything else is excluded and built standalone, because the Halo2
-forks in play cannot share a dependency tree: `deposit-prover/` (axiom-eth), `crates/bridge-prover-libraries/`
-(gosh-fork halo2-base), `crates/bridge-snark-utils/`, `crates/deposit-relayer-daemon/`, and `frontend/`.
+**Cargo workspaces.** The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`,
+`crates/deposit-chain-ids` and `crates/deposit-receipt`. Everything else is excluded and built
+standalone, because the Halo2 forks in play cannot share a dependency tree:
+`crates/bridge-prover-libraries/` (gosh-fork halo2-base), `crates/bridge-snark-utils/`,
+`crates/deposit-relayer-daemon/`, and `frontend/`.
 The AN→ETH relayer `crates/bridge-relayer-daemon/` and the end-user CLI `crates/ackinacki-bridge/`
 are symlinked members of `crates/bridge-prover-libraries/` and build only from there.
 
@@ -161,8 +168,8 @@ lists what it does and does not cover.
 
 The end-user CLI is not built from here at all —
 [`crates/ackinacki-bridge/scripts/install.sh`](crates/ackinacki-bridge/scripts/install.sh) downloads
-the published binaries (the CLI, the prover subprocess it shells out to, the verifier bytecode
-and sources, and the deposit prover), so an operator needs neither Rust nor a checkout. Start at
+the published binaries (the CLI, the prover subprocess it shells out to for withdrawals, and the
+verifier bytecode and sources), so an operator needs neither Rust nor a checkout. Start at
 [`QUICKSTART.md`](crates/ackinacki-bridge/QUICKSTART.md).
 
 Contracts on their own:

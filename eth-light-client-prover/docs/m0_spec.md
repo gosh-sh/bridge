@@ -21,9 +21,9 @@ it attests the *next* committee.
 
 BN254 `Fr`, 32 B little-endian each (matches `ZKHALO2VERIFYWITHVK` PI encoding).
 256-bit roots/hashes are split **hi = high 16 bytes, lo = low 16 bytes**, byte-for-byte
-identical to the deposit circuit's `blockHashHigh/Low` convention
-(`deposit-prover/src/circuit_v2.rs`, `bytes_to_field(&h[0..16])` / `&h[16..32]`), so
-`finalizeDeposit` can compare the two directly.
+identical to the `blockHashHigh/Low` convention of the deposit circuit that
+`deposit-prover/src/circuit_v2.rs` held until bridge-audit#139 replaced it with an on-chain receipt
+proof (`bytes_to_field(&h[0..16])` / `&h[16..32]`).
 
 | idx | name | type | contract use |
 |:--:|------|------|------|

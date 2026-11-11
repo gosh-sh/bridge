@@ -59,6 +59,14 @@ note here calling out the drift.
 > with no verifier set, `verifyBlock` reverts `VerifyBlockDisabled` (`:934`). Other citations were
 > not re-anchored.
 >
+> **Drift note, 2026-11-06 (deposits without a ZK proof, gosh-sh/bridge-audit#139).** The
+> Solidity side is unchanged. The deposit prover and its public inputs are gone: AN `eccBridge`
+> 1.17.0 proves the `Deposit` receipt itself. §2's diagram and ETH → AN paragraph, the `Deposit`
+> notes in §6 and the deposit rows of §14 describe that flow and cite
+> `contracts/an/exchange/eccBridge.sol`, `crates/deposit-receipt/src/lib.rs`,
+> `crates/deposit-relayer-daemon/src/source.rs` and `crates/deposit-chain-ids/src/lib.rs` as of
+> this change.
+>
 > **Drift note, 2026-11-05 (`migrateToken`, gosh-sh/bridge-audit#128).** §7.2's check table and the
 > §10 `fundToken` / `migrateToken` rows cite `src/AckiNackiBridge.sol` as of this change. Other
 > citations were not re-anchored.
@@ -136,8 +144,8 @@ flowchart TB
         B --> V4["BridgeWithdrawalAggregatorVerifier (C4)"]
         V1 & V2 & V3 & V4 --> W["ShplonkHalo2Verifier"] --> Y["Yul Halo2Verifier (CREATE from .bin)"]
     end
-    LOG -->|"MPT receipt proof"| DP["deposit-prover (off-chain Halo2)"]
-    DP -->|"SHPLONK proof + 12 PIs"| AN["AN USDCBridge.finalizeDeposit"]
+    LOG -->|"eth_getBlockByHash, eth_getBlockReceipts"| DP["deposit-receipt (off-chain witness)"]
+    DP -->|"header + receipt-trie proof + log index"| AN["AN eccBridge.finalizeDeposit"]
     AN -.->|"WithdrawalInitiated event"| C4P["AN-side prover (Circuit 4)"]
     C4P -.->|"proof + 12 PIs"| R
 ```
@@ -145,9 +153,10 @@ flowchart TB
 Two independent directions:
 
 * **ETH → AN (deposit).** Purely an event emission on this side (`AckiNackiBridge.deposit`,
-  `src/AckiNackiBridge.sol:672`). No Ethereum-side proof verification is involved; the event's log
-  is proven off-chain and consumed natively by the AN `USDCBridge`. The bridge keeps custody of the
-  USDC.
+  `src/AckiNackiBridge.sol:672`). No Ethereum-side proof verification is involved; the AN
+  `eccBridge` proves the event's receipt itself, against the receipts root of a block whose hash it
+  has accepted for that chain (`contracts/an/exchange/eccBridge.sol:949-993`). The bridge keeps
+  custody of the USDC.
 * **AN → ETH (state attestation + payout).** `verifyBlock` (`:739`) advances a rolling commitment to
   AN state from two cross-bound ZK proofs; `withdrawByProof` (`:1295`) pays out USDC against a
   Circuit-4 proof anchored into state that `verifyBlock` already recorded. `applyBkSetUpdate`
@@ -339,31 +348,31 @@ Notes that matter downstream:
   principal look like harvestable yield.
 * The received amount must match the requested amount exactly; a fee-on-transfer token is
   rejected before `depositCounter` or the listing's liabilities change (`:1911`).
-* The `Deposit` **event layout is a hard cross-repo ABI**: the off-chain prover parses
-  `topics[1] = depositId`, `topics[2] = sender`, and reads four data words:
-  `amount` at bytes 0..32, `anAccount` at 32..64, `timestamp` at 64..96 and `token` at 96..128,
-  the address in the low 20 bytes with the 12 padding bytes constrained to zero.
-  Parsing starts in `deposit-prover/src/ethereum_fetcher.rs:58`, which rejects any other data
-  length (`:110`) and any non-zero padding (`:145`). The circuit constrains the 128-byte data
-  length (`deposit-prover/src/circuit_v2.rs:880`), binds the account from word 1 and the token
-  from word 3 (`:1078`, `:1159`).
-  This format requires the matching deposit VK; the earlier five-field event and its proofs are
-  incompatible.
-* The proof's 13 public inputs are `deposit_id, sender, amount, contract_address, chain_id,
-  dapp_id_{high,low}, an_account_{high,low}, block_hash_{high,low}, token, promise_commit`
-  (`deposit-prover/src/circuit_v2.rs:74-90`,
-  `crates/deposit-relayer-daemon/src/types.rs:45,155-156`). `token` is **appended** at slot 11 so
-  that slots 0..10 keep their positions: the AN side reads public inputs positionally. The DApp ID
-  remains a config-supplied tag.
-  Those 13 values are the only deposit data the proof can change. The private witness is
-  longer: the receipt and the log sit in fixed-length buffers with an unused tail, and a
-  different tail is another witness of the same public inputs, not another deposit.
-  [`deposit-prover/README.md`](../deposit-prover/README.md) names the buffers.
-* Deposits are provable from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
-  Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111)
-  (`crates/deposit-chain-ids/src/lib.rs:30-38`). Ethereum mainnet (1) is **not** in that list. The
-  contract itself is chain-agnostic; the constraint lives in the prover/relayer allowlist and the
-  AN-side `(chainId → bridge Fr)` allowlist.
+* The `Deposit` **event layout is a hard cross-repo ABI**: the AN `eccBridge` reads it byte for
+  byte out of the proven receipt (`contracts/an/exchange/eccBridge.sol:1233-1264`). It accepts
+  exactly one shape — three topics, `topics[0] =
+  keccak256("Deposit(uint256,address,uint256,bytes32,uint256,address)")` =
+  `0x935bca73…623c0e` (`eccBridge.sol:107`), `topics[1] = depositId`, `topics[2] = sender`, and
+  exactly four data words: `amount` at bytes 0..32, `anAccount` at 32..64, `timestamp` at 64..96
+  and `token` at 96..128 — and refuses anything else with `ERR_NOT_DEPOSIT_LOG` (244). `amount`
+  must fit `uint64`. The emitter must be a trusted EVM bridge for the chain
+  (`_trustedL1Bridge[chainId]`, else `ERR_UNSUPPORTED_SRC_CHAIN`, 222; `eccBridge.sol:965-966`),
+  and `token` must be the token registered for it. The earlier five-field event is incompatible.
+* `finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex)` takes the RLP block header,
+  the index of the deposit transaction in that block, the receipt-trie nodes from the receipts
+  root down to the leaf at `rlp(txIndex)`, and the index of the `Deposit` log **within that
+  receipt** — not the block-wide `logIndex` an RPC returns. The block hash is
+  `keccak256(header)`, computed on AN, and must be an accepted anchor for `chainId`
+  (`ERR_UNKNOWN_BLOCK`, 224; `eccBridge.sol:953-954`); the receipt must be of a successful
+  transaction. Every deposit field comes out of the proven log, so only the choice of log is
+  caller-set. The DApp ID is pinned to 0. `crates/deposit-receipt/` builds these arguments from an
+  RPC that serves `eth_getBlockByHash` and `eth_getBlockReceipts`.
+* Deposits are accepted from an allowlisted set of chains: OP Mainnet (10), World Chain (480),
+  Mantle (5000), Base (8453), Arbitrum One (42161), Blast (81457), Sepolia (11155111), Arbitrum
+  Sepolia (421614) (`crates/deposit-chain-ids/src/lib.rs:32-41`). Ethereum mainnet (1) is **not**
+  in that list. The contract itself is chain-agnostic; the constraint lives in the relayer/CLI
+  allowlist, the AN-side `_trustedL1Bridge[chainId]` allowlist and the per-chain block-hash
+  anchors.
 
 ---
 
@@ -970,8 +979,8 @@ with no range check. `MockBridgeWithdrawalVerifier` has loose and strict-PI mode
 |---|---|
 | `crates/bridge-relayer-daemon` | `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof`, reads `storedLastSeenBlockSeqNo`, `storedBkSetCommitment`, `expectedPrevAnchor(numLayers)`, `storedPrevMaxLevelLayerHash`. Its `MockBridgeClient` mirrors the contract's cheap pre-flight checks exactly (`src/bridge.rs:15-23`). |
 | `crates/bridge-relayer-daemon/src/withdraw_e2e/` | In-process AN→ETH withdrawal driver (`a69ba36`): capture the live `WithdrawalInitiated` ExtOut → export + enrich the witness → Circuit-4 SHPLONK proof → optional `withdrawByProof`. Exposed as `relayer withdraw-e2e` (`src/bin/relayer.rs:442`); the ETH leg is opt-in (`--rpc-url` + `--bridge-address` + `--private-key`, with `--dry-run` doing an `eth_call` only), so `run_once` itself has no EVM dependency. |
-| `crates/deposit-relayer-daemon` | Polls the `Deposit` log (`src/source.rs:105-115`), 10-block `eth_getLogs` chunks, drives the deposit prover and the AN-side `finalizeDeposit`. |
-| `deposit-prover/` | Parses the `Deposit` log from a receipt + MPT proof (`src/ethereum_fetcher.rs:58-153`), emits the 13-PI SHPLONK proof. |
+| `crates/deposit-relayer-daemon` | Polls the `Deposit` log in 10-block `eth_getLogs` chunks (`EthLogSource::scan_for_deposit` in `src/source.rs`), builds the receipt proof with `crates/deposit-receipt` and submits the AN-side `finalizeDeposit`. |
+| `crates/deposit-receipt` | Builds the `finalizeDeposit` arguments for one deposit (`src/lib.rs:200`): fetches the receipt, the header and the block's receipts, checks the header hash, the rebuilt `receiptsRoot` and the `Deposit` log shape, and emits the receipt-trie proof. |
 | `frontend/` (WASM) | Calls `deposit(address,uint256,bytes32)` = `0x26b3293f` and `depositCounter()` — **current**. |
 | `crates/eth-frontend` | Declares `deposit(address,uint256,bytes32)` and the six-field `Deposit` event (`src/contract.rs:42,47`); its wrapper approves and deposits the named token (`src/contract.rs:133-162`). |
 

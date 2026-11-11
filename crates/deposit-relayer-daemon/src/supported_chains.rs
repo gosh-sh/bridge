@@ -1,8 +1,7 @@
 //! Supported EVM deposit-source chain IDs.
 //!
 //! Re-exported verbatim from the dependency-free `deposit-chain-ids` crate,
-//! which `deposit-prover` depends on too — the relayer cannot accept a chain
-//! the prover would refuse to build a witness for.
+//! which the end-user CLI depends on too, so both accept the same chains.
 
 pub use deposit_chain_ids::{
     is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,

@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""Derive the `USDCBridge.setAcceptedBlockHash` arguments for a deposit proof,
-and check against an RPC that the block really is canonical.
+"""Derive the `eccBridge.setAcceptedBlockHash` arguments for a deposit, and
+check against an RPC that the block really is canonical.
 
-The deposit proof binds the event to a block whose header hashes to public
-inputs #9/#10, but it cannot show that block is on the canonical chain — a
-privately mined block with a fabricated event proves equally well. So the AN
-bridge gates `finalizeDeposit` on an anchor set that someone populates from
-outside the proof (audit finding BC-D01).
+`finalizeDeposit` proves the deposit's receipt against a block header, but
+nothing in the receipt shows that block is on the canonical chain — a privately
+mined block with a fabricated event proves equally well. So the AN bridge gates
+`finalizeDeposit` on an anchor set that someone populates from outside the
+deposit (audit finding BC-D01).
 
 Whoever holds that key is asserting canonicality, which means two obligations
 that no contract can enforce: read the hash from a source independent of the
-party that produced the proof, and wait out reorg depth. This script exists so
-that discharging them is one command rather than a judgement call:
+party that built the receipt proof, and wait out reorg depth. This script exists
+so that discharging them is one command rather than a judgement call:
 
-    scripts/deposit_anchor_params.py deposit-prover/fixtures/deposit_10proofs/proof_00
-    scripts/deposit_anchor_params.py <dir-or-public_inputs.bin>... --verify
+    scripts/deposit_anchor_params.py <witness.json>... [--verify]
+    scripts/deposit_anchor_params.py --chain-id 421614 --block-hash 0x... [--verify]
 
-`--verify` resolves the hash over JSON-RPC and fails unless the node agrees the
-block is canonical (its number maps back to the same hash) and buried at least
-`--min-confirmations` deep. Point `--rpc` at a node you trust and that the
-relayer does not control; verifying against the same endpoint that produced the
-witness proves nothing.
+A `witness.json` is the `finalizeDeposit` input the deposit relayer's
+`prove-one` and the CLI's work directory hold; its header must hash to its
+`blockHash`. `--verify` resolves the hash over JSON-RPC and fails unless the
+node is on the anchor's chain (`eth_chainId` equals its `chainId`), agrees the
+block is canonical (its number maps back to the same hash) and has it buried at
+least `--min-confirmations` deep. Point `--rpc` at a node you trust
+and that the relayer does not control; verifying against the same endpoint that
+produced the witness proves nothing.
 
 The arguments printed are for the owner's `setAcceptedBlockHash`, the one anchor
 writer a person calls; `eccBridge` has no attester path. `--call` stays for
@@ -36,13 +39,10 @@ import sys
 import urllib.error
 import urllib.request
 
-USER_AGENT = "curl/8"  # matches deposit-prover/scripts/recanonicalize_fixture_headers.py
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "l2-block-proof-bench"))
+from keccak import keccak256  # noqa: E402
 
-FR_BYTES = 32
-NUM_PI = 13
-PI_CHAIN_ID = 4
-PI_BLOCK_HASH_HI = 9
-PI_BLOCK_HASH_LO = 10
+USER_AGENT = "curl/8"
 
 # Public RPC per chain id, used only when --rpc is not given. Deliberately
 # third-party: the point of the check is independence from our own pipeline.
@@ -51,6 +51,7 @@ DEFAULT_RPC = {
     10: "https://optimism-rpc.publicnode.com",
     8453: "https://base-rpc.publicnode.com",
     42161: "https://arbitrum-one-rpc.publicnode.com",
+    421614: "https://arbitrum-sepolia-rpc.publicnode.com",
     11155111: "https://ethereum-sepolia-rpc.publicnode.com",
 }
 
@@ -59,36 +60,18 @@ DEFAULT_RPC = {
 DEFAULT_MIN_CONFIRMATIONS = 64
 
 
-def read_public_inputs(path: pathlib.Path) -> bytes:
-    """Accept either a `public_inputs.bin` or a proof directory containing one."""
-    if path.is_dir():
-        path = path / "public_inputs.bin"
-    blob = path.read_bytes()
-    if len(blob) != NUM_PI * FR_BYTES:
-        raise SystemExit(
-            f"{path}: expected {NUM_PI * FR_BYTES} bytes "
-            f"({NUM_PI} x {FR_BYTES}-byte LE Fr), got {len(blob)}"
-        )
-    return blob
-
-
-def fr(blob: bytes, index: int) -> int:
-    off = index * FR_BYTES
-    return int.from_bytes(blob[off : off + FR_BYTES], "little")
-
-
-def anchor_of(blob: bytes) -> tuple[int, int]:
-    """Return (chainId, blockHash) as the contract reconstructs them: the circuit
-    splits the 32-byte hash into big-endian 16-byte halves, hi at the lower
-    instance index, so the hash is `hi << 128 | lo`."""
-    hi = fr(blob, PI_BLOCK_HASH_HI)
-    lo = fr(blob, PI_BLOCK_HASH_LO)
-    if hi >= 1 << 128 or lo >= 1 << 128:
-        raise SystemExit(
-            "block-hash halves exceed 128 bits — public inputs are not the "
-            "12-PI chain-binding layout this script understands"
-        )
-    return fr(blob, PI_CHAIN_ID), (hi << 128) | lo
+def anchor_of(path: pathlib.Path) -> tuple[int, int]:
+    """(chainId, blockHash) of a witness.json, after checking its header hashes to it."""
+    w = json.loads(path.read_text())
+    try:
+        chain_id = int(w["chainId"])
+        block_hash = int(w["blockHash"], 16)
+        header = bytes.fromhex(w["header"].removeprefix("0x"))
+    except (KeyError, ValueError) as exc:
+        raise SystemExit(f"{path}: not a deposit witness ({exc})") from exc
+    if int.from_bytes(keccak256(header), "big") != block_hash:
+        raise SystemExit(f"{path}: the header does not hash to blockHash")
+    return chain_id, block_hash
 
 
 def rpc(url: str, method: str, params: list) -> object:
@@ -110,9 +93,14 @@ def rpc(url: str, method: str, params: list) -> object:
     return payload["result"]
 
 
-def verify_canonical(url: str, block_hash: int, min_confirmations: int) -> list[str]:
+def verify_canonical(url: str, chain_id: int, block_hash: int, min_confirmations: int) -> list[str]:
     """Return a list of reasons the anchor must not be admitted (empty = admit)."""
     hash_hex = f"0x{block_hash:064x}"
+    # The anchor binds the block to `chain_id` and nothing else does: a node of
+    # another chain must not vouch for it.
+    node_chain = int(rpc(url, "eth_chainId", []), 16)
+    if node_chain != chain_id:
+        return [f"the node is on chain {node_chain}, the anchor is for chain {chain_id}"]
     block = rpc(url, "eth_getBlockByHash", [hash_hex, False])
     if block is None:
         return [
@@ -143,12 +131,9 @@ def verify_canonical(url: str, block_hash: int, min_confirmations: int) -> list[
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "inputs",
-        nargs="+",
-        type=pathlib.Path,
-        help="proof directories or public_inputs.bin files",
-    )
+    ap.add_argument("inputs", nargs="*", type=pathlib.Path, help="witness.json files")
+    ap.add_argument("--chain-id", type=int, help="with --block-hash, instead of a witness")
+    ap.add_argument("--block-hash", help="with --chain-id, instead of a witness")
     ap.add_argument("--verify", action="store_true", help="check canonicality over RPC")
     ap.add_argument(
         "--call",
@@ -165,10 +150,15 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    if (args.chain_id is None) != (args.block_hash is None):
+        ap.error("--chain-id and --block-hash go together")
+    if not args.inputs and args.chain_id is None:
+        ap.error("give witness.json files or --chain-id with --block-hash")
     anchors: dict[tuple[int, int], list[str]] = {}
     for path in args.inputs:
-        chain_id, block_hash = anchor_of(read_public_inputs(path))
-        anchors.setdefault((chain_id, block_hash), []).append(str(path))
+        anchors.setdefault(anchor_of(path), []).append(str(path))
+    if args.chain_id is not None:
+        anchors.setdefault((args.chain_id, int(args.block_hash, 16)), []).append("the command line")
 
     rejected = 0
     for (chain_id, block_hash), sources in sorted(anchors.items()):
@@ -182,7 +172,7 @@ def main() -> int:
             if not url:
                 problems.append(f"no RPC known for chain {chain_id}; pass --rpc")
             else:
-                problems = verify_canonical(url, block_hash, args.min_confirmations)
+                problems = verify_canonical(url, chain_id, block_hash, args.min_confirmations)
 
         if problems:
             rejected += 1

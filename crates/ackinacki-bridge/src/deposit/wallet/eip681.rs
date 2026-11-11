@@ -1,7 +1,7 @@
 //! EIP-681: two `ethereum:` URIs, one per transaction, for wallets that
 //! cannot pair. No session, no signature, no transaction hash, and no way
-//! to ask for a type-2 transaction — so a wallet that sends a legacy one
-//! makes the deposit unprovable. The user accepts that risk explicitly.
+//! to make the wallet add the network or keep the call data. The user
+//! accepts that risk explicitly.
 
 use alloy_primitives::{Address, Bytes, B256};
 use async_trait::async_trait;
@@ -81,11 +81,9 @@ impl Eip681Wallet {
 }
 
 /// What the person must accept before this mode is used.
-const RISK: &str = "EIP-681 cannot ask the wallet for a type-2 (EIP-1559) transaction. A wallet \
-                    that sends a legacy transaction makes this deposit unprovable: the deposit \
-                    stays in the bridge on the EVM side and only its operator can return it. The \
-                    wallet will not add the network either, and some wallets drop the call data. \
-                    Continue?";
+const RISK: &str = "EIP-681 cannot make the wallet add the network, and some wallets drop the \
+                    call data: check both before you sign. A transaction without the call data \
+                    does not deposit. Continue?";
 
 #[async_trait]
 impl Wallet for Eip681Wallet {
@@ -182,7 +180,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eip681_asks_to_accept_the_legacy_transaction_risk() {
+    async fn eip681_asks_to_accept_its_risk() {
         let ui = crate::deposit::ui::RecordingUi::new(false);
         let mut w = Eip681Wallet::new(Default::default(), 11_155_111);
         assert_eq!(w.connect(&ui).await, Err(WalletError::Rejected));

@@ -1,4 +1,4 @@
-//! The three deposit locks, all `flock(2)`: the kernel drops them when
+//! The two deposit locks, both `flock(2)`: the kernel drops them when
 //! the process dies, so a crash never leaves a stale lock.
 //!
 //! * `$state_dir/deposit.lock` — held from the unresolved-operation check
@@ -6,9 +6,6 @@
 //!   wallet" and "the deposit is on chain".
 //! * `$state_dir/<op-id>.lock` — held by whichever process drives that
 //!   operation, including `--resume` and `--abandon`.
-//! * `<prover-dir>/data/.prove.lock` — the prover's proving-key cache is not
-//!   safe for concurrent use, so proofs on one prover directory run one at a
-//!   time.
 //!
 //! A filesystem that cannot lock is a refusal here. `withdraw` carries on
 //! without the lock on such a filesystem; a deposit cannot, because its
@@ -27,8 +24,7 @@ use std::{
 };
 
 use crate::{
-    deposit::prover_files::ProverDir,
-    errors::{CliError, CliResult, ExitCode, Stage},
+    errors::{CliError, CliResult},
     idempotency::{classify_flock_error, FlockVerdict},
 };
 
@@ -39,14 +35,6 @@ pub struct LockFile {
     _file: File,
 }
 
-impl LockFile {
-    /// For handing the lock to a subprocess (the prover keeps it while it
-    /// runs).
-    pub fn raw_fd(&self) -> std::os::unix::io::RawFd {
-        self._file.as_raw_fd()
-    }
-}
-
 /// Reads an errno from `flock`: `None` means the lock is merely held by
 /// someone else, `Some` is a refusal with the reason worded for the operator.
 pub fn refusal_for(errno: Option<i32>, path: &Path) -> Option<CliError> {
@@ -55,8 +43,8 @@ pub fn refusal_for(errno: Option<i32>, path: &Path) -> Option<CliError> {
         FlockVerdict::Unsupported => Some(CliError::Preflight {
             reason: format!(
                 "{} is on a filesystem without file locks (flock); a deposit needs them to keep \
-                 two runs from requesting the same deposit, and proofs from sharing the prover's \
-                 key cache. Point --state-dir and --deposit-prover-dir at a local filesystem",
+                 two runs from requesting the same deposit. Point --state-dir at a local \
+                 filesystem",
                 path.display()
             ),
             source: None,
@@ -70,18 +58,6 @@ pub fn refusal_for(errno: Option<i32>, path: &Path) -> Option<CliError> {
             source: None,
         }),
     }
-}
-
-/// A lock failure after the wallet was asked: the deposit may be on chain,
-/// so it is not exit 2, and the operation is resumable.
-pub fn after_send(e: CliError, exit: ExitCode, stage: Stage, op_id: &str) -> CliError {
-    let reason = e.into_reason();
-    CliError::deposit(
-        exit,
-        stage,
-        Some(op_id),
-        format!("{reason}; fix it and continue with --resume {op_id}"),
-    )
 }
 
 /// Opens (creating if needed) a lock file without truncating it.
@@ -186,23 +162,6 @@ impl OpLock {
     }
 }
 
-/// `<prover-dir>/data/.prove.lock`: proofs on one prover directory run one at a
-/// time.
-#[derive(Debug)]
-pub struct ProverLock(pub LockFile);
-
-impl ProverLock {
-    /// Takes the prover directory's lock if it is free.
-    pub fn try_take(dir: &ProverDir) -> CliResult<Option<ProverLock>> {
-        Ok(take(&dir.lock_path())?.map(ProverLock))
-    }
-
-    /// Waits until the lock is free and takes it.
-    pub async fn wait(dir: &ProverDir) -> CliResult<ProverLock> {
-        wait_for(dir.lock_path()).await.map(ProverLock)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,24 +203,6 @@ mod tests {
         }
         assert!(refusal_for(Some(libc::EWOULDBLOCK), Path::new("/x")).is_none());
         assert!(refusal_for(Some(libc::EACCES), Path::new("/x")).is_some());
-    }
-
-    #[test]
-    fn a_lock_failure_after_the_wallet_is_not_exit_2() {
-        let e = refusal_for(Some(libc::ENOLCK), Path::new("/p/data/.prove.lock")).unwrap();
-        assert!(
-            !e.to_string().contains("nothing was sent"),
-            "the caller knows whether anything was sent"
-        );
-        let e = after_send(
-            e,
-            crate::errors::ExitCode::DepositProofFailed,
-            crate::errors::Stage::Prove,
-            "OP",
-        );
-        assert_eq!(e.exit_code(), crate::errors::ExitCode::DepositProofFailed);
-        assert!(e.to_string().contains("--resume OP"));
-        assert!(!e.to_string().starts_with("preflight"), "{e}");
     }
 
     #[tokio::test]

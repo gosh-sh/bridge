@@ -5,8 +5,7 @@
 //! `bridge-event-prover-lib`, whose cargo workspace pins the gosh `halo2-lib`
 //! fork + `tvm_vm` — a dependency tree incompatible with this relayer crate's
 //! alloy / `abigen` stack. Force-merging two halo2 backends into one binary
-//! would also bloat the relayer and slow CI. So, exactly like
-//! `deposit-relayer-daemon` consumes `deposit-prover`, proof generation stays
+//! would also bloat the relayer and slow CI. So proof generation stays
 //! behind a trait with two backends:
 //!
 //! - [`MockWithdrawalProver`] — deterministic, no halo2; returns a canned

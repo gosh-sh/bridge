@@ -1,8 +1,7 @@
 //! The checks a new deposit passes before the wallet is asked for
 //! anything, in order: the EVM chain and bridge, the Acki Nacki bridge,
-//! whether the light client can anchor the deposit, the prover directory
-//! and whether its tools run on this host, the work directory, and the
-//! operations still open in the state directory. A failure is
+//! whether the light client can anchor the deposit, the work directory,
+//! and the operations still open in the state directory. A failure is
 //! exit 2 (exit 3 for an open operation of the same deposit), and nothing
 //! has been sent. Nothing here asks the wallet or creates an operation.
 //!
@@ -23,9 +22,6 @@ use crate::{
         evm::{approve_calldata, deposit_calldata, EvmRead},
         evm_preflight::{self, EvmPreflight},
         lc_readiness::{self, AnchorPlan, HistoryCapped, LcFailure},
-        locks::ProverLock,
-        prover::{probe_tools, TOOL_PROBE_TIMEOUT},
-        prover_files::{check_prover_dir, ProverDir},
         retry::transient,
         run::RunCx,
         signals,
@@ -99,8 +95,6 @@ pub struct Checked {
     pub an: AnPreflight,
     /// Who is expected to anchor the deposit's block.
     pub plan: AnchorPlan,
-    /// The prover directory that passed its checks.
-    pub prover: ProverDir,
     /// The parameters the operation is created with.
     pub params: OpParams,
 }
@@ -262,8 +256,7 @@ pub async fn check(
         )));
     }
     let plan = anchor_plan(d, bridge_acc, net.chain_id(), &an).await?;
-    let prover = usable_prover(p.prover_dir.as_deref().expect("validated")).await?;
-    // The proof files go there: a path that cannot hold them is refused
+    // The receipt proof goes there: a path that cannot hold it is refused
     // now, not at step 7 with the USDC already in the bridge.
     writable_work_dir(p.work_dir.as_deref().expect("validated for a fresh run"))
         .map_err(|e| refuse(format!("--work-dir (BRIDGE_WORK_DIR): {e}")))?;
@@ -291,26 +284,8 @@ pub async fn check(
         evm,
         an,
         plan,
-        prover,
         params,
     })
-}
-
-/// The prover directory at `root`, checked as a proof needs it: its files
-/// ([`check_prover_dir`]), its lock, and its two tools, run once. A refusal
-/// names what failed.
-async fn usable_prover(root: &Path) -> CliResult<ProverDir> {
-    let dir = check_prover_dir(root).map_err(refuse)?;
-    // The prover's lock is probed now: a filesystem without flock is
-    // refused here, before the wallet, not when the proof is due with the
-    // USDC already in the bridge. Held means another deposit is proving,
-    // which is fine; the lock is let go at once.
-    drop(ProverLock::try_take(&dir)?);
-    // Executable is not yet runnable on this host.
-    probe_tools(&dir, TOOL_PROBE_TIMEOUT)
-        .await
-        .map_err(refuse)?;
-    Ok(dir)
 }
 
 /// Creates the work directory `dir` if it is missing and proves that a
@@ -417,8 +392,8 @@ async fn anchor_plan(
 /// one: a paused Acki Nacki bridge, its lost trust in the EVM bridge or a
 /// moved voucher code is a warning, the recipient is not checked, the light
 /// client's readiness is read only before the anchor and is a warning, and
-/// the prover directory and the work directory are checked only while a
-/// proof is still to be built. The bridge version is checked always:
+/// the work directory is checked only while the receipt proof is still to
+/// be built. The bridge version is checked always:
 /// resending `finalizeDeposit` is safe only on a fixed bridge.
 ///
 /// An RPC endpoint that serves another chain than the operation's is the
@@ -450,10 +425,9 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
             ),
         }
     };
-    // Flags and a local directory only: known before any chain is read,
-    // and those reads retry for as long as an endpoint is down.
-    let prover = resume_prover(p, rec, ui).await.map_err(held)?;
-    // The proof files go to the work directory the operation records.
+    // A local directory only: known before any chain is read, and those
+    // reads retry for as long as an endpoint is down. The receipt proof
+    // goes to the work directory the operation records.
     if proof_to_build(rec.stage) {
         if let Some(work) = crate::deposit::run::work_dir_of(p, rec) {
             writable_work_dir(&work).map_err(|e| {
@@ -511,17 +485,16 @@ pub async fn context_for_resume(p: &DepositParams, d: &Deps, rec: &OpRecord) -> 
         },
         _ => AnchorPlan::LightClient,
     };
-    let rpc_url = p
-        .rpc_url
-        .clone()
-        .ok_or_else(|| held(refuse("--rpc-url (RPC_URL) is required to resume".into())))?;
+    if p.rpc_url.is_none() {
+        return Err(held(refuse(
+            "--rpc-url (RPC_URL) is required to resume".into(),
+        )));
+    }
     Ok(RunCx {
         plan,
         bridge_acc,
         bridge_dapp: an.bridge_dapp,
         light_client: an.light_client,
-        prover,
-        rpc_url,
         // Only the steps before the deposit request read the token; a
         // resumed operation is past them, and the record names the token
         // its calldata used.
@@ -590,7 +563,7 @@ async fn resume_plan(
     })
 }
 
-/// Whether an operation at `stage` still has its proof to build.
+/// Whether an operation at `stage` still has its receipt proof to build.
 fn proof_to_build(stage: OpStage) -> bool {
     matches!(
         stage,
@@ -600,51 +573,6 @@ fn proof_to_build(stage: OpStage) -> bool {
             | OpStage::Confirmed
             | OpStage::Anchored
     )
-}
-
-/// The prover directory a resume needs. While a proof is still to be
-/// built it must be given and pass the checks of a new deposit's preflight
-/// ([`usable_prover`]), its tools run once included. After the proof, a
-/// broken or missing directory is only a warning: the proof may be on
-/// disk, or somebody may have finalized the deposit already. Without
-/// `--deposit-prover-dir` the directory is the empty path, which the prover
-/// refuses by naming the flag should the proof have to be built again.
-async fn resume_prover(p: &DepositParams, rec: &OpRecord, ui: &dyn Ui) -> CliResult<ProverDir> {
-    let to_prove = proof_to_build(rec.stage);
-    let no_prover = |why: String| {
-        let on_disk = crate::deposit::run::work_dir_of(p, rec)
-            .and_then(|w| crate::deposit::prover::load(&w))
-            .is_some();
-        if !on_disk {
-            ui.warn(&format!(
-                "the proof is not on disk and {why}; it is needed only if the deposit is not \
-                 finalized yet"
-            ));
-        }
-        ProverDir {
-            root: p.prover_dir.clone().unwrap_or_default(),
-        }
-    };
-    let Some(root) = &p.prover_dir else {
-        if to_prove {
-            return Err(refuse(
-                "--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR) is needed to build the proof of \
-                 this deposit, and none was given"
-                    .into(),
-            ));
-        }
-        return Ok(no_prover(
-            "no --deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR) was given".into(),
-        ));
-    };
-    if to_prove {
-        return usable_prover(root).await;
-    }
-    let checked = match check_prover_dir(root) {
-        Ok(dir) => probe_tools(&dir, TOOL_PROBE_TIMEOUT).await.map(|()| dir),
-        Err(e) => Err(e),
-    };
-    Ok(checked.unwrap_or_else(|e| no_prover(format!("the prover directory is unusable ({e})"))))
 }
 
 /// What `--dry-run` prints after a passed preflight: both transactions'
@@ -705,7 +633,7 @@ mod tests {
     use crate::deposit::{
         args::RunMode,
         lc_readiness::{AnchorPlan, OWNER_MODE_PAGE_CAP},
-        locks::{DirLock, ProverLock},
+        locks::DirLock,
         store::{FailReason, OpParams, OpRecord, OpStage, Store},
         testkit::*,
         ui::RecordingUi,
@@ -815,8 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dry_run_sends_nothing_and_writes_nothing() {
-        let world = World::healthy(); // FakeEvm + FakeAn + prover dir, see
-                                      // testkit
+        let world = World::healthy(); // FakeEvm + FakeAn, see testkit
         let p = world.params(RunMode::DryRun);
         let store = Store::open(&p.state_dir).unwrap();
         let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
@@ -894,16 +821,6 @@ mod tests {
         assert_eq!(c.plan, AnchorPlan::Owner {
             lc_ready: true
         });
-    }
-
-    #[tokio::test]
-    async fn a_busy_prover_directory_does_not_fail_preflight() {
-        let world = World::healthy();
-        let p = world.params(RunMode::Fresh);
-        let store = Store::open(&p.state_dir).unwrap();
-        let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
-        let _proving = ProverLock::try_take(&world.prover.1).unwrap().unwrap();
-        check(&p, &world.deps(), &store, None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1140,25 +1057,6 @@ mod tests {
         let closed = store.load(&dead.op_id).unwrap();
         assert_eq!(closed.stage, OpStage::Failed);
         assert_eq!(closed.failure.unwrap().reason, FailReason::Interrupted);
-    }
-
-    #[tokio::test]
-    async fn a_prover_directory_without_its_circuit_config_is_exit_2() {
-        let world = World::healthy();
-        std::fs::remove_file(
-            world
-                .prover
-                .1
-                .root
-                .join(crate::deposit::prover_files::CIRCUIT_PARAMS),
-        )
-        .unwrap();
-        let p = world.params(RunMode::Fresh);
-        let store = Store::open(&p.state_dir).unwrap();
-        let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
-        let e = check(&p, &world.deps(), &store, None).await.unwrap_err();
-        assert_eq!(e.exit_code(), crate::errors::ExitCode::PreflightRefused);
-        assert!(e.to_string().contains("circuit_params.json"), "{e}");
     }
 
     #[tokio::test]

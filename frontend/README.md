@@ -86,8 +86,8 @@ user believe funds had been returned when nothing had happened. Verified 2026-08
 3. Submit — if the allowance is short the form sends `approve` first, then
    the contract takes custody via `transferFrom` and emits a `Deposit` event.
 
-The proof of that event is produced off-chain and consumed on the Acki Nacki side, which mints to the
-destination. Nothing further is required from the user in this UI.
+A relayer then hands the event's receipt to the Acki Nacki side, which checks the receipt proof
+against an accepted block hash and mints to the destination. Nothing further is required from the user in this UI.
 
 ### Transaction History
 - View all your bridge transactions
@@ -130,7 +130,7 @@ docker run -p 8080:80 acki-nacki-bridge-frontend
 
 Set `BRIDGE_CONTRACT_ADDRESS` when building with Trunk. It must be a new
 Sepolia deployment exposing `deposit(address,uint256,bytes32)`, paired with an
-`eccBridge` 1.16.0 or newer that embeds this build's deposit key. The old
+`eccBridge` 1.17.0 or newer. The old
 workchain-bearing deployment addresses are incompatible.
 
 There is no default bridge address. Without a valid non-zero 20-byte address,

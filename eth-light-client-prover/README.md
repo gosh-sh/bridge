@@ -69,5 +69,5 @@ Removes the trusted-attester MVP (`_acceptedBlockHash` / `setAcceptedL1Block`).
 | M6 — testnet E2E | **runbook in this PR** — `scripts/ursus/eth_lc_shellnet_e2e.md` (operator on n14 + shellnet) |
 
 Standalone crate (own `[workspace]` + `[patch]`), excluded from the main Cargo
-workspace and CI's `cargo test --workspace`, same as `deposit-prover`. Build/test on n14
+workspace and CI's `cargo test --workspace`. Build/test on n14
 (`docs/m1_notes.md` §7).

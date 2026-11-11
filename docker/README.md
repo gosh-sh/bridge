@@ -14,9 +14,9 @@ knows a host path, an address or a key.
 | Image | Target | Holds | Runs |
 |---|---|---|---|
 | `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `seed_prover_bk_set`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight`, `fold-bk-set` |
-| `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer`, `fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`, `downsize_srs`, `circuit_params.json` | `deposit-relayer daemon` |
+| `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer` | `deposit-relayer daemon` |
 | `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
-| `bridge-cli` | `bridge-cli` | `ackinacki-bridge` with the deposit tools, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
+| `bridge-cli` | `bridge-cli` | `ackinacki-bridge`, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
 | (files) | `tools` | every binary above as plain files | `docker build --target tools --output type=local,dest=out .` |
 
 Every image runs as the unprivileged user `bridge` (UID/GID build args, default 998), on
@@ -77,12 +77,11 @@ $BRIDGE_OPT/                         # e.g. /opt/bridge-shellnet, root:bridge
   cli/state/                         # the CLI's deposit and withdrawal records
 $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:bridge
   daemon-live/work/  daemon-live/logs/
-  deposit-relayer/work/  deposit-relayer/logs/
+  deposit-relayer/logs/
   eth-lc-relayer/work/  eth-lc-relayer/logs/
   arbitrum-anchors/work/  arbitrum-anchors/logs/
   cli/work/  cli/logs/
   params/relayer/                    # SRS k=17..22, inner keys, SHA256SUMS (finalize-params.sh); pk_cache/ rw
-  params/deposit-prover/             # kzg_params_18.srs; the proving key the first proof writes
   params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_20.srs, kzg_bn254_21.srs;
                                      #   step-key/ written by the first step proof;
                                      #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
@@ -93,8 +92,8 @@ Each daemon logs to stdout and to one file per day in its `logs/` directory, kee
 retention rule of its own (logrotate, a cron `find -mtime`).
 
 Inside every container the same four paths: `/data/state`, `/data/work`, `/data/logs` and
-`/data/params` (read-only for the relayer except `pk_cache`, writable for the two provers that
-generate keys). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and
+`/data/params` (read-only for the relayer except `pk_cache`, writable for the light-client
+prover, which generates keys; the deposit relayer has none). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and
 sourced by its entrypoint; the other services get theirs as container environment
 (`env_file`). Keys are mounted read-only at `/run/keys`, the BK set at
 `/run/config/bk_set.json`.
@@ -125,8 +124,7 @@ next to it.
 2. Params. Withdraw relayer: the SRS and inner keys into `params/relayer/`, then
    `docker/relayer/finalize-params.sh $BRIDGE_DATA/params/relayer bridge` seals them and
    writes `SHA256SUMS`; its sha256 goes into `daemon-live.env` as `PARAMS_MANIFEST_SHA256`.
-   Deposit prover: `kzg_params_18.srs` into `params/deposit-prover/` (cut from the k=21 SRS
-   with `downsize_srs`, in the `bridge-cli` image). Light client: `kzg_bn254_19.srs` into
+   The deposit relayer needs no params. Light client: `kzg_bn254_19.srs` into
    `params/lc-prover/`; the first step proof of an image writes its key there, or ahead of it
    `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB). The rotate needs the
    Hermez `kzg_bn254_21.srs` there too: the release asset of that name, checked against the

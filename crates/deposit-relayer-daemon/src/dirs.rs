@@ -1,4 +1,4 @@
-//! The three directories the service writes to (bridge-audit#132).
+//! The two directories the service writes to (bridge-audit#132).
 //!
 //! Every long-running command takes them as flags with environment variables
 //! and writes nowhere else: not the system temp directory, not `$HOME`, not
@@ -7,10 +7,7 @@
 //! - **state**: what the daemon needs to resume after a restart. The daemon
 //!   names its files inside it ([`STATE_FILE_NAME`]); the lock file and the
 //!   temporary file of the atomic write sit beside them.
-//! - **work**: the provers' inputs and outputs. Everything here can be computed
-//!   again; one subdirectory per proof, removed when the proof is read back.
-//! - **log**: the daemon's own log (a file per day, beside the stdout stream)
-//!   and the output of every prover it starts, one file per invocation.
+//! - **log**: the daemon's own log (a file per day, beside the stdout stream).
 
 use std::path::{Path, PathBuf};
 
@@ -23,24 +20,19 @@ pub const STATE_FILE_NAME: &str = "deposit-relayer-state.json";
 /// adds the day to the name.
 pub const LOG_FILE_PREFIX: &str = "deposit-relayer.log";
 
-/// State, work and log directories of one service instance.
+/// State and log directories of one service instance.
 #[derive(Clone, Debug)]
 pub struct ServiceDirs {
     pub state: PathBuf,
-    pub work: PathBuf,
     pub log: PathBuf,
 }
 
 impl ServiceDirs {
-    /// Create the three directories when missing and refuse any that is not
+    /// Create both directories when missing and refuse any that is not
     /// writable, so a misconfigured mount fails at startup and not at the
     /// first deposit.
     pub fn prepare(&self) -> Result<(), RelayerError> {
-        for (what, dir) in [
-            ("state", &self.state),
-            ("work", &self.work),
-            ("log", &self.log),
-        ] {
+        for (what, dir) in [("state", &self.state), ("log", &self.log)] {
             prepare_dir(what, dir)?;
         }
         Ok(())
@@ -118,11 +110,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dirs = ServiceDirs {
             state: root.path().join("a/state"),
-            work: root.path().join("b/work"),
             log: root.path().join("c/log"),
         };
         dirs.prepare().unwrap();
-        assert!(dirs.state.is_dir() && dirs.work.is_dir() && dirs.log.is_dir());
+        assert!(dirs.state.is_dir() && dirs.log.is_dir());
         assert_eq!(
             dirs.state_file(),
             root.path().join("a/state").join(STATE_FILE_NAME)
@@ -146,7 +137,7 @@ mod tests {
             std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
             return;
         }
-        let err = prepare_dir("work", &ro).unwrap_err().to_string();
+        let err = prepare_dir("log", &ro).unwrap_err().to_string();
         assert!(err.contains("not writable"), "{err}");
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
     }

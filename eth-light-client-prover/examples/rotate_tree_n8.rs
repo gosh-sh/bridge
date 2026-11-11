@@ -115,7 +115,7 @@ fn read_instances(path: &Path) -> anyhow::Result<Vec<Fr>> {
     Ok(out)
 }
 
-/// Frozen `VkBlob` magic (see `deposit-prover/src/halo2_tvm_bundle.rs`).
+/// Frozen `VkBlob` magic (see `crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`).
 const VK_BLOB_MAGIC: &[u8; 8] = b"VKBLOB\x00\x00";
 
 fn write_chunk(out: &mut Vec<u8>, bytes: &[u8]) {

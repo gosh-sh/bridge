@@ -1,13 +1,14 @@
 //! Allowlist of EVM chains the deposit bridge accepts deposits from.
 //!
-//! One WITHVK VkBlob verifies deposits from any of these networks; the AN-side
-//! `USDCBridge` allowlists `(chainId → expected bridge Fr)`.
+//! This list is what the off-chain tools — the deposit relayer and the CLI —
+//! accept; `eth-lc-relayer` takes its chain ids from here too. On Acki Nacki
+//! the gate is per chain id in `eccBridge`: a deposit is finalized only from a
+//! block hash in `_acceptedBlockHash[chainId]`, emitted by a bridge in
+//! `_trustedL1Bridge[chainId]`.
 //!
-//! The prover and the relayer live in separate cargo trees and used to carry
-//! their own copy of this list. That is exactly the shape of the
-//! `HISTORY_PROOF_WINDOW_SIZE` drift (see `AGENTS.md`): two literals that must
-//! agree, with nothing forcing them to. Both crates now depend on this one, so
-//! the lists cannot diverge.
+//! The tools live in separate cargo trees, and two copies of a list that must
+//! agree, with nothing forcing them to, drift. So every tool depends on this
+//! one list instead of carrying its own.
 
 #![forbid(unsafe_code)]
 

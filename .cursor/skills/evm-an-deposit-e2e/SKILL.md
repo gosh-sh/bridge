@@ -2,170 +2,135 @@
 name: evm-an-deposit-e2e
 description: >-
   Cross-repo map and runbook for the EVM→Acki Nacki deposit bridge: where the
-  deposit circuit, relayer, TokenBridge contract, ZKHALO2VERIFYWITHVK opcode,
-  VK blob, and e2e artifacts live, plus how to regenerate the VK and recompile
-  TokenBridge. Use when working on deposit-prover, deposit-relayer-daemon,
-  finalizeDeposit / TokenBridge, the ZKHALO2VERIFYWITHVK opcode, the deposit
-  public inputs, or the EVM→AN deposit end-to-end flow.
+  receipt-proof builder, relayer, CLI, eccBridge / EthTrie contracts, block-hash
+  anchors and test vectors live, plus how to recompile eccBridge. Use when
+  working on deposit-receipt, deposit-relayer-daemon, finalizeDeposit / eccBridge,
+  EthTrie, the deposit anchors, or the EVM→AN deposit end-to-end flow.
 ---
 
 # EVM → Acki Nacki deposit e2e
 
-The deposit flow spans **four repos** (siblings under `/home/sergey/Pruvendo/gosh/`).
-Touching the public-input layout means changing all of them in lock-step.
+There is no deposit circuit and no deposit proof to generate (bridge-audit#139). The AN-side
+`eccBridge` (version 1.17.0) checks the deposit's Ethereum receipt itself, with the VM's
+`KECCAK256` instruction and a Merkle-Patricia walk in `contracts/an/exchange/EthTrie.sol`. Off
+chain, the only work is collecting the witness from an RPC node.
 
-## Public inputs (12, since 2026-07-23 — `chainId` added)
+Gone with that change: `deposit-prover/` (circuit and tools), the deposit VK and
+`scripts/embed_deposit_vk_blob.py`, error 220, `scripts/check_deposit_prover_bundle.sh`,
+`scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`, the `kzg_params_18.srs` release asset, the
+`an-contracts` deposit-VK step and the prover tools in the docker images. `ZKHALO2VERIFYWITHVK`
+is still in use — by the Ethereum light client, not by deposits. The VkBlob writer moved to
+`crates/bridge-snark-utils/src/halo2_tvm_bundle.rs`.
 
-Instance column order — every producer/consumer MUST agree:
+## `finalizeDeposit`
 
 ```
-[ depositId, sender, amount, contractAddress, chainId,
-  dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-  blockHashHigh, blockHashLow, token, promiseCommit ]
+finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)
 ```
 
-- `chainId` (slot #4, added 2026-07-23) = the EIP-1559 RLP field-0 value,
-  extracted from the enclosing tx and **MPT-bound under `transactionsRoot`** —
-  a *proven* value, NOT VK-baked and NOT read from the contract. The AN-side
-  `USDCBridge` must allowlist `(chainId → expected bridge Fr)`.
-- `contractAddress` (slot #3, bridge address) is bound in-circuit via
-  `constrain_equal(tx.to, contractAddress)` — provably the emitter of the Deposit
-  event, not a contract-supplied value.
-- `dappIdHigh`/`dappIdLow` = the 256-bit AN dApp identifier tag (config-supplied).
-- `anAccountHigh`/`anAccountLow` = the 256-bit AN recipient's two 16-byte halves;
-  reconstruct as `anAccountHigh << 128 | anAccountLow`.
-- The AN recipient is **bound in-circuit** (not a relayer hint). `dappId` replaced
-  the earlier `anWorkchain` slot; total count is **12** (was 11 before `chainId`).
+`contracts/an/exchange/eccBridge.sol:949`, the log parsing in `_provenDeposit` (`:1233`). In
+order:
+
+1. **Anchor.** `keccak256(header)` must be in `_acceptedBlockHash[chainId]`, else
+   `ERR_UNKNOWN_BLOCK` (224). This runs before `tvm.accept()` (with the pause check, `ERR_PAUSED`
+   231), so a block the bridge does not know costs it nothing: about 10k gas out of the external
+   message's credit.
+2. **Accept.** Everything after is paid by the bridge; a wrong proof costs it only its own gas.
+3. **Receipt proof.** `EthTrie` checks the header hashes to the block hash, takes its
+   `receiptsRoot`, and walks `receiptProof` (root node first, down to the leaf at key
+   `rlp(txIndex)`). The receipt's status must be 1 (`308`).
+4. **Log.** Log `logIndex` **within that receipt** (not the block-wide index an RPC reports) must
+   exist (`307`) and have exactly the `Deposit` shape: the emitter, three topics —
+   `topic0 = 0x935bca73ba823197b8e5564da08c2c294de3811fc4a4cb482e6af4fd08623c0e`
+   (`Deposit(uint256,address,uint256,bytes32,uint256,address)`), `depositId`, `sender` — and four
+   data words: `amount`, `anAccount`, `timestamp`, `token`. Anything else is
+   `ERR_NOT_DEPOSIT_LOG` (244); `amount` must fit `uint64` (`ERR_OVERFLOW`).
+5. **Emitter.** The emitter must be trusted for the chain, `_trustedL1Bridge[chainId][emitter]`,
+   else `ERR_UNSUPPORTED_SRC_CHAIN` (222). A zero amount or recipient is refused too.
+6. **Token and limits, then the voucher.** The token must be the one registered for the chain
+   (241–243), within the per-transfer cap (234) and the chain's TVL cap (235). Then the bridge
+   deploys the `DepositVoucher`, unchanged from before: its code is byte-identical, and its
+   address, derived from `(depositId, emitter, dappId = 0, chainId)`, is the replay protection.
+   The voucher calls back `confirmTokenDeposit`, which mints.
+
+Every deposit field comes out of the proven log; the caller chooses only which log.
+
+### `EthTrie` errors
+
+| Code | Meaning |
+|---|---|
+| 300 | the data ends inside an RLP item |
+| 301 | an item has the wrong RLP kind or size |
+| 302 | a proof node does not hash to its parent's reference |
+| 303 | the proof does not follow the key |
+| 304 | an inline (under 32 bytes) child node: not supported |
+| 305 | the key is not in the trie |
+| 306 | the header does not hash to the expected block hash |
+| 307 | no log at that index |
+| 308 | the transaction of the receipt failed |
+
+### Gas and size
+
+| Block | Gas | `finalizeDeposit` payload |
+|---|---|---|
+| 40 transactions | 132,569 | 2,140 B |
+| 300 transactions | 192,809 | 2,692 B |
+| 3,000 transactions | 226,259 | 3,355 B |
+| 60 logs before the `Deposit` in its receipt | 377,755 | 11,246 B |
+
+An external message gets a 500,000 `gas_credit` before accept; only step 1 runs inside it. The
+Block Manager takes external messages up to 64 KiB; the relayer and the CLI refuse a
+`finalizeDeposit` payload over 48 KiB (`MAX_FINALIZE_PAYLOAD_BYTES` in
+`crates/deposit-relayer-daemon/src/witness.rs`, `MAX_FINALIZE_PAYLOAD` in
+`crates/ackinacki-bridge/src/deposit/limits.rs`).
+
+### Trust model
+
+The receipt proof shows the deposit is in the block whose header was supplied; it cannot show the
+block is canonical. That is the anchor's job: `_acceptedBlockHash[chainId]` has three writers —
+the owner (`setAcceptedBlockHash`, which `disableOwnerAnchorsOn(chainId)` can switch off), the
+Ethereum light client (`acceptBlockHashFromLightClient`) and, for an Arbitrum chain, the
+`ArbitrumBlockVerifier` (`acceptBlockHashFromL2Verifier`, only for a block whose parent-chain block
+is already accepted). Whoever writes an anchor asserts canonicity; the rest is checked on chain.
+`KECCAK256` was already used by `EthBeaconLightClient` and `ArbitrumBlockVerifier`, so no node
+change was needed.
 
 ## Where each piece lives
 
 | Piece | Location | Notes |
 |---|---|---|
-| Deposit circuit | `acki-nacki-bridge/deposit-prover/src/circuit_v2.rs` | `num_instance() == vec![12]` (`chainId` at slot #4, MPT-bound to the EIP-1559 tx); RLC `EthCircuitImpl` + Blake2b SHPLONK proof (NOT Groth16). Keyed on **Hermez** SRS. |
-| Relayer | `acki-nacki-bridge/crates/deposit-relayer-daemon/` | `NUM_PUBLIC_INPUTS=12`; decodes `chainId` at `scalars[4]`; `export_vk_blob` + `export_blake2b_proof` (raw Halo2, no gnark wrap). |
-| USDCBridge / TokenBridge (AN) | `acki-nacki/contracts/exchange/USDCBridge.sol` | ABI is **`finalizeDeposit(bytes proof, bytes publicInputs)`** — the contract parses all deposit fields out of the operand itself and calls `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)`. Branch **`poseidon_dex`** on `gosh-sh/acki-nacki` (NOT `halo2_circuit_with_vk`, which never existed). **Currently deployed to shellnet** (code-hash `b38e934a…898e154`; embedded `VK_BLOB` = `147efe14…068abaf`) — but that VK was keygen'd from **synthetic 1-node fixtures** and **cannot verify real deposits**. **VK swap required:** the deposit circuit had a witness-dependent VK bug (per-deposit `contractAddress` leaked into a fixed column + unpinned keccak capacity), both now fixed in `deposit-prover` (see `docs/deposit_vk_witness_independence.md`). The new **witness-independent** production VkBlob is **`20cf9018…647a39`** (3982 B, `[13,10]`, cap=64); the recompiled `.tvc` has code-hash **`818fb76d…a9abc4`** (toolchain-validated: old source reproduces the deployed `b38e934a` exactly). Pending partner shellnet redeploy. |
-| Compiled bridge | `acki-nacki/contracts/0.79.3_compiled/exchange/USDCBridge.tvc` + `.abi.json` | Recompile with `sold --tvm-version gosh --base-path . exchange/USDCBridge.sol -o exchange/` (run from `contracts/`). Runtime ABI copies live in `crates/bridge-prover-libraries/python/contracts/USDCBridge.abi.json` and `crates/ackinacki-bridge/abi/USDCBridge.abi.json` (kept byte-identical by `scripts/check_bridge_abi_in_sync.sh`). ABI unchanged across the VK swap. |
-| Opcode `ZKHALO2VERIFYWITHVK` (`0xC7 0x4A`) | `tvm-sdk/tvm_vm/src/executor/zk_halo2_with_vk.rs` (builds params via `build_shared_kzg_params` → `zk_halo2_utils.rs::KZG_S_G2_BYTES`) | VkBlob-driven (reads PI count from the VkBlob — no opcode change for 11→12 PI). RLC `circuit_shape=1`. **`KZG_S_G2_BYTES` = Hermez `[s]·G2` since 2026-07-23** (`92 8f af b3 …`), so it accepts Hermez-keyed deposit proofs; the legacy Dark DEX path keeps `DARK_DEX_KZG_S_G2_BYTES` = chain ceremony. Verify green: `cargo +nightly test -p tvm_vm --features gosh deposit_rlc` (3/3). Branch **`full_dex_and_bridge_test_with_final_halo2_circuit`** on `tvmlabs/tvm-sdk`. Do **not** use `halo2_circuit_with_vk` (never existed) or `serhii/node-3406-vergrth16-with-vk` (superseded Groth16-era umbrella). |
-| tvm-sdk e2e test | `tvm-sdk/tvm_executor/src/transaction_executor.rs::athens_finalize_deposit_reaches_mint` | Loads `TokenBridge.tvc` + `/tmp/deposit_e2e/live_finalize_msg.boc`, drives finalize → opcode → mint. Skips if artifacts missing. |
-
-## e2e artifacts (machine-local, in `/tmp/deposit_e2e/`)
-
-- `deposit_proof_input.json` / `live_deposit_proof_input.json` — `DepositProofInput` (used for keygen + proving).
-- `deposit_vk_blob.bin` / `live_deposit_vk_blob.bin` — v2 RLC VkBlob (embed into `TokenBridge.sol`'s `VK_BLOB`).
-- `deposit_public_inputs.bin` — `N × 32` LE Fr operand.
-- `deposit_proof_blake2b.bin` — raw Blake2b SHPLONK proof.
-- `live_finalize_msg.boc` — signed external message that calls `finalizeDeposit`.
-- **SRS = Hermez (since 2026-07-23). Forget the chain ceremony for deposits.**
-  Deposit proofs are keyed on the **Hermez Perpetual Powers of Tau** SRS
-  `acki-nacki-bridge/deposit-prover/data/kzg_params_18.srs` (k=18, `s_g2` head
-  `92 8f af b3 …`, tail `… 5c 69 00`). Get it via `./download_trusted_setup.sh`
-  (downloads the 33 MB Hermez file). Do **not** downsize / use the chain ceremony
-  `params/kzg_bn254_{18,19}.srs` (`c6 02 8a cf …`) for deposit proofs anymore.
-  The tvm-sdk `ZKHALO2VERIFYWITHVK` opcode was switched to the Hermez `[s]·G2` on
-  2026-07-23 (`tvm_vm/src/executor/zk_halo2_utils.rs::KZG_S_G2_BYTES`) so it now
-  accepts Hermez-keyed deposit proofs. (The legacy Dark DEX `ZKHALO2VERIFY` path
-  still uses `DARK_DEX_KZG_S_G2_BYTES` = chain ceremony — do not touch it.)
-
-## Regenerate the VK / VkBlob
-
-The VK changes whenever `num_instance` changes. From `deposit-prover/` — first
-ensure the **Hermez** SRS is present (`./download_trusted_setup.sh` → `data/kzg_params_18.srs`;
-do NOT downsize the chain ceremony):
-
-```bash
-cargo run --release --example export_vk_blob -- \
-  --input /tmp/deposit_e2e/deposit_proof_input.json \
-  --output /tmp/deposit_e2e/deposit_vk_blob.bin \
-  --config-out /tmp/deposit_e2e/deposit_eth_circuit_params.json \
-  --degree 18 --max-data-byte-len 2048 --max-log-num 20
-```
-
-Then regenerate the matching proof + public inputs (`export_blake2b_proof`) and
-re-verify the triple (`verify_opcode_triple`). The degree / max-data-byte-len /
-max-log-num MUST match across keygen, prove, and verify. After regeneration, run
-`scripts/embed_deposit_vk_blob.py contracts/an/exchange/eccBridge.sol`
-from the repository root to update the embedded key and its checksum.
-
-**Witness-independence (2026-06-25):** the VK no longer depends on the deposit's
-`contractAddress` or MPT proof depth — `prover.rs` pins keccak capacity
-(`FIXED_KECCAK_CAPACITY = 128`) and `circuit_v2.rs` no longer loads the address as a
-fixed-column constant (binding preserved via public input #3). Real deposits of
-different bridge address / MPT depth AND the synthetic 1-node fixtures all produce
-the **byte-identical** production VkBlob. Current build VkBlob (13-PI, Hermez,
-13071 B) = **`f09aa7fa…17c007b9`** — rotated for the six-field
-`Deposit(uint256,address,uint256,bytes32,uint256,address)` event with 128 data
-bytes, `token` appended at public input #11. Keygen is reproducible: two runs of
-`export_deposit_proof_set` produced the same blob byte for byte.
-Previously `0180ee5a…b1c3efa1`, for the five-field
-`Deposit(uint256,address,uint256,bytes32,uint256)` event with 96 data bytes;
-before that `117f4a65…ad612cc`, rotated for Amsterdam 23-field headers
-(24-slot table, `MAX_BLOCK_HEADER_BYTES` 717 → 792); before that
-`83747b2e…74127a90`, rotated for type 1/2 enclosing transactions and
-2048-byte / 20-log receipts (Safe and ERC-4337 deposits), with the parsed `Deposit` log
-fields RLC-bound to the log bytes (before that they were free witnesses) and `log_index`
-bound to the receipt's logs (before that an empty log slot carried any bytes); before that
-`7322fb82…93f92541`
-(5006 B), rotated 2026-07-30 for Prague header support
-(21-field header table incl. EIP-7685 `requestsHash`, `MAX_BLOCK_HEADER_BYTES` 668 →
-705, 8-byte `gasLimit` for Arbitrum); before that `3e2a2db2…bf0d049c` (PR #26 soundness
-fixes), `006cca5d…191dec05`, and the 11-PI chain-ceremony `20cf9018…` superseded on
-2026-07-23 when `chainId` was added + the SRS moved to
-Hermez. Note that only the constraint system moves — PI layout, count and shape are
-stable across the last three rotations. Regenerate the
-whole synthetic `deposit_10proofs` regression set from `deposit-prover/` with:
-
-```bash
-cargo run --release --example generate_deposit_fixtures -- \
-  --set-dir fixtures/deposit_10proofs --count 10
-cargo run --release --example export_deposit_proof_set -- \
-  --set-dir fixtures/deposit_10proofs --count 10 \
-  --degree 18 --max-data-byte-len 2048 --max-log-num 20
-```
-
-The synthetic headers are not canonical Ethereum blocks. Follow
-`deposit-prover/fixtures/deposit_10proofs/README.md` for fixture provenance;
-then sync to tvm-sdk (`acki-nacki-bridge/scripts/sync_deposit_opcode_fixtures_to_tvm_sdk.sh`).
-NB: `get_or_create_proving_key` now writes a **shape-fingerprinted** PK filename so a
-circuit-shape change can never silently load a stale PK.
+| Witness builder | `crates/deposit-receipt/` (root workspace) | `deposit_receipt::fetch` reads `eth_getTransactionReceipt`, `eth_getBlockByHash` and `eth_getBlockReceipts`, checks the header hash, the rebuilt `receiptsRoot` and the `Deposit` log shape the way the contract will, and returns the `finalizeDeposit` arguments. The RPC must serve `eth_getBlockReceipts`. |
+| Relayer | `crates/deposit-relayer-daemon/` | Finds the `Deposit` log, builds the witness (`ReceiptWitnessBuilder` in `src/witness.rs`), checks the payload size and submits `finalizeDeposit`. `deposit-relayer --help` lists the subcommands. |
+| CLI | `crates/ackinacki-bridge/` (`deposit` subcommand) | Approve, deposit, then the same witness (`deposit_witness` in `src/deposit/evm.rs`) and `finalizeDeposit`. Builds only from `crates/bridge-prover-libraries` with `-p ackinacki-bridge`. |
+| Contracts | `contracts/an/exchange/eccBridge.sol`, `contracts/an/exchange/EthTrie.sol`, `contracts/an/exchange/DepositVoucher.sol` | Error codes in `contracts/an/exchange/modifiers/errors.sol` and at the top of `EthTrie.sol`. |
+| Compiled artefacts | `contracts/an/0.80.1_compiled/exchange/eccBridge.{tvc,abi.json}`; `contracts/an/0.81.0_compiled/exchange/DepositVoucher.{tvc,abi.json}` | `contracts/an/place.json` places both onto acki-nacki's `contracts/0.81.0_compiled/exchange/`, and the sources (`EthTrie.sol` among them) onto `contracts/exchange/`. Runtime ABI copies are kept in step by `scripts/check_bridge_abi_in_sync.sh`. |
+| Anchors | `scripts/deposit_anchor_params.py` | Turns a witness JSON or a `(chain id, block hash)` into `setAcceptedBlockHash` arguments; `--verify` checks against an independent RPC that the block is canonical and buried deep enough. |
+| Test vectors | `scripts/deposit-receipt/vectors.py` | `synthetic(...)` builds a self-consistent block and receipt trie with no node; `live --rpc-url <RPC> --tx <hash>` captures a real one into `scripts/deposit-receipt/fixtures/`. |
+| Contract tests | `scripts/test_an_bridge_limits.py` | Runs the bridge in a TVM debugger with real receipt proofs from `vectors.py`. Needs `SOLD_0_80_1`, `SOLD_0_81` and a `TVM_DEBUGGER` that runs `KECCAK256`; CI runs it with the released binaries. |
+| Chain allowlist | `crates/deposit-chain-ids/` | The source chains the relayer and the CLI accept; on chain the gate is `_trustedL1Bridge` plus the anchors. |
 
 ## Recompile eccBridge
 
-Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.0 for
-`eccBridge`, sold 0.81.0 for the voucher, sold 0.81.1 for the light client and the
-Arbitrum block verifier.
+Use the compilers pinned by `contracts/an/exchange/Makefile`: sold 0.80.1 for `eccBridge` (the
+0.80 line with `KECCAK256`; 0.81.x changes the event header the withdrawal proof reads), sold
+0.81.1 for the light client and the Arbitrum block verifier, sold 0.81.0 for `DepositVoucher`.
+The Makefile refuses a compiler that reports another version.
 
 ```bash
-make -C contracts/an/exchange SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
-    SOLD_0_81_1=/path/to/sold-0.81.1
+make -C contracts/an/exchange SOLD_0_80_1=/path/to/sold-0.80.1 SOLD_0_81=/path/to/sold-0.81.0 SOLD_0_81_1=/path/to/sold-0.81.1
 ```
 
-The Makefile writes beside the sources. Copy the rebuilt bridge TVC to
-`contracts/an/0.80.0_compiled/exchange/eccBridge.tvc` and check the ABI before
-deployment. This build's bridge version is 1.16.0 and its code hash starts with
-`e6810f06`. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh` tells
-them apart.
-
-## Build gotchas
-
-- `deposit-prover` is its own cargo workspace (axiom halo2-lib v0.4.1, stable toolchain).
-- The tvm-sdk RLC opcode path pulls `axiom-eth` + `snark-verifier-sdk` which need a
-  **nightly** toolchain (`trait_alias` for the `gosh` feature) and a unified halo2
-  backend via workspace-root `[patch]`. acki-nacki's `Cargo.toml` repoints `tvm_*`
-  to the tvm-sdk RLC branch and mirrors its `[patch]` set; some `[patch]` entries
-  point at local sibling forks by path (adjust before building elsewhere).
-
-## In-progress work / open items
-
-- Local reference patch: `acki-nacki-bridge/acki-nacki_deposit-rlc-e2e.patch` (the
-  earlier **7-input** TokenBridge + node-deps change — predates the 10-input migration).
-- PR for this work is tracked as **#248** (deposit-rlc-e2e). `gh` is not
-  authenticated locally; confirm the repo/branch before pushing (the TokenBridge
-  source is in `gosh-sh/acki-nacki`, branch `pruvendo/deposit-rlc-e2e`).
-- `.bak` files (`TokenBridge.sol.pre7input.bak`, dated `.bak`s of `transaction_executor.rs`)
-  are scratch snapshots from this experiment — do not commit them.
+It writes beside the sources and does not touch the tracked artefacts: copy the rebuilt
+`eccBridge.tvc` and `eccBridge.abi.json` to `contracts/an/0.80.1_compiled/exchange/` by hand and
+commit them together. The voucher must stay byte-identical — its code hash is part of every
+voucher address. When the ABI moves, refresh the runtime copies; `check_bridge_abi_in_sync.sh`
+tells them apart. The `an-contracts.yaml` pipeline checks the voucher ABI, `place.json` and the
+zerostate encoder, rebuilds the four contracts and compares them with the tracked artefacts,
+checks the event header, and runs `scripts/test_an_bridge_limits.py`.
 
 ## Docs
 
-`acki-nacki-bridge/docs/zkhalo2verifywithvk_reference.md` (§11 call-site sketch),
-`docs/verifying_eth_proof_on_an.md` (10-input table), `docs/bridge_verification.md`
-(DEP-N-1..5), `AGENTS.md` (Deposit Flow step 4).
+[`contracts/an/README.md`](../../../contracts/an/README.md) (the bridge, its anchors and limits),
+[`docs/EVM-contracts-spec.md`](../../../docs/EVM-contracts-spec.md) §6 (the `Deposit` event on the
+Ethereum side), [`docs/eth-light-client.md`](../../../docs/eth-light-client.md) §3.4 (how anchors
+reach the bridge). Anything under `docs/archive/` describes the retired deposit circuit.

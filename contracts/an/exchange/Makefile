@@ -2,32 +2,34 @@
 # ArbitrumBlockVerifier next to their sources.
 #
 # Each contract is built with the compiler its tracked artefact was built with,
-# because any other one changes the code hash: eccBridge with sold 0.80.0
-# (../0.80.0_compiled), DepositVoucher with sold 0.81.0 (../0.81.0_compiled),
+# because any other one changes the code hash: eccBridge with sold 0.80.1
+# (../0.80.1_compiled; release gosh_0.80.1), DepositVoucher with sold 0.81.0 (../0.81.0_compiled),
 # EthBeaconLightClient and ArbitrumBlockVerifier with sold 0.81.1
-# (../0.81.1_compiled). The light client and the verifier call gosh.keccak256,
-# which 0.81.1 is the first release to assemble. A build refuses a compiler
-# that reports a different version. It does not touch the tracked artefacts:
-# copy the rebuilt ones over by hand and commit them together.
+# (../0.81.1_compiled). These three call gosh.keccak256. eccBridge needs 0.80.1,
+# the 0.80 line with KECCAK256: 0.81.x sends events with a new external
+# outbound header, and the withdrawal proof (Circuit 4) is built for the 0.80
+# one. A build refuses a compiler that reports a different version. It does not
+# touch the tracked artefacts: copy the rebuilt ones over by hand and commit
+# them together.
 #
-#   make SOLD_0_80=/path/to/sold-0.80.0 SOLD_0_81=/path/to/sold-0.81.0 \
+#   make SOLD_0_80_1=/path/to/sold-0.80.1 SOLD_0_81=/path/to/sold-0.81.0 \
 #        SOLD_0_81_1=/path/to/sold-0.81.1
 
-SOLD_0_80 ?=
+SOLD_0_80_1 ?=
 SOLD_0_81 ?=
 SOLD_0_81_1 ?=
 TVM_VERSION ?= gosh
 TVCS := eccBridge DepositVoucher EthBeaconLightClient ArbitrumBlockVerifier
 
-SOLD_VAR_eccBridge := SOLD_0_80
-SOLD_VERSION_eccBridge := 0.80.0
+SOLD_VAR_eccBridge := SOLD_0_80_1
+SOLD_VERSION_eccBridge := 0.80.1
 SOLD_VAR_DepositVoucher := SOLD_0_81
 SOLD_VERSION_DepositVoucher := 0.81.0
 SOLD_VAR_EthBeaconLightClient := SOLD_0_81_1
 SOLD_VERSION_EthBeaconLightClient := 0.81.1
 SOLD_VAR_ArbitrumBlockVerifier := SOLD_0_81_1
 SOLD_VERSION_ArbitrumBlockVerifier := 0.81.1
-SOLD_eccBridge := $(SOLD_0_80)
+SOLD_eccBridge := $(SOLD_0_80_1)
 SOLD_DepositVoucher := $(SOLD_0_81)
 SOLD_EthBeaconLightClient := $(SOLD_0_81_1)
 SOLD_ArbitrumBlockVerifier := $(SOLD_0_81_1)

@@ -167,7 +167,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
 | `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
-| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile's endpoint serves full history and the raw transactions `deposit` needs) |
+| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile's endpoint serves full history and the `eth_getBlockReceipts` `deposit` needs) |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
 | `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Block the bridge was deployed in: where the `LayerAnchorAppended` scan (preflight, then stage 4b) stops when a window is not covered yet; changes together with `BRIDGE_ADDRESS` (unset = genesis). `--get-logs-chunk-blocks` / `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and `--get-logs-pause-ms` / `BRIDGE_GET_LOGS_PAUSE_MS` fit the scan to a capped, rate-limited RPC |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
@@ -180,7 +180,7 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--state-dir`           | `BRIDGE_WITHDRAW_STATE_DIR` | Per-withdrawal idempotency state dir (optional; defaults to `$HOME/.bridge-withdraw-state`) |
 
 These are `withdraw`'s. `deposit` shares the endpoint and bridge keys and adds
-its own (`BRIDGE_DEPOSIT_PROVER_DIR`, `BRIDGE_DEPOSIT_STATE_DIR`,
+its own (`BRIDGE_DEPOSIT_STATE_DIR`,
 `BRIDGE_DEPOSIT_CONFIRMATIONS`, `BRIDGE_WC_PROJECT_ID`); see [Command
 line](#command-line) under Deposit.
 
@@ -223,10 +223,10 @@ not hang" wants both.
 For it to resolve, two things must be true, and neither is visible in the
 command itself:
 
-1. `$BRIDGE_CONFIG` points at a profile file for endpoints and prover dirs.
+1. `$BRIDGE_CONFIG` points at a profile file for endpoints and state dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(address,uint256,bytes32)`
-   on EVM and `eccBridge` >= 1.16.0 with this build's deposit key on AN.
+   on EVM and `eccBridge` 1.17.0 on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -1078,7 +1078,6 @@ Located under `scripts/`:
 | `deploy_msig_and_mint.py`  | Python driver behind the `.sh`. Consumes the same `$BRIDGE_CONFIG` profile as the Rust CLI — `NETWORK`, `BRIDGE_GQL_ENDPOINT`, `USDC_BRIDGE_KEY_PATH` all come from there. `BRIDGE_WORK_DIR` optional override. |
 | `local_smoke.sh`           | `--dry-run` wrapper — same command as Step 4; reads all plumbing from `$BRIDGE_CONFIG` (default: `config/bridge_config`). |
 | `live_smoke.sh`            | Real-submit wrapper — same command as Step 5. Same profile handshake. |
-| `stage_deposit_prover.sh`  | Builds `deposit-prover`'s tools and lays out a deposit prover directory: `stage_deposit_prover.sh ./deposit-prover`. See § Deposit, "The deposit prover". |
 
 All three wrappers pick up the network profile via `$BRIDGE_CONFIG`
 (default: `config/bridge_config`, a symlink to `bridge_config.shellnet`)
@@ -1099,12 +1098,6 @@ crates/ackinacki-bridge/                       ← run cwd
 │   └── bridge_config.mainnet                  ← placeholder
 ├── docs/
 │   └── advanced_user_withdraw_runbook.md      ← self-deploy + deep failure diagnostics
-├── deposit-prover/                            ← BRIDGE_DEPOSIT_PROVER_DIR (deposit), laid out by
-│   │                                             scripts/stage_deposit_prover.sh; see § Deposit
-│   ├── fetch_deposit_data, export_blake2b_proof, export_vk_blob
-│   ├── configs/circuit_params.json
-│   └── data/                                  ← kzg_params_18.srs, and the ~3.4 GB proving key
-│                                                 the first proof writes
 ├── deposit-state/                             ← BRIDGE_DEPOSIT_STATE_DIR: <op-id>.json, deposit.lock,
 │                                                 <op-id>.lock — never delete or move while an
 │                                                 operation in it is unfinished
@@ -1170,9 +1163,9 @@ signs `approve` and `deposit` from a QR code and keeps its keys: **the CLI
 never takes an EVM private key**, and it needs no Acki Nacki key either,
 because `finalizeDeposit` is an unsigned external message whose gas the Acki
 Nacki bridge pays. The rest is the CLI's job: it waits for the `Deposit`
-event, waits for the deposit block's anchor on Acki Nacki, proves the deposit
-on this machine, sends `finalizeDeposit` and confirms that the eccUSDC reached
-the recipient.
+event, waits for the deposit block's anchor on Acki Nacki, builds the
+deposit's receipt proof from the EVM RPC, sends `finalizeDeposit` and confirms
+that the eccUSDC reached the recipient.
 
 [QUICKSTART.md](QUICKSTART.md) walks through one deposit with a wallet. This
 section is the reference behind it.
@@ -1189,9 +1182,9 @@ under `--json`:
 | 2 | wallet pairing | You scan the QR code and approve the connection; if the wallet is on another network, the CLI asks it to switch, or to add the network. Then the **account check**: an account holding contract code, other than an EIP-7702 delegation, is refused, and the wallet signs a short message (`personal_sign`) whose signer must be the account itself. A failure is exit 20; nothing is sent. |
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. The read-back and the deposit's gas estimate are made at the block that holds the approve — looked up again by its receipt, so that an approve a reorg moved is followed, or, for an approve from the QR code, the block where the new allowance was seen — and the nonce the deposit is expected at counts the approve: an RPC node that has not caught up with that block is asked again, not taken for a lowered limit or a deposit that would revert. |
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(token, amount, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
-| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a shape the circuit cannot prove — is only taken once the block is finalized. The provable shape: type 2 or type 1, input exactly the 100 bytes requested, an access list of at most 512 bytes payload (2048 on type 1), sent straight to the bridge; no receipt log whose payload is over 2211 bytes. The receipt must also fit the prover's keccak budget (about six logs at the 2048-byte cap; a plain deposit uses a fraction of it), which the prover checks at step 7. The wallet session is closed after this step. |
-| 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not proven here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
-| 7 | proof | `fetch_deposit_data` and `export_blake2b_proof` from the prover directory, one proof at a time per directory. The 13 public inputs are compared with the deposit before anything is sent. A proof already in the work directory for this deposit — after a 224, or on a resume — is used again only if the prover finished it: its files get the names `proof.bin` and `public_inputs.bin` once the prover has exited successfully, and a new proof starts by removing what an earlier one left. A deposit the prover finds unprovable (its exit 3 from `fetch_deposit_data` or `export_blake2b_proof`: an enclosing transaction of any type other than 1 or 2, a type-1 transaction over its ~2805-byte leaf, or the keccak budget) ends the operation at exit 35, before any key work; it is not retried. |
+| 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a deposit the Acki Nacki bridge cannot finalize — is only taken once the block is finalized. The bridge finalizes a successful receipt whose `Deposit` log has the bridge's exact shape (three topics, four data words), at a transaction index and a log index within the receipt that both fit in `uint16` (up to 65535). Any transaction type and any calldata length are fine. The wallet session is closed after this step. |
+| 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not finalized again from here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
+| 7 | proof | The **receipt proof**, built in seconds from the RPC: the block header and every receipt of the deposit's block (`eth_getBlockReceipts`). The CLI checks that the header hashes to the anchored block hash, that the receipts rebuild the header's `receiptsRoot`, and that the log is the bridge's `Deposit`, then writes it to `<work-dir>/<op-id>/receipt_proof.json`. The Acki Nacki bridge checks the same against the anchored block itself. A receipt proof already on disk for the same block and log — after a 224, or on a resume — is sent again. An RPC failure, or receipts that do not match the header, is exit 32 and is retried by `--resume`. A proof the Acki Nacki bridge could not check within the 500 000 gas an external message may spend before the bridge accepts it — about 65 to 88 or more other events before the `Deposit` in its transaction, depending on the size of its block — is exit 35, not retried. The CLI sends `deposit` as a transaction of its own, which never comes near that. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
 | 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
 
@@ -1202,8 +1195,9 @@ Preflight, in order:
   bridge without that getter counts as not paused); the amount is at most
   `u64::MAX` micro-USDC; the sender's USDC balance covers it, when
   `--from-address` names the sender (otherwise the balance is checked after
-  pairing); and the RPC serves every receipt and raw transaction of the
-  latest block, which is what the prover fetches.
+  pairing); and the RPC serves `eth_getBlockReceipts` for the latest block,
+  with receipts that rebuild its `receiptsRoot` — the receipt proof of step 7
+  needs exactly that.
 - **Acki Nacki** (`--gql-endpoint`): REST `/v2/` and GraphQL both answer; the
   bridge's `getVersion()` is at least the [minimum bridge
   version](#minimum-bridge-version); `isPaused()` is `false`;
@@ -1222,15 +1216,6 @@ Preflight, in order:
   (otherwise the CLI cannot compute the voucher's address, and a newer CLI is
   needed); and the recipient: an active account must live in the dapp `--to`
   names, while a missing or undeployed one only gets a warning.
-- **Prover** (`--deposit-prover-dir`): both tools are executable and run on
-  this host — each is started once with `--help`, without the network and
-  with nothing of the environment but `PATH` and `LD_LIBRARY_PATH`, and must
-  exit 0 within 10 s; a binary the loader refuses (`GLIBC_2.38' not found`,
-  a missing loader) is refused here with the end of its stderr, not at step
-  7 with the USDC in the bridge. `configs/circuit_params.json` has
-  `base.k = 18` and `base.lookup_bits = 8`, `data/` is writable, and
-  `data/kzg_params_18.srs` carries the Hermez ceremony's [s]·G2. A proof made
-  with another SRS would be refused on chain, after the deposit.
 - **Work directory** (`--work-dir`): created if it is missing, and a file is
   written, synced and removed there. A path that is a file, or a directory
   that cannot be written, is refused with the error the system gave.
@@ -1242,8 +1227,7 @@ Preflight, in order:
 `--dry-run` stops there. It prints the calldata of both transactions, the QR
 payloads and whom the anchor wait would wait for, and sends nothing. It is not
 read-only, though: it creates the state and work directories if they are
-missing, writes and removes its probe files in the work directory and in the
-prover's `data/`, takes the state directory's lock for as long as it runs, and
+missing, writes and removes its probe file in the work directory, takes the state directory's lock for as long as it runs, and
 closes operations an interrupted run left before the deposit was requested.
 So a dry run answers exit 3 too, while another run on this machine holds the
 state directory or an operation for the same deposit has an unknown outcome.
@@ -1275,13 +1259,12 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 
 | Flag | Env var / profile key | Default | Purpose |
 |------|-----------------------|---------|---------|
-| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve every receipt and raw transaction of a block: the prover reads the whole block (the profile's endpoint does; Tenderly's public gateway serves no raw transactions). On Arbitrum Sepolia, `https://sepolia-rollup.arbitrum.io/rpc` does not serve `eth_getRawTransactionByHash` either; `https://arbitrum-sepolia-rpc.publicnode.com` does |
+| `--rpc-url` | `RPC_URL` | — | EVM JSON-RPC. It must serve `eth_getBlockReceipts`: the receipt proof reads every receipt of the deposit's block (the profile's endpoint does) |
 | `--bridge-address` | `BRIDGE_ADDRESS` | — | `AckiNackiBridge` on the EVM chain |
 | `--gql-endpoint` | `BRIDGE_GQL_ENDPOINT` | — | The Acki Nacki host. GraphQL for reads; `finalizeDeposit` goes to `POST /v2/messages` on the same host, so it has to serve both |
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID` | — | Account id of the Acki Nacki bridge; its dapp is resolved live |
-| `--deposit-prover-dir` | `BRIDGE_DEPOSIT_PROVER_DIR` | — | The deposit prover, see [below](#the-deposit-prover) |
 | `--state-dir` | `BRIDGE_DEPOSIT_STATE_DIR` | `$HOME/.bridge-deposit-state`; none when `HOME` is unset or empty | Operation records, their locks and claims. Keep it the same for one sender: [why](#operations-resume-and-abandon) |
-| `--work-dir` | `BRIDGE_WORK_DIR` | `$HOME/.bridge-deposit-work`; none when `HOME` is unset or empty | `<op-id>/input.json`, `proof.bin` and `public_inputs.bin` of each operation. Each operation records its own, so only a new deposit needs this setting |
+| `--work-dir` | `BRIDGE_WORK_DIR` | `$HOME/.bridge-deposit-work`; none when `HOME` is unset or empty | `<op-id>/receipt_proof.json` of each operation. Each operation records its own, so only a new deposit needs this setting |
 | `--confirmations` | `BRIDGE_DEPOSIT_CONFIRMATIONS` | `12` | How deep the receipt must be before step 5 decides |
 | `--wc-project-id` | `BRIDGE_WC_PROJECT_ID` | none | WalletConnect Cloud project id. Neither a release nor a build from source has one: pass it, set it in the profile, or set `ACKINACKI_BRIDGE_WC_PROJECT_ID` when building |
 
@@ -1292,8 +1275,7 @@ transfer creates it, and its dapp becomes known only when it is deployed.
 | `--pair-timeout-s` | 300 | pairing with the wallet; and the wait for an `approve` to show on chain — its receipt once the wallet returned a hash, or the allowance once the QR code is shown (`eip681`) — with the allowance read back after it, every read, retry and pause included: an RPC that keeps failing ends the wait too | exit 20 for pairing, exit 21 for an `approve` |
 | `--recovery-window-s` | 600 | the search for the deposit transaction when the wallet did not return its hash, the session dropped, or the node does not show the hash the wallet returned | exit 30 |
 | `--anchor-timeout-s` | 0 = no limit | the anchor wait and the whole of step 8, pauses and sends included | exit 31; exit 34 if a `finalizeDeposit` was in doubt |
-| `--relayer-grace-s` | 120 | how long after the anchor the deposit is left to the operator's relayer | the CLI proves it itself |
-| `--prover-timeout-s` | 1800 | one proving attempt, both tools | exit 32 |
+| `--relayer-grace-s` | 120 | how long after the anchor the deposit is left to the operator's relayer | the CLI finalizes it itself |
 | `--credit-timeout-s` | 300 | the credit confirmation of step 9 | exit 34 |
 
 Each limit takes at most 315360000 s (ten years), `--pair-timeout-s` at most
@@ -1323,11 +1305,10 @@ time limit, which covers the retries too. Preflight's EVM reads are tried for
   `wc:` URI as text (`--uri-only`, `--qr-out`).
 - **`eip681`** — an `ethereum:` QR code per transaction, for wallets without
   WalletConnect, browser extensions among them. The wallet returns no
-  transaction hash, so step 5 finds the deposit by its `Deposit` event. **An
-  EIP-681 code cannot ask for a type-2 transaction**, and a wallet that sends a
-  legacy one makes the deposit unprovable (exit 35). The wallet will not add
-  the network either, and some wallets drop the call data. The CLI asks you to
-  accept that risk: `--yes` accepts it, `--non-interactive` or `--json`
+  transaction hash, so step 5 finds the deposit by its `Deposit` event. The
+  wallet will not add the network, and some wallets drop the call data, which
+  leaves a transaction that deposits nothing. The CLI asks you to accept that
+  risk: `--yes` accepts it, `--non-interactive` or `--json`
   without `--yes` declines it (exit 20), and Ctrl-C at the question ends the
   run at once, as anywhere else. There is no signature check in this mode,
   only the check of the account's code, so an ERC-4337 account that is not
@@ -1373,13 +1354,12 @@ final object: the summary, or the error envelope, which carries `op_id` too.
 **Secrets.** `--help` does not show the values of `--rpc-url`,
 `--gql-endpoint` and `--wc-project-id` taken from the environment or the
 profile. Every line a deposit run prints — logs, the checklist, events,
-errors, the prover's stderr — shows a configured URL as
+errors — shows a configured URL as
 `scheme://host[:port]/…` and never shows the project id: RPC providers put API
 keys into the URL, and HTTP clients quote it whole in their errors. The
 operation records hold chain identifiers only.
 
-**From a source checkout**, from `crates/ackinacki-bridge/`, once the
-[prover directory](#the-deposit-prover) is in place. Until the
+**From a source checkout**, from `crates/ackinacki-bridge/`. Until the
 [minimum bridge version](#minimum-bridge-version) is set, a build from source
 refuses every bridge with exit 2 unless it is built with
 `--features dev-unfixed-bridge`, and such a build is for development only:
@@ -1397,7 +1377,7 @@ cargo run --release -p ackinacki-bridge --features dev-unfixed-bridge \
 `deposit --network` takes Sepolia (`sepolia`) and Arbitrum Sepolia
 (`arbitrum-sepolia`) in this version; an Arbitrum Sepolia deposit needs a
 bridge at 1.14.0 or newer with a verifier for 421614. **Ethereum mainnet is
-not a deposit network**: the deposit circuit accepts OP Mainnet, World Chain,
+not a deposit network**: the deposit bridge accepts OP Mainnet, World Chain,
 Mantle, Base, Arbitrum One, Blast, Sepolia and Arbitrum Sepolia
 (`crates/deposit-chain-ids`), so production deposits come from L2s. `bridge_config.mainnet` cannot be used for
 `deposit`.
@@ -1420,7 +1400,7 @@ prints the owner's call to pass on:
 | Block anchor | by the owner: **from ~13 min, plus the owner's reaction; no limit by default** | by `eth-lc-relayer arbitrum-anchors` through the verifier: **35–75 min** (the rollup's next assertion on Sepolia, then the Sepolia light client admitting its block; 70 min in one measured run); the owner can anchor it sooner |
 | Deposit block finalized on the EVM side | ~13 min, inside the anchor wait | inside the anchor wait |
 | Relayer grace | up to 2 min | up to 2 min |
-| Proof | seconds to fetch the block, then ~45 s cold or ~25 s warm on the [measured host](#the-deposit-prover) | the same |
+| Receipt proof | seconds: one block header and the block's receipts | the same |
 | `finalizeDeposit` and the credit | under a minute; at most `--credit-timeout-s` | the same |
 | **End to end** | **~17 min, plus the owner's reaction** — an estimate summed from the rows above, not a measured run | **~40–80 min** — an estimate from the rows above |
 
@@ -1442,7 +1422,7 @@ Each deposit is an **operation**: an id printed right after preflight —
 record, `<state-dir>/<op-id>.json` (mode 0600), written before every step that
 could make it wrong: before the wallet is asked for the deposit, before the
 first `finalizeDeposit`. Ctrl-C, SIGTERM and SIGHUP end a run cleanly: the
-prover is stopped, the locks are released, the record keeps the last stage,
+locks are released, the record keeps the last stage,
 and the exit code follows it — 2 before the deposit was requested, 30 while
 its transaction is unknown, 31 once it is confirmed, 32 once it is anchored,
 34 after that. An operation that has already ended answers as its run did: a
@@ -1469,29 +1449,27 @@ The EVM chain and bridge, the Acki Nacki bridge, the recipient and the work
 directory come from the record, so a finished or failed operation is answered
 with `--state-dir` alone, and `--abandon` needs nothing else either. The other
 settings are asked for only when the operation needs them: `--rpc-url` and
-`--gql-endpoint` to go on with an operation that has not ended, and
-`--deposit-prover-dir` while its proof is still to be built — then the prover's
-tools are run once and the operation's work directory is checked, as for a
-new deposit, before either chain is read. A missing or failed one is
-named in the message, with the exit code an interrupt at the operation's stage
-gives (30 to 34), except for a proof that is gone and has to be built again:
-without `--deposit-prover-dir` that step fails, with exit 32, or 34 once a
-`finalizeDeposit` was sent. `--resume <depositId>` needs `--bridge-address` as
-well: a deposit id is unique only within its bridge.
+`--gql-endpoint` to go on with an operation that has not ended. A missing one
+is named in the message, with the exit code an interrupt at the operation's
+stage gives (30 to 34). A receipt proof that is gone from the work directory
+is built again. An operation that a CLI from before the receipt proof left
+after its Halo2 proof resumes by building the receipt proof; the old
+`proof.bin` and `public_inputs.bin` are not read, and can be deleted.
+`--resume <depositId>` needs `--bridge-address` as well: a deposit id is
+unique only within its bridge.
 
 An operation that stopped in the anchor wait or after the anchor may have
 been finalized meanwhile, by the operator's relayer. A resume of it first
 passes its own checks, in this order: the command line against the record,
-then `--deposit-prover-dir` with its tools and the work directory (without
-reading either chain), then the chains and the Acki Nacki bridge. A command
+then the chains and the Acki Nacki bridge. A command
 line that contradicts the record, or an RPC on another chain, is exit 2 as
 above; any other refusal there takes the stage's exit code (31 in the anchor
 wait, 32 after the anchor), even if the deposit was finalized meanwhile.
 Then, in the anchor
 wait on every poll once the receipt is read, before the anchor and the
-pause, and after the anchor before a proof is built, the resume looks
-whether the deposit is finalized already. If it is, the resume only
-confirms the credit: it builds no proof, and a bridge paused since, or an
+pause, and after the anchor before the receipt proof is built, the resume
+looks whether the deposit is finalized already. If it is, the resume only
+confirms the credit: it builds no receipt proof, and a bridge paused since, or an
 anchor withdrawn since, does not hold it.
 
 **After exit 30.** The wallet was asked for the deposit and its transaction
@@ -1541,10 +1519,10 @@ without them it is refused with exit 2.
 | 22 | The deposit transaction reverted on the EVM side, or succeeded without a `Deposit` event of the bridge | not taken; gas spent | read the cause it names, run again |
 | 30 | The wallet was asked; the transaction was not found in the recovery window | possibly in flight | [after exit 30](#operations-resume-and-abandon) |
 | 31 | The deposit is confirmed; the Acki Nacki side (the anchor, or a paused bridge) did not come in time | in the EVM bridge | `--resume <op-id>` later |
-| 32 | The proof failed or does not match the deposit; or `finalizeDeposit` could not be built, with no earlier send in doubt | in the EVM bridge | fix the [prover](#the-deposit-prover), `--resume <op-id>` |
-| 33 | The Acki Nacki bridge refused `finalizeDeposit` | in the EVM bridge | 222: `--resume <op-id>` once the owner restores the allowlist; 220: keep the work directory and report it (the prover does not match the bridge's verification key); other codes: report them |
+| 32 | The receipt proof could not be built — the RPC failed, or its header or receipts do not match the anchored block; or `finalizeDeposit` could not be built, with no earlier send in doubt | in the EVM bridge | fix the RPC the message names (it must serve `eth_getBlockReceipts`), `--resume <op-id>` |
+| 33 | The Acki Nacki bridge refused `finalizeDeposit` | in the EVM bridge | 222: `--resume <op-id>` once the owner restores the allowlist; 244, 300–305, 307, 308: the bridge does not accept this receipt or its log — keep the work directory (`receipt_proof.json`) and report it; other codes: report them |
 | 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt; or a `--resume` could not open the state directory or read the operation's record | unknown | `--resume <op-id>`; never make a new deposit instead |
-| **35** | **The deposit is on chain but cannot be proven, or it is not the deposit that was requested** | **in the EVM bridge; only the operator can finalize or return it** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
+| **35** | **The deposit is on chain but the Acki Nacki bridge cannot finalize it from its receipt, or it is not the deposit that was requested** | **in the EVM bridge** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 | **37** | **The voucher exists and the bridge transaction that should have minted the credit aborted** | **in the EVM bridge, beyond a retry; only the operator can pay it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 
 `--resume <op-id>` continues 30–34. 22, 35 and 37 close the operation for
@@ -1557,20 +1535,20 @@ Exit 35 and exit 37 are final: the CLI cannot move the USDC any further. It
 prints what the operator needs, and `--resume <op-id>` prints it again from the
 record.
 
-- **Exit 35, a shape the circuit cannot prove** — a legacy or type-4
-  transaction (EIP-681 wallets may send a legacy one), longer call data, a
-  longer access list, a call routed through another contract, a receipt log
-  whose payload is over 2211 bytes, or, found by the prover at step 7, a receipt over
-  its keccak budget or a type-1 transaction over its leaf. The USDC is in
-  the EVM bridge, which has no refund; only the operator can return it.
+- **Exit 35, a deposit the bridge cannot finalize** — the `Deposit` log is not
+  in the shape the Acki Nacki bridge reads, the transaction sits past index
+  65535 of its block or the log past index 65535 of its receipt, or, found at
+  step 7, the bridge could not check the receipt proof within the 500 000 gas
+  an external message may spend before the bridge accepts it: the deposit's
+  transaction carried dozens of other events. The USDC is in the EVM bridge,
+  which has no refund.
 - **Exit 35, not the deposit that was requested** — `the wallet broadcast a
   deposit that differs from the request`, with the actual amount and recipient
   next to the requested ones. You changed the amount in the wallet, the wallet
   altered the arguments (it happens with EIP-681), or the wallet sent the call
-  through its own contract. The CLI does not prove or finalize a deposit you
-  did not ask for. If its shape is provable, the operator or the operator's
-  relayer can finalize it to the recipient in its call data; otherwise only
-  the operator can return the USDC.
+  through its own contract. The CLI does not finalize a deposit you did not
+  ask for. The operator or the operator's relayer can finalize it to the
+  recipient in its call data.
 - **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
   The operator pays it out (`mintAndSendBridged`) once, for this deposit's
   recipient, amount and source `chainId`. That call credits bridged inventory the way
@@ -1599,7 +1577,8 @@ jq '{op_id, bridge: .params.bridge, tx: .tx.tx_hash,
   operation was closed before the deposit was recorded, so take the
   `depositId` from `detail`.
 - `requested_units` (micro-USDC) and `requested_to` are what was asked for.
-  For exit 37 and for an unprovable shape that is also what was deposited.
+  For exit 37 and for a deposit the bridge cannot finalize that is also what
+  was deposited.
   When the amount, recipient or sender differs from the request, the `Give
   the bridge operator:` line has what was deposited, and the sentence before
   it has both: `… units to account … from … were deposited, … were
@@ -1625,95 +1604,14 @@ Each side has an owner switch.
   relayer, while the run was stopped — does not wait for it: the CLI looks for
   that before the pause, and confirms the credit.
 
-### The deposit prover
-
-`--deposit-prover-dir` is the working directory of the two tools the CLI
-runs, built from `deposit-prover/` as it is:
-
-```
-<prover-dir>/
-├── fetch_deposit_data
-├── export_blake2b_proof
-├── export_vk_blob                     not run by the CLI; the release check uses it
-├── configs/circuit_params.json        read on every run, even with a cached key
-└── data/
-    ├── kzg_params_18.srs              the Hermez ceremony at degree 18, ~33 MB
-    ├── deposit_prover_k18.<fingerprint>.pk       the proving key, ~3.4 GB,
-    ├── deposit_prover_k18.<fingerprint>.pk.bp.json   written by the first proof
-    └── .prove.lock
-```
-
-A proof that has to generate a new key — the first one after an upgrade
-that changed the circuit — deletes the keys of earlier shapes from `data/`
-once the new one is written, so `data/` peaks at both keys for that one
-proof and then holds one.
-
-`scripts/install.sh` installs all of it. In a source checkout,
-`scripts/stage_deposit_prover.sh ./deposit-prover` builds the tools, with
-`deposit-prover`'s own `rust-toolchain.toml`, and lays them out where the
-shipped profiles point. The SRS then goes into `./deposit-prover/data/`: take
-`kzg_params_18.srs` from a release and check it against that release's
-`SHA256SUMS`. The release pipeline derives the file from the Hermez k=21
-`kzg_bn254_21.srs` with `deposit-prover`'s `downsize_srs` instead of
-downloading it, because the storage `deposit-prover/download_trusted_setup.sh`
-points at refuses access. From a release that does not carry it yet, derive
-it the same way from that release's `kzg_bn254_21.srs`; the staging script
-has already built `downsize_srs`:
-
-```bash
-../../deposit-prover/target/release/examples/downsize_srs \
-  --input kzg_bn254_21.srs --output ./deposit-prover/data/kzg_params_18.srs --k 18
-sha256sum ./deposit-prover/data/kzg_params_18.srs
-# from v0.2.0's kzg_bn254_21.srs: ca97cea5566cec45421f7b2a945c462da6cb759fd8d22791b41b4a3d479ffefc
-```
-
-Whatever its source, preflight refuses a file without the Hermez [s]·G2.
-
-**Memory, disk and time**, next to `withdraw`:
-
-| | `deposit` (k = 18) | `withdraw` (Circuit 4) |
-|---|---|---|
-| Peak RAM | ~9.6 GB with a cold key cache, ~8.8 GB warm | ~19 GB with a cold key cache (sampled every 5 s) |
-| Disk | ~3.4 GB in `data/` after the first proof, plus ~26 MB of tools; the first proof after an upgrade that rotates the key briefly holds the old key too, and then deletes it | ~10.7 GB on a withdraw-only host; for the first withdrawal after an upgrade, ~7.5 GB more, or ~10.7 GB with a new Circuit-4 key (Step 0) |
-| Proof, cold key cache (keygen included) | 2 min 7 s wall, 16 min CPU | ~8 min (8 min 12 s on the test host) |
-| Proof, warm key cache | 56 s wall, 11 min CPU | ~3 min (2 min 37 s and 2 min 41 s on the test host) |
-
-Measured with `export_blake2b_proof` on
-`deposit-prover/fixtures/deposit_10proofs/proof_00` (`--degree 18
---max-data-byte-len 2048 --max-log-num 20`, as the CLI runs it) on an Intel Core
-i5-14600KF with 20 hardware threads and 46 GB of RAM, Ubuntu 24.04 under WSL2.
-The prover uses every core, so with fewer
-the wall time moves toward the CPU time; `fetch_deposit_data` adds a few RPC
-calls. The default `--prover-timeout-s 1800` leaves a wide margin.
-
-Proofs on one prover directory run one at a time. The CLI holds
-`data/.prove.lock` for as long as `export_blake2b_proof` runs, and the prover
-inherits it, so a prover that outlives a killed CLI still holds it. A second
-deposit that reaches step 7 meanwhile waits with `the prover is busy with
-another deposit; waiting for it` — two proofs at once would also need twice
-the memory. Do not point a `deposit-relayer` at the same directory: it does
-not take the lock, and the key cache is not safe to share without it.
-
-**A damaged key cache.** A proof stopped while it was writing the proving key
-— `--prover-timeout-s` running out on a cold cache, the machine running out of
-memory, the process killed — can leave `data/deposit_prover_k18.*`
-half-written, and the proofs after it fail (exit 32). Delete those files, not
-`kzg_params_18.srs`, and `--resume <op-id>`; the next proof builds the key
-again:
-
-```bash
-rm -f <prover-dir>/data/deposit_prover_k18.*
-```
-
 ### Locks need `flock`
 
-`deposit` keeps three `flock` locks, which the kernel releases when their
+`deposit` keeps two `flock` locks, which the kernel releases when their
 holder dies: `<state-dir>/deposit.lock` (one run at a time from the check for
 unfinished operations to the confirmed deposit, so two runs cannot both ask a
-wallet), `<state-dir>/<op-id>.lock` (one process per operation, `--resume` and
-`--abandon` included) and `<prover-dir>/data/.prove.lock` (above). **So
-`--state-dir` and `--deposit-prover-dir` must be on a filesystem that supports
-`flock`.** On one that does not — NFS without a lock daemon, some FUSE and
+wallet) and `<state-dir>/<op-id>.lock` (one process per operation, `--resume`
+and `--abandon` included). **So `--state-dir` must be on a filesystem that
+supports `flock`.** On one that does not — NFS without a lock daemon, some FUSE and
 container overlay mounts — `deposit` refuses with exit 2 before the wallet is
 asked, and names the directory. Here it differs from `withdraw`, which carries
 on without its lock and relies on its record: for a deposit the lock is what
@@ -1728,19 +1626,19 @@ version is the build constant `MIN_BRIDGE_VERSION`
 (`src/deposit/an_preflight.rs`). Preflight reads the bridge's `getVersion()`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
-already. Independently of that minimum, preflight also refuses a bridge
-older than `DEPOSIT_KEY_BRIDGE_VERSION` (`1.16.0`) with exit 2: this CLI's
-prover makes proofs for that key, and an older bridge rejects them at
-`finalizeDeposit` after the USDC is already in the EVM bridge. A bridge newer
-than the newest this build was checked against (`1.16.0`) is refused by a released CLI. Development builds may bypass the version-range check, but never the deposit-key minimum.
+already. The minimum is `1.17.0`, the first bridge that finalizes a deposit
+from its receipt proof; an older one expects a Halo2 proof this CLI no longer
+makes. A bridge newer than the newest this build was checked against
+(`1.17.0`) is refused by a released CLI too, since its `finalizeDeposit` may
+take other arguments. A source build with `--features dev-unfixed-bridge`
+turns the refusal of a newer bridge into a warning.
 
-Until that bridge version exists, `MIN_BRIDGE_VERSION` is unset, and such a
-build refuses every bridge: `this build does not know which bridge version it
-needs`. The release pipeline refuses to build a tag in that state, so a
-released CLI always names its minimum. To develop against a bridge without
-that protection, a source build with `--features dev-unfixed-bridge` turns the
-refusal into a warning (`development build … never ship this build`). No flag
-does this in a released binary.
+A build whose `MIN_BRIDGE_VERSION` is unset refuses every bridge: `this build
+does not know which bridge version it needs`, and `--features
+dev-unfixed-bridge` turns that refusal into a warning (`development build …
+never ship this build`). The release pipeline refuses to build a tag in that
+state, so a released CLI always names its minimum. No flag lifts either
+refusal in a released binary.
 
 ### When only the light client anchors
 

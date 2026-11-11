@@ -1,7 +1,7 @@
 # Standalone workspace — excluded from the main bridge workspace because it
 # depends on `axiom-crypto/halo2-lib` while the orchestrator depends on the
 # gosh fork (`halo2-lib-zkevm-sha256-and-bls12-381`); both can't coexist
-# inside one cargo unit. Same pattern as `deposit-prover/`.
+# inside one cargo unit.
 [workspace]
 
 [package]
@@ -18,8 +18,6 @@ path = "src/lib.rs"
 
 [dependencies]
 # snark-verifier-sdk pulls in halo2-base (axiom fork), halo2-ecc, halo2_proofs.
-# Pinning matches deposit-prover/Cargo.toml so the two crates can share git
-# cache and CI knows the dependency graph is internally consistent.
 snark-verifier = { git = "https://github.com/axiom-crypto/snark-verifier.git", tag = "v0.1.7-git", default-features = false, features = [
     "loader_evm",
     "loader_halo2",

@@ -639,7 +639,6 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 1,
-                2,
                 Default::default(),
             ),
         );
@@ -842,7 +841,6 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 1,
-                2,
                 Default::default(),
             ),
         );

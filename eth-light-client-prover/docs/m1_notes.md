@@ -102,4 +102,4 @@ cargo test --test bls_mock_prover -- --ignored --nocapture   # MockProver (minut
 ```
 
 Excluded from the main Cargo workspace and from `cargo test --workspace` in CI (own
-`[workspace]` + `[patch]`, same pattern as `deposit-prover`).
+`[workspace]` + `[patch]`).

@@ -171,8 +171,9 @@ Use a throwaway acki-nacki worktree for the generation: `gen-zerostate.sh` rewri
 `config/`. Linux x86_64 only.
 
 ```sh
+# <acki_image_tag>: the pipeline variable of that name in .woodpecker/local-net-e2e.yaml; br_dev serves no latestBkSet
 # on the host: which build of the branch (prints ACKI_SHA, the image digests and the helpers dir)
-ssh USER@HOST "REGISTRY=docker.gosh.sh TAG=br_dev WORK_ROOT=\$HOME/bridge-e2e bash -s" < tests/e2e/local-net/resolve-acki-on-host.sh
+ssh USER@HOST "REGISTRY=docker.gosh.sh TAG=<acki_image_tag> WORK_ROOT=\$HOME/bridge-e2e bash -s" < tests/e2e/local-net/resolve-acki-on-host.sh
 # controller: check out acki-nacki at ACKI_SHA, scp the two helpers into HELPERS_DIR, then
 HELPERS_DIR=… ACKI_DIR=/path/to/acki-nacki-worktree BRIDGE_REPO=/path/to/bridge BRIDGE_SHA=$(git rev-parse HEAD) \
 BRIDGE_ZS_L1_BRIDGE=0x0000000000000000000000000000000000000001 DISABLE_BLACKLIST=true tests/e2e/local-net/gen-zerostate.sh
@@ -183,7 +184,7 @@ ssh USER@HOST "ACKI_REPO=https://github.com/gosh-sh/acki-nacki.git ACKI_SHA=<ACK
 ansible-playbook -i /path/to/infrastructure/ansible/inventory/bridge/e2e/local-net.yml /path/to/acki-nacki/ansible/dexdo-e2e-up.yml \
   -e target=bridge_e2e -e acki_repo= -e acki_dir=/opt/acki-nacki-bridge \
   -e config_src=/path/to/acki-nacki-worktree/config -e env_src=/path/to/acki-nacki-worktree/docker/.env \
-  -e dexdo_net_image_tag=br_dev -e dexdo_node_image=<NODE_IMG> -e dexdo_gql_image=<GQL_IMG> -e dexdo_bm_image=<BM_IMG> -e dex_test_notes_cnt=0
+  -e dexdo_net_image_tag=<acki_image_tag> -e dexdo_node_image=<NODE_IMG> -e dexdo_gql_image=<GQL_IMG> -e dexdo_bm_image=<BM_IMG> -e dex_test_notes_cnt=0
 ssh USER@HOST "PIPELINE_ID=manual BRIDGE_SHA=<sha> ACKI_DIR=/opt/acki-nacki-bridge bash -s" < tests/e2e/local-net/run-test-on-host.sh
 ansible-playbook -i /path/to/infrastructure/ansible/inventory/bridge/e2e/local-net.yml /path/to/acki-nacki/ansible/dexdo-e2e-down.yml \
   -e target=bridge_e2e -e acki_dir=/opt/acki-nacki-bridge -e dexdo_deploy_dir=/opt/acki-nacki-bridge/.no-dexdo -e full_cleanup=true

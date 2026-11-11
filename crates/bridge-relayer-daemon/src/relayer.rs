@@ -874,6 +874,67 @@ mod tests {
         assert_eq!(relayer.state().attempts_since_progress, 0);
     }
 
+    /// A source whose driver has no snapshot until a bundle is acked, then
+    /// reports a BK-set commitment the contract does not hold.
+    struct DriftsAfterAck {
+        inner: InMemoryBlockSource,
+        acked: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for DriftsAfterAck {
+        async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            self.inner.fetch(target).await
+        }
+
+        async fn ack_last_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
+            self.acked
+                .store(seq_no, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+            let acked = self.acked.load(std::sync::atomic::Ordering::SeqCst);
+            if acked == 0 {
+                return None;
+            }
+            let mut s = bridge_prover_lib::bridge_state::BridgeState::new(4);
+            s.stored_last_seen_block_seq_no = acked;
+            s.stored_bk_set_commitment = U256::from(BK + 1).to_le_bytes();
+            Some(s)
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_fails_when_the_driver_disagrees_with_the_contract_after_a_verified_bundle() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(DriftsAfterAck {
+            inner: InMemoryBlockSource::new(),
+            acked: std::sync::atomic::AtomicU64::new(0),
+        });
+        source.inner.insert(block(1, U256::ZERO));
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+            bundle_stride: BUNDLE_STRIDE_L1,
+        };
+        let mut r =
+            Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge.clone()).unwrap();
+        let err = r
+            .tick()
+            .await
+            .expect_err("the consistency check must run after a verified bundle");
+        assert!(err.to_string().contains("drift"), "got {err}");
+        assert_eq!(bridge.accepted_count(), 1, "the bundle itself was accepted");
+    }
+
     #[tokio::test]
     async fn tick_returns_not_yet_available_when_source_empty() {
         let dir = tempdir().unwrap();
@@ -1678,8 +1739,9 @@ mod tests {
         // prover must keep signing against the outgoing set until
         // `verifyBlock` crosses the next owed boundary. Simulate the
         // asynchronous ack that would eventually land once `verifyBlock`
-        // catches up (`maybe_ack_prover_rotation` on a later tick) so
-        // that `pending` is clear for N2 on the next tick.
+        // catches up (the relayer acks it on a later tick, once `verifyBlock` has
+        // crossed the owed boundary) so that `pending` is clear for N2 on the
+        // next tick.
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
         prover.release_by_hand(1500);
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);

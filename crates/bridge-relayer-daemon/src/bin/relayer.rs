@@ -378,11 +378,14 @@ enum Cmd {
         anchor_level: Option<u8>,
     },
     /// Live AN→ETH daemon: GraphQL + `LiveProverDriver` → `verifyBlock` /
-    /// `applyBkSetUpdate` (Alina live-integration plan).
+    /// `applyBkSetUpdate`.
     ///
-    /// Requires SRS/PKs under `--params-dir` and a GraphQL server that serves
-    /// `blockchain.latestBkSet` (gql-server >= 1.5.0): the starting BK set is
-    /// built from it. Prover state lives under `--prover-state-dir`.
+    /// Requires SRS/PKs under `--params-dir`. A GraphQL server that serves
+    /// `blockchain.latestBkSet` (gql-server >= 1.5.0) is needed only when
+    /// `--prover-state-dir` holds no BK set that fits the contract (a cold
+    /// start without `prover_bk_set.json`, or one that does not fit): the
+    /// starting BK set is then built from it. Prover state lives under
+    /// `--prover-state-dir`.
     DaemonLive {
         #[arg(long, env = "RPC_URL", hide_env_values = true)]
         rpc_url: String,

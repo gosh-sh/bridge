@@ -7,7 +7,7 @@
 //! accepts the tx. Rotation acks are deferred until the next bundle
 //! target is above N, so [`ack_last_bk_update`] may run many ticks after
 //! `applyBkSetUpdate` (and answers `AlreadyApplied` if that N is already in
-//! the driver). See Alina's live-integration plan §4.2 / §5.
+//! the driver).
 //!
 //! Rotations the contract already has are never proven: the driver checks
 //! them against their blocks and hands them over as deltas, which wait in
@@ -482,8 +482,8 @@ impl BkUpdateSource for LiveBlockSource {
             },
             LiveBkUpdateEvent::BkUpdate(u) => {
                 if u.block_seq_no < target {
-                    // The driver proves only rotations above `target - 1`;
-                    // keep one below as applied, never serve it.
+                    // A rotation below the target needs no proof: store it as
+                    // `Proven` so the relayer acks it, and serve nothing.
                     *self.pending_bk_update.lock().await = Some(PendingRotation::Proven(u));
                     return Ok(None);
                 }

@@ -127,8 +127,8 @@ A deploy (`compute_bridge_anchors`) and a cold start of the daemon without
 `prover_bk_set.json` build the BK set from GraphQL: `BRIDGE_GQL_ENDPOINT` must
 be gql-server 1.5.0 or later, serving `blockchain.latestBkSet`. A server
 without it stops both at once with `needs gql-server >= 1.5.0 serving
-blockchain.latestBkSet`. A restart with the state directory intact does not
-query it. [§3.2](#32-check-graphql) checks a server.
+blockchain.latestBkSet`. A restart whose state directory still fits the
+contract does not query it. [§3.2](#32-check-graphql) checks a server.
 
 ### Environment
 

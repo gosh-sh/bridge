@@ -59,7 +59,7 @@ assigns it when the release is tagged.
   scripts (`--bk-set-config` is refused now); keep `state/`.
 - A cold start of `daemon-live` or `bridge-prover-daemon` without `state/prover_bk_set.json`, and
   every `compute_bridge_anchors` run, need gql-server >= 1.5.0 serving `blockchain.latestBkSet`;
-  against an older server they exit 1 at once. A restart with an intact `state/` does not.
+  against an older server they exit 1 at once. A restart whose `state/` still fits the contract does not.
 
 ### New / Improvements
 
@@ -139,8 +139,9 @@ assigns it when the release is tagged.
 - `daemon-live` and `bridge-prover-daemon` can prove a rotation when the bundle at its height was
   verified first.
 - `daemon-live` exits with code 1 (`BK set diverged from the bridge at rotation …`), naming both
-  sides, when a rotation it catches up does not match the contract's BK set; a supervisor
-  restarts it.
+  sides, when a rotation it catches up does not match the contract's BK set; if it stops the same
+  way again after a restart, check that `BRIDGE_GQL_ENDPOINT` serves the network the bridge was
+  deployed for.
 
 ## [0.8.0] – 2026-11-06
 

@@ -81,7 +81,8 @@ without that file (the first start, a new host, or once it is lost) it builds th
 needs gql-server 1.5.0 or later at `BRIDGE_GQL_ENDPOINT`. A `prover_bk_set.json` that does
 not fit the prover state is renamed `prover_bk_set.json.mismatch-<unix time>` and rebuilt; such
 a file can be deleted. When a rotation the daemon catches up does not match the contract's BK
-set, it exits with code 1, naming both, and `restart: unless-stopped` starts it again. The
+set, it exits with code 1, naming both, and `restart: unless-stopped` starts it again; if it stops the same way again, check that
+`BRIDGE_GQL_ENDPOINT` serves the network the bridge was deployed for. The
 bridge's seed, `BRIDGE_BOOTSTRAP_SEQNO`, must be at or above L3\*, the first L3 boundary the
 block managers' history covers
 ([relayer runbook §3.1](../crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#31-pick-the-seed)).

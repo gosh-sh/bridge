@@ -574,8 +574,8 @@ fn bk_file_at_start(
     };
     anyhow::ensure!(
         loaded.commitment == state.stored_bk_set_commitment,
-        "prover_bk_set.json commitment {} disagrees with prover_state.json {} — delete BOTH files \
-         or restore them from a paired backup",
+        "prover_bk_set.json commitment {} disagrees with prover_state.json {} — move prover_bk_set.json \
+         aside to rebuild it from GraphQL, or restore both files from a paired backup",
         hex::encode(loaded.commitment),
         hex::encode(state.stored_bk_set_commitment),
     );

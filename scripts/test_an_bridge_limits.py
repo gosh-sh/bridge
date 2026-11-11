@@ -37,6 +37,7 @@ USDC_TOKEN = 68
 SECOND_TOKEN = 85
 THIRD_TOKEN = 102
 EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
+EMITTER = {1: 42, 2: 44}
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
 ACCEPT_REACHED = 999
 GAS_CREDIT = 500_000
@@ -97,10 +98,6 @@ class BridgeLimits(unittest.TestCase):
         tvm.accept();
         _acceptedBlockHash[chainId][blockHash] = true;
     }
-    function testTrust(uint256 chainId, uint256 l1Bridge) public {
-        tvm.accept();
-        _trustedL1Bridge[chainId][l1Bridge] = true;
-    }
     function testReceiptLog(bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)
         public pure returns (uint256 emitter, uint256 topic0)
     {
@@ -124,11 +121,9 @@ class BridgeLimits(unittest.TestCase):
         _totalBurnedBridgeByToken[USDC_ECC_ID] = 0;
         _outstandingByChain[1] = first;
         _outstandingByChain[2] = second;
-        _trustedL1Bridge[1][42] = true;
-        _trustedL1Bridge[2][42] = true;
     }
-    function testVoucher(uint256 depositId, uint256 chainId) public view returns (address voucher) {
-        uint256 h = tvm.hash(abi.encode(depositId, uint256(42), uint256(0), chainId));
+    function testVoucher(uint256 depositId, uint256 contractAddr, uint256 chainId) public view returns (address voucher) {
+        uint256 h = tvm.hash(abi.encode(depositId, contractAddr, uint256(0), chainId));
         voucher = address.makeAddrStd(0, tvm.hash(abi.encodeStateInit({
             contr: DepositVoucher, varInit: {_depositHash: h}, code: _depositVoucherCode
         })));
@@ -172,6 +167,7 @@ class BridgeLimits(unittest.TestCase):
         self.bind(2)
         for chain in (1, 2):
             self.register(USDC_TOKEN, 3, TRANSFER, TVL, chain=chain)
+            self.trust(chain, EMITTER[chain])
 
     def call(self, function, args=None, *, source=None, signed=False, expect=0,
              ecc=None, shell=1_000_000_000, header=None):
@@ -200,6 +196,18 @@ class BridgeLimits(unittest.TestCase):
         self.call("setEvmBridge", {"dstChainId": str(chain), "evmBridge": str(bridge)},
                   signed=True)
 
+    def trust(self, chain, l1_bridge, allowed=True, expect=0):
+        return self.call("setTrustedL1Bridge", {"chainId": str(chain), "l1Bridge": str(l1_bridge),
+                                                "allowed": allowed}, signed=True, expect=expect)
+
+    def trusted(self, chain, l1_bridge):
+        return self.call("isTrustedL1Bridge", {"chainId": str(chain), "l1Bridge": str(l1_bridge)})[
+            "response"]["value0"]
+
+    def trusted_chain(self, l1_bridge):
+        chain = self.call("getTrustedL1BridgeChain", {"l1Bridge": str(l1_bridge)})["response"]["value0"]
+        return None if chain is None else int(chain, 0)
+
     def evm_bridge(self, chain):
         return int(self.call("getEvmBridge", {"dstChainId": str(chain)})["response"]["value0"], 0)
 
@@ -212,7 +220,8 @@ class BridgeLimits(unittest.TestCase):
         the USDC transfer, the `Deposit` log, and an AAVE supply after it."""
         if receipt is None:
             if logs is None:
-                logs = [TRANSFER_LOG, vectors.deposit_log(42, deposit, amount, 43, token), SUPPLY_LOG]
+                logs = [TRANSFER_LOG, vectors.deposit_log(EMITTER[chain], deposit, amount, 43, token),
+                        SUPPLY_LOG]
             receipt = vectors.receipt(logs)
         v = vectors.synthetic(receipt, **block)
         if anchor:
@@ -228,18 +237,16 @@ class BridgeLimits(unittest.TestCase):
             "receiptProof": v["receiptProof"], "logIndex": log_index}, expect=expect, header=header)
 
     def voucher(self, deposit, chain=1):
-        return self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})[
-            "response"]["voucher"]
+        return self.call("testVoucher", {"depositId": str(deposit), "contractAddr": str(EMITTER[chain]),
+                                         "chainId": str(chain)})["response"]["voucher"]
 
     def deployed(self, result, deposit, chain=1):
         self.assertEqual([m["destination"] for m in result["messages"]], [self.voucher(deposit, chain)])
 
     def confirm(self, deposit=0, amount=TRANSFER, chain=1, source=None, expect=0):
-        voucher = self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})[
-            "response"]["voucher"]
-        return self.call("confirmDeposit", {"depositId": str(deposit), "contractAddr": "42",
+        return self.call("confirmDeposit", {"depositId": str(deposit), "contractAddr": str(EMITTER[chain]),
                          "dappId": "0", "chainId": str(chain), "amount": str(amount),
-                         "anAccount": "43"}, source=source or voucher, expect=expect)
+                         "anAccount": "43"}, source=source or self.voucher(deposit, chain), expect=expect)
 
     def withdraw(self, amount, chain=1, shell=1_000_000_000):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
@@ -273,11 +280,10 @@ class BridgeLimits(unittest.TestCase):
             "chainId": str(chain), "tokenId": token_id})["response"]
 
     def confirm_token(self, token=SECOND_TOKEN, amount=10**18, deposit=100, chain=1, expect=0):
-        voucher = self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})["response"]["voucher"]
         return self.call("confirmTokenDeposit", {
-            "depositId": str(deposit), "contractAddr": "42", "dappId": "0", "chainId": str(chain),
+            "depositId": str(deposit), "contractAddr": str(EMITTER[chain]), "dappId": "0", "chainId": str(chain),
             "amount": str(amount), "anAccount": "43", "evmToken": str(token)},
-            source=voucher, expect=expect)
+            source=self.voucher(deposit, chain), expect=expect)
 
     def withdraw_token(self, amount, token_id=4, chain=1):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
@@ -660,11 +666,41 @@ class BridgeLimits(unittest.TestCase):
     def test_a_deposit_from_an_untrusted_emitter_is_refused(self):
         for emitter in (43, 0):
             with self.subTest(emitter=emitter):
-                self.call("testTrust", {"chainId": "1", "l1Bridge": "0"})
+                self.trust(1, 0)
                 log = vectors.deposit_log(emitter, 40, 1, 43, USDC_TOKEN)
                 self.finalize(logs=[log], log_index=0, expect=222)
-        self.call("testTrust", {"chainId": "2", "l1Bridge": "43"})
+        self.trust(2, 43)
         self.finalize(logs=[vectors.deposit_log(43, 40, 1, 43, USDC_TOKEN)], log_index=0, expect=222)
+
+    def test_an_l1_bridge_is_trusted_under_one_chain_only(self):
+        self.trust(2, 42, expect=228)
+        self.assertFalse(self.trusted(2, 42))
+        self.trust(1, 42)
+        self.trust(2, 42, allowed=False)
+        self.assertTrue(self.trusted(1, 42))
+        self.assertEqual(self.trusted_chain(42), 1)
+        self.trust(1, 42, allowed=False)
+        self.assertFalse(self.trusted(1, 42))
+        self.assertIsNone(self.trusted_chain(42))
+        self.trust(2, 42)
+        self.assertEqual(self.trusted_chain(42), 2)
+        self.trust(1, 42, expect=228)
+        self.assertFalse(self.trusted(1, 42))
+
+    def test_a_deposit_made_on_one_chain_does_not_mint_under_another(self):
+        v = vectors.synthetic(vectors.receipt([vectors.deposit_log(42, 49, 1, 43, USDC_TOKEN)]))
+        self.anchor(v, chain=2)
+        self.trust(2, 42, expect=228)
+        self.submit(v, chain=2, log_index=0, expect=222)
+        self.anchor(v, chain=1)
+        self.deployed(self.submit(v, chain=1, log_index=0), 49)
+
+    def test_an_upgrade_drops_the_trusted_set_and_the_chain_it_was_bound_to(self):
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.assertFalse(self.trusted(1, 42))
+        self.assertIsNone(self.trusted_chain(42))
+        self.trust(2, 42)
+        self.assertEqual(self.trusted_chain(42), 2)
 
     def test_another_event_of_the_bridge_is_refused(self):
         withdrawal = vectors.keccak256(b"WithdrawalPaid(uint256,address,uint256,bytes32,uint256,address)")
@@ -693,7 +729,7 @@ class BridgeLimits(unittest.TestCase):
 
     def test_a_block_that_is_not_accepted_is_refused(self):
         self.finalize(anchor=False, expect=224)
-        v = vectors.synthetic(vectors.receipt([vectors.deposit_log(42, 44, 1, 43, USDC_TOKEN)]))
+        v = vectors.synthetic(vectors.receipt([vectors.deposit_log(EMITTER[2], 44, 1, 43, USDC_TOKEN)]))
         self.anchor(v, chain=2)
         self.submit(v, chain=1, log_index=0, expect=224)
         self.deployed(self.submit(v, chain=2, log_index=0), 44, chain=2)
@@ -747,7 +783,7 @@ class BridgeLimits(unittest.TestCase):
                 self.assertEqual(int(got["topic0"], 0), int(log["topics"][0], 16))
                 # These are the deployed bridge's five-field Deposit: proven, then refused.
                 self.call("testAnchor", {"chainId": str(chain), "blockHash": live["blockHash"]})
-                self.call("testTrust", {"chainId": str(chain), "l1Bridge": str(int(log["address"], 16))})
+                self.trust(chain, int(log["address"], 16))
                 self.submit({**args}, chain=chain, log_index=args["logIndex"], expect=244)
 
 if __name__ == "__main__":

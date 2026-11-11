@@ -415,8 +415,10 @@ one after another when there are several, at startup and while running
 the one at `storedLastBkSetUpdateSeqNo` does not lead from
 `storedPrevBkSetCommitment` to `storedBkSetCommitment`, the daemon stops with
 exit status 1 (`daemon: BK set diverged from the bridge — stopping`, naming
-both sides). A supervisor starts it again; if it stops the same way, the
-prover follows another BK-set history than the bridge — check that
+both sides). It stops the same way when the prover's BK set is not the set
+Acki Nacki signs the next rotation block with (that block's leaf [2]), whether
+that rotation is on the contract already or still to be proven. A supervisor starts it again; if it stops the same
+way, the prover follows another BK-set history than the bridge — check that
 `BRIDGE_GQL_ENDPOINT` serves the network the bridge was deployed for.
 
 Between boundaries every tick finds no bundle yet, and every 16th such tick

@@ -2,9 +2,10 @@
 //!
 //! Replaces the ad-hoc 3-arm `seed_policy` match + late drift-guard in
 //! `bin/relayer.rs` with an explicit routing table over
-//! (local `BridgeState`, on-chain `EthBridgeContractState`). The four legs are
+//! (local `BridgeState`, on-chain `EthBridgeContractState`). The five legs are
 //! [`StartupDecision::Cold`], [`StartupDecision::WarmResume`],
-//! [`StartupDecision::Resurrect`], [`StartupDecision::Stop`].
+//! [`StartupDecision::Resurrect`], [`StartupDecision::ResyncBkFromContract`],
+//! [`StartupDecision::Stop`].
 //!
 //! Design goals:
 //! * "Local state absent" is **not** the only resurrect trigger — a local state
@@ -25,7 +26,7 @@ use bridge_prover_lib::{
     live_driver::SeedPolicy,
 };
 
-/// The four legs of startup routing.
+/// The five legs of startup routing.
 #[derive(Debug)]
 pub enum StartupDecision {
     /// Contract is at genesis (`last_seen_block_seq_no == 0`) and local
@@ -48,6 +49,13 @@ pub enum StartupDecision {
     /// snapshot and drive with `SeedPolicy::Resume`. The rebuilt state
     /// is byte-for-byte the contract mirror.
     Resurrect { fresh_state: Box<BridgeState> },
+
+    /// The bundle cursors agree (or both sit at genesis) and the layer
+    /// windows match, but the local BK fields are more than one rotation
+    /// behind the contract: another relayer applied several rotations. The
+    /// state carries the local windows unchanged; the startup BK step replaces
+    /// its BK fields from the contract and rebuilds the prover BK set.
+    ResyncBkFromContract { state: Box<BridgeState> },
 
     /// Unrecoverable inconsistency between local and chain — the daemon
     /// must not paper over this. Operator must investigate before
@@ -85,6 +93,38 @@ fn hold_window_unacked(local: &BridgeState, chain: &EthBridgeContractState) -> b
     chain.last_bk_set_update_seq_no > local.stored_last_bk_set_update_seq_no
         && chain.last_bk_set_update_seq_no != 0
         && local.stored_bk_set_commitment == chain.prev_bk_set_commitment
+}
+
+/// Equal bundle cursors: the BK fields decide between resuming inside the
+/// hold window, taking them from the contract, and a window mismatch that
+/// stops. `None` means the BK fields give no reason to act and the caller's
+/// remaining checks apply.
+fn bk_behind_decision(
+    local: &BridgeState,
+    chain: &EthBridgeContractState,
+    anchor_level: u8,
+) -> Option<StartupDecision> {
+    if hold_window_unacked(local, chain) {
+        return Some(StartupDecision::WarmResume);
+    }
+    if chain.last_bk_set_update_seq_no <= local.stored_last_bk_set_update_seq_no {
+        return None;
+    }
+    if windows_match(local, chain, anchor_level) {
+        return Some(StartupDecision::ResyncBkFromContract {
+            state: Box::new(local.clone()),
+        });
+    }
+    Some(StartupDecision::Stop {
+        reason: format!(
+            "cursor match (last_seen={}) and the contract is on a later BK set update ({} vs \
+             local {}), but per-layer windows diverge byte-for-byte — the BK fields cannot be \
+             taken from the contract over windows that differ",
+            local.stored_last_seen_block_seq_no,
+            chain.last_bk_set_update_seq_no,
+            local.stored_last_bk_set_update_seq_no,
+        ),
+    })
 }
 
 /// Chronological equivalence check for local vs chain layer windows.
@@ -379,16 +419,18 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     if chain_empty && local.stored_last_seen_block_seq_no == 0 && local.num_active_layers() == 0 {
         // Both at the genesis seed (BRIDGE_BOOTSTRAP_SEQNO=0), before the
         // first verifyBlock: a restart picks up where it was.
-        return if local.stored_bk_set_commitment == chain.bk_set_commitment {
-            StartupDecision::WarmResume
-        } else {
-            StartupDecision::Stop {
-                reason: format!(
-                    "local genesis BK set commitment {} is not the contract's {}",
-                    hex::encode(local.stored_bk_set_commitment),
-                    hex::encode(chain.bk_set_commitment),
-                ),
-            }
+        if local.stored_bk_set_commitment == chain.bk_set_commitment {
+            return StartupDecision::WarmResume;
+        }
+        if let Some(decision) = bk_behind_decision(local, chain, anchor_level) {
+            return decision;
+        }
+        return StartupDecision::Stop {
+            reason: format!(
+                "local genesis BK set commitment {} is not the contract's {}",
+                hex::encode(local.stored_bk_set_commitment),
+                hex::encode(chain.bk_set_commitment),
+            ),
         };
     }
     if chain_empty {
@@ -457,8 +499,8 @@ pub fn decide(inputs: DecideInputs<'_>) -> StartupDecision {
     if let Some(layer) = stale_seed_layer {
         return stale_seed_layer_stop(layer, anchor_level);
     }
-    if hold_window_unacked(local, chain) {
-        return StartupDecision::WarmResume;
+    if let Some(decision) = bk_behind_decision(local, chain, anchor_level) {
+        return decision;
     }
     if local_commit != chain_commit {
         return StartupDecision::Stop {
@@ -693,6 +735,143 @@ mod tests {
         }) {
             StartupDecision::WarmResume => {},
             d => panic!("expected WarmResume, got {d:?}"),
+        }
+    }
+
+    /// Genesis local state and an empty-ring contract that applied rotations.
+    fn genesis_pair(
+        chain_rotation_seq: u64,
+        chain_prev: [u8; 32],
+    ) -> (BridgeState, EthBridgeContractState) {
+        let local = genesis_state([7u8; 32]);
+        let mut chain = empty_chain();
+        chain.bk_set_commitment = [0xABu8; 32];
+        chain.prev_bk_set_commitment = chain_prev;
+        chain.last_bk_set_update_seq_no = chain_rotation_seq;
+        (local, chain)
+    }
+
+    fn run(
+        local: &BridgeState,
+        chain: &EthBridgeContractState,
+        anchor_level: u8,
+    ) -> StartupDecision {
+        decide(DecideInputs {
+            local,
+            chain,
+            bootstrap_seqno: Some(0),
+            window_size: W,
+            anchor_level,
+        })
+    }
+
+    #[test]
+    fn genesis_in_hold_window_resumes() {
+        let (local, chain) = genesis_pair(20000, [7u8; 32]);
+        match run(&local, &chain, 2) {
+            StartupDecision::WarmResume => {},
+            d => panic!("expected WarmResume in the hold window, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn genesis_bk_behind_by_two_resyncs() {
+        let (local, chain) = genesis_pair(40000, [9u8; 32]);
+        match run(&local, &chain, 2) {
+            StartupDecision::ResyncBkFromContract {
+                state,
+            } => {
+                assert_eq!(state.stored_bk_set_commitment, [7u8; 32]);
+                assert_eq!(state.stored_last_seen_block_seq_no, 0);
+            },
+            d => panic!("expected ResyncBkFromContract, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn genesis_other_commitment_without_rotations_stops() {
+        let (local, mut chain) = genesis_pair(0, [0u8; 32]);
+        chain.bk_set_commitment = [8u8; 32];
+        match run(&local, &chain, 2) {
+            StartupDecision::Stop {
+                reason,
+            } => assert!(reason.contains("genesis BK set"), "{reason}"),
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    /// Equal bundle cursors at 16384 with the local BK fields on
+    /// `local_seq_no`.
+    fn equal_cursor_pair(local_bk_seq: u64) -> (BridgeState, EthBridgeContractState) {
+        let mut local = advanced_state(16384);
+        local.stored_last_bk_set_update_seq_no = local_bk_seq;
+        let chain = snapshot_as_chain(&local);
+        (local, chain)
+    }
+
+    #[test]
+    fn equal_cursor_bk_behind_by_two_resyncs() {
+        let (local, mut chain) = equal_cursor_pair(15000);
+        chain.bk_set_commitment = [0xC9u8; 32];
+        chain.prev_bk_set_commitment = [0xC9u8; 32];
+        chain.last_bk_set_update_seq_no = 40000;
+        match run(&local, &chain, 1) {
+            StartupDecision::ResyncBkFromContract {
+                state,
+            } => {
+                assert_eq!(
+                    state.stored_bk_set_commitment,
+                    local.stored_bk_set_commitment
+                );
+                assert_eq!(state.stored_last_bk_set_update_seq_no, 15000);
+                assert_eq!(state.stored_last_seen_block_seq_no, 16384);
+                for i in 0..MAX_LAYERS {
+                    assert_eq!(state.layer_windows[i].data, local.layer_windows[i].data);
+                }
+            },
+            d => panic!("expected ResyncBkFromContract, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn equal_cursor_bk_ahead_with_other_commitment_stops() {
+        // Local rotated further than the contract and holds another set.
+        let (local, mut chain) = equal_cursor_pair(40000);
+        chain.last_bk_set_update_seq_no = 15000;
+        chain.bk_set_commitment = [0xC9u8; 32];
+        match run(&local, &chain, 1) {
+            StartupDecision::Stop {
+                reason,
+            } => assert!(reason.contains("bk-set commitment diverges"), "{reason}"),
+            d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn hold_window_still_resumes_with_mismatching_windows() {
+        let (local, mut chain) = equal_cursor_pair(0);
+        chain.bk_set_commitment = [0xABu8; 32];
+        chain.prev_bk_set_commitment = local.stored_bk_set_commitment;
+        chain.last_bk_set_update_seq_no = 20000;
+        chain.layer_windows[0].data[0] = [0xFF; 32];
+        match run(&local, &chain, 1) {
+            StartupDecision::WarmResume => {},
+            d => panic!("expected WarmResume, got {d:?}"),
+        }
+    }
+
+    #[test]
+    fn resync_with_mismatching_windows_stops() {
+        let (local, mut chain) = equal_cursor_pair(15000);
+        chain.bk_set_commitment = [0xC9u8; 32];
+        chain.prev_bk_set_commitment = [0xC9u8; 32];
+        chain.last_bk_set_update_seq_no = 40000;
+        chain.layer_windows[0].data[0] = [0xFF; 32];
+        match run(&local, &chain, 1) {
+            StartupDecision::Stop {
+                reason,
+            } => assert!(reason.contains("windows"), "{reason}"),
+            d => panic!("expected Stop, got {d:?}"),
         }
     }
 

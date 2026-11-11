@@ -2545,6 +2545,9 @@ async fn run_daemon_live(
             );
             (state, policy)
         },
+        bridge_relayer_daemon::StartupDecision::ResyncBkFromContract {
+            ..
+        } => anyhow::bail!("startup routing: ResyncBkFromContract is not wired yet"),
         bridge_relayer_daemon::StartupDecision::WarmResume => {
             let behind = state.stored_last_seen_block_seq_no < chain_full.last_seen_block_seq_no
                 || state.stored_last_bk_set_update_seq_no < chain_full.last_bk_set_update_seq_no;

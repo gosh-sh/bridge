@@ -17,16 +17,16 @@
 //! The two-daemon contract is the `LiveProverDriver` API in
 //! `bridge-prover-lib/src/live_driver/mod.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use tracing::{error, info, warn};
 
 use bridge_prover_lib::bk_set_history::{
-    bk_target, build_bk_set_with_retry, genesis_bk_for_seed, BuildPolicy,
+    bk_target, build_bk_set_with_retry, genesis_bk_for_seed, BuildError, BuildPolicy,
 };
 use bridge_prover_lib::bootstrap;
 use bridge_prover_lib::bridge_state::BridgeState;
@@ -66,6 +66,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// How often the chain head is polled while the BK set waits for the seed
 /// block to exist.
 const SEED_WAIT_INTERVAL: Duration = Duration::from_secs(10);
+/// The GraphQL field a BK-set build starts from.
+const LATEST_BK_SET_FIELD: &str = "latestBkSet";
 #[cfg(not(feature = "self-verify"))]
 const VERIFIER_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -400,20 +402,22 @@ struct StartupBk {
 
 /// The BK set the driver starts with.
 ///
-/// * `prover_bk_set_file` exists: it is taken, and must have the commitment of
-///   an initialized `state`.
-/// * It does not, and `state` is initialized: the set is built from GraphQL at
-///   [`bk_target`] of the state's last seen block and last rotation, must have
-///   the state's commitment, and carries the state's rotation cursor.
-/// * Neither: the set is built at the seed S — `BRIDGE_BOOTSTRAP_SEQNO`, or
-///   under `Auto` the next stride boundary past the chain head. The block S
-///   must exist first, so this waits for the chain head to reach S. The driver
-///   then seeds at S (`SeedPolicy::Explicit(S)`) with the built set's
-///   commitment and the newest rotation at or below S.
+/// * `state` is initialized and `prover_bk_set_file` exists: the file is taken,
+///   and must have the state's commitment.
+/// * `state` is initialized and there is no file: the set is built from GraphQL
+///   at [`bk_target`] of the state's last seen block and last rotation, must
+///   have the state's commitment, and carries the state's rotation cursor.
+/// * `state` is not initialized: a file is moved aside ([`bk_file_at_start`]),
+///   and the set is built at the seed S — `BRIDGE_BOOTSTRAP_SEQNO`, or under
+///   `Auto` the next stride boundary past the chain head. The block S must
+///   exist first, so this waits for the chain head to reach S. The driver then
+///   seeds at S (`SeedPolicy::Explicit(S)`) with the built set's commitment and
+///   the newest rotation at or below S.
 ///
 /// A built set is written to `prover_bk_set_file` before this returns.
 /// Transient GraphQL failures are retried without a bound; a server without
-/// `latestBkSet` and a set that keeps failing its checks are errors.
+/// `latestBkSet` and a set that keeps failing its checks are errors. The seed
+/// path asks for `latestBkSet` before it waits, so an old server fails at once.
 async fn startup_bk(
     gql: &gql_client::GqlClient,
     state: &BridgeState,
@@ -423,15 +427,11 @@ async fn startup_bk(
     stride: u64,
     policy: &BuildPolicy,
 ) -> anyhow::Result<StartupBk> {
-    if let Some(loaded) = ProverBkSet::load(prover_bk_set_file)? {
-        if state.initialized && loaded.commitment != state.stored_bk_set_commitment {
-            anyhow::bail!(
-                "prover_bk_set.json commitment {} disagrees with prover_state.json {} — delete \
-                 BOTH files or restore them from a paired backup",
-                hex::encode(loaded.commitment),
-                hex::encode(state.stored_bk_set_commitment),
-            );
-        }
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let BkFileAtStart::Take(loaded) = bk_file_at_start(prover_bk_set_file, state, now_unix)? {
         info!(
             "prover_bk_set: loaded {} signers, last_applied_update_seq_no={}",
             loaded.pubkeys_hex.len(),
@@ -479,6 +479,7 @@ async fn startup_bk(
         });
     }
 
+    ensure_latest_bk_set_known(gql).await?;
     let seed = match seed_policy {
         SeedPolicy::Explicit(n) => n,
         SeedPolicy::Auto => {
@@ -527,6 +528,103 @@ async fn startup_bk(
         seed_policy: SeedPolicy::Explicit(seed),
         seed_bk: Some(seed_bk),
     })
+}
+
+/// What `prover_bk_set.json` gives [`startup_bk`].
+#[derive(Debug)]
+enum BkFileAtStart {
+    /// The set of the initialized state.
+    Take(ProverBkSet),
+    /// No set to start with: there is no file, or the state is not initialized
+    /// and the file was moved aside.
+    Build,
+}
+
+/// The `prover_bk_set.json` side of [`startup_bk`].
+///
+/// With an initialized `state` the file at `path` is taken when there is one,
+/// and must have the state's commitment.
+///
+/// With an uninitialized `state` the file is left from a start whose first ack
+/// never landed: `prover_state.json` is first written at the first ack, the
+/// set at the seed before it. That seed need not be the one this start picks,
+/// since under `Auto` the next boundary past the chain head has moved on, and
+/// a set taken for another seed fails the seed block's check on every poll.
+/// The file is moved to `<name>.mismatch-<now_unix>` without being read, and
+/// the set is built at the seed again.
+fn bk_file_at_start(
+    path: &str,
+    state: &BridgeState,
+    now_unix: u64,
+) -> anyhow::Result<BkFileAtStart> {
+    if !state.initialized {
+        if std::fs::symlink_metadata(path).is_ok() {
+            let backup = move_aside(Path::new(path), now_unix)?;
+            warn!(
+                "prover_bk_set: {} is left from a start that never acked (prover_state.json is \
+                 not initialized); moved it to {} and building the set at the seed again",
+                path,
+                backup.display(),
+            );
+        }
+        return Ok(BkFileAtStart::Build);
+    }
+    let Some(loaded) = ProverBkSet::load(path)? else {
+        return Ok(BkFileAtStart::Build);
+    };
+    anyhow::ensure!(
+        loaded.commitment == state.stored_bk_set_commitment,
+        "prover_bk_set.json commitment {} disagrees with prover_state.json {} — delete BOTH files \
+         or restore them from a paired backup",
+        hex::encode(loaded.commitment),
+        hex::encode(state.stored_bk_set_commitment),
+    );
+    Ok(BkFileAtStart::Take(loaded))
+}
+
+/// Moves `path` to `<file name>.mismatch-<now_unix>` in the same directory,
+/// appending `.1`, `.2`, ... while that name is taken, so nothing is
+/// overwritten. Returns where the file went.
+fn move_aside(path: &Path, now_unix: u64) -> anyhow::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let mut base = name.to_os_string();
+    base.push(format!(".mismatch-{now_unix}"));
+    let mut backup = path.with_file_name(&base);
+    let mut n = 0u32;
+    while std::fs::symlink_metadata(&backup).is_ok() {
+        n += 1;
+        let mut next = base.clone();
+        next.push(format!(".{n}"));
+        backup = path.with_file_name(next);
+    }
+    std::fs::rename(path, &backup)
+        .with_context(|| format!("rename {} to {}", path.display(), backup.display()))?;
+    Ok(backup)
+}
+
+/// Fails at once when the server does not know `latestBkSet`, which the set
+/// build needs: waiting for the seed block first would only delay the same
+/// error by up to a stride of blocks. Any other answer leaves it to the build,
+/// which retries.
+async fn ensure_latest_bk_set_known(gql: &gql_client::GqlClient) -> anyhow::Result<()> {
+    match gql.query_latest_bk_set().await {
+        Err(e)
+            if e.downcast_ref::<gql_client::UnknownFieldError>()
+                .is_some_and(|u| u.field == LATEST_BK_SET_FIELD) =>
+        {
+            Err(BuildError::NoLatestBkSetField.into())
+        },
+        Err(e) => {
+            warn!(
+                "bootstrap: asking for latestBkSet failed: {:#}; the BK set build retries it",
+                e
+            );
+            Ok(())
+        },
+        Ok(_) => Ok(()),
+    }
 }
 
 /// The highest seq_no among the newest blocks GraphQL reports.
@@ -929,4 +1027,291 @@ fn verify_bundle_inline(
 fn fr_from_repr(bytes: [u8; 32]) -> Fr {
     Option::from(Fr::from_repr(bytes))
         .expect("BundleProofArtifacts field is canonical Fr::to_repr bytes")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, sync::atomic::AtomicUsize};
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+
+    use super::*;
+
+    /// What shellnet answers a `latestBkSet` query with: a gql-server older
+    /// than 1.5.0.
+    const OLD_SERVER_BODY: &str = r#"{"data":null,"errors":[{"message":"Unknown field \"latestBkSet\" on type \"BlockchainQuery\".","locations":[{"line":1,"column":16}]}]}"#;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bridge-prover-daemon-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn set_with(commitment: [u8; 32]) -> ProverBkSet {
+        ProverBkSet {
+            commitment,
+            pubkeys_hex: BTreeMap::new(),
+            last_applied_update_seq_no: 7,
+        }
+    }
+
+    fn state(initialized: bool, commitment: [u8; 32]) -> BridgeState {
+        let mut state = BridgeState::new(HISTORY_WINDOW_SIZE as usize);
+        state.initialized = initialized;
+        state.stored_bk_set_commitment = commitment;
+        state
+    }
+
+    #[test]
+    fn unseeded_state_moves_the_file_aside() {
+        let dir = temp_dir("unseeded");
+        let path = dir.join("prover_bk_set.json");
+        set_with([1; 32]).save(path.to_str().unwrap()).unwrap();
+
+        let got = bk_file_at_start(path.to_str().unwrap(), &state(false, [0; 32]), 1700).unwrap();
+
+        assert!(matches!(got, BkFileAtStart::Build), "{got:?}");
+        assert_eq!(entries(&dir), ["prover_bk_set.json.mismatch-1700"]);
+        let moved = dir.join("prover_bk_set.json.mismatch-1700");
+        let moved = ProverBkSet::load(moved.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(moved.commitment, [1; 32]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unseeded_state_moves_an_unreadable_file_aside() {
+        let dir = temp_dir("unreadable");
+        let path = dir.join("prover_bk_set.json");
+        std::fs::write(&path, "not json").unwrap();
+
+        let got = bk_file_at_start(path.to_str().unwrap(), &state(false, [0; 32]), 9).unwrap();
+
+        assert!(matches!(got, BkFileAtStart::Build), "{got:?}");
+        assert_eq!(entries(&dir), ["prover_bk_set.json.mismatch-9"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unseeded_state_without_a_file_builds() {
+        let dir = temp_dir("unseeded-empty");
+        let path = dir.join("prover_bk_set.json");
+
+        let got = bk_file_at_start(path.to_str().unwrap(), &state(false, [0; 32]), 9).unwrap();
+
+        assert!(matches!(got, BkFileAtStart::Build), "{got:?}");
+        assert!(entries(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seeded_state_takes_its_file() {
+        let dir = temp_dir("seeded");
+        let path = dir.join("prover_bk_set.json");
+        set_with([2; 32]).save(path.to_str().unwrap()).unwrap();
+
+        let got = bk_file_at_start(path.to_str().unwrap(), &state(true, [2; 32]), 9).unwrap();
+
+        match got {
+            BkFileAtStart::Take(set) => {
+                assert_eq!(set.commitment, [2; 32]);
+                assert_eq!(set.last_applied_update_seq_no, 7);
+            },
+            other => panic!("expected the file to be taken, got {other:?}"),
+        }
+        assert_eq!(entries(&dir), ["prover_bk_set.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seeded_state_refuses_a_file_of_another_set() {
+        let dir = temp_dir("seeded-other");
+        let path = dir.join("prover_bk_set.json");
+        set_with([2; 32]).save(path.to_str().unwrap()).unwrap();
+
+        let err = bk_file_at_start(path.to_str().unwrap(), &state(true, [3; 32]), 9).unwrap_err();
+
+        assert!(
+            err.to_string().contains("disagrees with prover_state.json"),
+            "{err:#}"
+        );
+        assert_eq!(entries(&dir), ["prover_bk_set.json"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seeded_state_without_a_file_builds() {
+        let dir = temp_dir("seeded-empty");
+        let path = dir.join("prover_bk_set.json");
+
+        let got = bk_file_at_start(path.to_str().unwrap(), &state(true, [2; 32]), 9).unwrap();
+
+        assert!(matches!(got, BkFileAtStart::Build), "{got:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn moving_aside_never_overwrites() {
+        let dir = temp_dir("move-aside");
+        let path = dir.join("x.json");
+        std::fs::write(&path, "new").unwrap();
+        std::fs::write(dir.join("x.json.mismatch-5"), "first").unwrap();
+        std::fs::write(dir.join("x.json.mismatch-5.1"), "second").unwrap();
+
+        let backup = move_aside(&path, 5).unwrap();
+
+        assert_eq!(backup, dir.join("x.json.mismatch-5.2"));
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("x.json.mismatch-5")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("x.json.mismatch-5.1")).unwrap(),
+            "second"
+        );
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A GraphQL stub answering every request with `body`, and the number of
+    /// requests it answered.
+    async fn serve(body: &'static str) -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let counter = counter.clone();
+                tokio::spawn(async move {
+                    // Read the headers and the whole body, then answer.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(split) = text.find("\r\n\r\n") {
+                            let want = text[..split]
+                                .lines()
+                                .find_map(|l| {
+                                    let (k, v) = l.split_once(':')?;
+                                    k.eq_ignore_ascii_case("content-length")
+                                        .then(|| v.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= split + 4 + want {
+                                break;
+                            }
+                        }
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
+                         {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (url, requests, server)
+    }
+
+    /// Without the probe, `Auto` would first poll the chain head, which this
+    /// server never gives, every 10 s, and the timeout would fire.
+    #[tokio::test]
+    async fn an_old_server_fails_the_seed_path_before_any_wait() {
+        let (url, requests, server) = serve(OLD_SERVER_BODY).await;
+        let gql = gql_client::create_client(&url).unwrap();
+        let dir = temp_dir("old-server");
+        let path = dir.join("prover_bk_set.json");
+        set_with([1; 32]).save(path.to_str().unwrap()).unwrap();
+
+        let started = tokio::time::timeout(
+            Duration::from_secs(5),
+            startup_bk(
+                &gql,
+                &state(false, [0; 32]),
+                "prover_state.json",
+                path.to_str().unwrap(),
+                SeedPolicy::Auto,
+                1024,
+                &BuildPolicy::default(),
+            ),
+        )
+        .await
+        .expect("the seed path waited instead of failing at once");
+        server.abort();
+
+        let err = match started {
+            Ok(_) => panic!("an old server must fail the start"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<BuildError>(),
+                Some(BuildError::NoLatestBkSetField)
+            ),
+            "{err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("needs gql-server >= 1.5.0 serving blockchain.latestBkSet"),
+            "{err:#}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        // The file left from the unfinished seed went aside first.
+        let left = entries(&dir);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(
+            left[0].starts_with("prover_bk_set.json.mismatch-"),
+            "{left:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_probe_leaves_other_answers_to_the_build() {
+        // No snapshot yet.
+        let (url, requests, server) =
+            serve(r#"{"data":{"blockchain":{"latestBkSet":null}}}"#).await;
+        ensure_latest_bk_set_known(&gql_client::create_client(&url).unwrap())
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        // Nobody listening.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        ensure_latest_bk_set_known(&gql_client::create_client(&url).unwrap())
+            .await
+            .unwrap();
+    }
 }

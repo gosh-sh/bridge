@@ -9,6 +9,7 @@
 pub mod aggregated_source;
 pub mod aggregator;
 pub mod an_chain_guard;
+pub mod bk_startup;
 pub mod bridge;
 pub mod bundle_stride;
 pub mod daemon;

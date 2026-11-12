@@ -1350,7 +1350,7 @@ mod tests {
         .account;
         assert_eq!(
             getter(boc.clone(), "getVersion", json!({})).await["value0"],
-            "1.18.0"
+            "1.19.0"
         );
         assert_eq!(
             getter(
@@ -1478,11 +1478,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.1 build of eccBridge 1.18.0: 1.17.0 with each trusted L1
-        // bridge address bound to one chain.
+        // sold 0.80.1 build of eccBridge 1.19.0: 1.18.0 with NACKL locked on
+        // withdrawal and unlocked on deposit.
         assert_eq!(
             &hash[..8],
-            "e0a653cc",
+            "27026795",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.19.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven

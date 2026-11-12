@@ -8,7 +8,10 @@ skip = ["*/fixtures/*"] # snark-verifier dumps use exact pragma 0.8.19; tests lo
 optimizer = true
 optimizer_runs = 1 # Optimize for deployment size, not runtime gas
 via_ir = true # Required for large contracts to avoid "stack too deep" errors
-remappings = ["poseidon-solidity/=node_modules/poseidon-solidity/"]
+remappings = [
+    "poseidon-solidity/=node_modules/poseidon-solidity/",
+    "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+]
 ffi = false
 fs_permissions = [
     { access = "read", path = "./" },

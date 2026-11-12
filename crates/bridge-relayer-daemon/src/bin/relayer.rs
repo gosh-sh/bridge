@@ -24,14 +24,14 @@
 //! port 8600 REST is internal-only on public shellnet since AN v0.16.3.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use alloy::{
-    primitives::Address,
+    primitives::{Address, U256},
     providers::{Provider, RootProvider},
     signers::local::PrivateKeySigner,
     transports::http::reqwest::Url,
@@ -43,11 +43,11 @@ use bridge_relayer_daemon::{
     BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
     Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
     FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
-    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
-    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
+    NacklExecuteOutcome, PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig,
+    RelayerError, RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
     SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
     WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    WithdrawalPublicInputs, GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
+    WithdrawalPublicInputs, GET_LOGS_CHUNK_BLOCKS, NACKL_TOKEN_ID, WITHDRAW_RECEIPT_TIMEOUT,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -1632,6 +1632,79 @@ struct WithdrawScanState {
     paid: u64,
     skipped_already_used: u64,
     parked_permanent: u64,
+    /// NACKL payouts `withdrawByProof` queued instead of minting.
+    nackl_queued: u64,
+    /// Queued NACKL payouts this process minted with `executeNacklPayout`.
+    nackl_executed: u64,
+    /// Nullifiers of NACKL withdrawals whose payout may still be queued.
+    /// Filled from the proofs the scan sees, so a restart refills it from
+    /// the proofs directory; a nullifier leaves once nothing is queued
+    /// under it.
+    nackl_pending: BTreeSet<U256>,
+}
+
+fn is_nackl(pub_inputs: &WithdrawalPublicInputs) -> bool {
+    pub_inputs.token_id == U256::from(NACKL_TOKEN_ID)
+}
+
+/// Mint every NACKL payout in `st.nackl_pending` that is due and fits the
+/// daily limit. A payout leaves the set once nothing is queued under its
+/// nullifier — minted here or by anyone else, or abandoned by the owner. A
+/// failure keeps it for the next scan and never holds up the proofs.
+async fn execute_due_nackl_payouts<B>(bridge: &B, st: &mut WithdrawScanState)
+where
+    B: WithdrawBridge + ?Sized,
+{
+    let now = U256::from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    for nullifier in st.nackl_pending.clone() {
+        let payout = match bridge.nackl_payout(nullifier).await {
+            Ok(Some(payout)) => payout,
+            Ok(None) => {
+                st.nackl_pending.remove(&nullifier);
+                continue;
+            },
+            Err(e) => {
+                warn!(?e, %nullifier, "nacklPayout read failed; retrying on the next scan");
+                return;
+            },
+        };
+        if payout.ready_at > now {
+            continue;
+        }
+        let capacity = match bridge.nackl_capacity().await {
+            Ok(capacity) => capacity,
+            Err(e) => {
+                warn!(?e, "nacklState read failed; retrying on the next scan");
+                return;
+            },
+        };
+        if payout.amount > capacity {
+            info!(%nullifier, amount = %payout.amount, %capacity, "NACKL payout is due but over the daily limit's capacity; waiting");
+            continue;
+        }
+        match bridge.execute_nackl_payout(nullifier).await {
+            Ok(NacklExecuteOutcome::Executed {
+                tx_hash,
+            }) => {
+                info!(%nullifier, amount = %payout.amount, recipient = %payout.recipient, ?tx_hash, "executeNacklPayout MINTED");
+                st.nackl_executed += 1;
+                st.nackl_pending.remove(&nullifier);
+            },
+            Ok(NacklExecuteOutcome::Failed {
+                reason,
+            }) => {
+                warn!(%nullifier, %reason, "executeNacklPayout failed; retrying on the next scan");
+            },
+            Err(e) => {
+                warn!(?e, %nullifier, "executeNacklPayout failed; retrying on the next scan");
+            },
+        }
+    }
 }
 
 /// SIGINT (+ SIGTERM on Unix) shutdown future shared by the long-running
@@ -1747,6 +1820,9 @@ where
                     recipient_lo = %pub_inputs.recipient_lo,
                     "nullifier already used on-chain; skipping (benign retry — the same event was submitted before)"
                 );
+                if is_nackl(&pub_inputs) {
+                    st.nackl_pending.insert(pub_inputs.nullifier);
+                }
                 st.skipped_already_used += 1;
                 st.done.insert(proof_path);
                 continue;
@@ -1819,7 +1895,20 @@ where
                 tx_hash,
             } => {
                 info!(proof = %proof_path.display(), ?tx_hash, "withdrawByProof PAID");
+                if is_nackl(&pub_inputs) {
+                    st.nackl_pending.insert(pub_inputs.nullifier);
+                }
                 st.paid += 1;
+                st.done.insert(proof_path);
+            },
+            WithdrawSubmitOutcome::Queued {
+                tx_hash,
+                amount,
+                ready_at,
+            } => {
+                info!(proof = %proof_path.display(), ?tx_hash, nullifier = %pub_inputs.nullifier, %amount, %ready_at, "withdrawByProof QUEUED the NACKL payout; executeNacklPayout mints it once due");
+                st.nackl_pending.insert(pub_inputs.nullifier);
+                st.nackl_queued += 1;
                 st.done.insert(proof_path);
             },
             WithdrawSubmitOutcome::Reverted {
@@ -1859,6 +1948,10 @@ where
                 break;
             },
         }
+    }
+
+    if !dry_run {
+        execute_due_nackl_payouts(bridge, st).await;
     }
 
     Ok(had_transient_failure)
@@ -2134,6 +2227,17 @@ async fn submit_withdraw(
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Queued {
+            tx_hash,
+            amount,
+            ready_at,
+        } => info!(
+            ?tx_hash,
+            %amount,
+            %ready_at,
+            "withdrawByProof queued the NACKL payout; executeNacklPayout(nullifier) mints it once \
+             due and within the daily limit"
+        ),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
@@ -2253,6 +2357,17 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Queued {
+            tx_hash,
+            amount,
+            ready_at,
+        } => info!(
+            ?tx_hash,
+            %amount,
+            %ready_at,
+            "withdrawByProof queued the NACKL payout; executeNacklPayout(nullifier) mints it once \
+             due and within the daily limit"
+        ),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
@@ -2842,6 +2957,143 @@ mod exit_status_tests {
         });
         assert_eq!(exit_status(&stuck), None);
         assert_eq!(exit_status(&anyhow::anyhow!("anything else")), None);
+    }
+}
+
+#[cfg(test)]
+mod nackl_executor_tests {
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use async_trait::async_trait;
+    use bridge_relayer_daemon::{NacklPayout, WithdrawalPublicInputs};
+
+    use super::*;
+
+    /// The bridge's NACKL queue and daily-limit capacity, nothing else.
+    struct QueueBridge {
+        queue: Mutex<BTreeMap<U256, NacklPayout>>,
+        capacity: U256,
+        refuse: bool,
+        executed: Mutex<Vec<U256>>,
+    }
+
+    impl QueueBridge {
+        fn new(capacity: u64, payouts: &[(u64, u64, u64)]) -> Self {
+            Self {
+                queue: Mutex::new(
+                    payouts
+                        .iter()
+                        .map(|&(n, amount, ready_at)| {
+                            (U256::from(n), NacklPayout {
+                                recipient: Address::with_last_byte(7),
+                                amount: U256::from(amount),
+                                ready_at: U256::from(ready_at),
+                            })
+                        })
+                        .collect(),
+                ),
+                capacity: U256::from(capacity),
+                refuse: false,
+                executed: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WithdrawBridge for QueueBridge {
+        fn bridge_address(&self) -> Address {
+            Address::ZERO
+        }
+
+        async fn is_nullifier_used(&self, _n: U256) -> Result<bool, RelayerError> {
+            unreachable!("the executor reads the queue only")
+        }
+
+        async fn dry_run_withdraw(
+            &self,
+            _p: &alloy::primitives::Bytes,
+            _pi: &WithdrawalPublicInputs,
+        ) -> Result<DryRunOutcome, RelayerError> {
+            unreachable!("the executor sends no withdrawByProof")
+        }
+
+        async fn submit_withdraw(
+            &self,
+            _p: &alloy::primitives::Bytes,
+            _pi: &WithdrawalPublicInputs,
+        ) -> Result<WithdrawSubmitOutcome, RelayerError> {
+            unreachable!("the executor sends no withdrawByProof")
+        }
+
+        async fn nackl_payout(&self, nullifier: U256) -> Result<Option<NacklPayout>, RelayerError> {
+            Ok(self.queue.lock().unwrap().get(&nullifier).copied())
+        }
+
+        async fn nackl_capacity(&self) -> Result<U256, RelayerError> {
+            Ok(self.capacity)
+        }
+
+        async fn execute_nackl_payout(
+            &self,
+            nullifier: U256,
+        ) -> Result<NacklExecuteOutcome, RelayerError> {
+            if self.refuse {
+                return Ok(NacklExecuteOutcome::Failed {
+                    reason: "BridgePaused()".into(),
+                });
+            }
+            self.queue.lock().unwrap().remove(&nullifier);
+            self.executed.lock().unwrap().push(nullifier);
+            Ok(NacklExecuteOutcome::Executed {
+                tx_hash: alloy::primitives::B256::ZERO,
+            })
+        }
+    }
+
+    fn pending(nullifiers: &[u64]) -> WithdrawScanState {
+        WithdrawScanState {
+            nackl_pending: nullifiers.iter().map(|&n| U256::from(n)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_due_payout_within_the_capacity_is_minted_and_forgotten() {
+        let bridge = QueueBridge::new(100, &[(1, 100, 0)]);
+        let mut st = pending(&[1]);
+        execute_due_nackl_payouts(&bridge, &mut st).await;
+        assert_eq!(*bridge.executed.lock().unwrap(), vec![U256::from(1)]);
+        assert_eq!(st.nackl_executed, 1);
+        assert!(st.nackl_pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_payout_not_yet_due_or_over_the_capacity_waits() {
+        let bridge = QueueBridge::new(100, &[(1, 10, u64::MAX), (2, 101, 0)]);
+        let mut st = pending(&[1, 2]);
+        execute_due_nackl_payouts(&bridge, &mut st).await;
+        assert!(bridge.executed.lock().unwrap().is_empty());
+        assert_eq!(st.nackl_pending.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_nullifier_with_nothing_queued_is_dropped_without_a_send() {
+        let bridge = QueueBridge::new(100, &[]);
+        let mut st = pending(&[3]);
+        execute_due_nackl_payouts(&bridge, &mut st).await;
+        assert!(bridge.executed.lock().unwrap().is_empty());
+        assert!(st.nackl_pending.is_empty());
+        assert_eq!(st.nackl_executed, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_execution_keeps_the_payout_for_the_next_scan() {
+        let mut bridge = QueueBridge::new(100, &[(1, 5, 0)]);
+        bridge.refuse = true;
+        let mut st = pending(&[1]);
+        execute_due_nackl_payouts(&bridge, &mut st).await;
+        assert_eq!(st.nackl_pending.len(), 1);
+        assert_eq!(st.nackl_executed, 0);
     }
 }
 

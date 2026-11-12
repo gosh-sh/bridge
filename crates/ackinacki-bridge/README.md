@@ -1,7 +1,7 @@
 # ackinacki-bridge
 
 `withdraw --token-id <ECC_ID>` selects a token registered under the same id on AN and the
-EVM bridge; the default is `3` (USDC). The amount is read in that token's registered decimals,
+EVM bridge; the default is `3` (USDC), `1` is NACKL and needs `eccBridge` 1.19.0. The amount is read in that token's registered decimals,
 without rounding. Preflight refuses mismatched token addresses, missing registrations,
 insufficient per-chain inventory and payout limits before burning. Records and locks are
 separate for each ECC id; existing USDC records retain their original keys. The JSON burn

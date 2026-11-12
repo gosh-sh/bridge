@@ -249,7 +249,27 @@ pub async fn check(
             limits.max_transfer
         )));
     }
-    if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
+    if listing.token_id == bridge_relayer_daemon::NACKL_TOKEN_ID {
+        if an.version < an_preflight::NACKL_BRIDGE_VERSION {
+            return Err(refuse(format!(
+                "the AN bridge is version {}; NACKL moves through {} or later, which unlocks it \
+                 instead of minting it",
+                an.version,
+                an_preflight::NACKL_BRIDGE_VERSION
+            )));
+        }
+        // The AN bridge pays a NACKL deposit out of what withdrawals to this
+        // chain locked, and refuses more with 236.
+        if requested > limits.outstanding {
+            return Err(refuse(format!(
+                "the AN bridge holds {} base units of NACKL locked for chain {}, less than this \
+                 deposit; finalizeDeposit would refuse it with 236",
+                limits.outstanding,
+                net.chain_id()
+            )));
+        }
+    } else if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding
+    {
         return Err(refuse(format!(
             "AN chain {} would exceed the AN token maxTvl; wait for withdrawals and retry",
             net.chain_id()

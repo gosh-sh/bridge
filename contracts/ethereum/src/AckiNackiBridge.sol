@@ -9,6 +9,7 @@ import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
 import "./IPredecessorBridge.sol";
+import { NacklMint } from "./NacklMint.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -364,6 +365,13 @@ contract AckiNackiBridge {
     ///         the same field element.
     mapping(bytes32 => bool) private _nullifiers;
 
+    /// @notice ECC currency id of NACKL on Acki Nacki. The bridge mints and
+    ///         burns ERC20 NACKL rather than holding it (`NacklMint`).
+    uint32 public constant NACKL_TOKEN_ID = 1;
+
+    /// @dev ERC20 NACKL, its mint limits and the queue of payouts not minted yet.
+    NacklMint.State private _nackl;
+
     /// @notice Set of per-layer rolling windows populated by `verifyBlock`.
     ///         Each `withdrawByProof` checks `finalRoot` against the window
     ///         named by Circuit 4's `anchorLayer` public input.
@@ -459,6 +467,26 @@ contract AckiNackiBridge {
     );
     /// @notice `migrateToken` handed a listing's liabilities to `successor`.
     event TokenMigrated(address indexed successor, uint32 indexed tokenId, uint256 amount);
+
+    // Emitted and thrown by `NacklMint` from this bridge's address; declared
+    // here so that they are in the bridge's ABI. Keep them identical.
+    event NacklMintLimitsSet(uint256 dailyLimit, uint256 delayThreshold);
+    event NacklPayoutQueued(
+        uint256 indexed nullifier, address indexed recipient, uint256 amount, uint256 readyAt
+    );
+    event NacklPayoutAbandoned(
+        uint256 indexed nullifier, address indexed recipient, uint256 amount
+    );
+    event NacklMinterMigrated(address indexed successor);
+    error NacklAlreadyListed();
+    error NacklDecimalsMismatch(uint8 decimals);
+    error NacklPayoutNotQueued(uint256 nullifier);
+    error NacklPayoutNotDue(uint256 nullifier, uint256 readyAt);
+    error NacklMintLimitReached(uint256 amount, uint256 capacity);
+    error NacklQueueNotEmpty(uint256 queued);
+    error NacklMinterHandedOver(address successor);
+    error NacklSuccessorMismatch(address successor);
+    error NacklNotListed();
 
     /// @notice Bridge paused — emitted when the owner sets `paused = true`.
     event Paused(address indexed by);
@@ -1009,10 +1037,13 @@ contract AckiNackiBridge {
         if (owed > info.tvlCap || amount > info.tvlCap - owed) {
             revert TvlCapReached();
         }
-        uint256 credited = _pullExact(IERC20(token), amount);
+        if (tokenId == NACKL_TOKEN_ID) {
+            NacklMint.burn(_nackl, msg.sender, amount);
+        } else {
+            _creditLiabilities(tokenId, _pullExact(IERC20(token), amount));
+        }
 
         uint256 depositId = depositCounter++;
-        _creditLiabilities(tokenId, credited);
 
         emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token);
         if (tokenId == usdcTokenId) _supplyAboveTarget();
@@ -1035,6 +1066,9 @@ contract AckiNackiBridge {
             tokenId == usdcTokenId && (maxTransfer > MAX_TRANSFER_AMOUNT || tvlCap > MAX_BRIDGE_TVL)
         ) {
             revert TokenLimitsInvalid(maxTransfer, tvlCap);
+        }
+        if (tokenId == NACKL_TOKEN_ID && maxTransfer > _nackl.dailyLimit) {
+            revert NacklMint.NacklLimitsInvalid(_nackl.dailyLimit, maxTransfer);
         }
         if (maxTransfer > info.maxWithdrawal) info.maxWithdrawal = maxTransfer;
         info.maxTransfer = maxTransfer;
@@ -1915,40 +1949,47 @@ contract AckiNackiBridge {
         bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
         if (!ok) revert WithdrawalProofRejected();
 
-        // ---- Treasury check (must happen before the AAVE pull). ----
-        uint256 owed = liabilitiesOf(payoutTokenId);
-        if (pub.amount > owed) {
-            revert WithdrawTreasuryShortfall(pub.amount, owed);
-        }
-
-        // Measured before the debit: the USDC on hand and the part of it
-        // that is principal.
-        uint256 onHand = usdc.balanceOf(address(this));
-        uint256 liquid = _liquidPrincipal();
-        uint256 overBooked =
-            suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
-
-        // ---- Effects (CEI: mutate state before any external call). ----
-        _nullifiers[nullifierKey] = true;
-        _debitLiabilities(payoutTokenId, pub.amount);
-
-        // ---- Interactions ----
-        // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
-        // pull; every other token sits liquid in the contract. Only what the
-        // USDC on hand cannot pay has to come from AAVE. The pull also tries to
-        // leave the target of the new book liquid and to bring
-        // `suppliedPrincipal` back within the book, so it is attempted whenever
-        // the liquid principal falls short. It may reach aUSDC above
-        // `suppliedPrincipal`: user principal is paid before yield.
-        if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
-            _refillFromAave(
-                onHand < pub.amount ? pub.amount - onHand : 0,
-                pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
-            );
-        }
-
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        _pushExact(IERC20(payoutInfo.token), recipient, pub.amount);
+        if (payoutTokenId == NACKL_TOKEN_ID) {
+            // ERC20 NACKL is minted, not held: no liabilities to debit, and the
+            // mint may wait in the queue for the daily limit or the delay.
+            _nullifiers[nullifierKey] = true;
+            if (!NacklMint.payout(_nackl, pub.nullifier, recipient, pub.amount)) return true;
+        } else {
+            // ---- Treasury check (must happen before the AAVE pull). ----
+            uint256 owed = liabilitiesOf(payoutTokenId);
+            if (pub.amount > owed) {
+                revert WithdrawTreasuryShortfall(pub.amount, owed);
+            }
+
+            // Measured before the debit: the USDC on hand and the part of it
+            // that is principal.
+            uint256 onHand = usdc.balanceOf(address(this));
+            uint256 liquid = _liquidPrincipal();
+            uint256 overBooked =
+                suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
+
+            // ---- Effects (CEI: mutate state before any external call). ----
+            _nullifiers[nullifierKey] = true;
+            _debitLiabilities(payoutTokenId, pub.amount);
+
+            // ---- Interactions ----
+            // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
+            // pull; every other token sits liquid in the contract. Only what the
+            // USDC on hand cannot pay has to come from AAVE. The pull also tries to
+            // leave the target of the new book liquid and to bring
+            // `suppliedPrincipal` back within the book, so it is attempted whenever
+            // the liquid principal falls short. It may reach aUSDC above
+            // `suppliedPrincipal`: user principal is paid before yield.
+            if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
+                _refillFromAave(
+                    onHand < pub.amount ? pub.amount - onHand : 0,
+                    pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
+                );
+            }
+
+            _pushExact(IERC20(payoutInfo.token), recipient, pub.amount);
+        }
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
@@ -2205,6 +2246,7 @@ contract AckiNackiBridge {
             revert NotOwnerOrPredecessor();
         }
         if (tokenId == usdcTokenId) revert CannotMigrateUsdc();
+        if (tokenId == NACKL_TOKEN_ID) revert NacklMint.NacklNotCustodied();
         if (amount == 0) revert InvalidAmount();
         TokenInfo storage info = _requireListedId(tokenId);
         if (info.token != token) revert FundedTokenMismatch(tokenId, token);
@@ -2243,6 +2285,88 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(successor, amount);
         }
         emit TokenMigrated(successor, tokenId, amount);
+    }
+
+    // ---------------------------------------------------------------------
+    // NACKL
+    // ---------------------------------------------------------------------
+
+    /// @notice List ERC20 NACKL under `NACKL_TOKEN_ID`, once, with its mint
+    ///         limits. Its `decimals()` must be 9. The bridge mints it only
+    ///         once it owns it: deploy the token with the bridge as owner, or
+    ///         take it over from a predecessor with `migrateNacklMinter`.
+    /// @dev The one listing after the constructor: Acki Nacki credits NACKL
+    ///      deposits from what its withdrawals locked.
+    function listNackl(
+        address token,
+        uint256 maxTransfer,
+        uint256 dailyLimit,
+        uint256 delayThreshold
+    ) external onlyOwner {
+        NacklMint.list(_nackl, token, maxTransfer, dailyLimit, delayThreshold);
+        _listToken(NACKL_TOKEN_ID, token, 9, maxTransfer, maxTransfer, true);
+    }
+
+    /// @notice Set the most ERC20 NACKL minted within any 24 hours, and the
+    ///         payout size above which a payout waits 24 hours. The daily
+    ///         limit may not fall below NACKL's per-withdrawal cap.
+    function setNacklMintLimits(uint256 dailyLimit, uint256 delayThreshold) external onlyOwner {
+        NacklMint.setLimits(
+            _nackl, dailyLimit, delayThreshold, _tokens[NACKL_TOKEN_ID].maxWithdrawal
+        );
+    }
+
+    /// @notice Mint a queued NACKL payout once it is due and fits the daily
+    ///         limit. Anyone may call it; the recipient and amount are the
+    ///         ones `withdrawByProof` queued.
+    function executeNacklPayout(uint256 nullifier) external nonReentrant whenNotPaused {
+        (address to, uint256 amount) = NacklMint.execute(_nackl, nullifier);
+        emit WithdrawalByProofExecuted(nullifier, to, amount, NACKL_TOKEN_ID, msg.sender);
+    }
+
+    /// @notice Hand ERC20 NACKL to `successor`, the bridge that names this one
+    ///         as its `predecessor` and lists the same token. Paused only, and
+    ///         only with an empty queue once the payouts in `abandoned` are
+    ///         dropped: list only payouts held to be forged. Afterwards this
+    ///         bridge mints no NACKL.
+    /// @dev Withdrawals name the bridge that pays them, so point Acki Nacki's
+    ///      `setEvmBridge` at the successor and let this bridge pay what names
+    ///      it before calling this; see docs/NACKL-bridge-extension.md, HO-6.
+    function migrateNacklMinter(address successor, uint256[] calldata abandoned)
+        external
+        onlyOwner
+        nonReentrant
+    {
+        _requirePausedForSuccessor(successor);
+        NacklMint.migrate(_nackl, successor, abandoned, _tokens[NACKL_TOKEN_ID].maxWithdrawal);
+    }
+
+    /// @notice ERC20 NACKL's mint state: the limits, what can be minted now,
+    ///         how many payouts wait, and the successor once handed over. The
+    ///         token is `tokenInfo(NACKL_TOKEN_ID)`.
+    function nacklState()
+        external
+        view
+        returns (
+            uint256 dailyLimit,
+            uint256 delayThreshold,
+            uint256 capacity,
+            uint256 queued,
+            address migratedTo
+        )
+    {
+        NacklMint.State storage s = _nackl;
+        return (s.dailyLimit, s.delayThreshold, NacklMint.capacity(s), s.queuedCount, s.migratedTo);
+    }
+
+    /// @notice A queued NACKL payout; a zero recipient means none is queued.
+    function nacklPayout(uint256 nullifier)
+        external
+        view
+        returns (address recipient, uint256 amount, uint256 readyAt)
+    {
+        NacklMint.Payout storage p = _nackl.queue[bytes32(nullifier)];
+        return (p.recipient, p.amount, p.readyAt);
     }
 
     function _requirePausedForSuccessor(address successor) private view {

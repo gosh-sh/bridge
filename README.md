@@ -15,28 +15,25 @@ accepted.
 
 ## The current deployment
 
-Arbitrum Sepolia ↔ shellnet, deployed from tag `v0.8.0`.
+Arbitrum Sepolia ↔ shellnet, deployed from tag `v0.9.0`.
 The CLI, relayers and web form take their addresses from configuration.
 
 ### Arbitrum Sepolia (chain id 421614)
 
 | | |
 |---|---|
-| `AckiNackiBridge` | `0xcEe5D884BC1b7F4CC84A31FEA74f3C8809D19Bd5` |
-| deployment block | `326573145` |
+| `AckiNackiBridge` | `0xaf413BC4BFeb55b5dd31dD48D7AD75EC47A21aDe` |
+| deployment block | `328488622` |
 | USDC | `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` |
 | AAVE V3 pool | `0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff` |
 | aUSDC | `0x460b97BD498E1157530AEb3086301d5225b91216` |
-
-This branch requires a fresh token-aware EVM bridge and the matching AN bridge 1.17.0
-for deposits. The deployment addresses below describe the existing shellnet pair.
 
 ### Acki Nacki (shellnet)
 
 | | |
 |---|---|
-| `eccUSDCBridge` | `0:1a1a…1a1a` |
-| version | `1.15.0`, code hash `71074c89…` |
+| `eccBridge` | `0:1a1a…1a1a` |
+| version | `1.17.0`, code hash `c25d1ac0…` |
 | Arbitrum block verifier (421614, parent chain Sepolia) | `0:f1def367fa6bc245589bfa7bcf54937f5c926624d29e59e19826ee9033f14108` |
 | Sepolia beacon light client | `0:9121fc37c8ac55a4fc42a73bccaf725cb0d87b9a8c7dfbc6dd2be7d1690d8462` |
 | GraphQL | `https://shellnet.ackinacki.org/graphql` |
@@ -44,9 +41,9 @@ for deposits. The deployment addresses below describe the existing shellnet pair
 ### What to set
 
 ```bash
-BRIDGE_ADDRESS=0xcEe5D884BC1b7F4CC84A31FEA74f3C8809D19Bd5
-BRIDGE_DEPLOY_BLOCK=326573145
-FROM_BLOCK=326573145
+BRIDGE_ADDRESS=0xaf413BC4BFeb55b5dd31dD48D7AD75EC47A21aDe
+BRIDGE_DEPLOY_BLOCK=328488622
+FROM_BLOCK=328488622
 RPC_URL=https://arbitrum-sepolia-rpc.publicnode.com
 ```
 

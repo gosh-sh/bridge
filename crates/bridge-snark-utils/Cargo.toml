@@ -7,9 +7,8 @@ edition = "2021"
 # `bridge-prover-lib::live_driver`; what remains here are offline SNARK
 # utility binaries (bound test-data proof export, Poseidon Snark wrapping,
 # synthetic-primary generation) plus the shared halo2-snark / VkBlob lib
-# also consumed by the deposit-prover examples and the R15 aggregator
-# input pipeline.
-description = "Offline utilities for the AN→ETH bridge Halo2 proving pipeline: bound test-data proof export, Poseidon-transcript Snark wrapping, and synthetic-primary generation. Shares halo2-snark / VkBlob helpers with deposit-prover."
+# also consumed by the R15 aggregator input pipeline.
+description = "Offline utilities for the AN→ETH bridge Halo2 proving pipeline: bound test-data proof export, Poseidon-transcript Snark wrapping, and synthetic-primary generation."
 
 [dependencies]
 # Circuits / parsers / test-data-gen — path-deps into the sibling

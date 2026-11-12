@@ -1,7 +1,6 @@
 //! M6 recursive rotate — N=1 in-circuit **glue** bring-up.
 //!
-//! Extends `deposit-prover/examples/aggregate_rotate_shards.rs` (which only wrapped
-//! + aggregated a real shard snark) with the actual committee glue:
+//! Wraps and aggregates a real shard snark, plus the actual committee glue:
 //! [`RotateAggregationCircuit`] snark-verifies the shard proof **and** runs
 //! `node_from_hilo` (range-checked) → `sync_committee_root_from_subtrees` →
 //! `verify_merkle_branch_either(gindex 87 | 2946)` → `combine_committee_commitment`, exposing the

@@ -8,8 +8,8 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::header_rlp::{keccak256, rlp_parent_hash};
 
-/// 365 * 24 * 3600 / 12. Matches `EthBeaconLightClient.SLOTS_PER_YEAR`.
-pub const SLOTS_PER_YEAR: u64 = 2_628_000;
+/// 14 * 24 * 3600 / 12. Matches `EthBeaconLightClient.PROVEN_WINDOW_SLOTS`.
+pub const PROVEN_WINDOW_SLOTS: u64 = 100_800;
 /// Sync-committee period: 256 epochs of 32 slots.
 pub const SLOTS_PER_PERIOD: u64 = 8192;
 /// Matches `EthBeaconLightClient.MAX_EVICT_PER_TX`.
@@ -117,17 +117,17 @@ impl LightClient {
         }
     }
 
-    fn year_cutoff(&self) -> u64 {
-        self.finalized_slot.saturating_sub(SLOTS_PER_YEAR)
+    fn window_cutoff(&self) -> u64 {
+        self.finalized_slot.saturating_sub(PROVEN_WINDOW_SLOTS)
     }
 
-    fn within_year(&self, eth_slot: u64) -> bool {
-        eth_slot >= self.year_cutoff()
+    fn within_window(&self, eth_slot: u64) -> bool {
+        eth_slot >= self.window_cutoff()
     }
 
     pub fn is_live(&self, h: &[u8; 32]) -> bool {
         match self.proven.get(h) {
-            Some(&s) if s != 0 && self.within_year(s) => true,
+            Some(&s) if s != 0 && self.within_window(s) => true,
             _ => false,
         }
     }
@@ -143,7 +143,7 @@ impl LightClient {
             let h = self.queue.pop_front().expect("non-empty");
             n += 1;
             match self.proven.get(&h).copied() {
-                Some(s) if self.within_year(s) => self.queue.push_back(h),
+                Some(s) if self.within_window(s) => self.queue.push_back(h),
                 Some(_) => {
                     self.proven.remove(&h);
                     self.sink_forgets.push(pi_form(&h));
@@ -196,10 +196,10 @@ impl LightClient {
         if !advancing && !late {
             return Err(LcError::StaleUpdate);
         }
-        // The contract tests the year window before the committee, so a stale
+        // The contract tests the window before the committee, so a stale
         // update signed by the wrong committee reports StaleUpdate, not
         // WrongCommittee. The order is part of what this replica pins.
-        if late && !self.within_year(slot) {
+        if late && !self.within_window(slot) {
             return Err(LcError::StaleUpdate);
         }
         let prev_ok = self.prev_committee != [0; 32]
@@ -223,43 +223,49 @@ impl LightClient {
     }
 
     pub fn submit_ancestry(&mut self, header_rlps: &[Vec<u8>]) -> Result<u64, LcError> {
-        if header_rlps.len() < 3 {
+        if header_rlps.len() < 2 {
             return Err(LcError::BadAncestry);
         }
         if header_rlps.len() > 33 {
             return Err(LcError::AncestryTooLong);
         }
         let last = header_rlps.len() - 1;
-        let mut prev = keccak256(&header_rlps[0]);
-        let anchor = pi_form(&prev);
-        // Both ends before anything else, as the contract does before accept.
-        if !self.is_live(&anchor) || !self.is_live(&pi_form(&keccak256(&header_rlps[last]))) {
+        let last_key = pi_form(&keccak256(&header_rlps[last]));
+        // The proven end before anything else, as the contract checks it
+        // before accept.
+        if !self.is_live(&last_key) {
             return Err(LcError::UnknownCheckpoint);
         }
-        let anchor_slot = *self.proven.get(&anchor).expect("live");
+        let anchor_slot = *self.proven.get(&last_key).expect("live");
         // The contract reverts, undoing every write, so nothing may be stored
-        // before the whole payload has passed. Walk once to check, then write.
-        let mut between = Vec::new();
-        for (i, rlp) in header_rlps.iter().enumerate().skip(1) {
+        // before the whole payload has passed. Walk once to check, from the
+        // proven end back, then write in the order the contract does.
+        let mut behind = Vec::new();
+        let mut parent = rlp_parent_hash(&header_rlps[last]).map_err(|_| LcError::BadAncestry)?;
+        for i in (0..last).rev() {
             self.walk_steps += 1;
-            if rlp_parent_hash(rlp).map_err(|_| LcError::BadAncestry)? != prev {
+            let h = keccak256(&header_rlps[i]);
+            if h != parent {
                 return Err(LcError::BadAncestry);
             }
-            prev = keccak256(rlp);
-            let key = pi_form(&prev);
-            if i == last {
-                if !self.is_live(&key) {
-                    return Err(LcError::UnknownCheckpoint);
-                }
-            } else if !self.is_live(&key) {
-                between.push(key);
+            let key = pi_form(&h);
+            let back = (last - i) as u64;
+            let slot = anchor_slot
+                .checked_sub(back)
+                .filter(|s| *s > 0)
+                .unwrap_or(1);
+            if !self.is_live(&key) && self.within_window(slot) {
+                behind.push((key, slot));
+            }
+            if i > 0 {
+                parent = rlp_parent_hash(&header_rlps[i]).map_err(|_| LcError::BadAncestry)?;
             }
         }
         self.evict_expired();
         let mut added = 0u64;
-        for key in between {
+        for (key, slot) in behind {
             if !self.is_live(&key) {
-                self.push_exec(key, anchor_slot);
+                self.push_exec(key, slot);
                 added += 1;
             }
         }
@@ -425,7 +431,7 @@ mod tests {
             LcError::NotProven
         );
 
-        c.submit_update(100 + SLOTS_PER_YEAR + 1, [0x22; 32], [0xC0; 32])
+        c.submit_update(100 + PROVEN_WINDOW_SLOTS + 1, [0x22; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(c.sink_forgets, vec![block_hash]);
     }
@@ -649,7 +655,7 @@ mod tests {
     }
 
     /// The replaced committee may only sign in the period it served.
-    /// Without that bound it could sign any slot in the one-year window,
+    /// Without that bound it could sign any slot in the proven window,
     /// including slots it never attested, and the hashes it wrote would back
     /// mints.
     #[test]
@@ -798,9 +804,58 @@ mod tests {
         // to honour too.
         assert_eq!(
             &c.sink_notifies[before..],
-            &[keccak256(&chain[1]), keccak256(&chain[2])],
-            "ancestry must notify the sink in Ethereum byte order, oldest first"
+            &[keccak256(&chain[2]), keccak256(&chain[1])],
+            "ancestry must notify the sink in Ethereum byte order, newest first"
         );
+    }
+
+    /// The newest end is what the chain of hashes hangs from; nothing in front
+    /// of the payload needs to be proven, and every header behind is admitted,
+    /// the oldest included, each with a slot no earlier than its own.
+    #[test]
+    fn ancestry_needs_only_its_newest_end_proven() {
+        let mut c = lc();
+        let chain = dummy_linked_chain(4);
+        c.submit_update(1000, pi_form(&keccak256(&chain[3])), [0xC0; 32])
+            .unwrap();
+        assert_eq!(c.submit_ancestry(&chain).unwrap(), 3);
+        for (i, back) in [(2, 1), (1, 2), (0, 3)] {
+            let key = pi_form(&keccak256(&chain[i]));
+            assert!(c.is_live(&key), "header {i} must be admitted");
+            assert_eq!(c.proven[&key], 1000 - back);
+        }
+    }
+
+    /// A gap longer than one call: the oldest header of each call is proven
+    /// for the next, so calls of 33 headers walk back as far as needed.
+    #[test]
+    fn chained_spans_reach_back_over_a_gap() {
+        let mut c = lc();
+        let chain = dummy_linked_chain(70);
+        c.submit_update(5000, pi_form(&keccak256(&chain[69])), [0xC0; 32])
+            .unwrap();
+        assert_eq!(c.submit_ancestry(&chain[37..70]).unwrap(), 32);
+        assert_eq!(c.submit_ancestry(&chain[5..38]).unwrap(), 32);
+        assert_eq!(c.submit_ancestry(&chain[0..6]).unwrap(), 5);
+        assert!(chain.iter().all(|h| c.is_live(&pi_form(&keccak256(h)))));
+        assert_eq!(c.proven[&pi_form(&keccak256(&chain[0]))], 5000 - 69);
+    }
+
+    /// A header whose slot would already be outside the window is not
+    /// admitted: the sink would accept a block the client has dropped.
+    #[test]
+    fn ancestry_admits_nothing_already_outside_the_window() {
+        let mut c = lc();
+        let chain = dummy_linked_chain(4);
+        let head = PROVEN_WINDOW_SLOTS + 1000;
+        // The newest end sits one slot inside the window.
+        c.submit_update(head, [0xEE; 32], [0xC0; 32]).unwrap();
+        c.submit_update(1001, pi_form(&keccak256(&chain[3])), [0xC0; 32])
+            .unwrap();
+        assert_eq!(c.submit_ancestry(&chain).unwrap(), 1);
+        assert!(c.is_live(&pi_form(&keccak256(&chain[2]))));
+        assert!(!c.is_live(&pi_form(&keccak256(&chain[1]))));
+        assert!(!c.proven.contains_key(&pi_form(&keccak256(&chain[0]))));
     }
 
     /// Forgets are capped per call separately from examinations, because each
@@ -819,9 +874,9 @@ mod tests {
         }
         assert!(c.sink_forgets.is_empty(), "nothing has expired yet");
 
-        // Jump the head a year past all of them: every one is now outside the
+        // Jump the head a window past all of them: every one is now outside the
         // window, and the next call compacts.
-        let far = SLOTS_PER_YEAR + 32 * n as u64 + 32;
+        let far = PROVEN_WINDOW_SLOTS + 32 * n as u64 + 32;
         c.submit_update(far, [0xFF; 32], [0xC0; 32]).unwrap();
         assert_eq!(
             c.sink_forgets.len(),
@@ -837,16 +892,16 @@ mod tests {
         );
     }
 
-    /// Where the two-end check sits is a gas property, not an outcome: a
-    /// payload with an unproven far end is refused either way. On chain the
-    /// difference was 1,917,462 gas charged to the light client per message
-    /// versus nothing at all, so the walk must not start until both ends are
-    /// known.
+    /// Where the proven-end check sits is a gas property, not an outcome: a
+    /// payload whose newest end is not proven is refused either way. On chain
+    /// the difference was 1,917,462 gas charged to the light client per
+    /// message versus nothing at all, so the walk must not start until the
+    /// proven end is known.
     #[test]
     fn an_unproven_far_end_is_refused_before_the_walk_does_any_work() {
         let mut c = lc();
         let chain = dummy_linked_chain(33);
-        // Only the near end is an anchor — the shape a griefer sends.
+        // Only the oldest header is proven — the shape a griefer sends.
         c.submit_update(32, pi_form(&keccak256(&chain[0])), [0xC0; 32])
             .unwrap();
 
@@ -857,7 +912,7 @@ mod tests {
         );
         assert_eq!(
             c.walk_steps, before,
-            "the walk must not run a single link before both ends are proven"
+            "the walk must not run a single link before the newest end is proven"
         );
 
         // And an honest payload still walks: the check is a gate, not a wall.
@@ -881,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn ancestry_far_end_must_be_an_anchor() {
+    fn ancestry_newest_end_must_be_proven() {
         let mut c = lc();
         let chain = dummy_linked_chain(4);
         c.submit_update(32, pi_form(&keccak256(&chain[0])), [0xC0; 32])
@@ -920,7 +975,7 @@ mod tests {
         let mut c = lc();
         assert_eq!(c.submit_ancestry(&[]).unwrap_err(), LcError::BadAncestry);
         assert_eq!(
-            c.submit_ancestry(&dummy_linked_chain(2)).unwrap_err(),
+            c.submit_ancestry(&dummy_linked_chain(1)).unwrap_err(),
             LcError::BadAncestry
         );
         let too_long = vec![vec![0u8; 3]; 34];
@@ -978,11 +1033,11 @@ mod tests {
     }
 
     #[test]
-    fn year_window_drops_hash_and_forgets_sink() {
+    fn window_drops_hash_and_forgets_sink() {
         let mut c = lc();
         c.submit_update(100, [0x11; 32], [0xC0; 32]).unwrap();
         assert!(c.is_live(&[0x11; 32]));
-        c.submit_update(100 + SLOTS_PER_YEAR + 1, [0x22; 32], [0xC0; 32])
+        c.submit_update(100 + PROVEN_WINDOW_SLOTS + 1, [0x22; 32], [0xC0; 32])
             .unwrap();
         assert!(!c.is_live(&[0x11; 32]));
         assert!(c.is_live(&[0x22; 32]));
@@ -994,9 +1049,9 @@ mod tests {
     }
 
     #[test]
-    fn late_register_older_than_year_is_stale() {
+    fn late_register_older_than_the_window_is_stale() {
         let mut c = lc();
-        c.submit_update(SLOTS_PER_YEAR + 50, [0xAA; 32], [0xC0; 32])
+        c.submit_update(PROVEN_WINDOW_SLOTS + 50, [0xAA; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(
             c.submit_update(40, [0xBB; 32], [0xC0; 32]).unwrap_err(),
@@ -1009,7 +1064,7 @@ mod tests {
     fn ancestry_expired_checkpoint_unknown() {
         let mut c = lc();
         let chain = anchored_span(&mut c, 4);
-        c.submit_update(64 + SLOTS_PER_YEAR + 1, [0xEE; 32], [0xC0; 32])
+        c.submit_update(64 + PROVEN_WINDOW_SLOTS + 1, [0xEE; 32], [0xC0; 32])
             .unwrap();
         assert_eq!(
             c.submit_ancestry(&chain).unwrap_err(),

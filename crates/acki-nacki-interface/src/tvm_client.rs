@@ -38,8 +38,6 @@ pub const HD_PATH_V3: &str = "m/44'/1331'/0'/0/0";
 
 /// StdContractError: contract cannot be redeployed (DepositVoucher collision).
 pub const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
-/// USDCBridge: `ERR_INVALID_ZKPROOF`.
-pub const EXIT_INVALID_ZKPROOF: i32 = 220;
 
 /// Configuration for a live GraphQL tvm_client connection.
 #[derive(Clone, Debug)]
@@ -487,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_zk_reject_220() {
+    fn classify_an_aborted_transaction_by_its_exit_code() {
         let tx = json!({
             "aborted": true,
             "compute": { "exit_code": 220 }

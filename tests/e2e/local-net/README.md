@@ -87,21 +87,21 @@ waited for and the tail of the log.
 | Tests | Step |
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 2 hours |
-| `test_10`–`12` | The zerostate bridge is Active at 1.16.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_10`–`12` | The zerostate bridge is Active at 1.17.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the BK set at 0 from GraphQL, which has to serve `blockchain.latestBkSet`); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
 | `test_40`–`44` | `deposit`: sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
-| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
+| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, the receipt proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
 | `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), 2 USDC back on the deployer |
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain
 (`https://lodestar-sepolia.chainsafe.io`, `BEACON_URL` in `prover-host/jobs/common.sh`), and
 `lc-bootstrap` sets the committee that signed it, then switches the owner off. From there the
-light client accepts one finalized checkpoint per epoch and, with `--submit-ancestry`, the
-blocks between two consecutive ones; `eth-lc-relayer arbitrum-anchors` proves the deposit's Arbitrum block
-from the assertion in one of those Sepolia blocks. The light client follows a new sync
+light client accepts one finalized checkpoint per epoch; `eth-lc-relayer arbitrum-anchors` sends it
+the blocks of the epoch an assertion landed in (`submitAncestry`) and proves the deposit's Arbitrum
+block from that assertion. The light client follows a new sync
 committee (every ~27 h) only by a rotate proof, which does not run live yet, so a run must
 not cross one: `test_02` refuses to start a run that would.
 
@@ -114,7 +114,7 @@ whose `authorized_keys` entry allows only the dispatcher (a copy of
 `tests/e2e/local-net/prover-host/ci-entry` in the CI directory's `bin/`) and the tunnel ports
 127.0.0.1:28080 and :28600–28604. The copy is installed by hand: a pull request cannot change
 what runs, and PR code runs only inside the containers the dispatcher starts, with no docker
-socket and capped memory and CPU (40 GB / 12 cores for the build and the deposit prover, 64 GB /
+socket and capped memory and CPU (40 GB / 12 cores for the build, 64 GB /
 32 cores for the provers that have to keep pace: the light client's step prover, which has an
 epoch for each proof, `daemon-live` and the withdrawal's Circuit 4; 8 GB / 4 cores for the rest). It builds each commit once with `docker/Dockerfile`:
 the `tools` target gives every binary as plain files (`/bin-ci` in the jobs; `ackinacki-bridge`

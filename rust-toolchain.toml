@@ -10,8 +10,5 @@
 # To bump: change the date, then run `make pre-push` and land any resulting
 # reformat in the *same* commit, so the tree is never clean under one toolchain
 # and dirty under the pinned one.
-#
-# `deposit-prover/` keeps its own, older pin (nightly-2026-02-03) — halo2 needs
-# it — and the nearest file wins, so this does not reach it.
 channel = "nightly-2026-08-03"
 components = ["rustfmt", "clippy"]

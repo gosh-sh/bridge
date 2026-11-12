@@ -14,9 +14,9 @@ knows a host path, an address or a key.
 | Image | Target | Holds | Runs |
 |---|---|---|---|
 | `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight` |
-| `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer`, `fetch_deposit_data`, `export_vk_blob`, `export_blake2b_proof`, `downsize_srs`, `circuit_params.json` | `deposit-relayer daemon` |
+| `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer` | `deposit-relayer daemon` |
 | `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
-| `bridge-cli` | `bridge-cli` | `ackinacki-bridge` with the deposit tools, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
+| `bridge-cli` | `bridge-cli` | `ackinacki-bridge`, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
 | (files) | `tools` | every binary above as plain files | `docker build --target tools --output type=local,dest=out .` |
 
 Every image runs as the unprivileged user `bridge` (UID/GID build args, default 998), on
@@ -42,6 +42,18 @@ cargo registry and one target directory per workspace, so a rebuild after a smal
 short. `CLI_FEATURES` passes cargo features to `ackinacki-bridge` (the local-network e2e
 builds it with `ackinacki-bridge/dev-unfixed-bridge`).
 
+## Host memory
+
+All the services of `compose.yaml` on one host need 256 GB of RAM; 128 GB is not enough. Their
+peaks, summed and not measured together: `eth-lc-relayer` about 100 GB (two step proofs of about
+25 GB each beside a rotate stage of about 50 GB, `docs/eth-light-client.md` §5), `daemon-live`
+about 14 GB for the block proofs and 12.6 GB for `aggregate-proof`, `deposit-relayer` about
+9.6 GB: about 135 GB. The attestation proof in `daemon-live` grows with the number of signers its
+circuit is built for: about 38 GB at 1000 and 78 GB at 2000
+(`crates/bridge-circuits/attestation-bls-checker-circuit/PARALLEL_BENCHMARK_N14_REPORT.md`), up
+to about 200 GB in all. A memory limit on the `eth-lc-relayer` container has to sit above
+100 GB, or the kernel kills its rotate stage.
+
 ## Layout on the host
 
 Two roots (bridge-audit#132): what is small and not recoverable, and what is large and can
@@ -64,14 +76,13 @@ $BRIDGE_OPT/                         # e.g. /opt/bridge-shellnet, root:bridge
   cli/state/                         # the CLI's deposit and withdrawal records
 $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:bridge
   daemon-live/work/  daemon-live/logs/
-  deposit-relayer/work/  deposit-relayer/logs/
+  deposit-relayer/logs/
   eth-lc-relayer/work/  eth-lc-relayer/logs/
   arbitrum-anchors/work/  arbitrum-anchors/logs/
   cli/work/  cli/logs/
   params/relayer/                    # SRS k=17..22, inner keys, SHA256SUMS (finalize-params.sh); pk_cache/ rw
-  params/deposit-prover/             # kzg_params_18.srs; the proving key the first proof writes
   params/lc-prover/                  # kzg_bn254_19.srs, kzg_bn254_20.srs, kzg_bn254_21.srs;
-                                     #   step-key/ from `compose run lc-keygen`;
+                                     #   step-key/ written by the first step proof;
                                      #   rotate-keys/ written by the daemon at its first rotate (~40 GB)
 ```
 
@@ -94,8 +105,8 @@ Each daemon logs to stdout and to one file per day in its `logs/` directory, kee
 retention rule of its own (logrotate, a cron `find -mtime`).
 
 Inside every container the same four paths: `/data/state`, `/data/work`, `/data/logs` and
-`/data/params` (read-only for the relayer except `pk_cache`, writable for the two provers that
-generate keys). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and
+`/data/params` (read-only for the relayer except `pk_cache`, writable for the light-client
+prover, which generates keys; the deposit relayer has none). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and
 sourced by its entrypoint; the other services get theirs as container environment
 (`env_file`). Keys are mounted read-only at `/run/keys`.
 
@@ -103,17 +114,17 @@ sourced by its entrypoint; the other services get theirs as container environmen
 
 | File | Template | Holds |
 |---|---|---|
-| `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the two metrics ports |
+| `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the three metrics ports |
 | `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, the deployed BK-set commitment |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
-| `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `SUBMIT_ANCESTRY`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
+| `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
 | `$BRIDGE_OPT/env/arbitrum-anchors.env` | `env/arbitrum-anchors.env.example` | `PARENT_RPC_URL`, `ARBITRUM_RPC_URL`, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE` |
 | `$BRIDGE_OPT/env/cli.env` (optional) | none | endpoints and addresses for `compose run cli`; never a private key, which goes in as `run -e …` for the one run or as a file under `keys/` |
 
 `METRICS_LISTEN_ADDR` is required and is the host's address on the monitoring network: a
 `ports:` entry without an address publishes the port on every interface, past the host
-firewall. `/metrics` is served by `daemon-live` (9464) and `deposit-relayer` (9467); the
-compose healthchecks read them.
+firewall. `/metrics` is served by `daemon-live` (9464), `deposit-relayer` (9467) and
+`eth-lc-relayer` (9468); the compose healthchecks read the first two.
 
 Flags without an environment variable (`eth-lc-relayer daemon --owner-hop --rotate-timeout-secs …`)
 are the service's `command:` in the compose file; override it in a `compose.override.yaml`
@@ -125,9 +136,8 @@ next to it.
 2. Params. Withdraw relayer: the SRS and inner keys into `params/relayer/`, then
    `docker/relayer/finalize-params.sh $BRIDGE_DATA/params/relayer bridge` seals them and
    writes `SHA256SUMS`; its sha256 goes into `daemon-live.env` as `PARAMS_MANIFEST_SHA256`.
-   Deposit prover: `kzg_params_18.srs` into `params/deposit-prover/` (cut from the k=21 SRS
-   with `downsize_srs`, in the `bridge-cli` image). Light client: `kzg_bn254_19.srs` into
-   `params/lc-prover/`, then the step key once per image:
+   The deposit relayer needs no params. Light client: `kzg_bn254_19.srs` into
+   `params/lc-prover/`; the first step proof of an image writes its key there, or ahead of it
    `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB). The rotate needs the
    Hermez `kzg_bn254_21.srs` there too: the release asset of that name, checked against the
    release's `SHA256SUMS`. Its shard stage reads `kzg_bn254_20.srs`, cut from that file once
@@ -165,7 +175,7 @@ daemon's state file and take its lock: stop `eth-lc-relayer` first, start it aga
 
 Set `BRIDGE_IMAGE_TAG` to the new tag, `docker compose pull`, run `preflight`, then
 `docker compose up -d` service by service. The state directories carry over; the light
-client's step key is per image (`lc-keygen` again when the prover changed). To roll back, set
+client's step key is per image, replaced by the first proof of an image whose prover changed. To roll back, set
 the previous tag and `up -d` again.
 
 ## Status

@@ -29,7 +29,7 @@ use crate::{
         binding::{check_explicit, claims_of_others, decide, Binding, Candidate},
         credit::{self, FinalizedCheck, Identity, Look},
         evm::{
-            deposit_calldata, parse_deposit_log, read_balance, BlockTag, ReceiptLite,
+            deposit_calldata, parse_deposit_log, read_balance, BlockTag, ReceiptLite, WitnessError,
             DEPOSIT_CALLDATA_LEN,
         },
         evm_confirm::{self, Expect, Negative, Outcome},
@@ -40,11 +40,9 @@ use crate::{
         finalize::{self, FinCtx, FinalizeExit},
         identity::{offline_context, voucher_account_id, DepositIdentity, BRIDGE_ABI},
         lc_readiness::AnchorPlan,
+        limits,
         locks::{DirLock, OpLock},
-        pi::{self, DepositPublicInputs, ExpectedInputs},
         preflight::{self, Deps},
-        prover::{self, ProveRequest},
-        prover_files::ProverDir,
         recovery::{self, SearchOutcome},
         retry::{once, transient, until, ONE_READ},
         signals,
@@ -54,7 +52,7 @@ use crate::{
         },
         ui::{self, StepId, StepState, Ui},
         wallet::{account_check, Wallet},
-        DepositSuccess,
+        witness, DepositSuccess,
     },
     errors::{CliError, CliResult, ExitCode, Stage},
 };
@@ -70,10 +68,6 @@ pub struct RunCx {
     pub bridge_dapp: [u8; 32],
     /// The bridge's light client, if it names one.
     pub light_client: Option<[u8; 32]>,
-    /// The prover directory.
-    pub prover: ProverDir,
-    /// `--rpc-url`, for the prover's fetcher.
-    pub rpc_url: String,
     /// The ERC-20 this deposit moves.
     pub token: Address,
 }
@@ -274,8 +268,8 @@ fn unreadable(op: &str, e: CliError) -> CliError {
     )
 }
 
-/// Where the proof files of `rec` are: the work directory its record names,
-/// or `<--work-dir>/<op-id>` for a record that names none; `None` when
+/// Where the receipt proof of `rec` is kept: the work directory its record
+/// names, or `<--work-dir>/<op-id>` for a record that names none; `None` when
 /// neither is known.
 pub(crate) fn work_dir_of(p: &DepositParams, rec: &OpRecord) -> Option<std::path::PathBuf> {
     rec.work_dir
@@ -398,12 +392,12 @@ pub async fn run_fresh(
 ) -> Result<DepositSuccess, FreshError> {
     let ui = d.ui.as_ref();
     let board = Board::new(ui);
-    let (Some(net), Some(amount), Some(to), Some(bridge_acc), Some(rpc_url), Some(work_dir)) = (
+    let (Some(net), Some(amount), Some(to), Some(bridge_acc), Some(_), Some(work_dir)) = (
         p.network,
         p.amount,
         p.to,
         p.usdc_bridge_account,
-        p.rpc_url.clone(),
+        p.rpc_url.as_ref(),
         p.work_dir.as_ref(),
     ) else {
         return Err(CliError::Usage {
@@ -481,8 +475,6 @@ pub async fn run_fresh(
         bridge_acc,
         bridge_dapp: checked.an.bridge_dapp,
         light_client: checked.an.light_client,
-        prover: checked.prover,
-        rpc_url,
         token: checked.evm.token,
     };
 
@@ -958,15 +950,15 @@ async fn negative(d: &Deps, store: &Store, rec: &mut OpRecord, n: Negative) -> C
             ExitCode::DepositUnprovable,
             format!(
                 "{m}. The CLI does not finalize a deposit other than the one requested; the \
-                 deposit is in the EVM bridge, and its operator can finalize or return it"
+                 deposit is in the EVM bridge, and the bridge's relayer finalizes it"
             ),
         ),
         Negative::Unprovable(v) => (
             FailReason::Unprovable,
             ExitCode::DepositUnprovable,
             format!(
-                "the deposit is on chain but cannot be proven: {v}. The deposit is in the EVM \
-                 bridge and only its operator can return it"
+                "the deposit is on chain but the Acki Nacki bridge cannot finalize it from its \
+                 receipt: {v}. The deposit is in the EVM bridge"
             ),
         ),
     };
@@ -1169,7 +1161,6 @@ async fn walk(
                             block_hash: f.block_hash,
                             block_log_index: f.block_log_index,
                             receipt_log_index: f.receipt_log_index,
-                            access_list_rlp_len: f.access_list_rlp_len,
                             voucher_account: hex::encode(voucher),
                         });
                         rec.stage = OpStage::Confirmed;
@@ -1380,62 +1371,88 @@ async fn walk(
                         Stage::Prove,
                         &op,
                         format!(
-                            "the proof has to be built, and operation {op} records no work \
-                             directory and no --work-dir (BRIDGE_WORK_DIR) was given. The deposit \
-                             is on the EVM bridge; retry with --resume {op}"
+                            "the receipt proof has to be built, and operation {op} records no \
+                             work directory and no --work-dir (BRIDGE_WORK_DIR) was given. The \
+                             deposit is on the EVM bridge; retry with --resume {op}"
                         ),
                     );
                     return Err(in_doubt(rec, e));
                 };
-                let want = ExpectedInputs {
-                    deposit_id: dep.deposit_id,
-                    sender: from,
-                    amount: rec.params.amount_units,
-                    token: rec.params.token,
-                    contract: rec.params.bridge,
-                    chain_id: rec.params.chain_id,
-                    dapp_id: to.dapp_id,
-                    account_id: to.account_id,
-                    block_hash: dep.block_hash,
-                };
-                // A proof already on disk for this very deposit (after a 224
-                // and a new anchor, or on a resume) is used again: same
-                // block, same inputs.
-                let reusable = prover::load(&work).is_some_and(|f| {
-                    DepositPublicInputs::decode(&f.public_inputs)
-                        .is_ok_and(|pi| pi::verify(&pi, &want).is_ok())
-                });
-                if !reusable {
-                    let req = ProveRequest {
-                        rpc_url: cx.rpc_url.clone(),
-                        tx_hash: claim.tx_hash,
-                        bridge: rec.params.bridge,
-                        receipt_log_index: dep.receipt_log_index,
-                        // Hex of the recipient's dapp bytes, never the text typed.
-                        dapp_hex: to.dapp_hex(),
-                        chain_id: rec.params.chain_id,
-                        work,
-                        log_dir: p.log_dir.clone(),
-                    };
-                    // A failure — Ctrl-C reaching the prover too — leaves the
-                    // operation where it is: a resume proves again. An
-                    // unprovable deposit closes it, as step 5 would have.
-                    let proved = prover::prove(&cx.prover, &req, &want, p.prover_timeout, ui, &op)
+                // A receipt proof already on disk for this very deposit
+                // (after a 224 and a new anchor, or on a resume) is sent
+                // again: same block, same log.
+                let chain_id = rec.params.chain_id;
+                let reusable = witness::load(&work).filter(|w| witness::proves(w, chain_id, &dep));
+                let reused = reusable.is_some();
+                if !reused {
+                    let built = match d
+                        .evm
+                        .deposit_witness(
+                            chain_id,
+                            rec.params.bridge,
+                            dep.block_hash,
+                            claim.tx_hash,
+                            dep.receipt_log_index,
+                        )
                         .await
-                        .map_err(|e| in_doubt(rec, e))?;
-                    if let Err(v) = proved {
-                        if rec.stage == OpStage::Finalizing {
-                            return Err(in_doubt(
-                                rec,
-                                err(
-                                    ExitCode::DepositProofFailed,
-                                    Stage::Prove,
-                                    &op,
-                                    v.to_string(),
+                    {
+                        Ok(w) if !witness::proves(&w, chain_id, &dep) => {
+                            Err(WitnessError::Retry(format!(
+                                "the RPC now has the deposit in block {} ({:#x}), it was \
+                                 confirmed in block {} ({:#x})",
+                                w.block_number, w.block_hash, dep.block_number, dep.block_hash
+                            )))
+                        },
+                        Ok(w) => limits::check_gas(&w)
+                            .map(|()| w)
+                            .map_err(WitnessError::Final),
+                        Err(e) => Err(e),
+                    };
+                    let w = match built {
+                        Ok(w) => w,
+                        Err(WitnessError::Retry(why)) => {
+                            let e = err(
+                                ExitCode::DepositProofFailed,
+                                Stage::Prove,
+                                &op,
+                                format!(
+                                    "the receipt proof could not be built from --rpc-url: {why}. \
+                                     The deposit is on the EVM bridge; retry with --resume {op}"
                                 ),
-                            ));
-                        }
-                        return Err(negative(d, store, rec, Negative::Unprovable(v)).await);
+                            );
+                            return Err(in_doubt(rec, e));
+                        },
+                        // The bridge cannot finalize it: close the operation,
+                        // as step 5 would have.
+                        Err(WitnessError::Final(v)) => {
+                            if rec.stage == OpStage::Finalizing {
+                                return Err(in_doubt(
+                                    rec,
+                                    err(
+                                        ExitCode::DepositProofFailed,
+                                        Stage::Prove,
+                                        &op,
+                                        v.to_string(),
+                                    ),
+                                ));
+                            }
+                            return Err(negative(d, store, rec, Negative::Unprovable(v)).await);
+                        },
+                    };
+                    let saved =
+                        std::fs::create_dir_all(&work).and_then(|()| witness::save(&work, &w));
+                    if let Err(e) = saved {
+                        let e = err(
+                            ExitCode::DepositProofFailed,
+                            Stage::Prove,
+                            &op,
+                            format!(
+                                "cannot write the receipt proof to {}: {e}. The deposit is on the \
+                                 EVM bridge; free the directory and retry with --resume {op}",
+                                work.display()
+                            ),
+                        );
+                        return Err(in_doubt(rec, e));
                     }
                 }
                 if rec.stage != OpStage::Finalizing {
@@ -1444,8 +1461,8 @@ async fn walk(
                 }
                 board.done(
                     StepId::Prove,
-                    if reusable {
-                        "the proof on disk matches the deposit"
+                    if reused {
+                        "the receipt proof on disk matches the deposit"
                     } else {
                         ""
                     },
@@ -1460,9 +1477,14 @@ async fn walk(
                     .ok_or_else(|| damaged(store, &op, "the voucher address"))?;
                 let stored_code = hex32(&rec.voucher_code_hash)
                     .ok_or_else(|| damaged(store, &op, "the voucher code hash"))?;
-                let Some(files) = work_dir_of(p, rec).and_then(|w| prover::load(&w)) else {
-                    // A missing proof is not built again for a deposit
-                    // somebody finalized already.
+                let found = work_dir_of(p, rec)
+                    .and_then(|w| witness::load(&w))
+                    .filter(|w| witness::proves(w, rec.params.chain_id, &dep));
+                let Some(proof) = found else {
+                    // A missing receipt proof is not built again for a
+                    // deposit somebody finalized already. A record an older
+                    // CLI left at `Proved` has proof files and none of
+                    // this: it is built here.
                     phase = Phase::Look;
                     continue;
                 };
@@ -1505,18 +1527,7 @@ async fn walk(
                             poll: d.polls.anchor,
                         };
                         let an = d.an.as_ref();
-                        match finalize::finalize(
-                            an,
-                            an,
-                            store,
-                            rec,
-                            &fc,
-                            &files.proof,
-                            &files.public_inputs,
-                            ui,
-                        )
-                        .await?
-                        {
+                        match finalize::finalize(an, an, store, rec, &fc, &proof, ui).await? {
                             FinalizeExit::ToCredit {
                                 via_events,
                             } => {
@@ -1654,7 +1665,6 @@ pub fn summary(
         tx: Some(json!({
             "type": 2,
             "calldata_len": DEPOSIT_CALLDATA_LEN,
-            "access_list_len": rec.deposit.as_ref().map(|d| d.access_list_rlp_len),
         })),
         confirmation: rec.credit.as_ref().zip(rec.deposit.as_ref()).map(|(c, d)| {
             json!({
@@ -2296,9 +2306,7 @@ mod tests {
     };
 
     /// The world's command line and dependencies with polls short enough
-    /// for the real clock. A test that reaches the proof runs on it: the
-    /// fake prover is a real process, and on a paused clock the prover's
-    /// deadline fires as soon as the runtime waits for that process.
+    /// for the real clock.
     fn on_the_real_clock(w: &World) -> (DepositParams, Deps) {
         let mut p = w.params(RunMode::Fresh);
         p.relayer_grace = Duration::from_millis(10);
@@ -2452,7 +2460,6 @@ mod tests {
                 block_hash: B256::repeat_byte(0x90),
                 block_log_index: 41,
                 receipt_log_index: 1,
-                access_list_rlp_len: 1,
                 voucher_account: "ab".repeat(32),
             });
         }
@@ -2477,7 +2484,7 @@ mod tests {
             .load(s.op_id.as_deref().unwrap())
             .unwrap();
         assert_eq!(rec.stage, OpStage::Credited);
-        assert_eq!(w.prover_runs(), 1);
+        assert_eq!(w.witness_builds(), 1);
         // The world shows DepositFinalized from the start: only the count
         // tells that step 8 really sent.
         assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
@@ -2621,10 +2628,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_interrupt_while_the_wallet_closes_after_a_verdict_answers_with_the_verdict() {
-        // A legacy transaction is closed as exit 35; then the wallet session
-        // takes forever to close, and the run is interrupted meanwhile.
+        // A deposit the bridge cannot finalize is closed as exit 35; then the
+        // wallet session takes forever to close, and the run is interrupted
+        // meanwhile.
         let mut w = World::healthy();
-        let h = w.mined_deposit_of_type(7, 0);
+        let h = w.mined_deposit_out_of_reach(7);
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         let mut wallet = counted(&mut w);
@@ -2645,9 +2653,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_legacy_transaction_is_exit_35_with_what_to_give_the_operator() {
+    async fn a_deposit_out_of_the_bridges_reach_is_exit_35_with_what_to_give_the_operator() {
         let mut w = World::healthy();
-        let h = w.mined_deposit_of_type(7, 0);
+        let h = w.mined_deposit_out_of_reach(7);
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         let p = w.params(RunMode::Fresh);
@@ -2915,7 +2923,7 @@ mod tests {
         let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
         assert_eq!(
-            w.prover_runs(),
+            w.witness_builds(),
             0,
             "nothing is proven while the bridge is paused"
         );
@@ -2929,10 +2937,16 @@ mod tests {
     #[tokio::test]
     async fn a_proof_that_fails_leaves_the_operation_anchored_for_resume() {
         let mut w = World::healthy();
-        // As when Ctrl-C reaches the prover too: it dies, the run does not
-        // close the operation.
-        w.prover = fake_prover_dir("exit 1");
+        // The RPC fails the receipt proof's reads: the run does not close
+        // the operation.
         let h = w.mined_deposit(7);
+        w.evm
+            .witness_errors
+            .lock()
+            .unwrap()
+            .push_back(crate::deposit::evm::WitnessError::Retry(
+                "connection refused".into(),
+            ));
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         w.anchor_after(0);
@@ -2947,13 +2961,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_deposit_the_prover_finds_unprovable_closes_at_exit_35() {
+    async fn a_receipt_proof_over_the_gas_credit_closes_at_exit_35() {
         let mut w = World::healthy();
-        w.prover = fake_prover_dir(
-            "echo 'unprovable: the header, MPT paths, transaction and receipt need more than 128 \
-             keccak permutations' >&2; exit 3",
-        );
         let h = w.mined_deposit(7);
+        w.evm
+            .witnesses
+            .lock()
+            .unwrap()
+            .get_mut(&h)
+            .unwrap()
+            .receipt_proof = vec![Bytes::from(vec![0u8; 48 * 1024])];
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         w.anchor_after(0);
@@ -2961,7 +2978,7 @@ mod tests {
         let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::DepositUnprovable, "{e}");
         let m = e.to_string();
-        assert!(m.contains("keccak permutations"), "{m}");
+        assert!(m.contains("before the bridge accepts it"), "{m}");
         assert!(m.contains("Give the bridge operator:"), "{m}");
         assert!(!m.contains("--resume"), "{m}");
         assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was finalized");
@@ -2975,16 +2992,20 @@ mod tests {
         let (p, d) = resuming_on_the_real_clock(&w, &target);
         let again = resume(&p, &d, &target, None).await.unwrap_err();
         assert_eq!(again.exit_code(), ExitCode::DepositUnprovable, "{again}");
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 1, "not built again");
     }
 
     #[tokio::test]
-    async fn a_proof_the_prover_rejected_is_built_again_on_resume() {
+    async fn a_receipt_proof_that_failed_is_built_on_resume_and_its_refusal_is_exit_33() {
         let mut w = World::healthy();
-        let tool = w.prover.1.bin(crate::deposit::prover_files::PROVE_BIN);
-        let working = std::fs::read(&tool).unwrap();
-        prover_fails_after_writing(&w.prover.1);
         let h = w.mined_deposit(7);
+        w.evm
+            .witness_errors
+            .lock()
+            .unwrap()
+            .push_back(crate::deposit::evm::WitnessError::Retry(
+                "the receipts of block 0x90 do not rebuild its receiptsRoot".into(),
+            ));
         let a = w.approve_hash();
         w.wallet.send_results.extend([Ok(a), Ok(h)]);
         w.anchor_after(0);
@@ -2992,23 +3013,22 @@ mod tests {
         let e = run_with(&p, &d, &mut w.wallet).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
         assert_eq!(*w.an.sent.lock().unwrap(), 0, "nothing was finalized");
-        assert_eq!(w.prover_runs(), 1);
-        // The prover is fixed; the resume proves again before it sends, and
-        // the bridge's answer to that send ends it.
-        std::fs::write(&tool, working).unwrap();
+        assert_eq!(w.witness_builds(), 1);
+        // The RPC answers now; the resume builds the receipt proof before it
+        // sends, and the bridge's answer to that send ends it.
         w.an.sends
             .lock()
             .unwrap()
             .push_back(crate::deposit::refusals::FinalizeSend::Rejected {
-                exit_code: Some(220),
-                message: "proof rejected".into(),
+                exit_code: Some(302),
+                message: "receipt proof rejected".into(),
             });
         let target = OpRef::Op(e.op_id().unwrap().to_string());
         let (p, d) = resuming_on_the_real_clock(&w, &target);
         let e = resume(&p, &d, &target, None).await.unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::FinalizeRefused, "{e}");
         assert_eq!(*w.an.sent.lock().unwrap(), 1);
-        assert_eq!(w.prover_runs(), 2, "the proof sent is a new one");
+        assert_eq!(w.witness_builds(), 2, "the receipt proof sent is a new one");
     }
 
     #[tokio::test]
@@ -3043,9 +3063,8 @@ mod tests {
     // ---- steps 6 to 9 against the scripted Acki Nacki node ----
 
     /// A deposit that goes all the way — approved, mined, anchored at once,
-    /// credited — with `setup` applied to its world, run on the real clock
-    /// because it may reach the fake prover. The world, the result and what
-    /// the run showed.
+    /// credited — with `setup` applied to its world, run on the real clock.
+    /// The world, the result and what the run showed.
     async fn happy_world(
         setup: impl FnOnce(&mut World),
     ) -> (World, CliResult<DepositSuccess>, Arc<RecordingUi>) {
@@ -3078,7 +3097,7 @@ mod tests {
             matches!((paused, lost, proving), (Some(a), Some(b), Some(c)) if a < b && b < c),
             "{events:#?}"
         );
-        assert_eq!(w.prover_runs(), 1);
+        assert_eq!(w.witness_builds(), 1);
         assert_eq!(*w.an.sent.lock().unwrap(), 1);
     }
 
@@ -3102,7 +3121,11 @@ mod tests {
         ] {
             assert!(warned.contains(cause), "{cause}: {warned}");
         }
-        assert_eq!(w.prover_runs(), 1, "the proof for the same block is reused");
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the receipt proof for the same block is reused"
+        );
         assert_eq!(*w.an.sent.lock().unwrap(), 2);
     }
 
@@ -3114,7 +3137,7 @@ mod tests {
         let (w, r, ui) = happy_world(|w| w.voucher_deployed()).await;
         let s = r.unwrap();
         assert!(s.confirmation.is_some());
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 0);
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
         assert!(
             ui.events().iter().any(|e| matches!(
@@ -3253,62 +3276,6 @@ mod tests {
             r = resume(&p, &d, &target, None) => panic!("the first resume ended: {r:?}"),
             r = second => assert_eq!(r.unwrap_err().exit_code(), ExitCode::DuplicateRefused),
         }
-    }
-
-    #[tokio::test]
-    async fn two_deposits_with_their_own_state_share_a_cold_prover_and_build_its_key_once() {
-        // The fake prover refuses to run twice at once, and "builds the
-        // proving key" only when it is missing, logging each build.
-        let extra = "set -C; : > data/.busy || exit 99; set +C\n[ -f data/deposit_prover_k18.x.pk \
-                     ] || { echo gen >> data/keygen.log; : > data/deposit_prover_k18.x.pk; \
-                     }\nsleep 0.3; rm -f data/.busy";
-        let mut one = World::healthy();
-        one.prover = fake_prover_dir(extra);
-        // One sender and one deposit, seen from two state directories: the
-        // fake prover can hand out only one set of public inputs, and each
-        // run checks them against its own record of the deposit.
-        let mut two = World::healthy();
-        two.wallet.account = one.wallet.account;
-        two.wallet.signer = one.wallet.signer.clone();
-        for w in [&mut one, &mut two] {
-            let h = w.mined_deposit(7);
-            let a = w.approve_hash();
-            w.wallet.send_results.extend([Ok(a), Ok(h)]);
-            w.anchor_after(0);
-            w.credit_chain_for_mined_deposit();
-        }
-        let (ui1, ui2) = (
-            Arc::new(RecordingUi::new(true)),
-            Arc::new(RecordingUi::new(true)),
-        );
-        let (p1, mut d1) = on_the_real_clock(&one);
-        let (mut p2, mut d2) = on_the_real_clock(&two);
-        p2.prover_dir = p1.prover_dir.clone();
-        d1.ui = ui1.clone();
-        d2.ui = ui2.clone();
-        let (r1, r2) = tokio::join!(
-            run_with(&p1, &d1, &mut one.wallet),
-            run_with(&p2, &d2, &mut two.wallet)
-        );
-        r1.unwrap();
-        r2.unwrap();
-        let lines = |f: &str| {
-            std::fs::read_to_string(one.prover.1.data_dir().join(f))
-                .unwrap()
-                .lines()
-                .count()
-        };
-        assert_eq!(lines("keygen.log"), 1, "the proving key is built once");
-        assert_eq!(lines("runs.log"), 2, "each deposit got its own proof");
-        let waited = |ui: &RecordingUi| {
-            ui.statuses()
-                .iter()
-                .any(|s| s.contains("busy with another deposit"))
-        };
-        assert!(
-            waited(&ui1) || waited(&ui2),
-            "both reached the prover at the same time"
-        );
     }
 
     #[test]
@@ -3484,15 +3451,13 @@ mod tests {
         w.voucher_deployed();
         w.credit_chain_for_mined_deposit();
         let target = OpRef::Op(op);
-        let mut p = w.params(RunMode::Resume {
+        let p = w.params(RunMode::Resume {
             target: target.clone(),
             tx_hash: None,
         });
-        p.prover_dir = Some("/nonexistent/prover".into()); // not needed: the
-                                                           // voucher is there
         let s = resume(&p, &w.deps(), &target, None).await.unwrap();
         assert!(s.confirmation.is_some());
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3922,8 +3887,6 @@ mod tests {
             bridge_acc: W_BRIDGE_ACC,
             bridge_dapp: [0; 32],
             light_client: None,
-            prover: w.prover.1.clone(),
-            rpc_url: "http://rpc.invalid".into(),
             token: W_USDC,
         };
         let p = w.params(RunMode::Fresh);
@@ -4101,7 +4064,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_resume_without_the_proof_after_a_voucher_code_change_needs_no_prover() {
+    async fn a_resume_without_the_receipt_proof_after_a_voucher_code_change_builds_none() {
         // Finalized through the new voucher code: the stored voucher address
         // stays empty, and only the bridge's events show the deposit is done.
         let mut w = World::healthy();
@@ -4109,14 +4072,13 @@ mod tests {
         w.voucher_code_moved();
         w.credit_chain_for_mined_deposit();
         let target = OpRef::Op(op);
-        let mut p = w.params(RunMode::Resume {
+        let p = w.params(RunMode::Resume {
             target: target.clone(),
             tx_hash: None,
         });
-        p.prover_dir = Some("/nonexistent/prover".into());
         let s = resume(&p, &w.deps(), &target, None).await.unwrap();
         assert_eq!(s.confirmation.unwrap()["via_events"], true);
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4214,7 +4176,7 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("credited, never exit 31: {e}"));
         assert_eq!(s.confirmation.unwrap()["via_events"], false);
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 0);
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Credited);
@@ -4289,7 +4251,7 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("credited by its event: {e}"));
         assert_eq!(s.confirmation.unwrap()["via_events"], true);
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 0);
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Credited);
@@ -4320,108 +4282,11 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("credited: {e}"));
         assert!(s.confirmation.is_some());
-        assert_eq!(w.prover_runs(), 0, "no proof for a finalized deposit");
+        assert_eq!(w.witness_builds(), 0, "no proof for a finalized deposit");
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
     }
 
-    // ---- prover tools that are executable and still do not run ----
-
-    /// A tool the dynamic loader refuses, as a binary built against a newer
-    /// glibc than the host's.
-    const LOADER_REFUSES: &str = "#!/bin/sh\necho \"./fetch_deposit_data: \
-                                  /lib/x86_64-linux-gnu/libc.so.6: version \\`GLIBC_2.38' not \
-                                  found\" >&2\nexit 127\n";
-
-    /// Makes the world's prover tool `tool` an executable script `body`.
-    fn replace_tool(w: &World, tool: &str, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let path = w.prover.1.bin(tool);
-        std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_prover_tool_that_cannot_run_here_is_refused_before_the_wallet() {
-        use crate::deposit::prover_files::{FETCH_BIN, PROVE_BIN};
-        for (tool, body, said, mode) in [
-            (
-                FETCH_BIN,
-                LOADER_REFUSES,
-                "GLIBC_2.38' not found",
-                RunMode::Fresh,
-            ),
-            (
-                FETCH_BIN,
-                LOADER_REFUSES,
-                "GLIBC_2.38' not found",
-                RunMode::DryRun,
-            ),
-            (
-                PROVE_BIN,
-                "#!/nonexistent/interpreter\n",
-                "cannot be started",
-                RunMode::Fresh,
-            ),
-        ] {
-            let w = World::healthy();
-            replace_tool(&w, tool, body);
-            let p = w.params(mode.clone());
-            let e = run_with(&p, &w.deps(), &mut NeverPairs).await.unwrap_err();
-            assert_eq!(
-                e.exit_code(),
-                ExitCode::PreflightRefused,
-                "{tool} {mode:?}: {e}"
-            );
-            assert!(e.to_string().contains(tool), "{e}");
-            assert!(e.to_string().contains(said), "{e}");
-            assert!(
-                Store::open(&p.state_dir)
-                    .unwrap()
-                    .list()
-                    .unwrap()
-                    .is_empty(),
-                "no operation: the wallet was asked for nothing"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_resume_that_has_to_prove_refuses_a_prover_tool_that_cannot_run_by_its_stage() {
-        // Named before any chain is read: the EVM node is down, and a
-        // resume must not wait for it to say that the prover cannot run.
-        use crate::deposit::prover_files::FETCH_BIN;
-        for (at, exit) in [
-            (OpStage::Confirmed, ExitCode::AnWaitTimeout),
-            (OpStage::Anchored, ExitCode::DepositProofFailed),
-        ] {
-            let mut w = World::healthy();
-            let op = if at == OpStage::Confirmed {
-                w.confirmed_operation()
-            } else {
-                w.anchored_operation()
-            };
-            w.anchor_after(0);
-            replace_tool(&w, FETCH_BIN, LOADER_REFUSES);
-            w.evm
-                .fail_chain_id
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            let (p, target) = resuming(&w, &op);
-            let e = tokio::time::timeout(
-                Duration::from_secs(600),
-                resume(&p, &w.deps(), &target, None),
-            )
-            .await
-            .expect("refused without reading the EVM chain")
-            .unwrap_err();
-            assert_eq!(e.exit_code(), exit, "{at:?}: {e}");
-            assert!(e.to_string().contains("GLIBC_2.38' not found"), "{e}");
-            assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
-            let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
-            assert_eq!(rec.stage, at, "the record is unchanged");
-        }
-    }
-
-    // ---- a work directory that cannot hold the proof files ----
+    // ---- a work directory that cannot hold the receipt proof ----
 
     /// A regular file in the world's work directory.
     fn a_file_in(w: &World) -> std::path::PathBuf {
@@ -4607,10 +4472,11 @@ mod tests {
             W_AMOUNT,
             B256::from(W_ACC),
         );
-        w.evm.txs.lock().unwrap().insert(
-            original,
-            deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),
-        );
+        w.evm
+            .txs
+            .lock()
+            .unwrap()
+            .insert(original, deposit_tx(original, from, W_BRIDGE, 7, calldata));
         // Shown to the read that records its nonce, then gone.
         w.evm.vanishing_txs.lock().unwrap().insert(original, 1);
         let a = w.approve_hash();
@@ -4719,10 +4585,11 @@ mod tests {
             W_AMOUNT,
             B256::from(W_ACC),
         );
-        w.evm.txs.lock().unwrap().insert(
-            original,
-            deposit_tx(original, from, W_BRIDGE, 7, 2, calldata),
-        );
+        w.evm
+            .txs
+            .lock()
+            .unwrap()
+            .insert(original, deposit_tx(original, from, W_BRIDGE, 7, calldata));
         w.evm.vanishing_txs.lock().unwrap().insert(original, 1);
         let evm = w.evm.clone();
         let sends = std::sync::atomic::AtomicU32::new(0);

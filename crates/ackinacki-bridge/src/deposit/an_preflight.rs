@@ -34,27 +34,14 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The first bridge with the proven-token registry and token-aware voucher.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 16, 0));
+/// The first bridge whose `finalizeDeposit` takes the deposit's receipt
+/// proof: `(chainId, header, txIndex, receiptProof, logIndex)`.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 17, 0));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
-/// The mandatory protocol floor: the thirteen-input deposit key and the
-/// token-aware callback both arrive with 1.16.0, even in development builds.
-pub const DEPOSIT_KEY_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 16, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 17, 0);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
-
-/// Refuses a bridge older than this build's mandatory deposit interfaces.
-pub fn key_verdict(v: BridgeVersion, key_min: BridgeVersion) -> Result<(), String> {
-    if v < key_min {
-        return Err(format!(
-            "the bridge is version {v}; this CLI requires the deposit key and per-chain limit \
-             getters of bridge {key_min} and newer. Install the matching CLI and bridge pair"
-        ));
-    }
-    Ok(())
-}
 
 /// Read mandatory AN limits without treating RPC or ABI errors as an absent
 /// cap.
@@ -165,38 +152,28 @@ pub fn version_verdict(
         },
         Some(m) if v < m => {
             return Err(format!(
-                "the bridge is version {v}; this CLI needs {m} or newer, which cannot mint one \
-                 deposit twice"
+                "the bridge is version {v}; this CLI needs {m} or newer, which finalizes a \
+                 deposit from its receipt proof"
             ))
         },
         Some(_) => {},
     }
-    // A bridge NEWER than this build knows is refused, not warned about.
-    //
-    // The floor above catches a bridge carrying the previous deposit key. The
-    // ceiling catches the mirror case: a bridge whose key was rotated after
-    // this CLI was built. The prover would produce a proof for the key this
-    // build knows, `finalizeDeposit` would reject it, and the USDC would
-    // already be in the EVM bridge with no refund path — the same loss, from
-    // the other direction.
-    //
-    // This used to be a warning, on the assumption that a newer bridge keeps
-    // the same key. It does not: 1.12.0 rotated it. A warning on the one
-    // check standing between a run and an unrecoverable deposit is not a
-    // check.
-    //
-    // A development build still passes, so a bridge can be upgraded ahead of
-    // the CLI while both are being worked on.
+    // A bridge NEWER than this build knows is refused, not warned about:
+    // its finalizeDeposit may take other arguments than the ones this CLI
+    // sends, and the deposit would be refused with the USDC already in the
+    // EVM bridge. A development build still passes, so a bridge can be
+    // upgraded ahead of the CLI while both are being worked on.
     if v > newest {
         if dev_unfixed {
             warnings.push(format!(
-                    "development build: bridge {v} is newer than {newest} this CLI was built for, \
-                     and                  its deposit key may have been rotated; never ship this \
-                     build"
-                ));
+                "development build: bridge {v} is newer than {newest} this CLI was built for, and \
+                 its finalizeDeposit may take other arguments; never ship this build"
+            ));
         } else {
             return Err(format!(
-                "the bridge is version {v}, newer than {newest} this CLI was built for. Its                  deposit key may have been rotated, and this CLI proves for the older one: the                  deposit would be refused at finalizeDeposit with the USDC already in the EVM                  bridge. Install a CLI built for {v}"
+                "the bridge is version {v}, newer than {newest} this CLI was built for: its \
+                 finalizeDeposit may take other arguments, and the deposit would be refused with \
+                 the USDC already in the EVM bridge. Install a CLI built for {v}"
             ));
         }
     }
@@ -358,7 +335,6 @@ pub async fn run_with(
         .as_str()
         .and_then(BridgeVersion::parse)
         .ok_or_else(|| refuse(format!("getVersion answered {v}")))?;
-    key_verdict(version, DEPOSIT_KEY_BRIDGE_VERSION).map_err(refuse)?;
     for w in
         version_verdict(version, min, NEWEST_KNOWN_BRIDGE_VERSION, dev_unfixed).map_err(refuse)?
     {
@@ -591,9 +567,9 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
-        // A 1.16.0 bridge answers getL2Verifier; this chain is not a rollup,
+        // A 1.17.0 bridge answers getL2Verifier; this chain is not a rollup,
         // so it names none. Without the answer the read falls into
         // `transient`, which retries for ever.
         an.getter(BRIDGE, "getL2Verifier", vec![
@@ -632,7 +608,7 @@ mod tests {
             evm_bridge,
             &target,
             &ui,
-            Some(BridgeVersion(1, 6, 0)),
+            MIN_BRIDGE_VERSION,
             false,
             false,
         )
@@ -640,24 +616,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_deployment_without_limits_is_refused_by_version() {
+    async fn a_bridge_that_still_verifies_a_proof_is_refused_by_version() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.12.0", "value1": "eccUSDCBridge" }),
+            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.16.0"), "{error}");
-        assert!(error.to_string().contains("per-chain limit"), "{error}");
+        assert!(error.to_string().contains("1.17.0"), "{error}");
     }
 
-    /// A bridge whose version says 1.16.0 but whose code has no
+    /// A bridge whose version says 1.17.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -703,7 +678,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -777,8 +752,8 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // Newer than this build knows is a refusal, not a warning: the key may
-        // have been rotated, and proving for the older one loses the deposit.
+        // Newer than this build knows is a refusal, not a warning: its
+        // finalizeDeposit may take other arguments, and the deposit is lost.
         let ahead = version_verdict(BridgeVersion(1, 7, 0), min, BridgeVersion(1, 6, 0), false)
             .unwrap_err();
         assert!(ahead.contains("newer than"), "{ahead}");
@@ -800,39 +775,12 @@ mod tests {
         );
     }
 
+    /// A bridge newer than `NEWEST_KNOWN_BRIDGE_VERSION` is refused, so the
+    /// constant left behind by a contract release refuses every deposit.
+    /// This reads the version out of the contract source this build ships
+    /// and demands they agree.
     #[test]
-    fn a_bridge_older_than_the_deposit_key_is_refused() {
-        let key = DEPOSIT_KEY_BRIDGE_VERSION;
-        let e = key_verdict(BridgeVersion(1, 6, 0), key).unwrap_err();
-        assert!(e.contains("deposit key"), "{e}");
-        assert!(key_verdict(key, key).is_ok());
-        assert!(key_verdict(BridgeVersion(key.0, key.1, key.2 + 1), key).is_ok());
-    }
-
-    /// `DEPOSIT_KEY_BRIDGE_VERSION` is the floor the CLI refuses below, and
-    /// getting it wrong costs a deposit: a bridge at the old version passes
-    /// the check, `finalizeDeposit` rejects the proof, and the USDC is
-    /// already in the EVM bridge with no refund path.
-    ///
-    /// Every other test here is relative — it compares the constant with
-    /// itself — so none of them notices when the constant is left behind by
-    /// a contract rebuild. This one reads the version out of the contract
-    /// source this build ships and demands they agree. It caught nothing on
-    /// the way in; it exists because a merge of two branches that both
-    /// called themselves 1.11.0 left this constant pointing at a bridge
-    /// carrying the previous key.
-    ///
-    /// The floor moves with the deposit key, not with every release: 1.14.0
-    /// added the Arbitrum block verifier and kept 1.13.0's key, so the floor
-    /// stayed at 1.13.0 while both held the same key. 1.16.0 rotates it —
-    /// the circuit proves the deposited token — so the floor moves with it.
-    /// The key's VkBlob sha256, which the contract source records next to
-    /// the embedded key, is pinned here with the floor: a rotated key fails
-    /// this test until both are moved to the release that carries it.
-    #[test]
-    fn the_deposit_key_floor_matches_the_contract_this_build_ships() {
-        const FLOOR_KEY_SHA256: &str =
-            "f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9";
+    fn the_newest_known_bridge_is_the_contract_this_build_ships() {
         let src = include_str!("../../../../contracts/an/exchange/eccBridge.sol");
         let line = src
             .lines()
@@ -842,30 +790,13 @@ mod tests {
             .split('"')
             .nth(1)
             .expect("the version constant is a quoted string");
-        let key = src
-            .lines()
-            .find(|l| l.trim_start().starts_with("// sha256 = "))
-            .expect("eccBridge.sol records the embedded deposit key's sha256");
-
-        assert!(
-            key.contains(FLOOR_KEY_SHA256),
-            "the eccBridge this build ships embeds another deposit key ({}). Bump \
-             DEPOSIT_KEY_BRIDGE_VERSION to {shipped} and FLOOR_KEY_SHA256 to that key's sha256.",
-            key.trim(),
-        );
-        assert!(
-            DEPOSIT_KEY_BRIDGE_VERSION
-                <= BridgeVersion::parse(shipped).expect("the version constant parses"),
-            "DEPOSIT_KEY_BRIDGE_VERSION is {}, above the eccBridge this build ships \
-             ({shipped})",
-            DEPOSIT_KEY_BRIDGE_VERSION,
-        );
         assert_eq!(
             NEWEST_KNOWN_BRIDGE_VERSION.to_string(),
             shipped,
             "NEWEST_KNOWN_BRIDGE_VERSION is {}, the shipped contract is {shipped}",
             NEWEST_KNOWN_BRIDGE_VERSION,
         );
+        assert!(MIN_BRIDGE_VERSION.is_some_and(|m| m <= NEWEST_KNOWN_BRIDGE_VERSION));
     }
 
     #[test]
@@ -917,7 +848,7 @@ mod tests {
     async fn a_bridge_with_verifiers_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -937,7 +868,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),
@@ -961,13 +892,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bridge_with_the_previous_event_key_is_refused() {
+    async fn a_much_older_bridge_is_refused() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
             json!({ "value0": "1.10.0", "value1": "eccUSDCBridge" }),
         ]);
         let err = go(&an, [0; 32]).await.unwrap_err();
-        assert!(err.to_string().contains("deposit key"), "{err}");
+        assert!(err.to_string().contains("needs 1.17.0 or newer"), "{err}");
     }
 
     #[tokio::test]

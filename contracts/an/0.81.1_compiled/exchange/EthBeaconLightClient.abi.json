@@ -137,7 +137,7 @@
 			]
 		},
 		{
-			"name": "slotsPerYear",
+			"name": "provenWindowSlots",
 			"inputs": [
 			],
 			"outputs": [

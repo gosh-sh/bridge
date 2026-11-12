@@ -57,7 +57,6 @@ BRIDGE_VERIFIERS_DIR=../../contracts/ethereum/verifiers
 
 # --- Deposit (EVM → Acki Nacki) -----------------------------------------------
 # See `bridge_config.shellnet` for what each key holds.
-BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover
 BRIDGE_DEPOSIT_STATE_DIR=./deposit-state
 BRIDGE_DEPOSIT_CONFIRMATIONS=12
 

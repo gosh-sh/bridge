@@ -26,9 +26,9 @@ ARG RUST_IMAGE=rust:1-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 
 # ---------------------------------------------------------------------------
-# Sources, once, with the two pinned toolchains installed up front: every
-# builder stage inherits them instead of downloading them on its first cargo
-# call (one layer, cached while the rust-toolchain.toml files do not change).
+# Sources, once, with the pinned toolchain installed up front: every builder
+# stage inherits it instead of downloading it on its first cargo call (one
+# layer, cached while rust-toolchain.toml does not change).
 # ---------------------------------------------------------------------------
 FROM ${RUST_IMAGE} AS source
 # The cargo home is a cache mount in every builder stage: the lock file must
@@ -38,15 +38,12 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true \
     CARGO_HOME=/cargo
 WORKDIR /src
 COPY rust-toolchain.toml ./
-COPY deposit-prover/rust-toolchain.toml deposit-prover/
 # `rustup` itself lives in the image's cargo home, hence the explicit
 # CARGO_HOME for this one command; cargo's proxies find the toolchains in
 # RUSTUP_HOME whatever CARGO_HOME is.
 RUN channel() { sed -n 's/^channel = "\(.*\)"/\1/p' "$1"; } \
     && CARGO_HOME=/usr/local/cargo rustup toolchain install "$(channel rust-toolchain.toml)" \
-         --profile minimal --component rustfmt --component clippy \
-    && CARGO_HOME=/usr/local/cargo rustup toolchain install \
-         "$(channel deposit-prover/rust-toolchain.toml)" --profile minimal
+         --profile minimal --component rustfmt --component clippy
 COPY . .
 
 # relayer daemon-live, compute_bridge_anchors and the CLI:
@@ -73,20 +70,6 @@ RUN --mount=type=cache,id=cargo-home,target=/cargo \
     cd crates/bridge-evm-aggregator \
     && cargo build --release --locked --bin aggregate-proof \
     && install -D -m 0755 -t /out target/release/aggregate-proof
-
-# The three deposit-prover tools the deposit relayer and the CLI start, plus
-# downsize_srs for the params setup. Its own toolchain (nightly-2026-02-03).
-FROM source AS build-deposit-prover
-RUN --mount=type=cache,id=cargo-home,target=/cargo \
-    --mount=type=cache,id=target-deposit-prover,target=/src/deposit-prover/target \
-    cd deposit-prover \
-    && cargo build --release --locked \
-         --example fetch_deposit_data --example export_vk_blob \
-         --example export_blake2b_proof --example downsize_srs \
-    && install -D -m 0755 -t /out \
-         target/release/examples/fetch_deposit_data target/release/examples/export_vk_blob \
-         target/release/examples/export_blake2b_proof target/release/examples/downsize_srs \
-    && install -D -m 0644 -t /out configs/circuit_params.json
 
 FROM source AS build-deposit-relayer
 RUN --mount=type=cache,id=cargo-home,target=/cargo \
@@ -134,7 +117,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 FROM scratch AS tools
 COPY --from=build-prover-libs /out/ /
 COPY --from=build-aggregator /out/ /
-COPY --from=build-deposit-prover /out/ /
 COPY --from=build-deposit-relayer /out/ /
 COPY --from=build-lc-relayer /out/ /
 COPY --from=build-lc-prover /out/ /
@@ -191,26 +173,14 @@ WORKDIR /data/work
 ENTRYPOINT ["/opt/bridge/bin/container-entrypoint.sh"]
 CMD ["run"]
 
-# deposit-relayer daemon with the deposit-prover tools it starts. The
-# proving key and the SRS live in /data/params (DEPOSIT_PROVER_DIR).
+# deposit-relayer daemon. It proves nothing itself: it sends each deposit's
+# receipt proof, which the Acki Nacki bridge checks.
 FROM runtime-base AS bridge-deposit-relayer
 LABEL org.opencontainers.image.title="GOSH bridge: EVM -> Acki Nacki deposit relayer"
 COPY --from=build-deposit-relayer /out/deposit-relayer /opt/bridge/bin/
-COPY --from=build-deposit-prover /out/fetch_deposit_data /out/export_vk_blob \
-     /out/export_blake2b_proof /out/downsize_srs /opt/bridge/bin/
-COPY --from=build-deposit-prover /out/circuit_params.json /opt/bridge/deposit-prover/configs/
-# The tools read configs/circuit_params.json and data/ relative to their
-# working directory (DEPOSIT_PROVER_DIR): the config is in the image, data/
-# is the mounted params (the SRS, and the proving key the first proof writes).
 RUN chmod 0555 /opt/bridge/bin/* \
-    && ln -s /data/params /opt/bridge/deposit-prover/data \
     && cd /opt/bridge && sha256sum bin/* >IMAGE-SHA256SUMS && chmod 0444 IMAGE-SHA256SUMS
-ENV DEPOSIT_FETCH_DEPOSIT_DATA_BIN=/opt/bridge/bin/fetch_deposit_data \
-    DEPOSIT_EXPORT_VK_BLOB_BIN=/opt/bridge/bin/export_vk_blob \
-    DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN=/opt/bridge/bin/export_blake2b_proof \
-    DEPOSIT_PROVER_DIR=/opt/bridge/deposit-prover \
-    DEPOSIT_RELAYER_STATE_DIR=/data/state \
-    DEPOSIT_RELAYER_WORK_DIR=/data/work \
+ENV DEPOSIT_RELAYER_STATE_DIR=/data/state \
     DEPOSIT_RELAYER_LOG_DIR=/data/logs
 USER bridge
 WORKDIR /data/work
@@ -247,14 +217,11 @@ ENTRYPOINT ["/opt/bridge/bin/eth-lc-relayer"]
 CMD ["daemon"]
 
 # The operator's CLI with everything a deposit or a withdrawal runs:
-# the deposit-prover tools, the aggregator, cast and forge.
+# the aggregator, cast and forge.
 FROM runtime-base AS bridge-cli
 LABEL org.opencontainers.image.title="GOSH bridge: ackinacki-bridge CLI"
 COPY --from=build-prover-libs /out/ackinacki-bridge /out/compute_bridge_anchors /opt/bridge/bin/
 COPY --from=build-aggregator /out/aggregate-proof /opt/bridge/bin/
-COPY --from=build-deposit-prover /out/fetch_deposit_data /out/export_vk_blob \
-     /out/export_blake2b_proof /out/downsize_srs /opt/bridge/bin/
-COPY --from=build-deposit-prover /out/circuit_params.json /opt/bridge/deposit-prover/configs/
 COPY --from=foundry /out/cast /out/forge /opt/bridge/bin/
 COPY contracts/ethereum/verifiers/PrimaryAggregatorVerifier.bin \
      contracts/ethereum/verifiers/FallbackAggregatorVerifier.bin \
@@ -265,19 +232,14 @@ COPY contracts/ethereum/verifiers/PrimaryAggregatorVerifier.bin \
      contracts/ethereum/verifiers/LayerHashesAggregatorVerifier.sol \
      contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.sol \
      /opt/bridge/verifiers/
-# The CLI looks for the deposit prover's tools inside its prover directory
-# (configs/ in the image, data/ the mounted params) and for `aggregate-proof`
-# under `<aggregator dir>/target/release`, the layout of a source checkout:
-# links give the image that layout. The params are given by flags or env/cli.env.
+# The CLI looks for `aggregate-proof` under `<aggregator dir>/target/release`,
+# the layout of a source checkout: a link gives the image that layout. The
+# params are given by flags or env/cli.env.
 RUN chmod 0555 /opt/bridge/bin/* && chmod 0444 /opt/bridge/verifiers/* \
-    && ln -s /data/params/deposit-prover /opt/bridge/deposit-prover/data \
-    && ln -s /opt/bridge/bin/fetch_deposit_data /opt/bridge/deposit-prover/fetch_deposit_data \
-    && ln -s /opt/bridge/bin/export_blake2b_proof /opt/bridge/deposit-prover/export_blake2b_proof \
     && mkdir -p /opt/bridge/aggregator/target/release \
     && ln -s /opt/bridge/bin/aggregate-proof /opt/bridge/aggregator/target/release/aggregate-proof \
     && cd /opt/bridge && sha256sum bin/* verifiers/* >IMAGE-SHA256SUMS && chmod 0444 IMAGE-SHA256SUMS
-ENV BRIDGE_DEPOSIT_PROVER_DIR=/opt/bridge/deposit-prover \
-    BRIDGE_AGGREGATOR_DIR=/opt/bridge/aggregator \
+ENV BRIDGE_AGGREGATOR_DIR=/opt/bridge/aggregator \
     BRIDGE_VERIFIERS_DIR=/opt/bridge/verifiers
 USER bridge
 WORKDIR /data/work

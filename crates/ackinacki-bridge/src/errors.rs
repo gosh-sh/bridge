@@ -87,7 +87,7 @@ pub enum ExitCode {
     EthSubmitFailed = 13,
     /// Deposit: the wallet did not pair, the user cancelled, the pairing
     /// expired, or the account is a smart-contract account whose deposit
-    /// the circuit cannot prove. Nothing was sent.
+    /// this CLI cannot follow. Nothing was sent.
     WalletFailed = 20,
     /// Deposit: `approve` reverted or was rejected, or the wallet set a
     /// spending limit below the amount. No USDC moved.
@@ -108,8 +108,11 @@ pub enum ExitCode {
     /// `finalizeDeposit` was sent and the credit could not be confirmed in
     /// time. The outcome is unknown: `--resume`.
     CreditUnconfirmed = 34,
-    /// The deposit is on chain but cannot be proven, or it is not the
-    /// deposit that was requested. Only the operator can return the USDC.
+    /// The deposit is on chain but the Acki Nacki bridge cannot finalize it
+    /// from its receipt (the log is not the bridge's `Deposit`, the
+    /// transaction or log index does not fit `uint16`, or checking the
+    /// receipt proof needs more gas than an external message may spend), or
+    /// it is not the deposit that was requested.
     DepositUnprovable = 35,
     /// The deposit voucher exists and the bridge transaction that should
     /// have minted the credit aborted. Only the operator can pay it out.

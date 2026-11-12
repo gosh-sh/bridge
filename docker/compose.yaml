@@ -93,9 +93,9 @@ services:
     # A tick may be inside a multi-minute proof; let it finish on stop.
     stop_grace_period: 20m
 
-  # EVM -> Acki Nacki: proves Deposit events and finalizes them on
-  # eccBridge. The deposit-prover tools are in the image; the SRS and the
-  # proving key they read and write are /data/params.
+  # EVM -> Acki Nacki: finalizes Deposit events on eccBridge with each
+  # deposit's receipt proof, read from the source chain's RPC. Nothing to
+  # prove, so no params.
   deposit-relayer:
     <<: *service
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-deposit-relayer:${BRIDGE_IMAGE_TAG:?}
@@ -118,18 +118,8 @@ services:
         target: /data/state
         bind: { create_host_path: false }
       - type: bind
-        source: ${BRIDGE_DATA}/deposit-relayer/work
-        target: /data/work
-        bind: { create_host_path: false }
-      - type: bind
         source: ${BRIDGE_DATA}/deposit-relayer/logs
         target: /data/logs
-        bind: { create_host_path: false }
-      # Writable: export_blake2b_proof generates the proving key into data/
-      # on the first proof.
-      - type: bind
-        source: ${BRIDGE_DATA}/params/deposit-prover
-        target: /data/params
         bind: { create_host_path: false }
     ports:
       - "${METRICS_LISTEN_ADDR:?}:${DEPOSIT_RELAYER_METRICS_PORT:-9467}:9467"
@@ -150,14 +140,16 @@ services:
     image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-eth-lc-relayer:${BRIDGE_IMAGE_TAG:?}
     pull_policy: ${BRIDGE_PULL_POLICY:-missing}
     # Rotates are proven here: the stages peak at ~50 GB RSS (the tree), and
-    # the step prover (~25 GB) keeps running beside them, so a memory limit,
-    # if one is set, has to sit above ~75 GB.
+    # the step proofs (~25 GB each, LIGHT_CLIENT_PARALLEL_PROOFS at once,
+    # default 2) keep running beside them, so a memory limit, if one is set,
+    # has to sit above ~100 GB (~75 GB with LIGHT_CLIENT_PARALLEL_PROOFS=1).
     command: ["daemon", "--no-flip-owner", "--owner-hop", "--poll-secs", "64", "--prove-timeout-secs", "7200", "--rotate-timeout-secs", "10800"]
     env_file:
       - path: ${BRIDGE_OPT}/env/eth-lc-relayer.env
         required: true
     environment:
       AN_KEYS_PATH: /run/keys/an-owner.keys.json
+      ETH_LC_RELAYER_METRICS_ADDR: 0.0.0.0:9468
     volumes:
       - type: bind
         source: ${BRIDGE_OPT}/keys/an-owner.keys.json
@@ -183,6 +175,10 @@ services:
         source: ${BRIDGE_DATA}/params/lc-prover
         target: /data/params
         bind: { create_host_path: false }
+    ports:
+      # The LAN address is required: without one Docker publishes the port on
+      # every interface, past the host firewall.
+      - "${METRICS_LISTEN_ADDR:?}:${ETH_LC_RELAYER_METRICS_PORT:-9468}:9468"
     # A tick may be inside a step proof (up to --prove-timeout-secs). A rotate
     # stage is not waited for: it is killed, and the stages it finished stay
     # in /data/work/rotate-<P>/.
@@ -262,9 +258,10 @@ services:
         target: /data/params/pk_cache
         bind: { create_host_path: false }
 
-  # The step proving key for the light-client prover of this image: generated
-  # once per image into /data/params/step-key (the prover refuses a key another
-  # build generated). Minutes and a few GB.
+  # The step proving key for the light-client prover of this image, generated
+  # into /data/params/step-key ahead of the first proof. Optional: the first
+  # proof of an image generates it there itself, and a key another build
+  # generated is replaced. Minutes and a few GB.
   lc-keygen:
     <<: *service
     profiles: [ops]

@@ -1,29 +1,19 @@
-//! [`AnSubmitter`] — abstraction over "how do we deliver the proof to Acki
-//! Nacki and finalise the deposit?".
+//! [`AnSubmitter`] — abstraction over "how do we deliver the deposit to Acki
+//! Nacki and finalise it?".
 //!
-//! The AN-side entry point is `USDCBridge.finalizeDeposit(bytes proof, bytes
-//! publicInputs)` (acki-nacki branch `poseidon_dex`, deployed on shellnet
-//! 2026-06-22; verified by code-hash match against
-//! `contracts/0.79.3_compiled/exchange/USDCBridge.tvc`). The contract parses
-//! every deposit field straight out of the `publicInputs` operand (12 × 32-byte
-//! little-endian `Fr`), verifies the triple via
-//! `gosh.zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)` (opcode `0xC7
-//! 0x4A`; the `VK_BLOB` is the deploy-time 12-input deposit VkBlob embedded in
-//! the contract, **not** a per-call argument), reconstructs the recipient
-//! account as `(anAccountHigh << 128 | anAccountLow)` from the proven inputs,
-//! consumes a proof-bound deposit nullifier (deployed as a per-deposit
-//! `DepositVoucher`), and credits that proven account. An EVM address is not a
-//! valid AN recipient, so binding the destination account in the proof (rather
-//! than trusting an off-circuit relayer hint) is what makes the credit
-//! trust-minimised.
-//!
-//! Because the contract reads the operand directly, the relayer forwards only
-//! the two raw byte blobs — there are no per-field scalar call arguments, and
-//! the relayer cannot tamper with any proven field.
+//! The AN-side entry point is `eccBridge.finalizeDeposit(uint256 chainId,
+//! bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)`. The
+//! bridge requires `keccak256(header)` to be an accepted block of `chainId`
+//! (exit 224 otherwise, before it accepts the message), proves the receipt of
+//! transaction `txIndex` against the header's `receiptsRoot`, reads log
+//! `logIndex` of that receipt as the bridge's `Deposit` event, and deploys a
+//! per-deposit `DepositVoucher`, whose `confirmDeposit` call back into the
+//! bridge mints. Every deposit field comes from the proven receipt; the
+//! relayer cannot change any of them.
 //!
 //! Two implementations:
 //!
-//! - [`MockAnSubmitter`] — an in-memory mirror of the nullifier semantics, used
+//! - [`MockAnSubmitter`] — an in-memory mirror of the voucher semantics, used
 //!   by the unit tests to drive the relayer through many deposits without a
 //!   live AN node.
 //! - [`AnInterfaceSubmitter`] — wraps any [`acki_nacki_interface::IAckiNacki`]
@@ -52,8 +42,9 @@ use tvm_client::{abi::Abi, ClientContext};
 
 use crate::{
     error::RelayerError,
-    types::{DepositEvent, DepositProofBundle, NUM_PUBLIC_INPUTS},
+    types::DepositEvent,
     voucher::{self, DepositIdentity},
+    witness::{check_gas_credit, check_witness_matches, DepositWitness},
 };
 
 /// Outcome of an [`AnSubmitter::submit`] call.
@@ -68,127 +59,45 @@ pub enum SubmitOutcome {
     /// finalised it, or we retried after a successful submit we didn't
     /// observe). Treated as success for progress purposes.
     AlreadyFinalized,
-    /// AN rejected the submission (proof verification failed, malformed
-    /// call). The relayer logs and records an attempt.
+    /// AN rejected the submission (receipt proof refused, malformed call).
+    /// The relayer logs and records an attempt.
     Rejected { reason: String },
     /// The tx was broadcast but confirmation timed out while still pending.
-    /// Distinct from [`Rejected`] — the relayer retries without treating it
-    /// as a verifier failure.
+    /// Distinct from [`Rejected`] — the relayer retries without counting it
+    /// as a failed attempt.
     Pending { reason: String },
 }
 
 #[async_trait]
 pub trait AnSubmitter: Send + Sync {
-    /// Read the AN bridge's canonical-chain gate before starting the prover.
-    /// Errors must propagate: an unreadable gate is not permission to submit.
+    /// Read the AN bridge's canonical-chain gate before building the receipt
+    /// proof. Errors must propagate: an unreadable gate is not permission to
+    /// submit.
     async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
 
     /// Cheap pre-check: has this deposit already been finalised on AN? Used
-    /// to skip the expensive proof-generation step on replays. A backend that
+    /// to skip building and sending on replays. A backend that
     /// can't tell returns `Ok(false)` (the submit path is still safe — AN
     /// rejects double-finalisation).
     async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
 
-    /// Deliver the proof bundle and finalise the deposit.
+    /// Send `finalizeDeposit` with `witness` and finalise the deposit.
     async fn submit(
         &self,
         event: &DepositEvent,
-        bundle: &DepositProofBundle,
+        witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError>;
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// finalizeDeposit call encoding
-// ─────────────────────────────────────────────────────────────────────
-
-/// Diagnostic (non-ABI) serialization of a proof bundle's public inputs +
-/// proof.
-///
-/// **Not** the on-chain call ABI. The live `finalizeDeposit(bytes proof, bytes
-/// publicInputs)` call is encoded by [`build_finalize_deposit_params`] + the
-/// tvm_client ABI encoder. This function produces a deterministic,
-/// self-describing big-endian layout used only by debug tooling and the
-/// round-trip unit test (it asserts the twelve decoded scalars survive a
-/// re-encode):
-///
-/// ```text
-///   NUM_PUBLIC_INPUTS × 32-byte big-endian scalars (the proof's public inputs):
-///     depositId, sender, amount, contractAddress, chainId,
-///     dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-///     blockHashHigh, blockHashLow, promiseCommit
-///   u32 BE proof length
-///   proof bytes (raw Blake2b SHPLONK)
-/// ```
-pub fn encode_finalize_deposit(bundle: &DepositProofBundle) -> Vec<u8> {
-    let pi = &bundle.parsed;
-    let mut out = Vec::with_capacity(NUM_PUBLIC_INPUTS * 32 + 4 + bundle.proof.len());
-    for scalar in [
-        pi.deposit_id,
-        pi.sender,
-        pi.amount,
-        pi.contract_address,
-        pi.chain_id,
-        pi.dapp_id_high,
-        pi.dapp_id_low,
-        pi.an_account_high,
-        pi.an_account_low,
-        pi.block_hash_high,
-        pi.block_hash_low,
-        pi.token,
-        pi.promise_commit,
-    ] {
-        out.extend_from_slice(&scalar.to_be_bytes::<32>());
-    }
-    out.extend_from_slice(&(bundle.proof.len() as u32).to_be_bytes());
-    out.extend_from_slice(&bundle.proof);
-    out
-}
-
-/// Header size of an [`encode_finalize_deposit`] body (before the proof bytes):
-/// the public-input scalars + a u32 length.
-const FINALIZE_HEADER_LEN: usize = NUM_PUBLIC_INPUTS * 32 + 4;
-
-/// Decoded `finalizeDeposit` body: the public-input scalars and the raw proof
-/// bytes. `chainId` is `scalars[4]`; dappId is `scalars[5..7]`; the AN account
-/// is `scalars[7..9]`.
-pub type DecodedFinalize = ([U256; NUM_PUBLIC_INPUTS], Vec<u8>);
-
-/// Decode a body produced by [`encode_finalize_deposit`] back into the
-/// public-input scalars and proof bytes. Used by round-trip tests (and any
-/// future debug tooling).
-pub fn decode_finalize_deposit(body: &[u8]) -> Result<DecodedFinalize, RelayerError> {
-    if body.len() < FINALIZE_HEADER_LEN {
-        return Err(RelayerError::other("finalizeDeposit body too short"));
-    }
-    let mut scalars = [U256::ZERO; NUM_PUBLIC_INPUTS];
-    for (i, scalar) in scalars.iter_mut().enumerate() {
-        let mut be = [0u8; 32];
-        be.copy_from_slice(&body[i * 32..(i + 1) * 32]);
-        *scalar = U256::from_be_bytes::<32>(be);
-    }
-    let mut off = NUM_PUBLIC_INPUTS * 32;
-    let mut len_be = [0u8; 4];
-    len_be.copy_from_slice(&body[off..off + 4]);
-    off += 4;
-    let proof_len = u32::from_be_bytes(len_be) as usize;
-    if body.len() != off + proof_len {
-        return Err(RelayerError::other(format!(
-            "finalizeDeposit body length {} != header({off}) + proof({proof_len})",
-            body.len()
-        )));
-    }
-    Ok((scalars, body[off..].to_vec()))
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // MockAnSubmitter — in-memory nullifier mirror
 // ─────────────────────────────────────────────────────────────────────
 
-/// Verifier decision callback — returns `true` if the AN-side opcode would
-/// accept the bundle. Tests inject `false` to drive the rejection path.
-pub type VerifierDecision = Arc<dyn Fn(&DepositProofBundle) -> bool + Send + Sync>;
+/// Verifier decision callback — returns `true` if the AN bridge would accept
+/// the receipt proof. Tests inject `false` to drive the rejection path.
+pub type VerifierDecision = Arc<dyn Fn(&DepositWitness) -> bool + Send + Sync>;
 
-/// In-memory mirror of the AN `finalizeDeposit` nullifier semantics.
+/// In-memory mirror of the AN `finalizeDeposit` voucher semantics.
 pub struct MockAnSubmitter {
     inner: Mutex<MockInner>,
     verifier: VerifierDecision,
@@ -200,7 +109,7 @@ struct MockInner {
 }
 
 impl MockAnSubmitter {
-    /// All bundles accepted (the common happy path).
+    /// Every receipt proof accepted (the common happy path).
     pub fn accepting() -> Self {
         Self::with_verifier(Arc::new(|_| true))
     }
@@ -257,18 +166,18 @@ impl AnSubmitter for MockAnSubmitter {
     async fn submit(
         &self,
         event: &DepositEvent,
-        bundle: &DepositProofBundle,
+        witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
-        // The proof must bind to the deposit we're finalising.
-        bundle.check_binds_to(event)?;
+        check_witness_matches(event, witness)?;
+        check_gas_credit(witness)?;
 
         let mut inner = self.inner.lock().expect("poisoned lock");
         if inner.nullifiers.contains(&event.deposit_id) {
             return Ok(SubmitOutcome::AlreadyFinalized);
         }
-        if !(self.verifier)(bundle) {
+        if !(self.verifier)(witness) {
             return Ok(SubmitOutcome::Rejected {
-                reason: "ZKHALO2VERIFYWITHVK rejected the deposit proof".to_string(),
+                reason: "the mock bridge refused the receipt proof".to_string(),
             });
         }
         inner.nullifiers.insert(event.deposit_id);
@@ -283,12 +192,8 @@ impl AnSubmitter for MockAnSubmitter {
 // AnInterfaceSubmitter — live delivery over IAckiNacki
 // ─────────────────────────────────────────────────────────────────────
 
-/// Static configuration for the live submitter.
-///
-/// The deployed `finalizeDeposit(bytes proof, bytes publicInputs)` call carries
-/// no token id and no caller-supplied gas (the contract is hardcoded to ECC[3]
-/// USDC and pays its own gas after `tvm.accept()`), so neither is part of this
-/// config.
+/// Static configuration for the live submitter. `finalizeDeposit` carries
+/// no caller-supplied gas: the bridge pays its own after `tvm.accept()`.
 #[derive(Clone, Debug)]
 pub struct AnSubmitConfig {
     /// Relayer signer in SDK 3.0 `dapp_id::account_id` form.
@@ -299,35 +204,14 @@ pub struct AnSubmitConfig {
     pub confirm_timeout_secs: u64,
 }
 
-/// Build JSON parameters for `USDCBridge.finalizeDeposit(bytes proof, bytes
-/// publicInputs)` from a proof bundle.
-///
-/// The deployed contract (acki-nacki `poseidon_dex`) parses every deposit field
-/// out of the `publicInputs` operand itself and verifies the triple against its
-/// embedded `VK_BLOB`, so the relayer forwards only the two raw byte blobs:
-///
-/// - `proof` — raw Blake2b-transcript SHPLONK bytes.
-/// - `publicInputs` — `NUM_PUBLIC_INPUTS` × 32-byte little-endian `Fr`, exactly
-///   the operand the AN-side opcode's `public_inputs_cell` carries.
-///
-/// Both are encoded as plain hex (no `0x`) for the tvm_client ABI JSON encoder.
-/// The relayer cannot tamper with any proven field — the contract reads them
-/// from the operand the opcode verifies.
-pub fn build_finalize_deposit_params(bundle: &DepositProofBundle) -> serde_json::Value {
-    json!({
-        "proof": hex::encode(&bundle.proof),
-        "publicInputs": hex::encode(&bundle.public_inputs),
-    })
-}
-
 /// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
 /// [`IAckiNacki`] client.
 ///
 /// With [`Self::with_voucher_check`], `is_finalized` looks for the deposit's
 /// `DepositVoucher` on AN (see [`crate::voucher`]); without it, or when the
-/// lookup fails, it returns `Ok(false)` and the deposit is proven and
-/// submitted. That is safe: a duplicate `finalizeDeposit` still exits 0, but
-/// its voucher deploy fails with exit 51, which [`settle_finalize`] reports as
+/// lookup fails, it returns `Ok(false)` and the deposit is submitted. That is
+/// safe: a duplicate `finalizeDeposit` still exits 0, but its voucher deploy
+/// fails with exit 51, which [`settle_finalize`] reports as
 /// [`SubmitOutcome::AlreadyFinalized`].
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
@@ -417,18 +301,19 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         Ok(info.is_some_and(|i| i.active))
     }
 
-    /// Submit an already-generated bundle directly, without binding it to a
-    /// [`DepositEvent`]. The proof's public inputs are the sole authority (the
-    /// AN-side opcode verifies them against the embedded VK), so this is the
-    /// path used by the `finalize-one` operator command / contract self-test
-    /// where the original Ethereum event is not re-fetched.
-    pub async fn submit_bundle(
+    /// Submit a witness directly, without a [`DepositEvent`] to compare it
+    /// with: the bridge reads every deposit field from the proven receipt, so
+    /// this is the path of the `finalize-one` operator command, where the
+    /// Ethereum event is not fetched again. A witness the bridge could not
+    /// check within its gas credit is refused before anything is sent.
+    pub async fn submit_witness(
         &self,
-        bundle: &DepositProofBundle,
+        witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
+        check_gas_credit(witness)?;
         let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
         let to = ExtendedAddress::parse(&self.config.token_bridge).map_err(RelayerError::from)?;
-        let params = build_finalize_deposit_params(bundle);
+        let params = witness.finalize_params();
         let call = ContractCallRequest {
             from,
             to,
@@ -504,8 +389,8 @@ const EXIT_CELL_UNDERFLOW: i32 = 9;
 // eccBridge `modifiers/errors.sol`.
 const EXIT_ZERO_AMOUNT: i32 = 204;
 const EXIT_INVALID_SENDER: i32 = 207;
+const EXIT_OVERFLOW: i32 = 214;
 const EXIT_HASH_MISMATCH: i32 = 219;
-const EXIT_INVALID_ZKPROOF: i32 = 220;
 const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 const EXIT_UNKNOWN_BLOCK: i32 = 224;
 const EXIT_ZERO_RECIPIENT: i32 = 230;
@@ -514,6 +399,24 @@ const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
 const EXIT_TVL_CAP: i32 = 235;
 const EXIT_TOKEN_UNREGISTERED: i32 = 241;
 const EXIT_TOKEN_DEPOSITS_DISABLED: i32 = 243;
+const EXIT_NOT_DEPOSIT_LOG: i32 = 244;
+
+// eccBridge `EthTrie.sol`: the receipt proof.
+const EXIT_TRIE_SHORT: i32 = 300;
+const EXIT_TRIE_RLP: i32 = 301;
+const EXIT_TRIE_NODE_HASH: i32 = 302;
+const EXIT_TRIE_PATH: i32 = 303;
+const EXIT_TRIE_INLINE: i32 = 304;
+const EXIT_TRIE_ABSENT: i32 = 305;
+const EXIT_NO_LOG: i32 = 307;
+const EXIT_RECEIPT_STATUS: i32 = 308;
+
+/// What 300–305 share: the proof does not lead from the header's
+/// `receiptsRoot` to the receipt.
+const RECEIPT_PROOF_HINT: &str = "the receipt proof does not match the header's receiptsRoot; the \
+                                  relayer builds a fresh one on the next attempt. If it keeps \
+                                  failing, the source RPC serves receipts that are not the \
+                                  block's: point --rpc-url at another node";
 
 /// Names the `finalizeDeposit` revert and, where the cause is bridge
 /// configuration rather than a bad deposit, says which call fixes it. The
@@ -523,9 +426,30 @@ const EXIT_TOKEN_DEPOSITS_DISABLED: i32 = 243;
 fn describe_exit_code(code: i32) -> Option<&'static str> {
     match code {
         EXIT_ZERO_AMOUNT => Some("ERR_ZERO_AMOUNT — the proven deposit amount is zero"),
-        EXIT_INVALID_ZKPROOF => Some(
-            "ERR_INVALID_ZKPROOF — proof rejected by the opcode; check the deployed VK_BLOB is \
-             this prover's VkBlob",
+        EXIT_OVERFLOW => Some("ERR_OVERFLOW — the proven deposit amount does not fit a uint64"),
+        EXIT_NOT_DEPOSIT_LOG => Some(
+            "ERR_NOT_DEPOSIT_LOG — the log at logIndex of the proven receipt is not a Deposit \
+             event in the shape the bridge reads (three topics, four data words); the EVM bridge \
+             emitting it is not the one this AN bridge was built for",
+        ),
+        EXIT_TRIE_SHORT => Some("EthTrie ERR_SHORT — a receipt proof item ends early"),
+        EXIT_TRIE_RLP => Some("EthTrie ERR_RLP — a receipt proof item is malformed"),
+        EXIT_TRIE_NODE_HASH => {
+            Some("EthTrie ERR_NODE_HASH — a receipt proof node does not hash to its parent")
+        },
+        EXIT_TRIE_PATH => Some("EthTrie ERR_PATH — the receipt proof does not follow txIndex"),
+        EXIT_TRIE_INLINE => Some(
+            "EthTrie ERR_INLINE — the receipt trie of this block has a node under 32 bytes, which \
+             the bridge cannot walk; the deposit needs the EVM bridge operator",
+        ),
+        EXIT_TRIE_ABSENT => Some("EthTrie ERR_ABSENT — no receipt at txIndex in this block"),
+        EXIT_NO_LOG => Some(
+            "EthTrie ERR_NO_LOG — the proven receipt has no log at logIndex; logIndex counts \
+             within the receipt, not the block",
+        ),
+        EXIT_RECEIPT_STATUS => Some(
+            "EthTrie ERR_RECEIPT_STATUS — the deposit transaction failed on the source chain, so \
+             there is no deposit to finalize",
         ),
         EXIT_UNSUPPORTED_SRC_CHAIN => Some(
             "ERR_UNSUPPORTED_SRC_CHAIN — the proven (chainId, source contract) pair is not \
@@ -568,9 +492,14 @@ fn describe_voucher_exit(code: Option<i32>) -> &'static str {
 }
 
 fn rejected(code: i32, context: &str, detail: &str) -> SubmitOutcome {
-    let reason = match describe_exit_code(code) {
-        Some(hint) => format!("{hint} (exit_code={code}): {detail}"),
-        None => format!("{context} (exit_code={code}): {detail}"),
+    let reason = match (describe_exit_code(code), code) {
+        (
+            Some(hint),
+            EXIT_TRIE_SHORT | EXIT_TRIE_RLP | EXIT_TRIE_NODE_HASH | EXIT_TRIE_PATH
+            | EXIT_TRIE_ABSENT,
+        ) => format!("{hint}; {RECEIPT_PROOF_HINT} (exit_code={code}): {detail}"),
+        (Some(hint), _) => format!("{hint} (exit_code={code}): {detail}"),
+        (None, _) => format!("{context} (exit_code={code}): {detail}"),
     };
     SubmitOutcome::Rejected {
         reason,
@@ -749,7 +678,7 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
                 warn!(
                     deposit_id = event.deposit_id,
                     error = %e,
-                    "voucher pre-check failed; proving the deposit anyway",
+                    "voucher pre-check failed; submitting the deposit anyway",
                 );
                 Ok(false)
             },
@@ -759,10 +688,10 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
     async fn submit(
         &self,
         event: &DepositEvent,
-        bundle: &DepositProofBundle,
+        witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
-        bundle.check_binds_to(event)?;
-        self.submit_bundle(bundle).await
+        check_witness_matches(event, witness)?;
+        self.submit_witness(witness).await
     }
 }
 
@@ -772,7 +701,7 @@ mod tests {
     use alloy::primitives::{Address, B256};
 
     use super::*;
-    use crate::{prover::MockProofGenerator, types::DepositEvent};
+    use crate::{types::DepositEvent, witness::MockWitnessBuilder};
 
     #[test]
     fn anchor_getter_params_use_decimal_chain_and_ethereum_order_hex_hash() {
@@ -828,46 +757,15 @@ mod tests {
         }
     }
 
-    fn bundle(ev: &DepositEvent) -> DepositProofBundle {
-        let pi = MockProofGenerator::derive_public_inputs(ev, U256::from(0xD499u64));
-        DepositProofBundle {
-            vk_blob: vec![1, 2, 3].into(),
-            public_inputs: pi.to_operand().into(),
-            proof: vec![0xAB; 48].into(),
-            parsed: pi,
-        }
-    }
-
-    #[test]
-    fn finalize_call_roundtrips() {
-        let ev = event(7);
-        let b = bundle(&ev);
-        let body = encode_finalize_deposit(&b);
-        let (scalars, proof) = decode_finalize_deposit(&body).unwrap();
-        assert_eq!(scalars.len(), NUM_PUBLIC_INPUTS);
-        assert_eq!(scalars[0], U256::from(7u64)); // depositId
-        assert_eq!(scalars[2], U256::from(42u64)); // amount
-        assert_eq!(scalars[4], b.parsed.chain_id); // proven chainId
-                                                   // dappId is the config tag (scalars 5/6); the AN account high/low halves
-                                                   // (scalars 7/8) reconstruct the proven recipient account.
-        let dapp_id = (scalars[5] << 128) | scalars[6];
-        assert_eq!(dapp_id, b.parsed.dapp_id());
-        let reconstructed = (scalars[7] << 128) | scalars[8];
-        assert_eq!(reconstructed, U256::from_be_slice(ev.an_account.as_slice()));
-        // The token is appended at slot 11 and the promise commitment moves
-        // to 12: the AN side reads these positionally, so the order the body
-        // is written in is part of the ABI.
-        assert_eq!(scalars[11], U256::from_be_slice(ev.token.as_slice()));
-        assert_eq!(scalars[11], b.parsed.token);
-        assert_eq!(scalars[12], b.parsed.promise_commit);
-        assert_eq!(proof, b.proof.to_vec());
+    fn witness(ev: &DepositEvent) -> DepositWitness {
+        MockWitnessBuilder::new().witness_for(ev)
     }
 
     #[tokio::test]
     async fn mock_finalizes_then_replay_is_already_finalized() {
         let sub = MockAnSubmitter::accepting();
         let ev = event(1);
-        let b = bundle(&ev);
+        let b = witness(&ev);
 
         assert!(!sub.is_finalized(&ev).await.unwrap());
         assert!(matches!(
@@ -886,42 +784,32 @@ mod tests {
     async fn mock_rejects_when_verifier_says_no() {
         let sub = MockAnSubmitter::with_verifier(Arc::new(|_| false));
         let ev = event(2);
-        let b = bundle(&ev);
+        let b = witness(&ev);
         match sub.submit(&ev, &b).await.unwrap() {
             SubmitOutcome::Rejected {
                 reason,
-            } => assert!(reason.contains("ZKHALO2VERIFYWITHVK")),
+            } => assert!(reason.contains("refused the receipt proof")),
             other => panic!("expected Rejected, got {other:?}"),
         }
     }
 
-    #[test]
-    fn finalize_params_are_proof_and_public_inputs_hex() {
-        let ev = event(1);
-        let b = bundle(&ev);
-        let params = build_finalize_deposit_params(&b);
-        // Exactly the two `bytes` args the deployed contract expects.
-        let obj = params.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
+    #[tokio::test]
+    async fn an_oversized_witness_is_refused_before_anything_is_sent() {
+        use acki_nacki_interface::MockAckiNacki;
 
-        let proof = params["proof"].as_str().unwrap();
-        assert!(!proof.starts_with("0x"), "proof must be plain hex");
-        assert_eq!(hex::decode(proof).unwrap(), b.proof.to_vec());
-
-        let public_inputs = params["publicInputs"].as_str().unwrap();
-        assert!(
-            !public_inputs.starts_with("0x"),
-            "publicInputs must be plain hex"
-        );
-        let pi_bytes = hex::decode(public_inputs).unwrap();
-        assert_eq!(pi_bytes, b.public_inputs.to_vec());
-        // The operand must be the canonical 12 × 32-byte LE layout the opcode reads.
-        assert_eq!(pi_bytes.len(), NUM_PUBLIC_INPUTS * 32);
-        // And it must round-trip back to the same parsed inputs.
-        assert_eq!(
-            crate::types::DepositPublicInputs::from_operand(&pi_bytes).unwrap(),
-            b.parsed
-        );
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = AnInterfaceSubmitter::new(client.clone(), AnSubmitConfig {
+            from: "unused".into(),
+            token_bridge: "unused".into(),
+            confirm_timeout_secs: 1,
+        });
+        let ev = event(4);
+        let big = MockWitnessBuilder::with_header_len(48 * 1024).witness_for(&ev);
+        assert!(matches!(
+            sub.submit(&ev, &big).await,
+            Err(RelayerError::Unprovable(_))
+        ));
+        assert_eq!(client.transaction_count(), 0);
     }
 
     const VOUCHER_TX: TxHash = [0x11; 32];
@@ -964,7 +852,7 @@ mod tests {
         };
         let sub = AnInterfaceSubmitter::new(client, cfg);
         let ev = event(3);
-        sub.submit(&ev, &bundle(&ev)).await.unwrap()
+        sub.submit(&ev, &witness(&ev)).await.unwrap()
     }
 
     #[tokio::test]
@@ -1042,7 +930,7 @@ mod tests {
         };
         let sub = AnInterfaceSubmitter::new(client, cfg);
         let ev = event(3);
-        match sub.submit(&ev, &bundle(&ev)).await.unwrap() {
+        match sub.submit(&ev, &witness(&ev)).await.unwrap() {
             SubmitOutcome::Pending {
                 reason,
             } => {
@@ -1080,14 +968,38 @@ mod tests {
     }
 
     #[test]
-    fn classify_exit_220_as_rejected() {
-        match classify_call_error("contract call aborted (exit_code=220)") {
-            SubmitOutcome::Rejected {
-                reason,
-            } => {
-                assert!(reason.contains("220") || reason.contains("ERR_INVALID_ZKPROOF"));
-            },
-            other => panic!("expected Rejected, got {other:?}"),
+    fn receipt_proof_reverts_are_rejected_with_a_hint() {
+        for (code, name) in [
+            (244, "ERR_NOT_DEPOSIT_LOG"),
+            (300, "ERR_SHORT"),
+            (301, "ERR_RLP"),
+            (302, "ERR_NODE_HASH"),
+            (303, "ERR_PATH"),
+            (304, "ERR_INLINE"),
+            (305, "ERR_ABSENT"),
+            (307, "ERR_NO_LOG"),
+            (308, "ERR_RECEIPT_STATUS"),
+        ] {
+            for outcome in [
+                classify_call_error(&format!("contract call aborted (exit_code={code})")),
+                classify_reverted(Some(code), "Reverted"),
+            ] {
+                match outcome {
+                    SubmitOutcome::Rejected {
+                        reason,
+                    } => {
+                        assert!(reason.contains(name), "{code}: {reason}");
+                        assert!(reason.contains(&format!("exit_code={code}")), "{reason}");
+                        let rebuilt = reason.contains("builds a fresh one");
+                        assert_eq!(
+                            rebuilt,
+                            (300..=305).contains(&code) && code != 304,
+                            "{reason}"
+                        );
+                    },
+                    other => panic!("expected Rejected for {code}, got {other:?}"),
+                }
+            }
         }
     }
 

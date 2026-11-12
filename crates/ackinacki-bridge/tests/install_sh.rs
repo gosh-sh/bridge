@@ -1,7 +1,9 @@
-//! `scripts/install.sh` against a release served from a local directory: an
-//! installation whose `aggregate-proof` predates `--slot-report` runs, but
-//! this CLI refuses it, so the script has to count it as missing and replace
-//! it from the release, not call it ok.
+//! `scripts/install.sh` against a release served from a local directory. A
+//! binary of an older installation can run and still be unusable: an
+//! `aggregate-proof` that predates `--slot-report`, which this CLI refuses,
+//! or a CLI that still proves deposits with the retired deposit prover. The
+//! script has to count either as missing and replace it from the release,
+//! not call it ok.
 
 use std::{os::unix::fs::PermissionsExt as _, path::Path, process::Command};
 
@@ -16,19 +18,10 @@ fn stub(path: &Path, text: &str) {
 
 /// The parts of an installation `install.sh` looks for, laid out under
 /// `root` as the release bundle has them: the two binaries at the top, then
-/// `verifiers/`, `deposit-prover/` and `bridge_config`.
+/// `verifiers/` and `bridge_config`.
 fn installation(root: &Path, aggregator_help: &str) {
     stub(&root.join("ackinacki-bridge"), "ackinacki-bridge 0.0.0");
     stub(&root.join("aggregate-proof"), aggregator_help);
-    for f in ["fetch_deposit_data", "export_blake2b_proof"] {
-        stub(&root.join("deposit-prover").join(f), "usage");
-    }
-    std::fs::create_dir_all(root.join("deposit-prover/configs")).unwrap();
-    std::fs::write(
-        root.join("deposit-prover/configs/circuit_params.json"),
-        "{}",
-    )
-    .unwrap();
     std::fs::create_dir_all(root.join("verifiers")).unwrap();
     for f in [
         "BridgeWithdrawalAggregatorVerifier.bin",
@@ -38,6 +31,54 @@ fn installation(root: &Path, aggregator_help: &str) {
         std::fs::write(root.join("verifiers").join(f), "x").unwrap();
     }
     std::fs::write(root.join("bridge_config"), "BRIDGE_NETWORK=shellnet\n").unwrap();
+}
+
+/// The release under `dir`: the bundle, a top directory stripped on
+/// unpacking, with an aggregate-proof that takes `--slot-report`, and its
+/// SHA256SUMS. Returns the release directory and the bundle's name.
+fn release(dir: &Path) -> (std::path::PathBuf, &'static str) {
+    let release = dir.join("release");
+    let staged = dir.join("staged/ackinacki-bridge");
+    installation(&staged, "unused");
+    // Help that goes on long after the flag: a probe that stops reading at
+    // the match leaves the binary to die of SIGPIPE, which pipefail reports.
+    std::fs::write(
+        staged.join("aggregate-proof"),
+        "#!/bin/sh\necho 'aggregate-proof --inner-snark <path> [--slot-report <path>]'\nseq 1 \
+         200000\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&release).unwrap();
+    let bundle = "ackinacki-bridge-linux-x86_64.tar.gz";
+    let packed = Command::new("tar")
+        .arg("-czf")
+        .arg(release.join(bundle))
+        .arg("-C")
+        .arg(dir.join("staged"))
+        .arg("ackinacki-bridge")
+        .status()
+        .unwrap();
+    assert!(packed.success());
+    let sums = Command::new("sha256sum")
+        .arg(bundle)
+        .current_dir(&release)
+        .output()
+        .unwrap();
+    std::fs::write(release.join("SHA256SUMS"), sums.stdout).unwrap();
+    (release, bundle)
+}
+
+/// Fails the test when a tool `install.sh` needs is not on `PATH`.
+fn needs_tools() {
+    for tool in ["bash", "curl", "tar", "sha256sum"] {
+        if Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .map_or(true, |o| !o.status.success())
+        {
+            panic!("install.sh needs {tool}, and this test runs install.sh");
+        }
+    }
 }
 
 fn run(prefix: &Path, release: &Path, args: &[&str]) -> String {
@@ -58,47 +99,9 @@ fn run(prefix: &Path, release: &Path, args: &[&str]) -> String {
 
 #[test]
 fn an_aggregate_proof_without_slot_report_is_replaced_from_the_release() {
-    for tool in ["bash", "curl", "tar", "sha256sum"] {
-        if Command::new("sh")
-            .args(["-c", &format!("command -v {tool}")])
-            .output()
-            .map_or(true, |o| !o.status.success())
-        {
-            panic!("install.sh needs {tool}, and this test runs install.sh");
-        }
-    }
+    needs_tools();
     let dir = tempfile::tempdir().unwrap();
-
-    // The release: the bundle, a top directory stripped on unpacking, with
-    // an aggregate-proof that takes the flag.
-    let release = dir.path().join("release");
-    let staged = dir.path().join("staged/ackinacki-bridge");
-    installation(&staged, "unused");
-    // Help that goes on long after the flag: a probe that stops reading at
-    // the match leaves the binary to die of SIGPIPE, which pipefail reports.
-    std::fs::write(
-        staged.join("aggregate-proof"),
-        "#!/bin/sh\necho 'aggregate-proof --inner-snark <path> [--slot-report <path>]'\nseq 1 \
-         200000\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(&release).unwrap();
-    let bundle = "ackinacki-bridge-linux-x86_64.tar.gz";
-    let packed = Command::new("tar")
-        .arg("-czf")
-        .arg(release.join(bundle))
-        .arg("-C")
-        .arg(dir.path().join("staged"))
-        .arg("ackinacki-bridge")
-        .status()
-        .unwrap();
-    assert!(packed.success());
-    let sums = Command::new("sha256sum")
-        .arg(bundle)
-        .current_dir(&release)
-        .output()
-        .unwrap();
-    std::fs::write(release.join("SHA256SUMS"), sums.stdout).unwrap();
+    let (release, bundle) = release(dir.path());
 
     // The installation: everything there, the aggregate-proof from before.
     let prefix = dir.path().join("prefix");
@@ -128,6 +131,57 @@ fn an_aggregate_proof_without_slot_report_is_replaced_from_the_release() {
     );
 }
 
+#[test]
+fn a_cli_that_still_runs_the_deposit_prover_is_replaced_and_its_leftovers_named() {
+    needs_tools();
+    let dir = tempfile::tempdir().unwrap();
+    let (release, bundle) = release(dir.path());
+
+    // An installation of the release before the receipt proof: its CLI
+    // takes the prover directory, which it kept beside the rest.
+    let prefix = dir.path().join("prefix");
+    let agg = installation_at(&prefix);
+    stub(&agg, "aggregate-proof [--slot-report <path>]");
+    let cli = prefix.join("bin/ackinacki-bridge");
+    stub(&cli, "--deposit-prover-dir <DIR>");
+    std::fs::create_dir_all(prefix.join("deposit-prover/data")).unwrap();
+    std::fs::write(
+        prefix.join("bridge_config"),
+        "BRIDGE_DEPOSIT_PROVER_DIR=/x\nBRIDGE_DEPOSIT_STATE_DIR=/y\n",
+    )
+    .unwrap();
+
+    let checked = run(&prefix, &release, &["--check"]);
+    assert!(
+        checked.contains(&format!("MISSING {bundle}"))
+            && checked.contains("retired deposit prover"),
+        "the old CLI is missing, and says why:\n{checked}"
+    );
+    assert!(
+        !checked.contains("C library"),
+        "it runs; nothing to say about glibc:\n{checked}"
+    );
+
+    run(&prefix, &release, &["--yes"]);
+    let rechecked = run(&prefix, &release, &["--check"]);
+    assert!(
+        rechecked.contains(&format!("ok      {}", cli.display())),
+        "the release's CLI replaced it:\n{rechecked}"
+    );
+    assert!(
+        rechecked.contains("deposit-prover is no longer used"),
+        "{rechecked}"
+    );
+    assert!(
+        rechecked.contains("BRIDGE_DEPOSIT_PROVER_DIR is no longer read"),
+        "{rechecked}"
+    );
+    assert!(
+        prefix.join("deposit-prover").is_dir(),
+        "the user's directory is left alone"
+    );
+}
+
 /// Lay out an installation under `prefix` as `install.sh` does, and return
 /// where its aggregate-proof is.
 fn installation_at(prefix: &Path) -> std::path::PathBuf {
@@ -143,7 +197,6 @@ fn installation_at(prefix: &Path) -> std::path::PathBuf {
         std::fs::rename(from, to).unwrap();
     }
     std::fs::rename(staged.join("verifiers"), prefix.join("verifiers")).unwrap();
-    std::fs::rename(staged.join("deposit-prover"), prefix.join("deposit-prover")).unwrap();
     std::fs::remove_dir_all(&staged).unwrap();
     agg
 }

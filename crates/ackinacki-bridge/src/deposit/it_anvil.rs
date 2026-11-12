@@ -28,9 +28,8 @@ use crate::{
     deposit::{
         args::RunMode,
         evm::AlloyEvm,
-        evm_confirm::{self, Expect, Negative, Outcome},
+        evm_confirm::{self, Expect, Outcome},
         evm_steps::ensure_allowance,
-        limits::ShapeViolation,
         preflight::{Deps, Polls},
         run::run_with,
         store::{OpStage, Store},
@@ -195,7 +194,7 @@ fn mint(rpc: &str, usdc: Address, to: Address, units: u64) {
 
 #[tokio::test]
 #[ignore = "needs anvil, forge and cast; set ACKI_ANVIL_IT=1"]
-async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
+async fn a_type_2_deposit_and_a_legacy_one_are_both_confirmed() {
     let Some(a) = anvil(&[]) else { return };
     let (_usdc, bridge) = deploy(&a.url);
     let evm = AlloyEvm::connect(&a.url).unwrap();
@@ -238,22 +237,15 @@ async fn a_type_2_deposit_is_confirmed_and_a_legacy_one_is_unprovable() {
         let out = evm_confirm::confirm(&evm, h, &exp, &ui, Duration::from_millis(200))
             .await
             .unwrap();
-        match (legacy, out) {
-            (false, Outcome::Confirmed(f)) => {
+        match out {
+            Outcome::Confirmed(f) => {
                 assert_eq!(f.deposit_id, U256::from(id));
                 assert_eq!(
                     f.receipt_log_index, 0,
                     "the mock USDC emits no Transfer: Deposit is the receipt's only log"
                 );
-                assert_eq!(f.access_list_rlp_len, 1, "an empty access list");
             },
-            (
-                true,
-                Outcome::Final(Negative::Unprovable(ShapeViolation::NotTypedTx {
-                    tx_type: 0,
-                })),
-            ) => {},
-            (_, o) => panic!("legacy={legacy}: {o:?}"),
+            o => panic!("legacy={legacy}: {o:?}"),
         }
     }
 }
@@ -321,7 +313,7 @@ fn on_anvil(
 
 #[tokio::test]
 #[ignore = "needs anvil, forge and cast; set ACKI_ANVIL_IT=1"]
-async fn the_driver_takes_a_deposit_through_steps_1_to_5_and_a_legacy_one_is_exit_35() {
+async fn the_driver_takes_a_type_2_and_a_legacy_deposit_through_steps_1_to_5() {
     // Finality two blocks behind the head.
     let Some(a) = anvil(&["--slots-in-an-epoch", "1"]) else {
         return;
@@ -369,7 +361,7 @@ async fn the_driver_takes_a_deposit_through_steps_1_to_5_and_a_legacy_one_is_exi
 
     // The same sender, from a wallet that sends legacy transactions: the
     // first deposit spent the allowance, so its approve goes out legacy
-    // too, which is fine; the deposit is not.
+    // too, and so does the deposit, which the receipt proof covers as well.
     let w = World::healthy();
     let (p, d, ui) = on_anvil(&w, &a.url, bridge);
     let mut wallet = LocalKeyWallet {
@@ -382,21 +374,14 @@ async fn the_driver_takes_a_deposit_through_steps_1_to_5_and_a_legacy_one_is_exi
     let e = run_with(&p, &d, &mut wallet).await.unwrap_err();
     assert_eq!(
         e.exit_code(),
-        ExitCode::DepositUnprovable,
+        ExitCode::AnWaitTimeout,
         "{e}\n{:#?}",
         ui.events()
-    );
-    assert!(e.to_string().contains("type 0"), "{e}");
-    assert!(
-        ui.statuses()
-            .iter()
-            .any(|s| s.contains("waiting for its block to be finalized")),
-        "the verdict waited for finality: {:#?}",
-        ui.statuses()
     );
     let rec = Store::open(&p.state_dir)
         .unwrap()
         .load(e.op_id().unwrap())
         .unwrap();
-    assert_eq!(rec.stage, OpStage::Failed);
+    assert_eq!(rec.stage, OpStage::Confirmed);
+    assert_eq!(rec.deposit.unwrap().deposit_id, U256::from(1));
 }

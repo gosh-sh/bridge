@@ -51,6 +51,6 @@ async fn live_eth_log_source_finds_a_deposit() {
     assert_eq!(event.tx_hash, tx);
     assert_eq!(
         event.log_index, log_index,
-        "receipt-local log index must match deposit-prover expectation",
+        "receipt-local log index must match what finalizeDeposit takes",
     );
 }

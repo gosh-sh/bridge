@@ -13,8 +13,7 @@
 //! to run it (ETXTBSY) until that child has gone through `exec`.
 //!
 //! So a test that starts subprocesses holds [`spawning`] and runs while no
-//! other test holds either guard; a fake prover directory holds it for its
-//! test (`testkit::fake_prover_dir`). A test that releases a lock and takes
+//! other test holds either guard. A test that releases a lock and takes
 //! it again holds [`relocking`] and runs alongside the other tests that do.
 //! A test that does both takes [`spawning`]. The thread that holds
 //! [`spawning`] may take it again, and its [`relocking`] is one more hold

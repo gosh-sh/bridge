@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # eth-lc-relayer daemon: rolls the Sepolia light client forward from the committee lc-bootstrap
-# set, one finalized checkpoint per epoch, and with --submit-ancestry the blocks between two
-# consecutive checkpoints, which is where an Arbitrum assertion's Sepolia block gets accepted.
+# set, one finalized checkpoint per epoch. The blocks between two checkpoints, where an Arbitrum
+# assertion's Sepolia block sits, come from arbitrum-anchors' submitAncestry, not from here.
 # No rotate and no owner hop: the run must not cross a sync-committee period
 # (test_02 checks it). Input: any tvm keys JSON; submitUpdate and submitAncestry are
 # permissionless. Args: LC, the light client's address. Runs until the runner stops the run.
@@ -15,6 +15,6 @@ exec eth-lc-relayer daemon --beacon-url "$BEACON_URL" \
   --state-dir "$OUT/lc-state" --work-dir "$WORK/lc-work" --log-dir /logs/lc-relayer \
   --step-prover-bin "${LIGHT_CLIENT_STEP_PROVER_BIN:-/bin-ci/export_step_vk_blob}" --prover-dir "$WORK/lc-prover" \
   --srs-path /params/kzg_bn254_19.srs --no-rotate --no-flip-owner \
-  --eth-rpc-url "$SEPOLIA_RPC" --submit-ancestry \
+  --eth-rpc-url "$SEPOLIA_RPC" \
   --an-graphql-url "$GQL" --an-keys-path "$WORK/lc-sender.keys.json" \
   --an-light-client "$LC" --an-sender "$LC" --allow-insecure-graphql

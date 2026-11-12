@@ -180,7 +180,7 @@ pub(crate) fn advance_scan_cursor(cursor: &Mutex<Option<u64>>, through: u64) {
 }
 
 /// Map a block-global `logIndex` (from `eth_getLogs`) to the receipt-local
-/// position `deposit-prover` indexes by.
+/// position `finalizeDeposit`'s `logIndex` counts by.
 pub fn receipt_log_index_from_block_log(
     logs: &[Log],
     block_log_index: u64,
@@ -210,7 +210,7 @@ pub fn is_retryable_eth_rpc_error(err: &impl std::fmt::Display) -> bool {
 ///
 /// Generic over any alloy [`Provider`]; a plain HTTP provider is enough
 /// (read-only). Only deposits at least `confirmations` blocks behind the
-/// chain head are surfaced, so a reorg can't make the relayer prove a
+/// chain head are surfaced, so a reorg can't make the relayer submit a
 /// deposit that later disappears.
 pub struct EthLogSource<P: Provider<N>, N: Network = alloy::network::Ethereum> {
     provider: P,
@@ -279,8 +279,8 @@ where
         self.address
     }
 
-    /// Resolve and cache `eth_chainId` for operator sanity checks against the
-    /// proven `chainId` public input.
+    /// Resolve and cache `eth_chainId`: the `chainId` `finalizeDeposit` is
+    /// sent with.
     async fn resolve_chain_id(&self) -> Result<u64, RelayerError> {
         if let Some(id) = *self.chain_id.lock().expect("poisoned lock") {
             return Ok(id);
@@ -324,9 +324,8 @@ where
 /// Locate a deposit via `eth_getTransactionReceipt` only — no `eth_getLogs`.
 ///
 /// `log_index` is the **receipt-local** index (the position inside
-/// `receipt.logs[]`), matching what `deposit-prover`'s `fetch_deposit_data`
-/// expects. This avoids wide log scans that free-tier RPCs (e.g. Alchemy)
-/// rate-limit.
+/// `receipt.logs[]`), the `logIndex` `finalizeDeposit` takes. This avoids wide
+/// log scans that free-tier RPCs (e.g. Alchemy) rate-limit.
 pub async fn fetch_deposit_from_receipt<P>(
     provider: &P,
     bridge_address: Address,
@@ -433,7 +432,7 @@ where
                 continue;
             }
             let tx_hash = decoded.transaction_hash.unwrap_or_default();
-            // `deposit-prover` indexes logs by position inside the tx receipt,
+            // `finalizeDeposit` indexes logs by position inside the tx receipt,
             // not the block-global `logIndex` that `eth_getLogs` returns.
             let receipt = self
                 .provider

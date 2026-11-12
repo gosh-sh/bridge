@@ -7,55 +7,39 @@
 //! 1. **Listen** for `AckiNackiBridge.Deposit(depositId, sender, amount,
 //!    anAccount, timestamp, token)` events on Ethereum, surfacing only deposits
 //!    under a configurable confirmation depth ([`source::EthLogSource`]).
-//! 2. **Prove** that the deposit event was emitted — the `deposit-prover` Halo2
-//!    circuit (K=18, RLC) produces a Blake2b-transcript SHPLONK proof plus the
-//!    thirteen public inputs `[depositId, sender, amount, contractAddress,
-//!    chainId, dappIdHigh, dappIdLow, anAccountHigh, anAccountLow,
-//!    blockHashHigh, blockHashLow, token, promiseCommit]` — the Acki Nacki
-//!    account is bound in-circuit so the AN side credits a proven account,
-//!    proven `chainId` is allowlisted by `eccBridge` as a per-chain set of
-//!    bridges (`_trustedL1Bridge[chainId][bridge]`), and `dappId` (a config
-//!    tag, replaced `anWorkchain` on 2026-06-02) is pinned to 0 by the AN-side
-//!    bridge. Because `deposit-prover` is its own cargo workspace, the proof is
-//!    generated out-of-process ([`prover::SubprocessProofGenerator`]).
-//! 3. **Submit** the resulting proof triple (`vk_blob`, `public_inputs`,
-//!    `proof`) to the AN-side `eccBridge.finalizeDeposit(...)`, which
-//!    verifies it natively via the `ZKHALO2VERIFYWITHVK` opcode and deploys a
-//!    per-deposit `DepositVoucher` ([`submitter::AnInterfaceSubmitter`]).
+//! 2. **Collect the receipt proof** — the deposit block's header and the
+//!    Merkle-Patricia proof of the deposit transaction's receipt against the
+//!    header's `receiptsRoot` ([`witness::ReceiptWitnessBuilder`], built on
+//!    [`deposit_receipt::fetch`]). This takes a few RPC calls; nothing is
+//!    proven off chain.
+//! 3. **Submit** `eccBridge.finalizeDeposit(chainId, header, txIndex,
+//!    receiptProof, logIndex)` on Acki Nacki
+//!    ([`submitter::AnInterfaceSubmitter`]). The bridge requires the header's
+//!    hash to be an accepted block of `chainId`, walks the receipt proof, reads
+//!    the `Deposit` log of that receipt and deploys a per-deposit
+//!    `DepositVoucher`, which mints.
 //!
 //! ## Architecture
 //!
-//! Three trait seams keep the loop testable and let the heavy / not-yet-built
-//! pieces be swapped independently:
+//! Three trait seams keep the loop testable:
 //!
 //! ```text
 //! ┌────────────────────────┐   ┌──────────────────────────┐   ┌────────────────────────┐
 //! │ DepositSource          │──▶│ Relayer::tick()          │──▶│ AnSubmitter            │
-//! │  - EthLogSource (alloy)│   │ 1. nullifier pre-check   │   │  - AnInterfaceSubmitter│
-//! │  - InMemoryDepositSrc  │   │ 2. fetch deposit event   │   │  - MockAnSubmitter     │
-//! └────────────────────────┘   │ 3. generate proof        │   └────────────────────────┘
-//!            ▲                  │ 4. submit + finalise     │
-//!            │                  │ 5. persist state         │
+//! │  - EthLogSource (alloy)│   │ 1. fetch deposit event   │   │  - AnInterfaceSubmitter│
+//! │  - InMemoryDepositSrc  │   │ 2. voucher pre-check     │   │  - MockAnSubmitter     │
+//! └────────────────────────┘   │ 3. block accepted on AN? │   └────────────────────────┘
+//!                              │ 4. build receipt proof   │
+//!                              │ 5. submit + persist      │
 //! ┌────────────────────────┐   └────────────┬─────────────┘
-//! │ ProofGenerator         │◀───────────────┘
-//! │  - SubprocessProofGen  │   ┌──────────────────────────┐
-//! │  - MockProofGenerator  │   │ state.json (depositId)   │
+//! │ WitnessBuilder         │◀───────────────┘
+//! │  - ReceiptWitnessBuild │   ┌──────────────────────────┐
+//! │  - MockWitnessBuilder  │   │ state.json (depositId)   │
 //! └────────────────────────┘   └──────────────────────────┘
 //! ```
 //!
-//! ## Status / blockers
-//!
-//! - **Event listening** ([`source::EthLogSource`]) and **proof generation**
-//!   ([`prover::SubprocessProofGenerator`]) are fully wired against live
-//!   Ethereum + the `deposit-prover` examples.
-//! - **AN delivery** ([`submitter::AnInterfaceSubmitter`]) is wired over the
-//!   [`acki_nacki_interface::IAckiNacki`] trait. The live client is
-//!   [`acki_nacki_interface::TvmAckiNacki`]. A second `finalizeDeposit` for the
-//!   same deposit fails in the voucher constructor (exit 51), so re-submission
-//!   is safe.
-//! - The AN-side `eccBridge.finalizeDeposit` entry point is in
-//!   `contracts/an/exchange/`; the `ZKHALO2VERIFYWITHVK` opcode lives in
-//!   `tvm-sdk` and is authoritative for its semantics.
+//! A second `finalizeDeposit` for the same deposit fails in the voucher
+//! constructor (exit 51), so re-submission is safe.
 
 pub mod an_config;
 pub mod daemon;
@@ -64,7 +48,6 @@ pub mod error;
 #[cfg(test)]
 mod fake_rpc;
 pub mod metrics;
-pub mod prover;
 pub mod redact;
 pub mod relayer;
 pub mod source;
@@ -73,6 +56,7 @@ pub mod submitter;
 pub mod supported_chains;
 pub mod types;
 pub mod voucher;
+pub mod witness;
 
 pub use an_config::{bridge_abi, AnConfig, BRIDGE_ABI_JSON};
 pub use daemon::{
@@ -82,10 +66,6 @@ pub use dirs::{
     prepare_dir, refuse_unrecognised_state, ServiceDirs, LOG_FILE_PREFIX, STATE_FILE_NAME,
 };
 pub use error::RelayerError;
-pub use prover::{
-    require_executable, DepositProverBins, MockProofGenerator, ProofGenerator,
-    SubprocessProofGenerator, SubprocessProverConfig,
-};
 pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use source::{
     fetch_deposit_from_receipt, is_retryable_eth_rpc_error, receipt_log_index_from_block_log,
@@ -94,14 +74,14 @@ pub use source::{
 };
 pub use state::{DeploymentIdentity, DepositLogRef, OutstandingDeposit, RelayerState, StateLock};
 pub use submitter::{
-    build_finalize_deposit_params, decode_finalize_deposit, encode_finalize_deposit,
     AnInterfaceSubmitter, AnSubmitConfig, AnSubmitter, MockAnSubmitter, SubmitOutcome,
 };
 pub use supported_chains::{
     is_supported_deposit_chain, supported_deposit_chain_name, supported_deposit_chains_display,
     CHAIN_ID_SEPOLIA, SUPPORTED_DEPOSIT_CHAIN_IDS,
 };
-pub use types::{
-    parse_and_validate_dapp_id, DepositEvent, DepositProofBundle, DepositPublicInputs,
-    NUM_PUBLIC_INPUTS, PUBLIC_INPUT_BYTES,
+pub use types::DepositEvent;
+pub use witness::{
+    check_gas_credit, check_witness_matches, DepositWitness, MockWitnessBuilder,
+    ReceiptWitnessBuilder, WitnessBuilder,
 };

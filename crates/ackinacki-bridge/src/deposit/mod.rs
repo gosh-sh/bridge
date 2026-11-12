@@ -25,10 +25,7 @@ pub mod lc_readiness;
 pub mod limits;
 pub mod locks;
 pub mod log_index;
-pub mod pi;
 pub mod preflight;
-pub mod prover;
-pub mod prover_files;
 pub mod qr;
 pub mod qr_display;
 pub mod recovery;
@@ -42,6 +39,7 @@ pub mod testkit;
 pub mod ui;
 pub mod wallet;
 pub mod wc;
+pub mod witness;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -49,7 +47,7 @@ use crate::errors::{CliError, CliResult};
 
 /// Runs `ackinacki-bridge deposit` against the live chains: a new deposit,
 /// a dry run, `--resume` or `--abandon`. SIGINT, SIGTERM and SIGHUP end the
-/// run cleanly: the prover is killed, the locks are released, and the exit
+/// run cleanly: the locks are released, and the exit
 /// code follows the operation's recorded stage. The progress display is
 /// gone when this returns, so the caller prints the summary or the error on
 /// a quiet terminal.
@@ -391,94 +389,98 @@ mod tests {
         assert_eq!(stage(&w, &op), OpStage::Signed);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_stage_before_the_proof_without_the_prover_takes_its_exit_naming_it() {
-        for (at, exit) in [
-            (OpStage::Confirmed, ExitCode::AnWaitTimeout),
-            (OpStage::Anchored, ExitCode::DepositProofFailed),
-        ] {
-            let mut w = World::healthy();
-            let op = w.proved_operation();
-            restage(&w, &op, at);
-            let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
-            assert!(p.prover_dir.is_none());
-            let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
-                .await
-                .unwrap_err();
-            assert_eq!(e.exit_code(), exit, "{at:?}: {e}");
-            assert!(
-                e.to_string()
-                    .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
-                "{at:?}: {e}"
-            );
-            assert_eq!(stage(&w, &op), at, "the record is unchanged");
-            assert_eq!(*w.an.sent.lock().unwrap(), 0);
-        }
+    /// The bridge's answer to the next `finalizeDeposit`: a refusal, which
+    /// ends the run right after the send. The world's credit chain would
+    /// show the deposit finalized before the receipt proof is built.
+    fn refuse_the_send(w: &World) {
+        w.an.sends
+            .lock()
+            .unwrap()
+            .push_back(crate::deposit::refusals::FinalizeSend::Rejected {
+                exit_code: Some(222),
+                message: "untrusted emitter".into(),
+            });
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_missing_prover_is_named_before_a_chain_is_read() {
-        // A flag and a local directory: nothing waits for an RPC that is
-        // down before saying the prover is missing.
+    async fn an_anchored_operation_builds_its_receipt_proof_and_sends_it() {
         let mut w = World::healthy();
         let op = w.proved_operation();
-        restage(&w, &op, OpStage::Confirmed);
-        w.evm
-            .fail_chain_id
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_file(w.work.path().join(&op).join(witness::FILE)).unwrap();
+        restage(&w, &op, OpStage::Anchored);
+        refuse_the_send(&w);
         let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
-        let e = tokio::time::timeout(
-            std::time::Duration::from_secs(600),
-            run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None),
-        )
-        .await
-        .expect("the missing prover is named without reading the EVM chain")
-        .unwrap_err();
-        assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
-        assert!(
-            e.to_string()
-                .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
-            "{e}"
-        );
+        let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::FinalizeRefused, "{e}");
+        assert_eq!(w.witness_builds(), 1);
+        let saved = witness::load(&w.work.path().join(&op)).expect("kept in the work directory");
+        assert_eq!(*w.an.sent_witnesses.lock().unwrap(), vec![saved]);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_proved_operation_goes_on_without_the_prover() {
+    async fn a_proved_operation_sends_the_receipt_proof_on_disk() {
         let mut w = World::healthy();
         let op = w.proved_operation();
         w.credit_chain_for_mined_deposit();
+        let on_disk = witness::load(&w.work.path().join(&op)).unwrap();
         let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
-        assert!(p.prover_dir.is_none());
         let s = run::resume(&p, &w.deps(), &OpRef::Op(op), None)
             .await
             .unwrap();
         assert!(s.confirmation.is_some());
         assert_eq!(*w.an.sent.lock().unwrap(), 1, "finalizeDeposit was sent");
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(
+            w.witness_builds(),
+            0,
+            "nothing read again from the EVM chain"
+        );
+        assert_eq!(*w.an.sent_witnesses.lock().unwrap(), vec![on_disk]);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_proved_operation_without_its_proof_or_the_prover_is_exit_32_naming_it() {
-        // The proof is gone and has to be built again: that step fails, and
-        // nothing was sent yet.
+    async fn a_proved_operation_of_an_older_cli_builds_the_receipt_proof_instead_of_its_proof() {
+        // An older CLI recorded `Proved` with proof.bin and public_inputs.bin
+        // in the work directory; the 1.17.0 bridge takes neither.
         let mut w = World::healthy();
         let op = w.proved_operation();
         let work = w.work.path().join(&op);
-        std::fs::remove_file(work.join("proof.bin")).unwrap();
-        std::fs::remove_file(work.join("public_inputs.bin")).unwrap();
+        std::fs::remove_file(work.join(witness::FILE)).unwrap();
+        std::fs::write(work.join("proof.bin"), b"proof").unwrap();
+        std::fs::write(work.join("public_inputs.bin"), b"inputs").unwrap();
+        refuse_the_send(&w);
+        let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
+        let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::FinalizeRefused, "{e}");
+        assert_eq!(w.witness_builds(), 1);
+        assert_eq!(*w.an.sent.lock().unwrap(), 1);
+        assert!(witness::load(&work).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_receipt_proof_the_rpc_cannot_serve_is_exit_32_and_keeps_the_operation() {
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        std::fs::remove_file(w.work.path().join(&op).join(witness::FILE)).unwrap();
+        w.evm
+            .witness_errors
+            .lock()
+            .unwrap()
+            .push_back(evm::WitnessError::Retry(
+                "eth_getBlockReceipts: the method does not exist".into(),
+            ));
         let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
         let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
-        assert!(
-            e.to_string()
-                .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
-            "{e}"
-        );
+        assert!(e.to_string().contains("eth_getBlockReceipts"), "{e}");
+        assert!(e.to_string().contains(&format!("--resume {op}")), "{e}");
         assert_eq!(stage(&w, &op), OpStage::Proved);
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
-        assert_eq!(w.prover_runs(), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -504,15 +506,20 @@ mod tests {
             "{e}"
         );
         assert_eq!(stage(&w, &op), OpStage::Finalizing);
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_proof_to_build_again_without_the_prover_names_it() {
-        // Sent before, the proof gone, nothing finalized: the proof is
-        // built again, and that needs the prover.
+    async fn a_receipt_proof_to_build_again_after_a_send_that_fails_is_still_in_doubt() {
+        // Sent before, the receipt proof gone, nothing finalized: it is
+        // built again, and the RPC fails; the earlier send may have run.
         let mut w = World::healthy();
         let op = w.finalizing_operation();
+        w.evm
+            .witness_errors
+            .lock()
+            .unwrap()
+            .push_back(evm::WitnessError::Retry("connection refused".into()));
         let p = resume_line(&w, &op, &["--rpc-url", RPC, "--gql-endpoint", GQL]);
         let e = run::resume(&p, &w.deps(), &OpRef::Op(op.clone()), None)
             .await
@@ -522,12 +529,8 @@ mod tests {
             ExitCode::CreditUnconfirmed,
             "a send may have executed: {e}"
         );
-        assert!(
-            e.to_string()
-                .contains("--deposit-prover-dir (BRIDGE_DEPOSIT_PROVER_DIR)"),
-            "{e}"
-        );
+        assert!(e.to_string().contains("connection refused"), "{e}");
         assert_eq!(stage(&w, &op), OpStage::Finalizing);
-        assert_eq!(w.prover_runs(), 0);
+        assert_eq!(w.witness_builds(), 1);
     }
 }

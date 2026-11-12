@@ -5,7 +5,8 @@ import "./MockERC20.sol";
 
 /// @title MultiLogERC20
 /// @notice Emits extra logs on `transferFrom` — models Safe / ERC-4337 receipt spam.
-/// @dev TD-11: L1 `deposit()` can succeed while deposit-prover `MAX_LOG_NUM=3` rejects.
+/// @dev The Acki Nacki bridge takes the `Deposit` log by its index in the receipt, so the extra
+///      logs do not stand in its way.
 contract MultiLogERC20 is MockERC20 {
     event AuxLog(uint256 indexed slot, bytes32 marker);
     event Transfer(address indexed from, address indexed to, uint256 value);

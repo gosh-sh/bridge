@@ -88,8 +88,6 @@ pub struct DepositInfo {
     pub block_hash: B256,
     pub block_log_index: u64,
     pub receipt_log_index: u64,
-    /// RLP length of the transaction's access list, as the circuit sees it.
-    pub access_list_rlp_len: usize,
     /// Voucher account id (hex), computed with `voucher_code_hash`.
     pub voucher_account: String,
 }
@@ -582,7 +580,6 @@ mod tests {
             block_hash: Default::default(),
             block_log_index: 0,
             receipt_log_index: 0,
-            access_list_rlp_len: 1,
             voucher_account: String::new(),
         });
         r.stage = OpStage::Finalizing;

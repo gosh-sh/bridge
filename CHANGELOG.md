@@ -23,6 +23,36 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `eccBridge` 1.17.0 (code hash `c25d1ac0…`) proves a deposit from its Ethereum receipt instead of
+  a ZK proof: `finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)`,
+  `logIndex` counted within the receipt. Switch every caller to
+  `contracts/an/0.80.1_compiled/exchange/eccBridge.abi.json`; finalized deposits keep their vouchers.
+- The deposit circuit, its VK (`f09aa7fa…`), `deposit-prover/` and refusal 220 are removed.
+- New `finalizeDeposit` refusals: 244 (not the `Deposit` log), 300–305 (bad receipt proof), 307
+  (no log at `logIndex`), 308 (failed transaction); 224 is a block not anchored for `chainId`, 222
+  an untrusted emitter, 214 an amount over uint64. Anchor a block only under its own chain.
+- `eccBridge` is built with `sold` 0.80.1 into `contracts/an/0.80.1_compiled/exchange/`
+  (`place.json` still places it at `contracts/0.80.0_compiled/exchange/`). Upgrade a 1.16.0 bridge
+  with `updateCode` and an empty `userCell`, then restore trusted EVM bridges, anchors and light clients.
+- The release ships no deposit prover and no `kzg_params_18.srs`: drop `BRIDGE_DEPOSIT_PROVER_DIR`,
+  `DEPOSIT_PROVER_DIR`, `DEPOSIT_FETCH_DEPOSIT_DATA_BIN`, `DEPOSIT_EXPORT_VK_BLOB_BIN`,
+  `DEPOSIT_EXPORT_BLAKE2B_PROOF_BIN`, `AN_DAPP_ID` and the relayer's `params/deposit-prover` mount.
+- `deposit-relayer` refuses to start with `--deposit-prover-dir`, `--fetch-deposit-data-bin`,
+  `--export-vk-blob-bin`, `--export-blake2b-proof-bin`, `--prover-rpc-url`, `--degree`,
+  `--max-data-byte-len`, `--max-log-num`, `--dapp-id`, `--work-dir` or `prove-one --log-dir`;
+  `prove-one --out-dir` writes `witness.json`, which `finalize-one --bundle-dir` reads; the
+  `deposit_relayer_prover_stage_*` metrics are removed.
+- `ackinacki-bridge` requires `eccBridge` 1.17.0 exactly; `deposit` drops `--deposit-prover-dir`,
+  `--log-dir`, `--prover-timeout-s`, `BRIDGE_DEPOSIT_PROVER_DIR` and `BRIDGE_DEPOSIT_LOG_DIR`, writes
+  `<work-dir>/<op-id>/receipt_proof.json` at step 7, and its success JSON drops
+  `tx.access_list_len`. Upgrade the AN bridge, the CLI and `deposit-relayer` together.
+- A deposit whose receipt proof needs more than the 500 000 gas an external message may spend
+  (about 65 or more other events before `Deposit` in its transaction) cannot be finalized: CLI exit
+  35, `deposit-relayer` `unprovable_deposit_ids`. Make every deposit a transaction of its own.
+- The EVM RPC for deposits must serve `eth_getBlockByHash` and `eth_getBlockReceipts`.
+- `scripts/deposit_anchor_params.py` takes a `witness.json`, or `--chain-id` with `--block-hash`;
+  `--verify` refuses a node whose `eth_chainId` is not the anchor's chain.
+
 - Only USDC can be bridged: Acki Nacki has no other currency for the bridge to mint. `eccBridge`
   `setBridgeToken` refuses any ECC id but `3` with exit code 242, and `AckiNackiBridge` lists USDC
   in its constructor and has no `listToken` or `delistToken`. A new currency takes new versions of
@@ -38,6 +68,7 @@ assigns it when the release is tagged.
   VK (SHA-256 `f09aa7fa781fd111dbc6421fdc3aed33af633a9c2fc696b9649d80b717c007b9`).
   Deploy `eccBridge` 1.16.0 and the matching prover/CLI together. Old-event receipts cannot
   be re-proven with this key: finalize pending deposits on the old pair before switching.
+  `eccBridge` 1.17.0 drops the circuit again (see above).
 - After the upgrade to `eccBridge` 1.16.0, and on a fresh zerostate, the AN token registry
   is empty: every deposit, USDC included, is refused with 241 until `setBridgeToken` registers
   USDC as ECC `3` for each source chain. Pause the AN bridge and let pending vouchers confirm
@@ -60,23 +91,55 @@ assigns it when the release is tagged.
 - A cold start of `daemon-live` or `bridge-prover-daemon` without `state/prover_bk_set.json`, and
   every `compute_bridge_anchors` run, need gql-server >= 1.5.0 serving `blockchain.latestBkSet`;
   against an older server they exit 1 at once. A restart whose `state/` still fits the contract does not.
+- `EthBeaconLightClient` 1.7.0 keeps a proven Ethereum block hash 14 days instead of a year
+  (`PROVEN_WINDOW_SLOTS = 100_800`), and `slotsPerYear()` is now `provenWindowSlots()`. Upgrade a
+  running light client with `updateCode` (empty `userCell`): it then deletes the older hashes and
+  has the bridge forget them, at most 32 per transaction, two to three weeks for shellnet's backlog.
+  A block older than 14 days can no longer be accepted through the light client. Point anything
+  that reads `slotsPerYear()` at the new getter.
+- `eth-lc-relayer daemon` does not start without `ETH_RPC_URL` (`--eth-rpc-url`): set it to an
+  execution RPC of the followed chain.
+- The `eth-lc-relayer` container needs about 100 GB of memory: two step proofs at once
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) beside a rotate stage; 75 GB with `1`. Raise a
+  memory limit set for the previous 75 GB. A host running all of `docker/compose.yaml` needs 256 GB.
 
 ### New / Improvements
+
+- `eth-lc-relayer arbitrum-anchors` sends `submitAncestry` for the Ethereum epoch each Arbitrum
+  assertion landed in, to the light client the bridge's `getLightClient` names, once its head has
+  passed that epoch; at most three sends per block. Upgrade it first, then turn `SUBMIT_ANCESTRY`
+  (`--submit-ancestry`) off on `eth-lc-relayer daemon`: the daemon's spans admitted every block.
+  `docker/env/eth-lc-relayer.env.example` no longer sets it.
+- `eth-lc-relayer daemon` proves every Ethereum checkpoint: a watcher asks the beacon node every
+  slot, apart from proving and sending, and queues each checkpoint on disk in
+  `<state file>.steps/` as it appears; proofs run in the background, `--parallel-proofs`
+  (`LIGHT_CLIENT_PARALLEL_PROOFS`, default 2) at once. A checkpoint that fails is tried again
+  until it is on chain, and a version signed by fewer than 342 of the committee is not taken.
+- `eth-lc-relayer daemon --metrics-addr` (`ETH_LC_RELAYER_METRICS_ADDR`) serves `GET /metrics` with
+  the counter `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}`;
+  `docker/compose.yaml` publishes it on `ETH_LC_RELAYER_METRICS_PORT` (default 9468). Add it to
+  the scrape config.
+- `eth-lc-relayer daemon` closes the blocks of checkpoints it missed with `submitAncestry` back from
+  the next one and logs `checkpoints missed` as an ERROR.
+- `EthBeaconLightClient` 1.7.0 `submitAncestry` takes 2 to 33 headers and needs only the last one
+  proven; it admits every header before it.
+- `export_step_vk_blob` always keeps its proving key, in `STEP_KEY_DIR` or `step-key/` next to the
+  SRS, and replaces a key another build generated; `lc-keygen` is optional.
 
 - `relayer daemon-withdraw` and `daemon-bridge` retry existing proof files on `TransferTooLarge`
   or `UnsupportedTokenId`, instead of parking them; later payable proofs continue to be submitted,
   and such a proof does not slow other payouts or `verifyBlock` with `--backoff-max-secs`.
 - `deposit-relayer` keeps retrying a deposit refused with 241 (`ERR_TOKEN_UNREGISTERED`) or 243
   (`ERR_TOKEN_DEPOSITS_DISABLED`) without counting it against `--skip-after-attempts`, so it is not
-  parked while a token is unregistered or closed on AN. `finalizeDeposit` makes these refusals, and
-  234 and 235, before `accept`, so a retry costs the bridge no gas.
+  parked while a token is unregistered or closed on AN.
 - `eccBridge` 1.16.0 (code hash `e6810f06…`) credits the proven ERC-20 to its registered
   ECC currency and tracks outstanding inventory independently for each source chain and currency.
   Before opening deposits on EVM, register USDC under ECC id `3` on AN with
   `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)`; limits use
   token base units. AN refuses unregistered tokens and the CLI refuses mismatched currency ids.
   `DepositVoucher` 1.5.0 carries the token to `confirmTokenDeposit`; the existing
-  `finalizeDeposit`, `initiateWithdrawal` and `confirmDeposit` signatures are preserved.
+  `initiateWithdrawal` and `confirmDeposit` signatures are preserved (`finalizeDeposit` changes
+  in 1.17.0, see above).
   Upgrading from 1.15.0 requires the structured `userCell` returned by
   `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)`, followed by token registration
   and restoration of the trusted bridge, EVM bridge (`setEvmBridge`) and anchor configuration. Subsequent upgrades preserve
@@ -119,6 +182,9 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `scripts/ursus/deposit-relayer.service` starts again: in `deposit-relayer.env` replace
+  `DEPOSIT_RELAYER_STATE` with `DEPOSIT_RELAYER_STATE_DIR` and `DEPOSIT_RELAYER_LOG_DIR` and drop
+  `AN_BRIDGE_ABI_PATH`.
 - Listed ERC-20 tokens whose `transfer` / `transferFrom` return no data can deposit and pay out.
   False and malformed returns still revert, and exact custody-delta checks remain in force.
 - USDC deposit limits cannot exceed AN's 50 USDC per transfer and 10,000 USDC per-chain

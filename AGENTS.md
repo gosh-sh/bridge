@@ -17,11 +17,11 @@ disagree, the code wins.
 ## Project overview
 
 Cross-chain bridge between Ethereum and [Acki Nacki](https://docs.ackinacki.com/) (TVM-based,
-multi-threaded). USDC deposited on Ethereum is proven on Acki Nacki and minted there; Acki Nacki
-state is proven on Ethereum, which pays withdrawals out against it. Both directions use Halo2
-proofs. [`README.md`](README.md) walks through both directions and the repository. In more depth:
-the deposit circuit and its 13 public inputs in [`deposit-prover/README.md`](deposit-prover/README.md),
-the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
+multi-threaded). USDC deposited on Ethereum is proven on Acki Nacki and minted there: the AN
+bridge checks the deposit's receipt against an anchored block hash itself, with the VM's keccak.
+Acki Nacki state is proven on Ethereum with Halo2 proofs, and Ethereum pays withdrawals out
+against it. [`README.md`](README.md) walks through both directions and the repository. In more
+depth: the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
 ## Issues, branches and pull requests
@@ -108,13 +108,14 @@ contracts/an/              TVM (gosh-solidity): exchange/ has eccBridge, Deposit
                            Ethereum beacon light client and the Arbitrum block verifier, with the
                            compiled artefacts acki-nacki pins by commit; zerostate/ assembles the bridge account; place.json tells acki-nacki
                            what to place where
-deposit-prover/            ETH→AN deposit circuit (Halo2 on axiom-eth), standalone package
 eth-light-client-prover/   Ethereum sync-committee light-client circuits (step, rotate), standalone
 crates/
   acki-nacki-interface/    traits + mocks for AN node access; BkSetClient for /v2/bk_set{,_update}
   deposit-chain-ids/       the EVM chains the deposit bridge accepts — single source of truth
+  deposit-receipt/         finalizeDeposit's witness from an EVM RPC: header, receipts-trie proof,
+                           log index
   eth-frontend/            Ethereum client (alloy)
-  deposit-relayer-daemon/  ETH→AN relayer: Deposit logs → deposit-prover → finalizeDeposit on AN
+  deposit-relayer-daemon/  ETH→AN relayer: Deposit logs → receipt proof → finalizeDeposit on AN
   eth-light-client-relayer/ finality_update → step/rotate proofs → EthBeaconLightClient on AN;
                            arbitrum-anchors: Arbitrum deposit blocks → proveBlock on AN
   bridge-prover-libraries/ AN→ETH prover workspace (gosh halo2 fork): prover lib and live driver,
@@ -122,8 +123,8 @@ crates/
                            and prover, snark wrap
   bridge-relayer-daemon/   AN→ETH relayer, `relayer` CLI — symlinked member of the prover workspace
   ackinacki-bridge/        end-user CLI: `withdraw` and `deposit` — symlinked member of the prover
-                           workspace; shipped as a release download together with the deposit
-                           prover, QUICKSTART.md is the operator's entry point
+                           workspace; shipped as a release download, QUICKSTART.md is the
+                           operator's entry point
   bridge-snark-utils/      offline SNARK tools: bound Circuit 1A/1B/2 fixtures, Poseidon snark export
   bridge-evm-aggregator/   SHPLONK aggregator: export-inner-aggregator writes the production
                            verifiers, aggregate-proof is the prover subprocess the CLI shells out to
@@ -139,8 +140,8 @@ docs/                      current documentation (see DOCS.md); docs/archive/ is
 
 ## Cargo workspaces
 
-The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface` and
-`crates/deposit-chain-ids`. Everything else is outside it on purpose: the halo2 forks in play cannot
+The root workspace holds `crates/eth-frontend`, `crates/acki-nacki-interface`,
+`crates/deposit-chain-ids` and `crates/deposit-receipt`. Everything else is outside it on purpose: the halo2 forks in play cannot
 share a dependency tree. **Do not move a crate into the root workspace, and do not try to reconcile
 those dependency versions.**
 
@@ -148,9 +149,8 @@ those dependency versions.**
   `crates/ackinacki-bridge` are symlinked members of it and inherit its dependencies, so cargo cannot
   even parse their manifests on their own: every cargo command for them runs from
   `crates/bridge-prover-libraries` with `-p <crate>`.
-- `deposit-prover`, `eth-light-client-prover`, `crates/bridge-evm-aggregator` and
-  `crates/bridge-circuits` declare their own `[workspace]`. `deposit-prover` also has its own
-  `rust-toolchain.toml`. `bridge-circuits` uses the gosh-fork halo2 backend that the prover pins;
+- `eth-light-client-prover`, `crates/bridge-evm-aggregator` and
+  `crates/bridge-circuits` declare their own `[workspace]`. `bridge-circuits` uses the gosh-fork halo2 backend that the prover pins;
   the root's halo2-axiom cannot coexist with it, which is why the root workspace excludes it.
 - `crates/deposit-relayer-daemon`, `crates/eth-light-client-relayer`, `crates/bridge-snark-utils` and
   `frontend` are standalone packages excluded by the root `Cargo.toml`.
@@ -162,7 +162,7 @@ Pinned in the `Cargo.toml` files; clone them next to this repository when you ne
 | Repository | Role |
 |---|---|
 | `gosh-sh/acki-nacki-to-eth-bridge-halo2-circuits` | The AN→ETH circuits (1A/1B, 2, 4). Vendored under `crates/bridge-circuits/` — nothing in this repository fetches it any more; a clone of the upstream repo is only useful if you want its issue tracker or its pre-vendor history |
-| `tvmlabs/tvm-sdk` | TVM SDK, including the `ZKHALO2VERIFYWITHVK` opcode the AN side verifies deposits with |
+| `tvmlabs/tvm-sdk` | TVM SDK, including `tvm-debugger`, which `scripts/test_an_bridge_limits.py` runs the bridge on, and the `ZKHALO2VERIFYWITHVK` opcode the Ethereum light client's step proofs are verified with |
 | `acki-nacki` | The node. Pins a commit of this repository and places the files `contracts/an/place.json` lists |
 | `gosh-sh/halo2-lib-zkevm-sha256-and-bls12-381`, `gosh-sh/halo2-axiom`, `gosh-sh/gosh-halo2-crypto-lib`, `gosh-sh/axiom-eth`, `gosh-sh/snark-verifier` | The gosh halo2 forks and chips the circuits and provers build on |
 
@@ -203,7 +203,7 @@ cd crates/bridge-snark-utils && cargo run --release --bin export-bound-block-pro
 
 # ETH→AN deposit relayer
 cd crates/deposit-relayer-daemon && cargo test           # the live test is #[ignore]d
-cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- --help   # watch, prove-one, an-preflight, daemon
+cd crates/deposit-relayer-daemon && cargo run --bin deposit-relayer -- --help   # watch, prove-one, daemon, finalize-one, status
 cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=<RPC> \
     BRIDGE_ADDRESS=<new-bridge> DEPOSIT_TX_HASH=<tx> EXPECTED_RECEIPT_LOG_INDEX=<index> \
     DEPOSIT_ID=0 cargo test --test live_log_discovery -- --ignored --nocapture
@@ -218,11 +218,11 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 |---|---|---|
 | `hygiene.yaml` | PRs, pushes to `main` | `gitleaks` over the whole history (`.gitleaks.toml`, `.gitleaksignore`); `lychee` over the Markdown (`lychee.toml`); English-only text (`scripts/check_english_only.py`, `make english-check`; a `non-english-ok` marker exempts a line) |
 | `solidity.yaml` | PRs, pushes to `main` | `forge build`, `forge fmt --check`, `forge test --no-match-contract Fork`, then the Arbitrum Sepolia fork suite (`AckiNackiBridgeArbSepoliaAaveForkTest`) against the public RPC |
-| `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the embedded deposit VK against `deposit-prover/fixtures/`, the zerostate encoder and its module tests, `contracts/an/place.json`, the ABIs built into `eth-lc-relayer` and the CLI's `USDCBridge.abi.json` copy against the compiled contracts (`scripts/check_lc_relayer_abis.py`) |
+| `an-contracts.yaml` | PRs, pushes to `main` | What the TVM compiler does not check: the voucher ABI, the zerostate encoder and its module tests, `contracts/an/place.json`, the ABIs built into `eth-lc-relayer` and the CLI's `USDCBridge.abi.json` copy against the compiled contracts (`scripts/check_lc_relayer_abis.py`) |
 | `verifier_sources.yaml` | PRs, pushes touching `contracts/ethereum/verifiers/` | Every `*AggregatorVerifier.sol` compiles with `solc` 0.8.19 to its `.bin` byte for byte; EIP-170 |
 | `bridge-circuits.yaml` | PRs, pushes to `main` | Vendored halo2 circuits under `crates/bridge-circuits/`: fast MockProver step (Circuit 4 + cross-circuit block-id) plus a heavy step (attestation-BLS, layer-hashes movement, poseidon, test-data-gen) serialised with `RUST_TEST_THREADS=1` |
 | `images.yaml` | PRs (build only), pushes to `main`, tags `v*`, manual on `main` | The four service images from `docker/Dockerfile` (every Rust workspace compiles), pushed to the registry from `main` and tags; `docker/compose.yaml` checked against the example settings |
-| `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or no earlier release has `kzg_bn254_21.srs`; builds `ackinacki-bridge`, `aggregate-proof` and `deposit-prover`'s tools; derives `kzg_params_18.srs` from the carried `kzg_bn254_21.srs`; checks the packaged deposit prover outside the tree (`scripts/check_deposit_prover_bundle.sh`: Hermez [s]·G2, the bridge's embedded deposit VK, a fixture proof); publishes the four assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite |
+| `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or no earlier release has `kzg_bn254_21.srs`; builds `ackinacki-bridge` and `aggregate-proof`; publishes the three assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
 | `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of the acki-nacki branch the pipeline's `acki_branch` names) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
 
@@ -247,7 +247,7 @@ run one on its own:
 - the other members of `crates/bridge-prover-libraries` — `ackinacki-bridge`, `bridge-prover-lib`,
   `bridge-gql-fetcher`, `bridge-event-prover-lib`, `bridge-event-witness`; run them from that
   directory with `cargo test --locked -p <crate>`;
-- the standalone crates, each from its own directory with `cargo test`: `deposit-prover`,
+- the standalone crates, each from its own directory with `cargo test`:
   `eth-light-client-prover`, `deposit-relayer-daemon`, `eth-light-client-relayer`,
   `bridge-snark-utils`, `frontend`.
 
@@ -333,8 +333,7 @@ commit.
   [`docs/eth-light-client.md`](docs/eth-light-client.md), [`docs/aave-yield.md`](docs/aave-yield.md).
 - [`contracts/an/README.md`](contracts/an/README.md),
   [`contracts/ethereum/verifiers/README.md`](contracts/ethereum/verifiers/README.md).
-- Crate READMEs: [`deposit-prover`](deposit-prover/README.md),
-  [`eth-light-client-prover`](eth-light-client-prover/README.md),
+- Crate READMEs: [`eth-light-client-prover`](eth-light-client-prover/README.md),
   [`eth-light-client-relayer`](crates/eth-light-client-relayer/README.md),
   [`bridge-evm-aggregator`](crates/bridge-evm-aggregator/README.md),
   [`bridge-prover-libraries`](crates/bridge-prover-libraries/TECHNICAL_README.md),

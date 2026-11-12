@@ -88,7 +88,7 @@ CARGO_NET_GIT_FETCH_WITH_CLI=true cargo +nightly check --tests
 `axiom-crypto/snark-verifier`, `axiom-crypto/halo2-lib`,
 `privacy-scaling-explorations/halo2{,curves}` git deps. The crate is
 deliberately a **separate cargo workspace** (note the empty `[workspace]`
-section in `Cargo.toml` — same pattern as `deposit-prover/`) because it
+section in `Cargo.toml`) because it
 depends on `axiom-crypto/halo2-lib`, which clashes with the
 gosh-fork (`halo2-lib-zkevm-sha256-and-bls12-381`) used by
 `crates/bridge-snark-utils/`.

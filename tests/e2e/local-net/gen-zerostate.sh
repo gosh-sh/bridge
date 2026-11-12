@@ -60,7 +60,7 @@ sed -i -E "s/^BRIDGE_COMMIT = \"[0-9a-f]{40}\"/BRIDGE_COMMIT = \"$BSHA\"/" contr
 grep -q "^BRIDGE_COMMIT = \"$BSHA\"" contracts/scripts/bridge_contracts.py || { echo "!! could not move BRIDGE_COMMIT in contracts/scripts/bridge_contracts.py"; exit 1; }
 export BRIDGE_REPO="$BRIDGE"
 python3 contracts/scripts/bridge_contracts.py
-want=$(git -C "$BRIDGE" show "$BSHA:contracts/an/0.80.0_compiled/exchange/eccBridge.tvc" | sha256sum | cut -c1-64)
+want=$(git -C "$BRIDGE" show "$BSHA:contracts/an/0.80.1_compiled/exchange/eccBridge.tvc" | sha256sum | cut -c1-64)
 have=$(sha256sum contracts/0.80.0_compiled/exchange/eccBridge.tvc | cut -c1-64)
 [ "$want" = "$have" ] || { echo "!! placed eccBridge.tvc differs from $BSHA"; exit 1; }
 

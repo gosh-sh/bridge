@@ -9,7 +9,6 @@ target/
 # `cargo fetch --locked` and `Dockerfile` copies it).
 #
 # Tracked locks in excluded crates (reproducible VK / daemon `--locked` builds):
-#   deposit-prover/Cargo.lock
 #   eth-light-client-prover/Cargo.lock
 #   crates/deposit-relayer-daemon/Cargo.lock
 #   crates/eth-light-client-relayer/Cargo.lock
@@ -135,8 +134,10 @@ yarn.lock
 *.a
 *.lib
 
-# Data directories (deposit-prover/data/ contains large generated artifacts)
-deposit-prover/data/
+# The deposit prover was removed (bridge-audit#139); a checkout that ran it
+# still holds its SRS and its ~1.3 GB proving key there.
+deposit-prover/
+crates/ackinacki-bridge/deposit-prover/
 db/
 
 # Keys and secrets (NEVER commit these!)
@@ -166,16 +167,11 @@ poseidon-proof/data/*
 !poseidon-proof/data/evm_calldata.bin
 !poseidon-proof/data/keccak_evm_calldata.bin
 !poseidon-proof/data/keccak_verifier_deployment.bin
-deposit-prover/params/
 *.pk
 *.snark
 *.bkp
 
-# KZG parameters (downloaded from trusted setup, not stored in git)
-deposit-prover/data/*.srs
-
 # AN→ETH gnark wrapper build artifacts (per-circuit, under bridge-snark-utils)
-# The deposit-prover/gnark-wrapper/ tree was retired in Phase 4.3 (2026-05-17).
 crates/bridge-snark-utils/gnark-wrappers/circuit-*/circuit.r1cs
 crates/bridge-snark-utils/gnark-wrappers/circuit-*/proving.key
 crates/bridge-snark-utils/gnark-wrappers/circuit-*/verification.key
@@ -214,7 +210,6 @@ cargo.audit
 contracts/DepositVerifier.*
 deployment_addresses.json
 contracts/ethereum/deployment_real.json
-deposit-prover/deposit_proof_output.json
 
 # R15 / M2 bridge-evm-aggregator standalone workspace. Its Cargo.lock is
 # committed because `aggregate-proof` is a deployed binary; only generated
@@ -228,12 +223,6 @@ crates/bridge-evm-aggregator/out/
 # SUMMARY.md are intended to be committed from this batch.
 FIX_TASK_FOR_AGENT.md.bak.*
 acki-nacki_deposit-rlc-e2e.patch
-deposit-prover/Cargo.lock.pse-backup
-deposit-prover/Cargo.toml.bak_*
-deposit-prover/Cargo.toml.pse-backup
-deposit-prover/deposit_public_inputs.bin
-deposit-prover/deposit_eth_circuit_params.json
-deposit-prover/src/bin/an_rlc_verify.rs
 docs/**/Acki_Nacki_Bridge_User_Guide.pdf.bak.*
 docs/**/USER_GUIDE.pdf
 docs/**/USER_GUIDE.md.bak.*
@@ -273,7 +262,7 @@ crates/eth-light-client-relayer/*.bin
 
 # eth-light-client-prover: Hermez SRS downloads + example emit dirs.
 # (repo-root `target/` and `out/` already cover cargo/build output.)
-# Cargo.lock is tracked — same VK-reproducibility reason as deposit-prover.
+# Cargo.lock is tracked for VK reproducibility.
 eth-light-client-prover/data/
 eth-light-client-prover/out/
 eth-light-client-prover/*.srs
@@ -314,12 +303,7 @@ crates/bridge-prover-libraries/L2_config/work_dir/
 crates/ackinacki-bridge/work_dir/
 crates/ackinacki-bridge/withdraw-state/
 
-# The deposit prover the source-checkout profiles point at
-# (BRIDGE_DEPOSIT_PROVER_DIR=./deposit-prover, laid out by
-# scripts/stage_deposit_prover.sh): its tools, the k=18 SRS and the ~1.3 GB
-# proving key the first proof writes into data/. And the deposit operation
-# records (BRIDGE_DEPOSIT_STATE_DIR=./deposit-state).
-crates/ackinacki-bridge/deposit-prover/
+# The deposit operation records (BRIDGE_DEPOSIT_STATE_DIR=./deposit-state).
 crates/ackinacki-bridge/deposit-state/
 
 # Per-user output artifacts from scripts/deploy_msig_and_mint.{sh,py}

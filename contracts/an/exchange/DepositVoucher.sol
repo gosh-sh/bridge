@@ -2,7 +2,15 @@ pragma gosh-solidity >=0.80;
 pragma AbiHeader expire;
 
 import "./modifiers/modifiers.sol";
-import "./eccBridge.sol";
+
+// The one call the voucher makes. eccBridge itself is not imported: it links
+// EthTrie, whose KECCAK256 the voucher's compiler cannot assemble.
+interface IDepositConfirmation {
+    function confirmTokenDeposit(
+        uint256 depositId, uint256 contractAddr, uint256 dappId,
+        uint256 chainId, uint128 amount, uint256 anAccount, uint256 evmToken
+    ) external;
+}
 
 /// @title DepositVoucher
 /// @notice Deterministic one-shot marker contract for inbound bridge deposits
@@ -42,7 +50,7 @@ contract DepositVoucher is eccBridgeModifiers {
             tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId)) == _depositHash,
             ERR_HASH_MISMATCH
         );
-        eccBridge(USDC_BRIDGE_ADDRESS).confirmTokenDeposit{value: 0.5 vmshell, flag: 1}(
+        IDepositConfirmation(USDC_BRIDGE_ADDRESS).confirmTokenDeposit{value: 0.5 vmshell, flag: 1}(
             depositId, contractAddr, dappId, chainId, amount, anAccount, evmToken
         );
     }

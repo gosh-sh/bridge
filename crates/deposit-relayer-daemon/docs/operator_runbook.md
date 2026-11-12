@@ -225,6 +225,7 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | 308 `ERR_RECEIPT_STATUS` (`EthTrie`) | `finalizeDeposit` | the deposit transaction failed on the source chain | no deposit was made; the relayer refuses a failed transaction itself (`unprovable`) |
 | 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | proven amount exceeds 50 USDC | contact the operator; old oversized transfers must settle before activating the new pair |
 | 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full | retried without counting a failed attempt; wait for withdrawals |
+| 236 `ERR_CHAIN_BALANCE_EXCEEDED` | `finalizeDeposit` | a NACKL deposit is larger than the NACKL the AN bridge holds locked for the source chain | retried without counting a failed attempt; withdrawals to that chain lock more. The deposit's NACKL is already burned on the EVM side, so one that can never be covered is paid by the owner's recovery call |
 | 400 / 402 | message header | identical recorded message / expired message | pending; observe the voucher before retrying |
 | 231 `ERR_PAUSED` | `finalizeDeposit` | the lane is paused | pending until `setPaused(false)` |
 | 401 | message header | expiry is at least five minutes ahead of block time | use the matching client and check clock synchronization; this build caps finalization expiry at 240 seconds |

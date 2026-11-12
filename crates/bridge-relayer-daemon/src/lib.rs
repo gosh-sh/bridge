@@ -41,8 +41,9 @@ pub use an_chain_guard::{ChainBehindGuard, BEHIND_FOR_TO_STOP, POLLS_BEHIND_TO_S
 pub use bridge::{
     classify_withdraw_revert, is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome,
     BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig,
-    MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
-    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
+    MockBridgeClient, NacklExecuteOutcome, NacklPayout, NacklState, SubmitOutcome, WithdrawBridge,
+    WithdrawRevertKind, WithdrawSubmitOutcome, GET_LOGS_CHUNK_BLOCKS, NACKL_TOKEN_ID,
+    WITHDRAW_RECEIPT_TIMEOUT,
 };
 pub use bundle_stride::{check_stride_for_rotations, stride_for_submitting, BundleStrideError};
 pub use daemon::{

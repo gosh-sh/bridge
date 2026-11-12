@@ -495,6 +495,23 @@ pub trait WithdrawBridge: Send + Sync {
         proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError>;
+    /// The queued NACKL payout under `nullifier`; `None` when nothing is
+    /// queued under it.
+    async fn nackl_payout(&self, _nullifier: U256) -> Result<Option<NacklPayout>, RelayerError> {
+        Ok(None)
+    }
+    /// How much NACKL the daily limit lets the bridge mint now.
+    async fn nackl_capacity(&self) -> Result<U256, RelayerError> {
+        Ok(U256::ZERO)
+    }
+    async fn execute_nackl_payout(
+        &self,
+        _nullifier: U256,
+    ) -> Result<NacklExecuteOutcome, RelayerError> {
+        Ok(NacklExecuteOutcome::Failed {
+            reason: "this bridge client cannot execute NACKL payouts".into(),
+        })
+    }
 }
 
 #[async_trait]
@@ -525,6 +542,21 @@ where
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
         EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
+    }
+
+    async fn nackl_payout(&self, nullifier: U256) -> Result<Option<NacklPayout>, RelayerError> {
+        EthBridgeClient::nackl_payout(self, nullifier).await
+    }
+
+    async fn nackl_capacity(&self) -> Result<U256, RelayerError> {
+        EthBridgeClient::nackl_capacity(self).await
+    }
+
+    async fn execute_nackl_payout(
+        &self,
+        nullifier: U256,
+    ) -> Result<NacklExecuteOutcome, RelayerError> {
+        EthBridgeClient::execute_nackl_payout(self, nullifier).await
     }
 }
 
@@ -958,6 +990,18 @@ mod sol_bindings {
             error InsufficientTreasury();
             error AaveWithdrawFailed(uint256 requested, uint256 received);
             error WithdrawTransferFailed(address recipient, uint256 amount);
+            error NacklMinterHandedOver(address successor);
+            error NacklPayoutNotQueued(uint256 nullifier);
+            error NacklPayoutNotDue(uint256 nullifier, uint256 readyAt);
+            error NacklMintLimitReached(uint256 amount, uint256 capacity);
+
+            /// A NACKL payout `withdrawByProof` accepted but did not mint:
+            /// over the delay threshold, or over the daily limit's capacity.
+            /// Anyone mints it with `executeNacklPayout` once it is due and
+            /// fits the capacity; `amount` is zero once it has left the queue.
+            function nacklPayout(uint256 nullifier) external view returns (address recipient, uint256 amount, uint256 readyAt);
+            function nacklState() external view returns (uint256 dailyLimit, uint256 delayThreshold, uint256 capacity, uint256 queued, address migratedTo);
+            function executeNacklPayout(uint256 nullifier) external;
 
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
@@ -1440,10 +1484,11 @@ where
                 .confirm(pending, nonce, self.withdraw_receipt_timeout)
                 .await
             {
-                Ok(receipt) => Ok(outcome_from_mined_withdraw(
-                    receipt.status(),
-                    receipt.transaction_hash(),
-                )),
+                Ok(receipt) => {
+                    let outcome =
+                        outcome_from_mined_withdraw(receipt.status(), receipt.transaction_hash());
+                    Ok(self.queued_nackl(outcome, pub_inputs).await)
+                },
                 Err(e) => {
                     // Post-send confirmation failures (RPC dropped, receipt
                     // wait timed out, transaction replaced) are transient by
@@ -1618,6 +1663,111 @@ where
             .call()
             .await
             .map_err(map_contract_err)
+    }
+
+    /// Turn a NACKL `Paid` into `Queued` when the bridge queued the payout.
+    /// The payout is read back rather than taken from the receipt's logs;
+    /// if that read fails the outcome stays `Paid`, and the daemon still
+    /// checks the nullifier's queue entry before it forgets the payout.
+    async fn queued_nackl(
+        &self,
+        outcome: WithdrawSubmitOutcome,
+        pub_inputs: &WithdrawalPublicInputs,
+    ) -> WithdrawSubmitOutcome {
+        let WithdrawSubmitOutcome::Paid {
+            tx_hash,
+        } = outcome
+        else {
+            return outcome;
+        };
+        if pub_inputs.token_id != U256::from(NACKL_TOKEN_ID) {
+            return outcome;
+        }
+        match self.nackl_payout(pub_inputs.nullifier).await {
+            Ok(Some(payout)) => WithdrawSubmitOutcome::Queued {
+                tx_hash,
+                amount: payout.amount,
+                ready_at: payout.ready_at,
+            },
+            Ok(None) => outcome,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    ?tx_hash,
+                    "nacklPayout read failed after withdrawByProof"
+                );
+                outcome
+            },
+        }
+    }
+
+    /// `nacklPayout(nullifier)`; `None` when no payout is queued under it.
+    pub async fn nackl_payout(&self, nullifier: U256) -> Result<Option<NacklPayout>, RelayerError> {
+        let p = self
+            .contract
+            .nacklPayout(nullifier)
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok((!p.amount.is_zero()).then_some(NacklPayout {
+            recipient: p.recipient,
+            amount: p.amount,
+            ready_at: p.readyAt,
+        }))
+    }
+
+    /// `nacklState()`.
+    pub async fn nackl_state(&self) -> Result<NacklState, RelayerError> {
+        let s = self
+            .contract
+            .nacklState()
+            .call()
+            .await
+            .map_err(map_contract_err)?;
+        Ok(NacklState {
+            daily_limit: s.dailyLimit,
+            delay_threshold: s.delayThreshold,
+            capacity: s.capacity,
+            queued: s.queued,
+            migrated_to: s.migratedTo,
+        })
+    }
+
+    /// The `capacity` of `nacklState()`: what the daily limit lets the
+    /// bridge mint now.
+    pub async fn nackl_capacity(&self) -> Result<U256, RelayerError> {
+        Ok(self.nackl_state().await?.capacity)
+    }
+
+    /// Send `executeNacklPayout(nullifier)` and wait for its receipt.
+    pub async fn execute_nackl_payout(
+        &self,
+        nullifier: U256,
+    ) -> Result<NacklExecuteOutcome, RelayerError> {
+        let call = self.contract.executeNacklPayout(nullifier);
+        let failed = |e: &dyn std::fmt::Display| NacklExecuteOutcome::Failed {
+            reason: format!("executeNacklPayout: {e}"),
+        };
+        let (call, nonce) = match self.prepare_send(call).await {
+            Ok(prepared) => prepared,
+            Err(e) => return Ok(failed(&e)),
+        };
+        match call.send().await {
+            Ok(pending) => match self
+                .confirm(pending, nonce, self.withdraw_receipt_timeout)
+                .await
+            {
+                Ok(receipt) if receipt.status() => Ok(NacklExecuteOutcome::Executed {
+                    tx_hash: receipt.transaction_hash(),
+                }),
+                Ok(receipt) => Ok(failed(&format_args!(
+                    "reverted on chain (tx {:#x})",
+                    receipt.transaction_hash()
+                ))),
+                Err(e) => Ok(failed(&e)),
+            },
+            Err(e) => Ok(failed(&e)),
+        }
     }
 
     /// `uint256 public treasuryBalance` (`AckiNackiBridge.sol:98`).
@@ -2232,6 +2382,54 @@ pub enum WithdrawSubmitOutcome {
         reason: String,
         permanent: bool,
     },
+    /// `withdrawByProof` for NACKL succeeded and spent the nullifier, but the
+    /// bridge queued the payout instead of minting it. It is minted by
+    /// `executeNacklPayout` once `ready_at` (unix seconds) has passed and the
+    /// daily limit has room for `amount`.
+    Queued {
+        tx_hash: B256,
+        amount: U256,
+        ready_at: U256,
+    },
+}
+
+/// The ECC id of NACKL; the EVM bridge mints its payouts, under a daily limit
+/// and a delay.
+pub const NACKL_TOKEN_ID: u32 = 1;
+
+/// A queued NACKL payout, as `nacklPayout(nullifier)` reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NacklPayout {
+    pub recipient: Address,
+    pub amount: U256,
+    pub ready_at: U256,
+}
+
+/// The EVM bridge's NACKL mint limits, as `nacklState()` reports them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NacklState {
+    pub daily_limit: U256,
+    /// A payout above it is queued for 24 hours.
+    pub delay_threshold: U256,
+    /// What the daily limit lets the bridge mint now.
+    pub capacity: U256,
+    pub queued: U256,
+    /// The bridge ERC20 NACKL was handed over to; zero while this bridge
+    /// mints it.
+    pub migrated_to: Address,
+}
+
+/// Outcome of [`EthBridgeClient::execute_nackl_payout`].
+#[derive(Clone, Debug)]
+pub enum NacklExecuteOutcome {
+    Executed {
+        tx_hash: B256,
+    },
+    /// Not sent or reverted; the payout stays queued unless `reason` says
+    /// `NacklPayoutNotQueued`.
+    Failed {
+        reason: String,
+    },
 }
 
 /// The outcome of a `withdrawByProof` that was mined, from its receipt.
@@ -2279,7 +2477,7 @@ pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmi
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 9] = [
+    let permanent_selectors: [[u8; 4]; 10] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
@@ -2289,6 +2487,7 @@ pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
         AckiNackiBridge::FieldElementOutOfRange::SELECTOR,
         AckiNackiBridge::InvalidNumLayers::SELECTOR,
         AckiNackiBridge::NullifierAlreadyUsed::SELECTOR,
+        AckiNackiBridge::NacklMinterHandedOver::SELECTOR,
     ];
     let lowered = reason.to_ascii_lowercase();
     for sel in permanent_selectors {
@@ -2401,6 +2600,22 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
         E::WithdrawTransferFailed(x) => (
             "WithdrawTransferFailed",
             format!("recipient: {}, amount: {}", x.recipient, x.amount),
+        ),
+        E::NacklMinterHandedOver(x) => (
+            "NacklMinterHandedOver",
+            format!("successor: {}", x.successor),
+        ),
+        E::NacklPayoutNotQueued(x) => (
+            "NacklPayoutNotQueued",
+            format!("nullifier: {}", word(x.nullifier)),
+        ),
+        E::NacklPayoutNotDue(x) => (
+            "NacklPayoutNotDue",
+            format!("nullifier: {}, readyAt: {}", word(x.nullifier), x.readyAt),
+        ),
+        E::NacklMintLimitReached(x) => (
+            "NacklMintLimitReached",
+            format!("amount: {}, capacity: {}", x.amount, x.capacity),
         ),
     };
     BridgeRevert {
@@ -2797,9 +3012,7 @@ mod tests {
                 assert!(reason.contains("reverted on chain"), "{reason}");
                 assert!(reason.contains(&format!("{hash:#x}")), "{reason}");
             },
-            WithdrawSubmitOutcome::Paid {
-                ..
-            } => panic!("status 0 reported as Paid"),
+            other => panic!("status 0 reported as {other:?}"),
         }
         assert!(matches!(
             outcome_from_mined_withdraw(true, hash),

@@ -123,15 +123,22 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     let status = match s.status {
         crate::orchestrator::SubmitStatus::DryRunOk => "dry-run-ok",
         crate::orchestrator::SubmitStatus::Confirmed => "confirmed",
+        crate::orchestrator::SubmitStatus::Queued => "queued",
     };
     // Built whole, then written once. Sixteen separate `eprintln!`s were
     // sixteen chances to panic and sixteen chances to tear the summary in
     // half — the same reasoning that replaced the burn confirmation
     // prompt's discarded writes with one checked `write_all`.
-    let eth = match s.eth_tx.as_deref() {
+    let mut eth = match s.eth_tx.as_deref() {
         Some(tx) => format!("  ETH tx:       {tx} ({status})\n"),
         None => format!("  ETH tx:       (none) ({status})\n"),
     };
+    if let Some(ready_at) = s.ready_at {
+        eth.push_str(&format!(
+            "  payout:       queued; executeNacklPayout mints it from unix time {ready_at} while \
+             the daily limit has room\n"
+        ));
+    }
     emit(
         &format!(
             "\nwithdraw complete:\n\x20 amount:       {} USDC\n\x20 AN tx:        {}\n\x20 msg \

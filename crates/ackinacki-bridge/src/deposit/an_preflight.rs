@@ -40,6 +40,10 @@ pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 17, 
 /// The newest bridge this build was checked against.
 pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 19, 0);
 
+/// The first bridge that locks NACKL (ECC id 1) on withdrawal and unlocks it
+/// on deposit; an older one refuses to register it.
+pub const NACKL_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 19, 0);
+
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
 

@@ -323,6 +323,17 @@ pub async fn run_for_token(
                 reason: "AN bridge returned an invalid version".into(),
                 source: None,
             })?;
+        let nackl = token_id == bridge_relayer_daemon::NACKL_TOKEN_ID;
+        if nackl && version < crate::deposit::an_preflight::NACKL_BRIDGE_VERSION {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} is version {version}; NACKL \
+                     moves through {} or later, which locks it instead of burning it",
+                    crate::deposit::an_preflight::NACKL_BRIDGE_VERSION
+                ),
+                source: None,
+            });
+        }
         if token_id != BRIDGED_USDC_TOKEN_ID
             || version >= crate::deposit::an_preflight::BridgeVersion(1, 16, 0)
         {
@@ -351,8 +362,9 @@ pub async fn run_for_token(
                 .await?;
         // Match initiateWithdrawal's refund when burned already exceeds minted
         // or this amount would take it there. The first arm avoids
-        // subtracting when burned > minted.
-        if burned > minted || amount.0 > minted - burned {
+        // subtracting when burned > minted. NACKL is locked, not burned, and
+        // neither this nor the chain's outstanding amount bounds it.
+        if !nackl && (burned > minted || amount.0 > minted - burned) {
             return Err(CliError::Preflight {
                 reason: format!(
                     "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
@@ -373,7 +385,7 @@ pub async fn run_for_token(
                     .await?;
             (cap, outstanding)
         };
-        if amount.0 > max_transfer || amount.0 > outstanding {
+        if amount.0 > max_transfer || (!nackl && amount.0 > outstanding) {
             return Err(CliError::Preflight {
                 reason: format!(
                     "getDepositLimits({}) reports maxTransfer={max_transfer}, \
@@ -2770,6 +2782,44 @@ pub async fn check_bridge_deploy(
     .await
 }
 
+/// Refuse a NACKL withdrawal the bridge can no longer pay, and say when its
+/// payout will wait instead of being minted at once.
+fn nackl_payout_verdict(
+    state: &bridge_relayer_daemon::NacklState,
+    bridge: Address,
+    amount: UsdcAmount,
+) -> CliResult<()> {
+    if state.migrated_to != Address::ZERO {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge} handed ERC20 NACKL over to {} \
+                 (nacklState().migratedTo) and no longer mints it: withdrawByProof would revert \
+                 NacklMinterHandedOver. Withdraw through the successor once the owner points \
+                 setEvmBridge on Acki Nacki at it.",
+                state.migrated_to
+            ),
+            source: None,
+        });
+    }
+    let amount = U256::from(amount.0);
+    if amount > state.delay_threshold {
+        tracing::warn!(
+            %amount,
+            delay_threshold = %state.delay_threshold,
+            "the payout is above the bridge's NACKL delay threshold: withdrawByProof queues it \
+             for 24 hours, then executeNacklPayout mints it"
+        );
+    } else if amount > state.capacity {
+        tracing::warn!(
+            %amount,
+            capacity = %state.capacity,
+            "the payout is over what the bridge's daily NACKL limit lets it mint now: \
+             withdrawByProof queues it until the limit has room"
+        );
+    }
+    Ok(())
+}
+
 /// Check the verifier stack, identity and selected token payout lane before
 /// burning.
 pub async fn check_bridge_deploy_for_token(
@@ -3016,7 +3066,20 @@ pub async fn check_bridge_deploy_for_token(
                 });
             }
         }
-        (info.max_withdrawal, info.liabilities)
+        if token_id == bridge_relayer_daemon::NACKL_TOKEN_ID {
+            let state = client
+                .nackl_state()
+                .await
+                .map_err(|e| CliError::Preflight {
+                    reason: format!("--bridge-address {bridge}: nacklState() failed: {e}"),
+                    source: None,
+                })?;
+            nackl_payout_verdict(&state, bridge, *amount)?;
+            // ERC20 NACKL is minted, not held: there is no treasury to fall short.
+            (info.max_withdrawal, U256::MAX)
+        } else {
+            (info.max_withdrawal, info.liabilities)
+        }
     };
     if U256::from(amount.0) > max_transfer {
         return Err(CliError::Preflight {
@@ -3142,6 +3205,30 @@ pub async fn check_window_scan(
 // and a second copy of a selector table is a second thing to drift.
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn a_nackl_withdrawal_is_refused_only_once_the_minter_is_handed_over() {
+        let state = bridge_relayer_daemon::NacklState {
+            daily_limit: U256::from(100u64),
+            delay_threshold: U256::from(50u64),
+            capacity: U256::from(10u64),
+            queued: U256::ZERO,
+            migrated_to: Address::ZERO,
+        };
+        let bridge = Address::with_last_byte(1);
+        for amount in [1, 10, 11, 50, 51, 100] {
+            nackl_payout_verdict(&state, bridge, UsdcAmount(amount))
+                .expect("a queued payout is still paid; only a handover refuses");
+        }
+        let handed_over = bridge_relayer_daemon::NacklState {
+            migrated_to: Address::with_last_byte(2),
+            ..state
+        };
+        let msg = nackl_payout_verdict(&handed_over, bridge, UsdcAmount(1))
+            .expect_err("a bridge that handed ERC20 NACKL over cannot mint it")
+            .to_string();
+        assert!(msg.contains("NacklMinterHandedOver"), "{msg}");
+    }
+
     #[test]
     fn refusal_wording_names_the_token_being_withdrawn() {
         let amount = U256::from(7u64);

@@ -115,6 +115,10 @@ pub struct SubmitSummary {
     /// `None` for `--dry-run` success; `Some(tx_hash)` for real submits.
     pub eth_tx: Option<String>,
     pub status: SubmitStatus,
+    /// Unix time a queued NACKL payout becomes executable; set only with
+    /// `status: queued`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -124,6 +128,9 @@ pub struct SubmitSummary {
 pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
+    /// The bridge accepted the NACKL withdrawal and queued its payout: it is
+    /// minted by `executeNacklPayout` once due and within the daily limit.
+    Queued,
 }
 
 /// `LockHold`'s `impl Drop` is what keeps the withdrawal lock borrowed to
@@ -819,6 +826,7 @@ pub async fn run(
             submit: SubmitSummary {
                 eth_tx: None,
                 status: SubmitStatus::DryRunOk,
+                ready_at: None,
             },
         });
     }
@@ -1314,6 +1322,36 @@ pub async fn run(
             SubmitSummary {
                 eth_tx: Some(tx),
                 status: SubmitStatus::Confirmed,
+                ready_at: None,
+            }
+        },
+        WithdrawSubmitOutcome::Queued {
+            tx_hash,
+            amount,
+            ready_at,
+        } => {
+            let tx = format!("{tx_hash:?}");
+            info!(
+                tx = %tx,
+                %amount,
+                %ready_at,
+                "withdrawByProof queued the NACKL payout: executeNacklPayout mints it once due and \
+                 within the bridge's daily limit; the withdraw relayer sends it, and anyone may"
+            );
+            if let Some(r) = record.as_mut() {
+                r.status = Status::Submitted;
+                r.eth_tx_hash = Some(tx.clone());
+                idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+                    e.after_send(&format!(
+                        "withdrawByProof queued the payout on the EVM side as {tx} — the NACKL is \
+                         locked on Acki Nacki and the payout cannot be proven again"
+                    ))
+                })?;
+            }
+            SubmitSummary {
+                eth_tx: Some(tx),
+                status: SubmitStatus::Queued,
+                ready_at: Some(ready_at.saturating_to()),
             }
         },
         WithdrawSubmitOutcome::Reverted {

@@ -19,7 +19,7 @@ assigns it when the release is tagged.
 ### Fixes
 -->
 
-## [Unreleased]
+## [0.9.0]
 
 ### Breaking Changes
 

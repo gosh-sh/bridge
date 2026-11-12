@@ -77,10 +77,7 @@ abstract contract NacklBridgeFixture is Test {
                 GENESIS_PREV_ANCHOR
             ),
             VerifyBlockConfigLib.withWithdrawAfter(
-                IBridgeWithdrawalVerifier(address(withdrawalVerifier)),
-                DAPP_FR,
-                ACC_FR,
-                predecessor
+                IBridgeWithdrawalVerifier(address(withdrawalVerifier)), DAPP_FR, ACC_FR, predecessor
             )
         );
         uint256[10] memory layers;

@@ -60,7 +60,9 @@ library NacklMint {
     event NacklPayoutQueued(
         uint256 indexed nullifier, address indexed recipient, uint256 amount, uint256 readyAt
     );
-    event NacklPayoutAbandoned(uint256 indexed nullifier, address indexed recipient, uint256 amount);
+    event NacklPayoutAbandoned(
+        uint256 indexed nullifier, address indexed recipient, uint256 amount
+    );
     event NacklMinterMigrated(address indexed successor);
 
     error NacklAlreadyListed();
@@ -206,8 +208,9 @@ library NacklMint {
         uint256 amount,
         uint256 readyAt
     ) private {
-        s.queue[bytes32(nullifier)] =
-            Payout({ recipient: recipient, readyAt: uint64(readyAt), amount: amount });
+        s.queue[bytes32(nullifier)] = Payout({
+            recipient: recipient, readyAt: uint64(readyAt), amount: amount
+        });
         s.queuedCount += 1;
         emit NacklPayoutQueued(nullifier, recipient, amount, readyAt);
     }

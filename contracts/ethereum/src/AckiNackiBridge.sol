@@ -474,7 +474,9 @@ contract AckiNackiBridge {
     event NacklPayoutQueued(
         uint256 indexed nullifier, address indexed recipient, uint256 amount, uint256 readyAt
     );
-    event NacklPayoutAbandoned(uint256 indexed nullifier, address indexed recipient, uint256 amount);
+    event NacklPayoutAbandoned(
+        uint256 indexed nullifier, address indexed recipient, uint256 amount
+    );
     event NacklMinterMigrated(address indexed successor);
     error NacklAlreadyListed();
     error NacklDecimalsMismatch(uint8 decimals);
@@ -2354,13 +2356,7 @@ contract AckiNackiBridge {
         )
     {
         NacklMint.State storage s = _nackl;
-        return (
-            s.dailyLimit,
-            s.delayThreshold,
-            NacklMint.capacity(s),
-            s.queuedCount,
-            s.migratedTo
-        );
+        return (s.dailyLimit, s.delayThreshold, NacklMint.capacity(s), s.queuedCount, s.migratedTo);
     }
 
     /// @notice A queued NACKL payout; a zero recipient means none is queued.

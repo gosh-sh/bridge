@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Status | **Normative, gosh-sh/bridge-audit#152.** What the bridge must do to carry NACKL between Acki Nacki and an EVM chain: the nine points of that issue and the two design decisions recorded on it (an external library for the EVM logic; on-chain checks plus the owner's procedure for the minter handover). Every requirement is covered by the test case named in [§12](#12-traceability). |
-| Written against | `6c4d8a9d`, the gosh-sh/bridge-audit#139 branch the #152 branch is stacked on. A `file:line` points at that commit and marks behaviour that stays as it is; a requirement without one is new. Re-verify against the merge commit and bump this line when the #152 PR lands. |
+| Written against | `fd9a2ca8`, `eccBridge` 1.18.0 of gosh-sh/bridge#166 (bridge-audit#139 requirement 7), which the #152 branch is stacked on. A `file:line` points at that commit and marks behaviour that stays as it is; a requirement without one is new. Re-verify against the merge commit and bump this line when the #152 PR lands. |
 | Genre | Design and correctness. The Ethereum contract reference is [`EVM-contracts-spec.md`](EVM-contracts-spec.md); the Acki Nacki contracts are described in [`contracts/an/README.md`](../contracts/an/README.md). |
 | Paths | Relative to the repository root. `tvm-sdk` and `acki-nacki` paths are in those repositories, at the commits named where they are cited. |
 
@@ -34,7 +34,7 @@ A requirement that cannot be checked by a test says so and says what checks it i
 | **AN bridge** | `eccBridge`, `contracts/an/exchange/eccBridge.sol`. |
 | **EVM bridge** | `AckiNackiBridge`, `contracts/ethereum/src/AckiNackiBridge.sol`. |
 | **Lock** | NACKL that a withdrawal leaves on the AN bridge instead of burning it. |
-| **Locked amount** (`locked[c]`) | The NACKL the AN bridge holds on behalf of EVM chain `c`: increased by every withdrawal to `c`, decreased by every deposit from `c`. It lives in `BridgeTokenConfig.outstanding` (`contracts/an/exchange/modifiers/modifiers.sol:11`) of the NACKL entry for `c`, so `updateCode` carries it without a format change (`eccBridge.sol:1090-1098`). |
+| **Locked amount** (`locked[c]`) | The NACKL the AN bridge holds on behalf of EVM chain `c`: increased by every withdrawal to `c`, decreased by every deposit from `c`. It lives in `BridgeTokenConfig.outstanding` (`contracts/an/exchange/modifiers/modifiers.sol:11`) of the NACKL entry for `c`, so `updateCode` carries it without a format change (`eccBridge.sol:1116-1124`). |
 | **Unlock** | The AN bridge sending locked NACKL to the recipient of a proven deposit. |
 | **Payout** | The EVM bridge minting ERC20 NACKL to the recipient of a proven withdrawal. |
 | **Queued payout** | A payout `withdrawByProof` has accepted — the proof verified, the nullifier spent — but not minted yet, because of the daily limit or the delay. It is keyed by the withdrawal's nullifier. |
@@ -44,7 +44,7 @@ A requirement that cannot be checked by a test says so and says what checks it i
 | **Capacity** | `D` less what the window has minted. A payout fits when its amount is at most the capacity. |
 | **Minter handover** | Moving the ownership of ERC20 NACKL from an EVM bridge to its successor, the bridge whose `predecessor()` names it. |
 | **Abandoned payout** | A queued payout the owner names in the minter handover. It is removed with an event and is never minted. Only for a payout the owner holds to be forged; see HO-3. |
-| **Owner key** | The ed25519 key in the AN bridge's `_ownerPubkey`. It authorises `updateCode` (`eccBridge.sol:1090`), `setBridgeToken` and the recovery calls. |
+| **Owner key** | The ed25519 key in the AN bridge's `_ownerPubkey`. It authorises `updateCode` (`eccBridge.sol:1116`), `setBridgeToken` and the recovery calls. |
 | **Special account** | An Acki Nacki account that the node lets mint and burn ECC: the config account and the accounts listed in `special_contracts` (`tvm-sdk` `tvm_executor/src/blockchain_config.rs:345-351`). |
 
 ## 3. The supply rule
@@ -65,21 +65,21 @@ is bounded by the daily limit and the delay instead (§7).
 
 | ID | Form | Requirement |
 |---|---|---|
-| AN-1 | Ubiquitous | `setBridgeToken` shall accept NACKL (id 1) as well as USDC (id 3) and refuse every other id with `ERR_TOKEN_CONFIG` (242). Today it accepts id 3 only (`eccBridge.sol:698`). For NACKL the USDC ceilings `MAX_TRANSFER_AMOUNT` and `MAX_BRIDGE_TVL` do not apply; `maxTransfer` stays within `uint64` (`:699`) and is also the per-withdrawal cap, `maxWithdrawal`, which never decreases (`:712-713`). |
-| AN-2 | Event-driven | When `initiateWithdrawal` receives NACKL for a chain whose NACKL entry is registered and whose EVM bridge is set, within `maxWithdrawal`, the AN bridge shall keep the NACKL, add the amount to `locked[dstChainId]` and emit `WithdrawalInitiated` with the same fields as today (`:456-458`). |
-| AN-3 | Unwanted | If a NACKL withdrawal is refused — the entry is not registered (241), no EVM bridge is set (239), the amount is over `maxWithdrawal` (234) — then the AN bridge shall return the NACKL with `WithdrawalRefused`, as it does for USDC (`:413-428`). |
-| AN-4 | Ubiquitous | A NACKL withdrawal shall not be bounded by bridged minted less bridged burned or by the chain's outstanding amount: those bound a burn of what the bridge minted (`:432-443`), and a lock mints nothing. |
-| AN-5 | Event-driven | When a NACKL deposit is confirmed (`confirmTokenDeposit`, `:1016`), the AN bridge shall send `amount` of the NACKL it holds to the recipient and subtract it from `locked[chainId]`. |
+| AN-1 | Ubiquitous | `setBridgeToken` shall accept NACKL (id 1) as well as USDC (id 3) and refuse every other id with `ERR_TOKEN_CONFIG` (242). Today it accepts id 3 only (`eccBridge.sol:721`). For NACKL the USDC ceilings `MAX_TRANSFER_AMOUNT` and `MAX_BRIDGE_TVL` do not apply; `maxTransfer` stays within `uint64` (`:722`) and is also the per-withdrawal cap, `maxWithdrawal`, which never decreases (`:735-736`). |
+| AN-2 | Event-driven | When `initiateWithdrawal` receives NACKL for a chain whose NACKL entry is registered and whose EVM bridge is set, within `maxWithdrawal`, the AN bridge shall keep the NACKL, add the amount to `locked[dstChainId]` and emit `WithdrawalInitiated` with the same fields as today (`:466-467`). |
+| AN-3 | Unwanted | If a NACKL withdrawal is refused — the entry is not registered (241), no EVM bridge is set (239), the amount is over `maxWithdrawal` (234) — then the AN bridge shall return the NACKL with `WithdrawalRefused`, as it does for USDC (`:420-437`). |
+| AN-4 | Ubiquitous | A NACKL withdrawal shall not be bounded by bridged minted less bridged burned or by the chain's outstanding amount: those bound a burn of what the bridge minted (`:441-452`), and a lock mints nothing. |
+| AN-5 | Event-driven | When a NACKL deposit is confirmed (`confirmTokenDeposit`, `:1035`), the AN bridge shall send `amount` of the NACKL it holds to the recipient and subtract it from `locked[chainId]`. |
 | AN-6 | Unwanted | If a NACKL deposit's amount is above `locked[chainId]`, then `finalizeDeposit` shall refuse it before `tvm.accept()` with `ERR_CHAIN_BALANCE_EXCEEDED` (236), and `confirmTokenDeposit` and the recovery call of AN-8 shall refuse it with the same code. |
-| AN-7 | Ubiquitous | For NACKL, `finalizeDeposit` and `confirmTokenDeposit` shall keep every other check they make for USDC: deposits enabled, `maxTransfer` on a new deposit, `maxWithdrawal` on confirmation, the registered token (`:720-727`). The TVL cap (`:728-729`) does not apply to NACKL: the bound is `locked[chainId]`. |
-| AN-8 | Event-driven | When the owner pays an aborted NACKL deposit with `mintAndSendTokenBridged` (`:344`), the AN bridge shall unlock — send held NACKL and subtract it from `locked[chainId]` — instead of minting. |
+| AN-7 | Ubiquitous | For NACKL, `finalizeDeposit` and `confirmTokenDeposit` shall keep every other check they make for USDC: deposits enabled, `maxTransfer` on a new deposit, `maxWithdrawal` on confirmation, the registered token (`:743-750`). The TVL cap (`:751-752`) does not apply to NACKL: the bound is `locked[chainId]`. |
+| AN-8 | Event-driven | When the owner pays an aborted NACKL deposit with `mintAndSendTokenBridged` (`:353`), the AN bridge shall unlock — send held NACKL and subtract it from `locked[chainId]` — instead of minting. |
 | AN-9 | Ubiquitous | The AN bridge shall never mint or burn NACKL: no code path calls `gosh.mintecc` or `gosh.burnecc` with id 1. `getTotalBridged(1)` shall stay `(0, 0)`. |
 | AN-10 | Ubiquitous | Locked NACKL shall leave the AN bridge only by an unlock (AN-5, AN-8). NACKL sent to the bridge outside `initiateWithdrawal` is not locked for any chain and no call sends it out. |
-| AN-11 | Ubiquitous | `updateCode` shall carry `locked[c]` for every chain unchanged (`:1090-1098`, `:1131-1157`). |
-| AN-12 | Ubiquitous | `getTokenDepositConfig` and `getTokenWithdrawalConfig` (`:746-760`) shall report `locked[c]` as `outstanding` for the NACKL entry. |
-| AN-13 | Ubiquitous | `setOutstandingByChain` (`:801`) shall keep writing the USDC counter only. |
+| AN-11 | Ubiquitous | `updateCode` shall carry `locked[c]` for every chain unchanged (`:1116-1124`, `:1157-1195`). |
+| AN-12 | Ubiquitous | `getTokenDepositConfig` and `getTokenWithdrawalConfig` (`:769-787`) shall report `locked[c]` as `outstanding` for the NACKL entry. |
+| AN-13 | Ubiquitous | `setOutstandingByChain` (`:822`) shall keep writing the USDC counter only. |
 | AN-14 | Ubiquitous | The USDC paths shall not change: `mintecc` on deposit, `burnecc` on withdrawal, the accounting of `_totalMintedBridgeByToken[3]`, `_totalBurnedBridgeByToken[3]` and `_outstandingByChain`. |
-| AN-15 | Ubiquitous | The AN bridge's version shall become `1.18.0` (`:57`), and the CLI's `MIN_BRIDGE_VERSION` shall follow it. |
+| AN-15 | Ubiquitous | The AN bridge's version shall become `1.19.0` (`:57`). The CLI's `NEWEST_KNOWN_BRIDGE_VERSION` shall follow it, and the CLI shall refuse to move NACKL through a bridge older than `1.19.0`. |
 
 ### The owner key (KEY)
 
@@ -128,13 +128,13 @@ of ERC20 NACKL: it trades freely on the EVM chain.
 | LIM-3 | State-driven | While a proven payout at most the delay threshold does not fit the capacity, the EVM bridge shall queue it, due at once, and emit `NacklPayoutQueued(nullifier, recipient, amount, readyAt)`. |
 | LIM-4 | Event-driven | When the owner calls `setNacklMintLimits(dailyLimit, delayThreshold)`, the EVM bridge shall use the new values from the next mint on and emit `NacklMintLimitsSet`. What the window has already minted keeps counting. |
 | LIM-5 | Unwanted | If a call would set the daily limit to zero, or below NACKL's `maxWithdrawal`, then it shall revert with `NacklLimitsInvalid`. Every payout `withdrawByProof` accepts must be able to fit some day. |
-| LIM-6 | Ubiquitous | `nacklMintCapacity()` shall return the capacity at the current block. |
+| LIM-6 | Ubiquitous | `nacklState()` shall return the daily limit, the delay threshold, the capacity at the current block, the number of queued payouts and the successor ERC20 NACKL was handed over to (zero before the handover). |
 | DLY-1 | Event-driven | When a proven payout is above the delay threshold, the EVM bridge shall queue it, due 24 hours after the `withdrawByProof` that accepted it, and emit `NacklPayoutQueued`. |
 | DLY-2 | Event-driven | When anyone calls `executeNacklPayout(nullifier)` for a queued payout that is due and fits the capacity, the EVM bridge shall mint it to the recipient recorded in the queue, remove it and emit `WithdrawalByProofExecuted` with the caller as relayer. |
 | DLY-3 | Unwanted | If the payout is not queued, not due, or does not fit the capacity, then `executeNacklPayout` shall revert (`NacklPayoutNotQueued`, `NacklPayoutNotDue`, `NacklMintLimitReached`) and change nothing. |
 | DLY-4 | State-driven | While the EVM bridge is paused, `executeNacklPayout` shall revert. Pausing is how a forged payout is stopped during its delay (bridge-audit#104). |
 | DLY-5 | Ubiquitous | A queued payout shall not be cancelled and its recipient and amount shall not change: the lock on Acki Nacki has already happened. The only way it leaves the queue without a mint is HO-3. |
-| DLY-6 | Ubiquitous | `nacklPayout(nullifier)` shall return the recipient, the amount and the due time of a queued payout, and `nacklQueuedCount()` the number of queued payouts. |
+| DLY-6 | Ubiquitous | `nacklPayout(nullifier)` shall return the recipient, the amount and the due time of a queued payout. |
 
 ## 8. Minter handover (HO)
 
@@ -151,7 +151,7 @@ of ERC20 NACKL: it trades freely on the EVM chain.
 
 | ID | Form | Requirement |
 |---|---|---|
-| CRY-1 | Ubiquitous | The circuits and their verification keys shall not change. `WithdrawalInitiated` and `Deposit` keep the layout the circuits and the receipt proof bind (`eccBridge.sol:61`, `AckiNackiBridge.sol:399-407`); NACKL differs only in the `tokenId` and `token` fields they already carry. |
+| CRY-1 | Ubiquitous | The circuits and their verification keys shall not change. `WithdrawalInitiated` and `Deposit` keep the layout the circuits and the receipt proof bind (`eccBridge.sol:64`, `AckiNackiBridge.sol:399-407`); NACKL differs only in the `tokenId` and `token` fields they already carry. |
 | ENV-1 | Ubiquitous | One ERC20 NACKL shall be deployed on Arbitrum Sepolia (421614) with `script/DeployNacklToken.s.sol`, owner = the bridge, zero supply, and its address recorded in `CHANGELOG.md`. |
 | ENV-2 | Ubiquitous | Every deploy script that deploys `AckiNackiBridge` shall link `NacklMint` (forge links it on `forge script --broadcast`). |
 

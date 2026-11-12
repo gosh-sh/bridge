@@ -51,7 +51,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
     event NacklPayoutQueued(
         uint256 indexed nullifier, address indexed recipient, uint256 amount, uint256 readyAt
     );
-    event NacklPayoutAbandoned(uint256 indexed nullifier, address indexed recipient, uint256 amount);
+    event NacklPayoutAbandoned(
+        uint256 indexed nullifier, address indexed recipient, uint256 amount
+    );
     event NacklMinterMigrated(address indexed successor);
 
     // ─────────────────────────────────────────────────────────────────────
@@ -60,8 +62,14 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
     /// @notice EVM-1: NACKL is listed under id 1, open for deposits, with its limits.
     function test_EVM1_listNacklListsIdOneWithLimits() public view {
-        (address token, uint8 decimals, bool open, uint256 maxTransfer, uint256 tvlCap, uint256 owed) =
-            bridge.tokenInfo(NACKL_ID);
+        (
+            address token,
+            uint8 decimals,
+            bool open,
+            uint256 maxTransfer,
+            uint256 tvlCap,
+            uint256 owed
+        ) = bridge.tokenInfo(NACKL_ID);
         assertEq(token, address(nackl));
         assertEq(decimals, 9);
         assertTrue(open);
@@ -105,7 +113,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklDecimalsMismatch.selector, 18));
         b.listNackl(address(eighteen), MAX_TRANSFER, DAILY, THRESHOLD);
 
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, 0, MAX_TRANSFER));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, 0, MAX_TRANSFER)
+        );
         b.listNackl(address(t), MAX_TRANSFER, 0, THRESHOLD);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -214,7 +224,8 @@ contract NacklBridgeTest is NacklBridgeFixture {
         vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
         _pay(MAX_TRANSFER + 1, 2);
 
-        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub = _pub(bridge, RECIPIENT, UNIT, 3);
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory pub =
+            _pub(bridge, RECIPIENT, UNIT, 3);
         pub.dstBridge = 0xBEEF;
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.WrongDstBridge.selector, 0xBEEF));
         bridge.withdrawByProof(hex"c4", pub);
@@ -238,7 +249,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         AckiNackiBridge b = _liveBridge(address(0));
         NacklToken t = new NacklToken(address(this), address(0), 0);
         b.listNackl(address(t), MAX_TRANSFER, DAILY, THRESHOLD);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(b)));
+        vm.expectRevert(
+            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(b))
+        );
         _pay(b, RECIPIENT, UNIT, 9);
         assertFalse(b.isNullifierUsed(9));
         t.transferOwnership(address(b));
@@ -258,7 +271,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
     /// @notice EVM-6: the deposit cap, and with it the withdrawal cap, stays within the daily limit.
     function test_EVM6_setTokenLimitsStaysWithinTheDailyLimit() public {
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, DAILY, DAILY + 1));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, DAILY, DAILY + 1)
+        );
         bridge.setTokenLimits(NACKL_ID, DAILY + 1, DAILY + 1);
         bridge.setTokenLimits(NACKL_ID, DAILY, DAILY);
         assertEq(bridge.maxWithdrawalAmount(NACKL_ID), DAILY);
@@ -273,8 +288,12 @@ contract NacklBridgeTest is NacklBridgeFixture {
     function test_EVM8_bridgeAbiCopiesMatchTheLibrary() public pure {
         assertEq(AckiNackiBridge.NacklMintLimitsSet.selector, NacklMint.NacklMintLimitsSet.selector);
         assertEq(AckiNackiBridge.NacklPayoutQueued.selector, NacklMint.NacklPayoutQueued.selector);
-        assertEq(AckiNackiBridge.NacklPayoutAbandoned.selector, NacklMint.NacklPayoutAbandoned.selector);
-        assertEq(AckiNackiBridge.NacklMinterMigrated.selector, NacklMint.NacklMinterMigrated.selector);
+        assertEq(
+            AckiNackiBridge.NacklPayoutAbandoned.selector, NacklMint.NacklPayoutAbandoned.selector
+        );
+        assertEq(
+            AckiNackiBridge.NacklMinterMigrated.selector, NacklMint.NacklMinterMigrated.selector
+        );
         bytes4[9] memory bridgeErrors = [
             AckiNackiBridge.NacklAlreadyListed.selector,
             AckiNackiBridge.NacklDecimalsMismatch.selector,
@@ -381,14 +400,20 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
     /// @notice LIM-5: every payout the bridge accepts must be able to fit some day.
     function test_LIM5_theDailyLimitCoversTheWithdrawalCap() public {
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, 0, MAX_TRANSFER));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, 0, MAX_TRANSFER)
+        );
         bridge.setNacklMintLimits(0, THRESHOLD);
         vm.expectRevert(
-            abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, MAX_TRANSFER - 1, MAX_TRANSFER)
+            abi.encodeWithSelector(
+                NacklMint.NacklLimitsInvalid.selector, MAX_TRANSFER - 1, MAX_TRANSFER
+            )
         );
         bridge.setNacklMintLimits(MAX_TRANSFER - 1, THRESHOLD);
         uint256 tooBig = uint256(type(uint128).max) + 1;
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, tooBig, MAX_TRANSFER));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklLimitsInvalid.selector, tooBig, MAX_TRANSFER)
+        );
         bridge.setNacklMintLimits(tooBig, THRESHOLD);
     }
 
@@ -485,14 +510,20 @@ contract NacklBridgeTest is NacklBridgeFixture {
         assertEq(nackl.balanceOf(RECIPIENT), 2 * UNIT);
 
         bridge.unpause();
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklMinterHandedOver.selector, address(s)));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklMinterHandedOver.selector, address(s))
+        );
         _pay(UNIT, 3);
         assertFalse(bridge.isNullifierUsed(3));
         vm.prank(address(bridge));
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(bridge)));
+        vm.expectRevert(
+            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(bridge))
+        );
         nackl.mint(RECIPIENT, 1);
         bridge.pause();
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklMinterHandedOver.selector, address(s)));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklMinterHandedOver.selector, address(s))
+        );
         bridge.migrateNacklMinter(address(s), new uint256[](0));
     }
 
@@ -534,7 +565,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         assertEq(_queued(bridge), 0);
         bridge.unpause();
         vm.warp(block.timestamp + 24 hours);
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklMinterHandedOver.selector, address(s)));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklMinterHandedOver.selector, address(s))
+        );
         bridge.executeNacklPayout(5);
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklPayoutNotQueued.selector, 5));
         s.executeNacklPayout(5);
@@ -554,12 +587,17 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
         AckiNackiBridge stranger = _liveBridge(address(0));
         stranger.listNackl(address(nackl), MAX_TRANSFER, DAILY, THRESHOLD);
-        vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.NotSuccessor.selector, address(stranger)));
+        vm.expectRevert(
+            abi.encodeWithSelector(AckiNackiBridge.NotSuccessor.selector, address(stranger))
+        );
         bridge.migrateNacklMinter(address(stranger), new uint256[](0));
 
         AckiNackiBridge otherToken = _liveBridge(address(bridge));
         otherToken.listNackl(
-            address(new NacklToken(address(otherToken), address(0), 0)), MAX_TRANSFER, DAILY, THRESHOLD
+            address(new NacklToken(address(otherToken), address(0), 0)),
+            MAX_TRANSFER,
+            DAILY,
+            THRESHOLD
         );
         vm.expectRevert(
             abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(otherToken))
@@ -568,11 +606,15 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
         AckiNackiBridge lowCap = _liveBridge(address(bridge));
         lowCap.listNackl(address(nackl), MAX_TRANSFER - 1, DAILY, THRESHOLD);
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(lowCap)));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(lowCap))
+        );
         bridge.migrateNacklMinter(address(lowCap), new uint256[](0));
 
         AckiNackiBridge unlisted = _liveBridge(address(bridge));
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(unlisted)));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(unlisted))
+        );
         bridge.migrateNacklMinter(address(unlisted), new uint256[](0));
         assertEq(nackl.owner(), address(bridge));
     }
@@ -585,7 +627,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         AckiNackiBridge s = _liveBridge(address(old));
         s.listNackl(address(sticky), MAX_TRANSFER, DAILY, THRESHOLD);
         old.pause();
-        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(s)));
+        vm.expectRevert(
+            abi.encodeWithSelector(NacklMint.NacklSuccessorMismatch.selector, address(s))
+        );
         old.migrateNacklMinter(address(s), new uint256[](0));
     }
 

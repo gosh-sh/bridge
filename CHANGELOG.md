@@ -23,6 +23,11 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- **Shellnet runs on a new `AckiNackiBridge`, `0xaf413BC4BFeb55b5dd31dD48D7AD75EC47A21aDe`**, on
+  Arbitrum Sepolia from block `328488622`, with `eccBridge` 1.17.0 and `EthBeaconLightClient` 1.7.0.
+  `0xcEe5D884BC1b7F4CC84A31FEA74f3C8809D19Bd5` is paused, its treasury moved to the new bridge, and
+  `eccBridge` no longer trusts it. Set `BRIDGE_ADDRESS`, `BRIDGE_DEPLOY_BLOCK` and `FROM_BLOCK` as
+  `README.md` lists them.
 - `eccBridge` 1.17.0 (code hash `c25d1ac0…`) proves a deposit from its Ethereum receipt instead of
   a ZK proof: `finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex, bytes[] receiptProof, uint16 logIndex)`,
   `logIndex` counted within the receipt. Switch every caller to

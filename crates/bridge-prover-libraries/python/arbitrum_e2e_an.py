@@ -25,7 +25,15 @@ logs go to stderr.
                             USDC to it with mintAndSendBridged for 421614, so the withdrawal
                             does not wait for the deposit: MSIG, MSIG_ACCOUNT, MSIG_KEYS
   accepted <chain> <hash>   ACCEPTED=true|false
-  ecc <dapp::account>       ECC3=<base units of USDC on the account>
+  ecc <dapp::account>       ECC3=<base units of USDC on the account>, ECC1=<base units of NACKL>
+  nackl-token <evm token> <max transfer>
+                            setBridgeToken(421614, token, 1, max, max, true): NACKL under ECC
+                            id 1; NACKL_LISTED=true|false read back
+  msig-nackl <amount>       deploy a multisig and have the giver send it <amount> base units
+                            of NACKL: MSIG, MSIG_ACCOUNT, MSIG_KEYS
+  nackl                     what the bridge holds for 421614: NACKL_LOCKED (the NACKL entry's
+                            outstanding), NACKL_HELD (its ECC[1] balance), NACKL_MINTED and
+                            NACKL_BURNED (getTotalBridged(1), both 0 by design)
 
 Env: as test_deploy_and_withdraw_only.py (MODE=local, NETWORK, WORK_DIR, PROVER_DIR,
 ACKI_NACKI_ROOT).
@@ -50,9 +58,11 @@ from helper.bridge_e2e import (  # noqa: E402
     USDC_BRIDGE_ABI, USDC_BRIDGE_ADDRESS, USDC_BRIDGE_KEYS,
     materialize_usdc_bridge_key_from_node_config, validate_usdc_bridge_key,
 )
+from helper.bridge_e2e import GIVER_ABI, GIVER_ADDRESS, GIVER_KEY_PATH  # noqa: E402
 from helper.msig import deploy_multisig, mint_usdc  # noqa: E402
 
 ARB_SEPOLIA = 421614
+NACKL_ECC_ID = 1
 SEPOLIA = 11155111
 PROVER_DIR = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, "work-local"))
@@ -116,6 +126,10 @@ def deployed(address):
     """`0:<account>` when an address getter names an account; None for addr_none or zero."""
     a = str(address or "")
     return a if re.fullmatch(r"0:[0-9a-f]{64}", a) and int(a[2:], 16) else None
+
+
+def nackl_entry():
+    return getter("getTokenWithdrawalConfig", {"chainId": str(ARB_SEPOLIA), "tokenId": NACKL_ECC_ID})
 
 
 def owner_anchors(chain):
@@ -224,8 +238,37 @@ def main():
         elif cmd == "accepted" and len(args) == 2:
             answer = [f"ACCEPTED={str(accepted(args[0], args[1])).lower()}"]
         elif cmd == "ecc" and len(args) == 1:
-            account = common.get_account(args[0]) or {}
-            answer = [f"ECC3={int((account.get('ecc_balance') or {}).get('3', 0))}"]
+            ecc = (common.get_account(args[0]) or {}).get("ecc_balance") or {}
+            answer = [f"ECC3={int(ecc.get('3', 0))}", f"ECC1={int(ecc.get('1', 0))}"]
+        elif cmd == "nackl-token" and len(args) == 2:
+            owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": str(int(args[0], 16)),
+                                          "tokenId": NACKL_ECC_ID, "maxTransfer": args[1], "maxTvl": args[1],
+                                          "depositsEnabled": True})
+            listed = until(lambda: truth(nackl_entry().get("listed")))
+            answer = [f"NACKL_LISTED={str(bool(listed)).lower()}"]
+        elif cmd == "msig-nackl" and len(args) == 1:
+            gql = be.GqlClient(GRAPHQL_URL)
+            keys = os.path.join(WORK_DIR, "msig_nackl_withdraw.keys.json")
+            address, _abi = deploy_multisig(
+                tracer, gql, work_dir=WORK_DIR, msig_key_path=keys,
+                usdc_bridge_key_path=USDC_BRIDGE_KEYS, is_shellnet=False,
+                verbose_faucet=False, mint=False,
+            )
+            ext = address if "::" in address else common.to_dapp_address(address)
+            common.call_contract(GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH, "sendCurrencyWithFlag",
+                                 {"dest": "0:" + ext.split("::")[1], "value": "1000000000",
+                                  "ecc": {str(NACKL_ECC_ID): args[0]}, "flag": "1"})
+            got = until(lambda: int(((common.get_account(ext) or {}).get("ecc_balance") or {})
+                                    .get(str(NACKL_ECC_ID), 0)) >= int(args[0]))
+            if not got:
+                raise RuntimeError(f"the giver's {args[0]} NACKL never reached {ext}")
+            answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
+        elif cmd == "nackl" and not args:
+            entry = nackl_entry()
+            totals = getter("getTotalBridged", {"tokenId": NACKL_ECC_ID})
+            held = ((common.get_account(USDC_BRIDGE_ADDRESS) or {}).get("ecc_balance") or {}).get(str(NACKL_ECC_ID), 0)
+            answer = [f"NACKL_LOCKED={uint(entry.get('outstanding'))}", f"NACKL_HELD={int(held)}",
+                      f"NACKL_MINTED={uint(totals.get('minted'))}", f"NACKL_BURNED={uint(totals.get('burned'))}"]
         else:
             raise SystemExit(__doc__)
     print("\n".join(answer))

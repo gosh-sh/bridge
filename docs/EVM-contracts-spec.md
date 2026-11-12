@@ -70,6 +70,12 @@ note here calling out the drift.
 > **Drift note, 2026-11-05 (`migrateToken`, gosh-sh/bridge-audit#128).** §7.2's check table and the
 > §10 `fundToken` / `migrateToken` rows cite `src/AckiNackiBridge.sol` as of this change. Other
 > citations were not re-anchored.
+>
+> **Drift note, 2026-11-11 (NACKL through the bridge, gosh-sh/bridge-audit#152).** §1.1's
+> `NacklMint` and `NacklToken` rows, §4.1's `_nackl` and `_layerWindows` rows and all of §7.5 cite
+> `src/AckiNackiBridge.sol`, `src/NacklMint.sol` and `src/NacklToken.sol` as of `7fe09b01`.
+> `_nackl` took slots 18–48, so `_layerWindows` moved from 18 to 49. Other citations were not
+> re-anchored.
 
 **Method:** written by reading the contract sources only. No pre-existing prose was used as input;
 where the older documentation and the code disagree, the divergences are itemised in §16.
@@ -114,6 +120,8 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/IBlockHeaderOracle.sol` | 27 | Block-hash oracle interface. |
 | `src/AxiomBlockHeaderOracle.sol` | 186 | Axiom V2 Core–backed oracle implementation. |
 | `src/MockBlockHeaderOracle.sol` | 76 | Test/E2E oracle (owner-settable hashes + `blockhash()` fallback). |
+| `src/NacklMint.sol` | 237 | External library linked into the bridge: NACKL listing, mint limits, payout queue, minter handover (§7.5). |
+| `src/NacklToken.sol` | 30 | ERC20 NACKL, 9 decimals, minted and burned only by its owner bridge (§7.5). |
 | `src/IAavePool.sol`, `src/IERC20.sol` | 47 / 12 | Minimal external interfaces. |
 | `verifiers/*.bin` | — | Production SHPLONK Yul **creation** bytecode (4 circuits). |
 | `verifiers/*_calldata.bin` | — | Reference `instances ‖ proof` calldata fixtures. |
@@ -217,7 +225,8 @@ relying on them for a storage-level migration.
 | 15 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 264 | constructor, `verifyBlock` |
 | 16 | 0 | `storedPrevBkSetCommitment` | `uint256` | 271 | `applyBkSetUpdate` |
 | 17 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 365 | `withdrawByProof` |
-| 18 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 384 | `_appendLayer` |
+| 18–48 | — | `_nackl` | `NacklMint.State` | 373 | `listNackl`, `setNacklMintLimits`, `deposit` and `withdrawByProof` for NACKL, `executeNacklPayout`, `migrateNacklMinter` |
+| 49 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 392 | `_appendLayer` |
 
 Regenerated from this tree with `forge inspect src/AckiNackiBridge.sol:AckiNackiBridge
 storageLayout`. **The token registry took slots 2–5**, so everything from
@@ -621,6 +630,27 @@ boundary at or below it — usually just that one bundle.
 | `isKnownAnchor(uint256)` | 1173 | Flat membership across all 10 windows. **Not** the `withdrawByProof` predicate — a monitor that pre-checks only this view will accept a proof the contract then rejects if `anchorLayer` names a different window. |
 | `isKnownLayerAnchor(uint8, uint256)` | 1212 | Membership in one window. This is what `withdrawByProof` uses. |
 | `isNullifierUsed(uint256)` | 1610 | Replay pre-check for relayers: `true` when this bridge paid the nullifier, which is exactly when `withdrawByProof` reverts `NullifierAlreadyUsed`. |
+
+
+### 7.5 NACKL (token id 1)
+
+The bridge mints and burns ERC20 NACKL rather than holding it; Acki Nacki locks NACKL on a
+withdrawal and unlocks it on a deposit. The logic is the external library `NacklMint`, linked at
+deploy, and its state is `_nackl` (`:373`). The requirements it meets and the tests behind them
+are in [`NACKL-bridge-extension.md`](NACKL-bridge-extension.md).
+
+| Surface | Line | Behaviour |
+|---|---:|---|
+| `NACKL_TOKEN_ID` | 370 | `1`, the ECC id of NACKL on Acki Nacki. |
+| `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` | 2300 | Owner, once. Lists `token` under id 1 with 9 decimals and the same deposit and withdrawal cap. Reverts `NacklAlreadyListed`, `NacklDecimalsMismatch`, or `NacklLimitsInvalid` (`src/NacklMint.sol:81`). |
+| `setNacklMintLimits(dailyLimit, delayThreshold)` | 2313 | Owner. `dailyLimit` must be non-zero, at least the withdrawal cap and at most `2^128 - 1` (`src/NacklMint.sol:192-194`); `setTokenLimits` refuses to raise the cap above it (`:1070-1071`). |
+| `deposit` | 1040-1041 | `burnFrom(msg.sender, amount)` instead of a transfer into custody; no liabilities are credited. |
+| `withdrawByProof` | 1953-1957 | Marks the nullifier and mints at once when `amount <= delayThreshold` and the amount fits the daily limit; otherwise queues the payout and emits `NacklPayoutQueued` (`src/NacklMint.sol:112-127`). A payout above `delayThreshold` is due 24 hours later (`:35`); one queued only because the daily limit is spent is due at once. Liabilities are not debited. |
+| `executeNacklPayout(nullifier)` | 2322 | Anyone, while not paused. Mints a due payout that fits the daily limit and emits `WithdrawalByProofExecuted`; reverts `NacklPayoutNotQueued`, `NacklPayoutNotDue` or `NacklMintLimitReached` (`src/NacklMint.sol:130`). |
+| `migrateNacklMinter(successor, abandoned)` | 2335 | Owner, paused. Drops the payouts in `abandoned` (`NacklPayoutAbandoned`), requires the queue to be empty, and transfers ownership of the token to a successor that lists it with at least the same withdrawal cap (`src/NacklMint.sol:150-178`). After it the bridge mints nothing: `NacklMinterHandedOver`. |
+| `nacklState()` | 2347 | `(dailyLimit, delayThreshold, capacity, queued, migratedTo)`; `capacity` is what can be minted now within the sliding 24-hour window of hourly buckets (`src/NacklMint.sol:39`, `:181`). |
+| `nacklPayout(nullifier)` | 2363 | `(recipient, amount, readyAt)` of a queued payout; zero once executed or abandoned. |
+| `fundToken` | 2249 | Reverts `NacklNotCustodied` for id 1, so `migrateToken` cannot move it either. |
 
 ---
 

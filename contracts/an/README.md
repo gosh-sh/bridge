@@ -144,8 +144,8 @@ pin is moved.
 
 Before opening deposits from a source chain, call
 `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)` as the AN owner.
-Only USDC can be registered, under ECC id `3`: Acki Nacki has no other currency for the bridge to
-mint, so any other id is refused with `242`. Both sides must use the same ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
+Two currencies can be registered: USDC under ECC id `3`, which the bridge mints and burns, and
+NACKL under ECC id `1`, which it locks and unlocks. Any other id is refused with `242`. Both sides must use the same ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
 immutable; subsequent calls can raise the TVL ceiling, change the deposit transfer limit and
 the deposit switch, retaining outstanding
 inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
@@ -154,6 +154,15 @@ the configuration and per-chain outstanding amount. Closing or throttling deposi
 lower the withdrawal allowance. `finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
 1.5.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
 burns the attached currency and decrements only that currency's destination-chain inventory.
+
+NACKL is never minted or burned here. `initiateWithdrawal` keeps the attached NACKL on the bridge
+and adds it to the `outstanding` of the destination chain's NACKL entry, which is what the bridge
+holds locked for that chain. A NACKL deposit is paid out of it: an amount above it, or above the
+NACKL the bridge holds, is refused with `236`, and the deposit relayer retries until withdrawals
+have locked enough. `maxTvl` bounds nothing for NACKL, the USDC bounds do not apply to it, and
+`getTotalBridged(1)` stays `(0, 0)`. On the EVM side ERC20 NACKL is minted and burned by the
+bridge under a daily limit and a delay; see
+[`docs/NACKL-bridge-extension.md`](../../docs/NACKL-bridge-extension.md).
 
 For an upgrade from 1.15.0, build `userCell` with
 `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)` and pass it to the old `updateCode`.

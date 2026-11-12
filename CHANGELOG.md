@@ -44,8 +44,9 @@ assigns it when the release is tagged.
     `approve` as for any token.
   - Withdrawals: a NACKL `withdrawByProof` mints at once if the amount is at most the delay
     threshold and fits the daily limit, a sliding 24-hour window. Otherwise it queues the payout
-    and emits `NacklPayoutQueued`. A queued payout is due 24 hours later, and anyone can then mint
-    it with `executeNacklPayout(nullifier)`.
+    and emits `NacklPayoutQueued`. A payout above the delay threshold is due 24 hours later; one
+    queued only because the daily limit is spent is due at once. Anyone mints a due payout that
+    fits the limit with `executeNacklPayout(nullifier)`.
   - Custody: the bridge holds no NACKL, so `fundToken` refuses id 1 with `NacklNotCustodied`, and
     `migrateToken` cannot move it.
 - `eccBridge` 1.18.0 (code hash `e0a653cc…`) trusts an EVM bridge address under one chain only:

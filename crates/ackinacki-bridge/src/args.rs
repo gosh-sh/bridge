@@ -107,8 +107,8 @@ pub enum Command {
 /// can only refuse what they were handed verbatim.
 pub struct WithdrawArgs {
     /// ECC currency id registered for this token on AN and the destination
-    /// bridge.
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(3..))]
+    /// bridge: 3 is USDC, 1 is NACKL. ECC[2], Shell, never crosses.
+    #[arg(long, default_value_t = 3, value_parser = parse_token_id)]
     pub token_id: u32,
 
     /// Source multisig address in `dapp_id::account_id` form (both 64 hex,
@@ -445,6 +445,18 @@ pub fn parse_to(raw: &str, to_chain: Option<u64>) -> CliResult<ToAddress> {
         address,
         chain_id,
     })
+}
+
+/// `--token-id`: NACKL (1), or USDC (3) and the ids above it.
+fn parse_token_id(raw: &str) -> Result<u32, String> {
+    let id: u32 = raw.parse().map_err(|e| format!("{e}"))?;
+    if id == 1 || id >= 3 {
+        Ok(id)
+    } else {
+        Err(format!(
+            "ECC[{id}] does not cross the bridge; 1 is NACKL, 3 is USDC"
+        ))
+    }
 }
 
 /// Convert a token-denominated amount without rounding or a six-decimal
@@ -1068,6 +1080,19 @@ mod tests {
             panic!("expected withdraw")
         };
         args
+    }
+
+    #[test]
+    fn token_id_takes_nackl_and_usdc_but_not_shell() {
+        assert_eq!(submit_plumbing_fixture_all_absent().token_id, 3);
+        assert_eq!(parse_token_id("1"), Ok(1));
+        assert_eq!(parse_token_id("3"), Ok(3));
+        assert_eq!(parse_token_id("7"), Ok(7));
+        for refused in ["0", "2"] {
+            let msg = parse_token_id(refused).unwrap_err();
+            assert!(msg.contains("does not cross"), "{msg}");
+        }
+        assert!(parse_token_id("-1").is_err());
     }
 
     #[test]

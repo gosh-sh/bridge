@@ -23,6 +23,31 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `eccBridge` 1.19.0 (code hash `27026795…`) carries NACKL, ECC id 1, as well as USDC.
+  `setBridgeToken` now accepts id 1. The USDC ceilings `MAX_TRANSFER_AMOUNT` and `MAX_BRIDGE_TVL`
+  do not apply to it, and its `maxTvl` bounds nothing. A NACKL withdrawal is locked on the bridge
+  instead of burned, and its amount is added to the `outstanding` of the chain's NACKL entry. A
+  NACKL deposit is paid out of that amount instead of minted. A deposit above that amount, or above
+  the NACKL the bridge holds, is refused with 236. The bridge never mints or burns NACKL, so
+  `getTotalBridged(1)` stays `(0, 0)`. `updateCode` carries the locked amounts with the token
+  registry.
+  - Upgrade with `updateCode` and an empty `userCell`.
+  - Then register NACKL per chain with
+    `setBridgeToken(chainId, <ERC20 NACKL>, 1, maxTransfer, maxTvl, true)`.
+  - The owner key can still install code that mints NACKL or spends what is locked; see
+    `docs/NACKL-bridge-extension.md`, KEY-1 to KEY-3.
+- `AckiNackiBridge` mints and burns ERC20 NACKL, and has to be redeployed to carry it.
+  - Linking: the NACKL logic is the external library `NacklMint` (`src/NacklMint.sol`), which
+    `forge script --broadcast` deploys and links.
+  - Storage: `_nackl` follows `_nullifiers`, so every later slot moves.
+  - Deposits: a NACKL deposit burns the depositor's tokens with `burnFrom`, after the same
+    `approve` as for any token.
+  - Withdrawals: a NACKL `withdrawByProof` mints at once if the amount is at most the delay
+    threshold and fits the daily limit, a sliding 24-hour window. Otherwise it queues the payout
+    and emits `NacklPayoutQueued`. A queued payout is due 24 hours later, and anyone can then mint
+    it with `executeNacklPayout(nullifier)`.
+  - Custody: the bridge holds no NACKL, so `fundToken` refuses id 1 with `NacklNotCustodied`, and
+    `migrateToken` cannot move it.
 - `eccBridge` 1.18.0 (code hash `e0a653cc…`) trusts an EVM bridge address under one chain only:
   `setTrustedL1Bridge(chainId, l1Bridge, true)` exits with 228 while `l1Bridge` is trusted under
   another `chainId`; revoke it there first. EVM bridges on different chains must therefore be
@@ -102,6 +127,46 @@ assigns it when the release is tagged.
   memory limit set for the previous 75 GB. A host running all of `docker/compose.yaml` needs 256 GB.
 
 ### New / Improvements
+
+- ERC20 NACKL: `contracts/ethereum/src/NacklToken.sol`, an OpenZeppelin 5.7.0 `ERC20`,
+  `ERC20Burnable` and `Ownable` with 9 decimals, deployed by `script/DeployNacklToken.s.sol`.
+  - `NACKL_BRIDGE` names the owner bridge.
+  - Only a test token may start with a supply: `NACKL_TEST_TOKEN=true` mints
+    `NACKL_INITIAL_SUPPLY` to `NACKL_INITIAL_HOLDER`.
+  - `NACKL_LIST=true` also lists the token on the bridge, with `NACKL_MAX_TRANSFER`,
+    `NACKL_DAILY_LIMIT` and `NACKL_DELAY_THRESHOLD`.
+  - `contracts/ethereum` now takes `@openzeppelin/contracts` from npm next to `poseidon-solidity`;
+    `setup.sh` installs both.
+- `AckiNackiBridge` NACKL surface:
+  - Owner calls: `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` and
+    `setNacklMintLimits(dailyLimit, delayThreshold)`. A daily limit below NACKL's `maxTransfer` is
+    refused with `NacklLimitsInvalid`, and so is a `setTokenLimits` that raises NACKL's
+    `maxTransfer` above the daily limit.
+  - Anyone: `executeNacklPayout(nullifier)`, which reverts `NacklPayoutNotDue` or
+    `NacklMintLimitReached` until the payout can be minted.
+  - Views: `nacklState()` returns `(dailyLimit, delayThreshold, capacity, queued, migratedTo)`, and
+    `nacklPayout(nullifier)` returns `(recipient, amount, readyAt)`.
+  - Minter handover: `migrateNacklMinter(successor, abandoned)` transfers ownership of ERC20 NACKL
+    to a successor bridge that lists the same token. The bridge must be paused, and every queued
+    payout must be executed first; payouts listed in `abandoned` are dropped with
+    `NacklPayoutAbandoned` and are never minted. Otherwise it reverts `NacklQueueNotEmpty`.
+    Afterwards `withdrawByProof` and `executeNacklPayout` revert `NacklMinterHandedOver`.
+- `relayer daemon-withdraw` and `daemon-bridge` mint queued NACKL payouts. They remember every
+  NACKL withdrawal they submit or find already submitted, including after a restart. After each
+  scan they call `executeNacklPayout` for every payout that is due and fits the daily limit; the
+  rest wait for a later scan. `submit-withdraw` reports a queued payout and its due time.
+  `NacklMinterHandedOver` parks the proof.
+- `ackinacki-bridge withdraw --token-id 1` and `deposit --token <ERC20 NACKL>` move NACKL, and
+  require `eccBridge` 1.19.0.
+  - A withdrawal whose payout was queued ends with `submit.status: "queued"` and `submit.ready_at`
+    in unix seconds. Its NACKL arrives when `executeNacklPayout` runs.
+  - Withdrawal preflight refuses a bridge that has handed ERC20 NACKL over, and warns when the
+    payout will be queued.
+  - Deposit preflight refuses an amount above the NACKL the AN bridge holds locked for the chain.
+- `deposit-relayer` retries a `finalizeDeposit` refused with 236, as it already does 235: a NACKL
+  deposit waits until withdrawals to that chain have locked enough.
+- `docs/NACKL-bridge-extension.md` lists the requirements, properties and tests for carrying NACKL
+  through the bridge.
 
 - `eth-lc-relayer arbitrum-anchors` sends `submitAncestry` for the Ethereum epoch each Arbitrum
   assertion landed in, to the light client the bridge's `getLightClient` names, once its head has

@@ -22,12 +22,14 @@ variables:
   # The branch must build a gql-server (>= 1.5.0) that serves blockchain.latestBkSet and
   # a block-manager that keeps the bkSetUpdates history: daemon-live's cold start and
   # compute_bridge_anchors build the starting BK set from them. Its nodes must have the
-  # KECCAK256 instruction ArbitrumBlockVerifier needs (tvm-sdk v3.1.0.an has it). Images
-  # are tagged br_<branch>, with "/" as "_".
+  # KECCAK256 instruction ArbitrumBlockVerifier needs (tvm-sdk v3.1.0.an has it).
+  # acki-nacki's CI tags a push build of dev latest-dev (and its commit sha); br_<branch>,
+  # with "/" as "_", marks the source branch of a pull request, so br_dev is the build of
+  # some pull request from dev, not dev's latest commit.
   - &acki_branch "dev"
   # gql-server and block-manager fall back to this tag when the image tag lacks them.
-  - &acki_image_tag "br_dev"
-  - &acki_aux_fallback_tag "br_dev"
+  - &acki_image_tag "latest-dev"
+  - &acki_aux_fallback_tag "latest-dev"
   - &registry "docker.gosh.sh"
   # Contract toolchain for zerostate generation and for the test on the host (the checkout's
   # own contracts/compiler binaries are macOS builds). Every tarball is sha256-verified.

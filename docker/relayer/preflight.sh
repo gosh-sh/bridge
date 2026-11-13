@@ -92,8 +92,7 @@ required=(
   RELAYER_ADDRESS RELAYER_PRIVATE_KEY
   MIN_RELAYER_BALANCE_WEI BRIDGE_GQL_ENDPOINT BRIDGE_PARAMS_DIR
   BRIDGE_BOOTSTRAP_SEQNO BRIDGE_STATE_DIR BRIDGE_WORK_DIR BRIDGE_LOG_DIR
-  BRIDGE_BK_SET_CONFIG
-  BRIDGE_BK_SET_EXPECTED_SHA256 EXPECTED_BK_SET_COMMITMENT
+  EXPECTED_BK_SET_COMMITMENT
   EXPECTED_GENESIS_PREV_ANCHOR EXPECTED_WITHDRAW_DAPP_FR
   EXPECTED_WITHDRAW_ACC_FR EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID
   EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID EXPECTED_USDC_TOKEN_ID
@@ -174,10 +173,6 @@ derived_address=$(cast wallet address --private-key "$RELAYER_PRIVATE_KEY")
   die "private key derives $derived_address, expected $RELAYER_ADDRESS"
 ok "private key matches expected EOA $RELAYER_ADDRESS"
 
-actual_bk_hash=$(sha256sum "$BRIDGE_BK_SET_CONFIG" | awk '{print $1}')
-[[ "${actual_bk_hash,,}" == "${BRIDGE_BK_SET_EXPECTED_SHA256,,}" ]] ||
-  die "BK-set checksum mismatch"
-
 declare -A srs_sizes=(
   [17]=16777476
   [19]=67109124
@@ -200,7 +195,7 @@ done
 mkdir -p "$BRIDGE_DUMP_SUBMISSIONS_DIR" 2>/dev/null || true
 [[ -d "$BRIDGE_DUMP_SUBMISSIONS_DIR" && -w "$BRIDGE_DUMP_SUBMISSIONS_DIR" ]] ||
   die "submission dump directory is not writable"
-ok "BK set, Hermez SRS K=17/19/20/21/22, and writable state, work and log directories"
+ok "Hermez SRS K=17/19/20/21/22, and writable state, work and log directories"
 
 # Child diagnostics below do not need the signing key. This does not alter the
 # EnvironmentFile inherited later by the daemon process.
@@ -308,10 +303,14 @@ usdc_token_id=$(call_word "$BRIDGE_ADDRESS" 'usdcTokenId()(uint32)')
 [[ "$usdc_token_id" == "$EXPECTED_USDC_TOKEN_ID" ]] || die "USDC token id mismatch"
 
 if [[ ! -f "$BRIDGE_STATE_DIR/prover_state.json" ]]; then
-  [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]] ||
-    die "cold start has no local state but contract cursor $last_seen != bootstrap $BRIDGE_BOOTSTRAP_SEQNO"
-  expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
-  [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+  # At its seed the contract still expects the genesis anchor. Past it,
+  # daemon-live rebuilds the local state from the contract on start.
+  if [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]]; then
+    expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
+    [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+  else
+    ok "no local state; daemon-live rebuilds it from the contract at cursor $last_seen (BK set from GraphQL, gql-server >= 1.5.0)"
+  fi
 else
   jq -e '.initialized == true and .anchor_level == 2' "$BRIDGE_STATE_DIR/prover_state.json" >/dev/null ||
     die "existing prover state is not initialized L2 state"

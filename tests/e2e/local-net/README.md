@@ -16,7 +16,7 @@ then `test_arbitrum_block_proof.py` (`deployL2Verifier` → `proveBlock` on the 
 synthetic vector, refused before its parent block is accepted and admitted after).
 It follows the dexdo e2e pattern (gosh-sh/dexdo `.woodpecker/e2e.yml`) and reuses
 acki-nacki's `tests/dexdo/up.sh` + `ansible/dexdo-e2e-{prepare,up,down}.yml` as they are.
-The network follows a **branch** of acki-nacki (`dev`), not a commit: each run resolves
+The network follows a **branch** of acki-nacki (the pipeline's `acki_branch`), not a commit: each run resolves
 the branch's latest build on the host and uses that one build for the checkout, the
 zerostate helpers and the nodes. The host is the one dexdo's e2e uses, shared through
 the same lease; the host, its user and the inventory repository are Woodpecker secrets,
@@ -88,7 +88,7 @@ waited for and the tail of the log.
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 2 hours |
 | `test_10`–`12` | The zerostate bridge is Active at 1.17.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
-| `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the zerostate's keepers); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
+| `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the BK set at 0 from GraphQL, which has to serve `blockchain.latestBkSet`); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
 | `test_40`–`44` | `deposit`: sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
@@ -149,7 +149,7 @@ moves 2 USDC there and back.
 | ssh private key | Woodpecker secret `LOCAL_NET_SSH_KEY` | newline-joined with `@` (dexdo convention); public key in the host's `authorized_keys` |
 | host key | `ansible/inventory/bridge/e2e/known_hosts` in the private infrastructure repository (`ssh-keyscan -t ed25519` of the host name and its address) | every ssh/scp step installs it as `~/.ssh/known_hosts` and runs with `StrictHostKeyChecking=yes`; the ansible steps get it through the inventory's `ansible_ssh_common_args`. Refresh the file when the VPS is rebuilt; until then the pipeline stops at `prepare-host` |
 | GitHub token | Woodpecker secret `ACKI_NACKI_GH_TOKEN` | read access to private gosh-sh/acki-nacki and to the inventory repository; used through a temporary `~/.netrc` on the runner and, by `dexdo-e2e-up.yml`, on the host |
-| acki-nacki branch and build | pipeline `variables` `acki_branch` (`dev`), `acki_image_tag` (`br_dev`), `registry` | the branch must carry `tests/dexdo/up.sh`, `ansible/dexdo-e2e-*.yml` and `contracts/scripts/bridge_contracts.py`; the images must carry the `org.opencontainers.image.revision` label (acki-nacki's CI sets it). node and all-bin of the tag must be one build (`block-manager` is rebuilt on its own cadence and runs as found). The resolved commit and digests are printed by `resolve-acki` in every run. `nginx0` is not pinned: acki-nacki's compose names `docker.gosh.sh/ackinacki-nginx` without a tag and `up.sh` does not pull it |
+| acki-nacki branch and build | pipeline `variables` `acki_branch`, `acki_image_tag` (`latest-dev` for a push build of `dev`; `br_<branch>`, with `/` as `_`, is a pull request's source branch), `registry` | the branch must carry `tests/dexdo/up.sh`, `ansible/dexdo-e2e-*.yml` and `contracts/scripts/bridge_contracts.py`, and its gql-server must serve `blockchain.latestBkSet` (gql-server >= 1.5.0); the images must carry the `org.opencontainers.image.revision` label (acki-nacki's CI sets it). node and all-bin of the tag must be one build (`block-manager` is rebuilt on its own cadence and runs as found). The resolved commit and digests are printed by `resolve-acki` in every run. `nginx0` is not pinned: acki-nacki's compose names `docker.gosh.sh/ackinacki-nginx` without a tag and `up.sh` does not pull it |
 | tvm-cli / tvm-debugger | `tvm_cli_version`, `tvm_cli_sha256`, `tvm_debugger_sha256` | tvmlabs/tvm-sdk release; acki-nacki's `contracts/compiler/*` are macOS arm64 builds and cannot run in CI. On the host the test uses the host's `tvm-cli` only when `tvm-cli version` reports the pinned version, otherwise the release is fetched and checked |
 | sold | `sold_version` + `sold_sha256` | gosh-sh/TVM-Solidity-Compiler release, verified before use |
 | trusted L1 bridge baked into the zerostate | `bridge_zs_l1_bridge` | any 20-byte address for a local network |
@@ -171,8 +171,9 @@ Use a throwaway acki-nacki worktree for the generation: `gen-zerostate.sh` rewri
 `config/`. Linux x86_64 only.
 
 ```sh
+# <acki_image_tag>: the pipeline variable of that name in .woodpecker/local-net-e2e.yaml (br_dev is a pull request build, not dev's latest commit)
 # on the host: which build of the branch (prints ACKI_SHA, the image digests and the helpers dir)
-ssh USER@HOST "REGISTRY=docker.gosh.sh TAG=br_dev WORK_ROOT=\$HOME/bridge-e2e bash -s" < tests/e2e/local-net/resolve-acki-on-host.sh
+ssh USER@HOST "REGISTRY=docker.gosh.sh TAG=<acki_image_tag> WORK_ROOT=\$HOME/bridge-e2e bash -s" < tests/e2e/local-net/resolve-acki-on-host.sh
 # controller: check out acki-nacki at ACKI_SHA, scp the two helpers into HELPERS_DIR, then
 HELPERS_DIR=… ACKI_DIR=/path/to/acki-nacki-worktree BRIDGE_REPO=/path/to/bridge BRIDGE_SHA=$(git rev-parse HEAD) \
 BRIDGE_ZS_L1_BRIDGE=0x0000000000000000000000000000000000000001 DISABLE_BLACKLIST=true tests/e2e/local-net/gen-zerostate.sh
@@ -183,7 +184,7 @@ ssh USER@HOST "ACKI_REPO=https://github.com/gosh-sh/acki-nacki.git ACKI_SHA=<ACK
 ansible-playbook -i /path/to/infrastructure/ansible/inventory/bridge/e2e/local-net.yml /path/to/acki-nacki/ansible/dexdo-e2e-up.yml \
   -e target=bridge_e2e -e acki_repo= -e acki_dir=/opt/acki-nacki-bridge \
   -e config_src=/path/to/acki-nacki-worktree/config -e env_src=/path/to/acki-nacki-worktree/docker/.env \
-  -e dexdo_net_image_tag=br_dev -e dexdo_node_image=<NODE_IMG> -e dexdo_gql_image=<GQL_IMG> -e dexdo_bm_image=<BM_IMG> -e dex_test_notes_cnt=0
+  -e dexdo_net_image_tag=<acki_image_tag> -e dexdo_node_image=<NODE_IMG> -e dexdo_gql_image=<GQL_IMG> -e dexdo_bm_image=<BM_IMG> -e dex_test_notes_cnt=0
 ssh USER@HOST "PIPELINE_ID=manual BRIDGE_SHA=<sha> ACKI_DIR=/opt/acki-nacki-bridge bash -s" < tests/e2e/local-net/run-test-on-host.sh
 ansible-playbook -i /path/to/infrastructure/ansible/inventory/bridge/e2e/local-net.yml /path/to/acki-nacki/ansible/dexdo-e2e-down.yml \
   -e target=bridge_e2e -e acki_dir=/opt/acki-nacki-bridge -e dexdo_deploy_dir=/opt/acki-nacki-bridge/.no-dexdo -e full_cleanup=true

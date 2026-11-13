@@ -224,7 +224,7 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 | `images.yaml` | PRs (build only), pushes to `main`, tags `v*`, manual on `main` | The four service images from `docker/Dockerfile` (every Rust workspace compiles), pushed to the registry from `main` and tags; `docker/compose.yaml` checked against the example settings |
 | `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or no earlier release has `kzg_bn254_21.srs`; builds `ackinacki-bridge` and `aggregate-proof`; publishes the three assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
-| `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of acki-nacki's `dev`) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
+| `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of the acki-nacki branch the pipeline's `acki_branch` names) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
 
 Each pipeline's header comment has the detail. A step that names a secret which does not exist, or
 is not ticked for the event, makes Woodpecker refuse the whole pipeline before any step runs.

@@ -74,7 +74,11 @@ anchor level 2 only, so deploy with the output of `compute_bridge_anchors --leve
 `--at-head` or `--seed-seqno`): `BUNDLE_STRIDE`, `GENESIS_BK_SET_COMMITMENT`,
 `GENESIS_PREV_MAX_LEVEL_LAYER_HASH`, `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and
 `GENESIS_SEED_SEQNO` exported as `GENESIS_LAST_SEEN_BLOCK_SEQNO`, as
-`tests/e2e/local-net/prover-host/jobs/deploy.sh` does. Set `PRIVATE_KEY` to the key of the kit's `RELAYER_ADDRESS`:
+`tests/e2e/local-net/prover-host/jobs/deploy.sh` does. `compute_bridge_anchors` builds the BK set
+at the seed from GraphQL, so its endpoint must be gql-server 1.5.0 or later serving
+`blockchain.latestBkSet`, and the seed must be at or above L3\*
+([relayer runbook §3.1](../crates/bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#31-pick-the-seed)).
+Set `PRIVATE_KEY` to the key of the kit's `RELAYER_ADDRESS`:
 the deploying account becomes the owner, and preflight requires the owner to be
 `RELAYER_ADDRESS`. Its `daemon-live.env` then needs:
 

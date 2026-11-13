@@ -9,6 +9,7 @@
 pub mod aggregated_source;
 pub mod aggregator;
 pub mod an_chain_guard;
+pub mod bk_startup;
 pub mod bridge;
 pub mod bundle_stride;
 pub mod daemon;
@@ -61,8 +62,8 @@ pub use rpc_http::{
     ENV_RPC_REQUEST_TIMEOUT_SECS,
 };
 pub use source::{
-    BkUpdateProofsSource, BkUpdateSource, BlockSource, EmptyBkUpdateSource, FixturesBlockSource,
-    InMemoryBlockSource, ProverProofsBlockSource,
+    AckOutcome, AppliedRotation, BkUpdateProofsSource, BkUpdateSource, BlockSource,
+    EmptyBkUpdateSource, FixturesBlockSource, InMemoryBlockSource, ProverProofsBlockSource,
 };
 pub use startup_decide::{decide as startup_decide, DecideInputs, StartupDecision};
 pub use state::RelayerState;

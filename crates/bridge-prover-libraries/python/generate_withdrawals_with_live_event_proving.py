@@ -42,9 +42,9 @@ Env vars (all optional, defaults are MODE-dependent):
                         on-chain `USDCBridge.getOwnerPubkey()` before
                         proceeding, so a stale/wrong key fails fast instead
                         of bouncing later with TVM exit_code 209.
-  ACKI_NACKI_ROOT       override sibling acki-nacki checkout (used by both
-                        bk_set and USDCBridge key materialization in local
-                        mode). Default: `<PROVER_DIR>/../acki-nacki`.
+  ACKI_NACKI_ROOT       override sibling acki-nacki checkout (used by the
+                        USDCBridge key materialization in local mode).
+                        Default: `<PROVER_DIR>/../acki-nacki`.
 
 Prereqs (the script does not start these):
   - Live cluster reachable at GRAPHQL_URL.
@@ -60,8 +60,6 @@ $WORK_DIR on failure.
 
 import json
 import os
-import re
-import subprocess
 import sys
 import time
 
@@ -124,61 +122,6 @@ tracer: be.Tracer
 gql: be.GqlClient
 
 
-# ── Local-devnet bk_set materialization ───────────────────────────────────────
-
-def materialize_bk_set_from_node_config():
-    acki_nacki_root = os.environ.get(
-        "ACKI_NACKI_ROOT",
-        os.path.abspath(os.path.join(PROVER_DIR, "..", "acki-nacki")),
-    )
-    config_dir = os.path.join(acki_nacki_root, "config")
-    try:
-        names = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
-            capture_output=True, text=True, check=True,
-        ).stdout
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        raise RuntimeError(
-            f"failed to enumerate docker containers: {e}. "
-            "the local devnet cluster must be running before this test"
-        ) from e
-
-    pat = re.compile(r"-node(\d+)-\d+$")
-    indices = sorted({
-        int(m.group(1))
-        for line in names.splitlines()
-        for m in [pat.search(line.strip())]
-        if m
-    })
-    if not indices:
-        raise RuntimeError(
-            "no `*-nodeN-*` containers detected via `docker ps`; "
-            "start the cluster (e.g. `make run`) before this test"
-        )
-
-    bk_set = {}
-    for idx in indices:
-        path = os.path.join(config_dir, f"block_keeper{idx}_bls.keys.json")
-        if not os.path.isfile(path):
-            raise FileNotFoundError(
-                f"BLS key file missing: {path} (needed for node{idx})"
-            )
-        with open(path) as f:
-            data = json.load(f)
-        try:
-            pub = data[0]["public"]
-        except (IndexError, KeyError, TypeError) as e:
-            raise ValueError(f"unexpected format in {path}: {e}") from e
-        bk_set[str(idx)] = pub
-
-    out_path = os.path.join(PROVER_DIR, "bk_set.local.json")
-    with open(out_path, "w") as f:
-        json.dump(bk_set, f, indent=2)
-    tracer.log(f"  bk_set.local.json: {len(bk_set)} signers (indices {indices}) "
-               f"sourced from {config_dir}")
-    tracer.log(f"  wrote {out_path}")
-
-
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -206,12 +149,9 @@ def main():
         f"USDCBridge not active at {USDC_BRIDGE_ADDRESS}"
     tracer.log(f"  USDCBridge active at {USDC_BRIDGE_ADDRESS}")
 
-    if not IS_SHELLNET:
-        tracer.log_phase("Materializing bk_set.local.json from local cluster config")
-        materialize_bk_set_from_node_config()
-        if USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
-            tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")
-            materialize_usdc_bridge_key_from_node_config(tracer, PROVER_DIR, USDC_BRIDGE_KEY_PATH)
+    if not IS_SHELLNET and USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
+        tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")
+        materialize_usdc_bridge_key_from_node_config(tracer, PROVER_DIR, USDC_BRIDGE_KEY_PATH)
 
     tracer.log_phase("Validating USDCBridge owner key against on-chain getOwnerPubkey")
     tracer.log(f"  USDC_BRIDGE_KEY_PATH: {USDC_BRIDGE_KEY_PATH}"

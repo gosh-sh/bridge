@@ -269,7 +269,7 @@ done
 ```
 
 `shellnet.common` holds `RPC_URL`, `RPC_FAILOVER_URLS`,
-`BRIDGE_GQL_ENDPOINT`, `BRIDGE_BK_SET_CONFIG`, `BRIDGE_PARAMS_DIR`,
+`BRIDGE_GQL_ENDPOINT`, `BRIDGE_PARAMS_DIR`,
 `BRIDGE_AGGREGATOR_DIR`, `BRIDGE_AGGREGATE_PROOF_BIN`, `BRIDGE_VERIFIERS_DIR`; `$BRIDGE_CONFIG_DIR/env` sources it
 and layers on `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`,
 `BRIDGE_ANCHOR_LEVEL`, `BRIDGE_CONFIG_DIR`. `RELAYER_PRIVATE_KEY` and the RPC
@@ -594,9 +594,9 @@ Follow the relayer runbook
 [Case 1](./live_relayer_bridge_runbook.md#3-case-1--fresh-deploy-and-cold-start)
 end-to-end; it is written for L2 (`LEVEL=2`,
 `BRIDGE_CONFIG_DIR=./L2_config`, `BRIDGE_ANCHOR_LEVEL=2`) and covers
-building the BK set for the seed, `deploy_bridge_bundle.sh LEVEL=2`
-(which runs `compute_bridge_anchors --level 2`), and `daemon-live`
-startup with its refusal diagnostics.
+the GraphQL check, `deploy_bridge_bundle.sh LEVEL=2` (which runs
+`compute_bridge_anchors --level 2`), and `daemon-live` startup with its
+refusal diagnostics.
 
 **Two withdraw-side sanity checks worth doing inline:**
 

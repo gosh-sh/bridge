@@ -1,10 +1,12 @@
 //! Cross-crate parity test for the BK-set-update path.
 //!
-//! Re-executes the four checks from
-//! [`bridge_prover_lib::live_driver::bk_update::drive_next_bk_update`]
-//! against a captured live-chain fixture, so a regression in any of:
+//! Checks a captured live-chain rotation against the leaves of its block: the
+//! block-id tree folds to the block id, the set before the rotation hashes to
+//! leaf 2, and that set with the rotation applied in node order hashes to
+//! leaf 3. A regression in any of:
 //!   * `bridge-poseidon::compute_bk_set_poseidon` (schema drift),
-//!   * `bridge-gql-fetcher::bk_set_fetcher::parse_bk_set_changes_pub` (blob layout drift),
+//!   * `bridge-prover-lib::bk_set_replay::{parse_changes, apply_block_changes}`
+//!     (blob layout drift, change order),
 //!   * `bridge-gql-fetcher::bk_set_fetcher::normalize_bk_set_pubkeys` (compression drift),
 //!   * `bridge-prover-lib::block_id_tree::BlockIdMerkleTree` (leaf order / fold direction),
 //!
@@ -25,12 +27,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use bridge_gql_fetcher::bk_set_fetcher::{
-    normalize_bk_set_pubkeys, parse_bk_set_changes_pub, BK_CHANGE_VARIANT_ADDED,
-    BK_CHANGE_VARIANT_REMOVED,
-};
+use bridge_gql_fetcher::bk_set_fetcher::normalize_bk_set_pubkeys;
 use bridge_poseidon as poseidon;
-use bridge_prover_lib::block_id_tree::{BlockIdMerkleTree, BLOCK_ID_TREE_LEAF_COUNT};
+use bridge_prover_lib::{
+    bk_set_replay::{apply_block_changes, parse_changes},
+    block_id_tree::{BlockIdMerkleTree, BLOCK_ID_TREE_LEAF_COUNT},
+};
 use serde::{Deserialize, Serialize};
 
 /// On-disk schema. Kept as plain hex strings (not `[u8;32]`) so hand-edits and
@@ -99,7 +101,6 @@ fn bk_update_parity_against_captured_fixture() {
              To capture: BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql \\\n\
              \x20\x20cargo run --release --example capture_bk_update_fixture -- \\\n\
              \x20\x20  --height <bk-update block seqno> \\\n\
-             \x20\x20  --genesis-bk-set path/to/bk_set.shellnet.json \\\n\
              \x20\x20  --out {}",
             path.display(),
             path.display(),
@@ -114,7 +115,7 @@ fn bk_update_parity_against_captured_fixture() {
         fx.source, fx.block_seq_no
     );
 
-    // (a) Tree fold parity — mirrors bk_update.rs:81..98 guard.
+    // (a) Tree fold parity.
     let leaves = decode_leaves(&fx.leaves_hex);
     let block_id_be: [u8; 32] = hex::decode(&fx.block_id_be_hex)
         .expect("block_id_be_hex")
@@ -127,7 +128,7 @@ fn bk_update_parity_against_captured_fixture() {
          leaf ordering or SHA-256 combine direction has drifted",
     );
 
-    // (b) L2 = Poseidon(old_pubkeys) — mirrors bk_update.rs:106..114 cross-check.
+    // (b) L2 = Poseidon(old_pubkeys).
     let old_pubkeys = decode_pubkeys(&fx.old_pubkeys_hex);
     let old_pubkeys = normalize_bk_set_pubkeys(old_pubkeys)
         .expect("normalize old_pubkeys — capture must store 48/96B keys");
@@ -138,38 +139,23 @@ fn bk_update_parity_against_captured_fixture() {
          drifted from the AN node's BK-set Poseidon schema",
     );
 
-    // (c) Apply delta and check we reach `expected_new_pubkeys_hex`.
-    // Mirrors bk_update.rs:118..149 delta application.
-    let blob = hex::decode(&fx.bk_set_update_hex).expect("bk_set_update_hex not hex");
-    let changes = parse_bk_set_changes_pub(&blob);
-    assert!(
-        !changes.is_empty(),
-        "parse_bk_set_changes_pub returned 0 changes — parser drifted from \
-         AN node's bincode layout for BlockKeeperSetChange",
+    // (c) Apply the delta in node order (every removal, then every addition)
+    // and check we reach `expected_new_pubkeys_hex`.
+    let changes = parse_changes(&fx.bk_set_update_hex).expect(
+        "parse_changes failed — the blob is not hex or the parser drifted from AN node's bincode \
+         layout for BlockKeeperSetChange",
     );
     let mut new_pubkeys = old_pubkeys.clone();
-    for (variant, idx, pk) in &changes {
-        match *variant {
-            BK_CHANGE_VARIANT_ADDED => {
-                new_pubkeys.insert(*idx, pk.clone());
-            }
-            BK_CHANGE_VARIANT_REMOVED => {
-                new_pubkeys.remove(idx);
-            }
-            _ => {}
-        }
-    }
-    let new_pubkeys =
-        normalize_bk_set_pubkeys(new_pubkeys).expect("normalize new_pubkeys after delta");
+    apply_block_changes(&mut new_pubkeys, &changes).expect("apply the delta to old_pubkeys");
     let expected_new = decode_pubkeys(&fx.expected_new_pubkeys_hex);
     let expected_new = normalize_bk_set_pubkeys(expected_new).expect("normalize expected_new");
     assert_eq!(
         new_pubkeys, expected_new,
-        "delta application diverged from capture-time expected new pubkeys \
-         — parse_bk_set_changes_pub semantics or normalization drifted",
+        "delta application diverged from capture-time expected new pubkeys — parse_changes / \
+         apply_block_changes semantics or normalization drifted",
     );
 
-    // (d) L3 = Poseidon(new_pubkeys) — mirrors bk_update.rs:150..158 guard.
+    // (d) L3 = Poseidon(new_pubkeys).
     let (_, l3_expected) = poseidon::compute_bk_set_poseidon(&new_pubkeys);
     assert_eq!(
         l3_expected, tree.leaves[3],

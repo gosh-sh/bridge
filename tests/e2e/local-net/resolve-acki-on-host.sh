@@ -6,7 +6,7 @@
 # (`bash -s`); stdout carries ONLY KEY=VALUE lines for the runner to source, everything
 # else goes to stderr.
 #
-# Required env: REGISTRY (docker.gosh.sh), TAG (e.g. br_dev), WORK_ROOT (e.g. ~/bridge-e2e).
+# Required env: REGISTRY (docker.gosh.sh), TAG (e.g. latest-dev), WORK_ROOT (e.g. ~/bridge-e2e).
 # node and all-bin must come from the same commit (the helpers bake the zerostate the
 # nodes will run); gql-server and block-manager are reported and run by digest as found.
 set -euo pipefail

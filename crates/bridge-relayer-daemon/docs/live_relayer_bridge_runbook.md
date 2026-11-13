@@ -77,7 +77,6 @@ planned to be disallowed, and the Compose kit already refuses it.
 
 ```bash
 cargo build --release --locked -p bridge-relayer-daemon --bin relayer
-cargo build --release --locked -p bridge-prover-daemon --example seed_prover_bk_set
 ( cd ../bridge-evm-aggregator && cargo build --release --locked --bin aggregate-proof )
 ```
 
@@ -122,6 +121,15 @@ itself; K=21 and K=22 come from their own ceremony files.
   cost is lower); each `verifyBlock` or `applyBkSetUpdate` costs
   ~0.001–0.003 ETH.
 
+### GraphQL
+
+A deploy (`compute_bridge_anchors`) and a cold start of the daemon without
+`prover_bk_set.json` build the BK set from GraphQL: `BRIDGE_GQL_ENDPOINT` must
+be gql-server 1.5.0 or later, serving `blockchain.latestBkSet`. A server
+without it stops both at once with `needs gql-server >= 1.5.0 serving
+blockchain.latestBkSet`. A restart whose state directory still fits the
+contract does not query it. [§3.2](#32-check-graphql) checks a server.
+
 ### Environment
 
 `L2_config/env` is written by the deploy script and sources `shellnet.common`
@@ -131,7 +139,6 @@ itself; K=21 and K=22 come from their own ceremony files.
 |---|---|---|
 | `BRIDGE_CONFIG_DIR` | `./L2_config` | config and state root |
 | `BRIDGE_STATE_DIR` | `./L2_config/state` | `daemon-live` otherwise uses `./state` |
-| `BRIDGE_BK_SET_CONFIG` | `./bk_set.shellnet.live.json` | the BK set the bridge was deployed with ([§3.2](#32-build-the-bk-set-at-s)); `shellnet.common` points at the pre-rotation genesis file |
 
 Optional: `BRIDGE_PK_CACHE_DIR=./params/pk_cache`,
 `BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions` (saves each `verifyBlock`
@@ -191,7 +198,7 @@ Check before every launch:
 ```bash
 for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT \
          BRIDGE_AGGREGATE_PROOF_BIN BRIDGE_VERIFIERS_DIR BRIDGE_PARAMS_DIR \
-         BRIDGE_CONFIG_DIR BRIDGE_STATE_DIR BRIDGE_BK_SET_CONFIG \
+         BRIDGE_CONFIG_DIR BRIDGE_STATE_DIR \
          BRIDGE_BOOTSTRAP_SEQNO BRIDGE_DEPLOY_BLOCK; do
   [ -n "${!v:-}" ] && echo "  ok  $v" || echo "  FAIL $v"
 done
@@ -206,17 +213,12 @@ done
 Use this for a first deploy, and whenever the current bridge cannot continue
 ([§5.5](#55-when-to-redeploy)).
 
-**The one thing to get right: the BK set at the seed.** The bridge starts at
-a key block S near chain head, and the contract and the daemon must both
-start with the BK set that signs block S. Shellnet does not publish "the
-current set" — GraphQL lists only the changes (`bkSetUpdates`: one keeper
-leaves, another joins). So the set is rebuilt: take the set from before
-rotations began (`bk_set.shellnet.json`) and replay every change up to block
-S. A list replayed only up to an earlier block misses the changes in between:
-the contract gets an outdated set while its rotation counter already skips
-those changes, and the daemon stops at the next rotation with
-`prover out of sync`. The deploy and the daemon's cold start both compare the
-list with the commitment block S itself records, and refuse a mismatch.
+**The BK set at the seed.** The bridge starts at a key block S near chain
+head, and the contract and the daemon both start with the BK set that signs
+block S. Nothing has to be prepared for it: the deploy and the daemon's cold
+start build it from GraphQL — the block manager's snapshot of the current set
+(`blockchain.latestBkSet`) and the rotations between that snapshot and S
+(`bkSetUpdates`) — and check every step against the leaves of its block.
 
 ### 3.1 Pick the seed
 
@@ -229,20 +231,28 @@ S=$(( HEAD / 16384 * 16384 ))      # newest W² boundary at or below head
 echo "seed S=$S"
 ```
 
-### 3.2 Build the BK set at S
+**S must be at or above L3\*.** The block managers behind GraphQL keep
+history only from the height F their history store started at (the largest
+F among them); `bkSetUpdates` and the layer hashes below it are gone. L3\* is
+the first L3 boundary (a multiple of 2,097,152, ~8.2 days of blocks) at or
+above that F, once their stores have no gaps. A bridge seeded below L3\*
+reads rows from before F at its first L2 boundary and stops there. Nothing
+checks this: ask the block managers' operator for F. The newest boundary
+picked above is fine once the chain has passed L3\*; until then, wait.
+
+### 3.2 Check GraphQL
 
 ```bash
-BRIDGE_GQL_ENDPOINT=$GQL BRIDGE_BK_SET_CONFIG=bk_set.shellnet.json \
-  ./target/release/examples/seed_prover_bk_set --cap-height "$S" \
-  --out "/tmp/prover_bk_set_$S.json"
-[ -f bk_set.shellnet.live.json ] && \
-  mv bk_set.shellnet.live.json "bk_set.shellnet.live.pre_$(date +%s).json"
-jq '.pubkeys_hex' "/tmp/prover_bk_set_$S.json" > bk_set.shellnet.live.json
+curl -s "$GQL" -H 'Content-Type: application/json' \
+  -d '{"query":"{ blockchain { latestBkSet { height } } }"}' | jq .
 ```
 
-It prints the signer indices and the set's Poseidon commitment. The replay
-needs every change since the network's genesis to still be served by
-GraphQL.
+- `data.blockchain.latestBkSet.height`: the server serves the BK set; the
+  height is its snapshot's anchor.
+- `latestBkSet: null`: no snapshot yet. The block manager refreshes it every
+  minute; the deploy waits up to 180 s for one, the daemon without a limit.
+- `Unknown field "latestBkSet"`: gql-server older than 1.5.0. Neither the
+  deploy nor a cold start can run against it.
 
 ### 3.3 Deploy
 
@@ -252,7 +262,7 @@ CONFIRM_NEW_BRIDGE_DEPLOY=DEPLOY_NEW_CONTRACTS LEVEL=2 \
 PRIVATE_KEY="$RELAYER_PRIVATE_KEY" \
 WITHDRAW_ACC_FR=<AN bridge account field element> \
 PREDECESSOR_BRIDGE=<the Sepolia bridge whose treasury this one takes over, or the zero address> \
-BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
+BRIDGE_SEED_SEQNO="$S" \
   ./scripts/deploy_bridge_bundle.sh 2>&1 | tee "logs/deploy_L2_$(date -u +%Y%m%dT%H%M%SZ).log"
 ```
 
@@ -272,15 +282,14 @@ BRIDGE_SEED_SEQNO="$S" BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
   already serves 11155111, follow the cutover above instead.
 
 - `BRIDGE_SEED_SEQNO` pins the seed to S; without it the script picks the
-  newest boundary at deploy time, which can be later than the S the set was
-  built for. `BRIDGE_BK_SET_CONFIG` must be a `./` path relative to this
-  directory.
+  newest boundary at deploy time.
 - `WITHDRAW_ACC_FR` is fixed for the life of the bridge. Reuse the previous
   bridge's value: `cast call <old bridge> 'bridgeWithdrawalAccFr()(uint256)'`.
   A dummy value only suits a `verifyBlock`-only smoke test.
 - The script runs `compute_bridge_anchors`, which derives the constructor
-  arguments: `GENESIS_BK_SET_COMMITMENT` (the file's Poseidon commitment,
-  checked against block S), `GENESIS_LAST_BK_SET_UPDATE_SEQNO` (the last
+  arguments: `GENESIS_BK_SET_COMMITMENT` (the Poseidon commitment of the BK
+  set at S, built from GraphQL and checked against block S),
+  `GENESIS_LAST_BK_SET_UPDATE_SEQNO` (the last
   rotation at or below S — the contract's rotation counter starts there),
   `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` (block S's layer-2 hash) and the seed.
   It then deploys the bundle with forge (14 transactions), rewrites
@@ -313,7 +322,6 @@ do not start the daemon.
 export BRIDGE_CONFIG_DIR=./L2_config
 set -a; source "$BRIDGE_CONFIG_DIR/env"; set +a
 export BRIDGE_STATE_DIR="$BRIDGE_CONFIG_DIR/state" \
-       BRIDGE_BK_SET_CONFIG=./bk_set.shellnet.live.json \
        BRIDGE_PK_CACHE_DIR=./params/pk_cache \
        BRIDGE_DUMP_SUBMISSIONS_DIR=./submissions
 # run the environment check from §2, then make sure nothing from an
@@ -330,20 +338,34 @@ nohup ./target/release/relayer daemon-live --work-dir ./work --log-dir ./logs \
 Within ~10 s the log shows (abridged):
 
 ```
-INFO bridge_prover_lib::bk_set_bootstrap: BK-set bootstrap: mode=file, loaded 5 signers from ./bk_set.shellnet.live.json
 INFO relayer: startup: read on-chain state for routing chain_last_seen=<S> chain_bk_upd=<C> local_last_seen=0 local_bk_upd=0 local_initialized=false anchor_level=2 bundle_stride=16384
 INFO relayer: startup: bridge bundleStride matches chain_stride=16384
-INFO relayer: startup: Cold — contract at genesis, bootstrapping policy=Explicit(<S>)
+INFO bridge_relayer_daemon::bk_startup: startup: Cold — seeding with the contract's BK fields seed_policy=Explicit(<S>) commitment=<K> last_bk_set_update_seq_no=<C>
+WARN bridge_relayer_daemon::bk_startup: building the prover BK set from GraphQL reason=there is no readable prover BK set file height=…
+INFO bridge_relayer_daemon::bk_startup: built the prover BK set from GraphQL commitment=<K> height=… cursor=<C>
 INFO relayer: daemon-live starting gql=https://shellnet.ackinacki.org/graphql params=./params prover_state=./L2_config/state
-INFO bridge_prover_lib::live_driver: live_driver: cold-start bk-update cursor resolved — last_bk_set_update_seq_no=<C> (seed_seqno=<S>)
 INFO bridge_prover_lib::live_driver: live_driver: bootstrap seed applied — seq_no=<S>, height=<S>, layers=2
 ```
 
 - `C` is `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, and `prover_state` must be
   `./L2_config/state`.
-- A wrong BK-set file stops here with
-  `BK-set commitment … does not match the chain's … at seed seq_no=…` —
-  rebuild it ([§3.2](#32-build-the-bk-set-at-s)).
+- `K` is the commitment `GENESIS_BK_SET_COMMITMENT` names, but printed as
+  its 32 bytes in little-endian order without `0x`, while the deploy log
+  prints `GENESIS_BK_SET_COMMITMENT` big-endian with `0x`: the two strings
+  differ. To compare, reverse the bytes of the deploy log's value:
+  `echo "${GENESIS_BK_SET_COMMITMENT#0x}" | fold -w2 | tac | tr -d '\n'`.
+- A contract deployed with another BK set stops here, with exit status 1:
+  `the BK set built from GraphQL at height … has commitment …, but the
+  contract expects …`. `BRIDGE_ADDRESS` and `BRIDGE_GQL_ENDPOINT` name
+  different networks.
+- `the block-keeper set failed its checks on 3 snapshots …`, exit status 1:
+  GraphQL did not return every rotation between its snapshot and the
+  target height — below F ([§3.1](#31-pick-the-seed)) it no longer has
+  them.
+- `the GraphQL server's latestBkSet answer could not be used on 3 attempts …`,
+  exit status 1: the snapshot has a field or a key this release cannot read;
+  check that `BRIDGE_GQL_ENDPOINT` serves the bridge's network and runs a
+  supported gql-server version.
 - `Resurrect` or `WarmResume` instead of `Cold` means old local state was
   not archived.
 - A daemon at another anchor level than the bridge's stops with
@@ -385,6 +407,19 @@ A rotation that has to wait for the next bundle — a second rotation past the
 boundary of a bundle not yet verified — is not picked up at all until that
 bundle is verified, and nothing is logged for it meanwhile. It is proven and
 applied right after the next `verified`.
+
+A rotation the contract already holds — applied by another sender, or by this
+daemon before a restart — is not proven again: the prover takes it as it is,
+one after another when there are several, at startup and while running
+(`INFO … prover took a rotation already on the contract rotation=<N>`). When
+the one at `storedLastBkSetUpdateSeqNo` does not lead from
+`storedPrevBkSetCommitment` to `storedBkSetCommitment`, the daemon stops with
+exit status 1 (`daemon: BK set diverged from the bridge — stopping`, naming
+both sides). It stops the same way when the prover's BK set is not the set
+Acki Nacki signs the next rotation block with (that block's leaf [2]), whether
+that rotation is on the contract already or still to be proven. A supervisor starts it again; if it stops the same
+way, the prover follows another BK-set history than the bridge — check that
+`BRIDGE_GQL_ENDPOINT` serves the network the bridge was deployed for.
 
 Between boundaries every tick finds no bundle yet, and every 16th such tick
 logs `INFO … waiting for the next bundle`. `WARN … no new bundle for much
@@ -435,7 +470,15 @@ when the files match the contract, or `startup: WarmResume — local cursor is
 behind the contract in the BK-set hold window` when a rotation has landed and
 the bundle cursor has not caught up. Either way `seed_policy=Resume`. A proof
 that was in progress is lost across the restart and redone (~10–14 min for a
-bundle, ~3.5–5 min per pending rotation).
+bundle, ~3.5–5 min per rotation not yet on the contract).
+
+The restart takes the BK set from `prover_bk_set.json` and does not query
+`latestBkSet`. When only the file's rotation cursor is off, it is fixed in
+place (`… fixing the cursor`). When the file does not fit the prover state, it is
+renamed `prover_bk_set.json.mismatch-<unix time>` and the set is built from
+GraphQL as on a cold start. `startup: the contract applied BK set updates the
+local mirror has not` means another sender applied rotations while the
+daemon was down; it takes the contract's BK fields and goes on.
 
 ### 5.2 Hard abort after failed submissions
 
@@ -522,12 +565,12 @@ cast call "$BRIDGE_ADDRESS" \
 ### 5.4 New machine, contract already advanced
 
 With no local state and a contract past its seed, startup picks `Resurrect`:
-it rebuilds the prover state from the contract and resumes. The BK-set file
-must then hold the set the contract currently expects — build it as in
-[§3.2](#32-build-the-bk-set-at-s) with
-`--cap-height <storedLastBkSetUpdateSeqNo>`. Startup stops instead (`Stop`)
-when local state is ahead of the chain, belongs to another contract, or has a
-different anchor level; archive the state dir and investigate.
+it rebuilds the prover state from the contract, builds the BK set the
+contract expects from GraphQL (gql-server 1.5.0 or later), checks it against
+the contract and resumes — in the rotation hold window too. Nothing has to be
+prepared. Startup stops instead (`Stop`) when local state is ahead of the
+chain, belongs to another contract, or has a different anchor level; archive
+the state dir and investigate.
 
 ### 5.5 When to redeploy
 
@@ -543,8 +586,6 @@ different anchor level; archive the state dir and investigate.
   exits with 1), so a supervisor can tell it apart: the shellnet-l2
   container stays up with the daemon stopped instead of restarting into the
   same stop every few minutes.
-  Before §3, rebuild `bk_set.shellnet.json` for the new network (see the
-  [shellnet BK-set section of `TECHNICAL_README.md`](../../bridge-prover-libraries/TECHNICAL_README.md#shellnet-bk-set--manual-maintenance-of-bk_setshellnetjson)).
 
 Redeploy with [§3](#3-case-1--fresh-deploy-and-cold-start) at a seed near
 head. The old bridge stays frozen at its last cursor; update everything keyed
@@ -559,8 +600,6 @@ on `BRIDGE_ADDRESS`.
 ```
 crates/bridge-prover-libraries/
 ├── shellnet.common              shared development env (RPC, GraphQL, paths; keys from .env)
-├── bk_set.shellnet.json         BK set at the network's genesis (restart of 2026-10-14); input of §3.2
-├── bk_set.shellnet.live.json    BK set at the current bridge's seed; BRIDGE_BK_SET_CONFIG
 ├── L2_config/
 │   ├── env                      written by the deploy script
 │   └── state/                   BRIDGE_STATE_DIR: the one state directory
@@ -573,8 +612,9 @@ crates/bridge-prover-libraries/
 ```
 
 Never delete the state of a running daemon; archive it (`mv state
-state.pre_<ts>`). Once a daemon has started, `prover_bk_set.json` is what it
-uses; `bk_set.shellnet.live.json` is read only on a cold start.
+state.pre_<ts>`). Without `prover_bk_set.json` the daemon builds the set from
+GraphQL again. A `prover_bk_set.json.mismatch-<unix time>` beside it is a file
+the daemon set aside because it did not fit the prover state; it can be deleted.
 
 ### BK rotation on shellnet
 
@@ -593,7 +633,7 @@ The [Compose kit](../../../docker/README.md) wraps the same steps:
 read-only preflight on every start, `restart: unless-stopped`, and the kit's
 `scripts/status.sh` for a snapshot. Never run two daemons on the
 same bridge, key or state. Record for every deployment: the bridge address
-and deploy transactions, S, `GENESIS_LAST_BK_SET_UPDATE_SEQNO`, the SHA-256 of
-`bk_set.shellnet.live.json`, `WITHDRAW_ACC_FR`, and — at handoff — the current
+and deploy transactions, S, `GENESIS_BK_SET_COMMITMENT`,
+`GENESIS_LAST_BK_SET_UPDATE_SEQNO`, `WITHDRAW_ACC_FR`, and — at handoff — the current
 `storedLastSeenBlockSeqNo`, `storedBkSetCommitment` and
 `storedLastBkSetUpdateSeqNo`.

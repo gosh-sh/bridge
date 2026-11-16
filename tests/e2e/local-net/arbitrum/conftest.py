@@ -169,9 +169,20 @@ class Arbitrum:
                 time.sleep(2 * (attempt + 1))
         raise AssertionError(f"{method}: Arbitrum Sepolia RPC did not answer")
 
-    def call(self, to, signature, args=b""):
+    def call(self, to, signature, args=b"", block="latest"):
         data = "0x" + keccak256(signature.encode())[:4].hex() + args.hex()
-        return int(self.rpc("eth_call", [{"to": to, "data": data}, "latest"]), 16)
+        return int(self.rpc("eth_call", [{"to": to, "data": data}, block]), 16)
+
+    def block(self):
+        return self.rpc("eth_blockNumber", [])
+
+    def words(self, to, signature, args=b"", block="latest"):
+        data = "0x" + keccak256(signature.encode())[:4].hex() + args.hex()
+        raw = self.rpc("eth_call", [{"to": to, "data": data}, block])[2:]
+        return [int(raw[i:i + 64], 16) for i in range(0, len(raw), 64)]
+
+    def erc20(self, token, address):
+        return self.call(token, "balanceOf(address)", bytes(12) + bytes.fromhex(address[2:]))
 
     def receipt(self, tx):
         return self.rpc("eth_getTransactionReceipt", [tx])

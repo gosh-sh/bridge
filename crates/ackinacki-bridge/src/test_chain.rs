@@ -1350,7 +1350,7 @@ mod tests {
         .account;
         assert_eq!(
             getter(boc.clone(), "getVersion", json!({})).await["value0"],
-            "1.17.0"
+            "1.18.0"
         );
         assert_eq!(
             getter(
@@ -1478,11 +1478,9 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.1 build of eccBridge 1.17.0: 1.16.0 with the deposit
-        // checked against its receipt instead of a ZK proof.
         assert_eq!(
             &hash[..8],
-            "c25d1ac0",
+            "576bb7a1",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

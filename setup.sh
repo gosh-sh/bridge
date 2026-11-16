@@ -85,7 +85,7 @@ fi
 # 4. Node.js: contracts/ethereum takes poseidon-solidity from npm
 print_info "Checking Node.js installation..."
 if ! command -v npm &> /dev/null; then
-    print_error "npm not found. contracts/ethereum needs it for poseidon-solidity."
+    print_error "npm not found. contracts/ethereum needs it for poseidon-solidity and OpenZeppelin."
     print_error "Install Node.js from: https://nodejs.org/"
     exit 1
 fi

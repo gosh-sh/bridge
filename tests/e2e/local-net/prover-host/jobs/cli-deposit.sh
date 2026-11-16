@@ -6,12 +6,16 @@
 # Input: the deployer's private key.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
 load evm.env
+tag=deposit token=() unit=USDC
+if [ "${DEPOSIT_TOKEN:-}" = nackl ]; then
+  tag=nackl-deposit token=(--token "$NACKL_ADDRESS") unit=NACKL
+fi
 export BRIDGE_DEPOSIT_PRIVATE_KEY; BRIDGE_DEPOSIT_PRIVATE_KEY=$(tr -d '[:space:]' </run/input)
 export BRIDGE_DEPOSIT_FROM=$FROM RPC_URL=$ARB_DEPOSIT_RPC BRIDGE_ADDRESS BRIDGE_GQL_ENDPOINT=$GQL
 export USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 export BRIDGE_DEPOSIT_CONFIRMATIONS=${CONFIRMATIONS:-1}
-export BRIDGE_DEPOSIT_STATE_DIR=$WORK/deposit-state BRIDGE_WORK_DIR=$WORK/deposit-work
+export BRIDGE_DEPOSIT_STATE_DIR=$WORK/$tag-state BRIDGE_WORK_DIR=$WORK/$tag-work
 mkdir -p "$BRIDGE_DEPOSIT_STATE_DIR" "$BRIDGE_WORK_DIR"
-log "deposit $AMOUNT USDC from $FROM to $TO"
+log "deposit $AMOUNT $unit from $FROM to $TO"
 exec ackinacki-bridge --json --yes --non-interactive deposit --network arbitrum-sepolia --qr-mode local-key \
-  --amount "$AMOUNT" --to "$TO" --anchor-timeout-s "${ANCHOR_TIMEOUT_S:-5400}"
+  "${token[@]}" --amount "$AMOUNT" --to "$TO" --anchor-timeout-s "${ANCHOR_TIMEOUT_S:-5400}"

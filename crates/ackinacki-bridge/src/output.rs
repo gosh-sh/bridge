@@ -123,6 +123,7 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     let status = match s.status {
         crate::orchestrator::SubmitStatus::DryRunOk => "dry-run-ok",
         crate::orchestrator::SubmitStatus::Confirmed => "confirmed",
+        crate::orchestrator::SubmitStatus::Queued => "queued",
     };
     // Built whole, then written once. Sixteen separate `eprintln!`s were
     // sixteen chances to panic and sixteen chances to tear the summary in
@@ -132,11 +133,23 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
         Some(tx) => format!("  ETH tx:       {tx} ({status})\n"),
         None => format!("  ETH tx:       (none) ({status})\n"),
     };
+    let queued = match (&s.payout_id, s.ready_at) {
+        (Some(id), Some(at)) => format!(
+            "  NACKL payout: {id} queued, due at unix {at}; executeNacklPayout({id}) mints it \
+             once due and within the daily limit (the relayer sends it)\n"
+        ),
+        _ => String::new(),
+    };
+    let unit = match summary.burn.token_id {
+        1 => "NACKL".to_string(),
+        3 => "USDC".to_string(),
+        id => format!("ECC[{id}]"),
+    };
     emit(
         &format!(
-            "\nwithdraw complete:\n\x20 amount:       {} USDC\n\x20 AN tx:        {}\n\x20 msg \
+            "\nwithdraw complete:\n\x20 amount:       {} {unit}\n\x20 AN tx:        {}\n\x20 msg \
              id:       {}\n\x20 block:        seq={} id={}\n\x20 proof:        {} bytes, {} \
-             public inputs, self_verified={}\n{eth}",
+             public inputs, self_verified={}\n{eth}{queued}",
             summary.burn.amount,
             summary.burn.an_tx,
             summary.capture.withdrawal_msg_id,

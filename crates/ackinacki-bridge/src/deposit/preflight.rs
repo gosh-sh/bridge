@@ -249,7 +249,18 @@ pub async fn check(
             limits.max_transfer
         )));
     }
-    if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding {
+    if listing.token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
+        if requested > limits.outstanding {
+            return Err(refuse(format!(
+                "the Acki Nacki bridge holds {} base units of NACKL locked for chain {}; a \
+                 deposit of {requested} would wait there as pending until withdrawals lock more. \
+                 Deposit at most that much, or retry later",
+                limits.outstanding,
+                net.chain_id()
+            )));
+        }
+    } else if limits.outstanding > limits.max_tvl || requested > limits.max_tvl - limits.outstanding
+    {
         return Err(refuse(format!(
             "AN chain {} would exceed the AN token maxTvl; wait for withdrawals and retry",
             net.chain_id()

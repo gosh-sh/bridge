@@ -9,8 +9,10 @@ logs go to stderr.
                             deployL2Verifier unless getL2Verifier already records one for
                             that parent (the bridge refuses the same code twice, 238), then
                             VERIFIER, VERIFIER_PARENT, VERIFIER_L2/L1/ROLLUP (its getConfig)
-  trust <evm bridge>        setTrustedL1Bridge(421614, bridge, true) and setEvmBridge(421614,
-                            bridge); TRUSTED=true|false and EVM_BRIDGE (0x-hex) read back
+  trust <evm bridge> [nackl]
+                            setTrustedL1Bridge(421614, bridge, true) and setEvmBridge(421614,
+                            bridge), and with the run's NACKL token setBridgeToken(421614, it, 1):
+                            TRUSTED=true|false, EVM_BRIDGE (0x-hex), NACKL_REGISTERED read back
   lightclient               deployLightClient(owner pubkey, 11155111, 0, 0): the Sepolia light
                             client, its committee unset (lc-bootstrap sets it once); LC (as
                             dapp::account), LC_L1, LC_OWNER and OWNER_PUBKEY read back
@@ -24,8 +26,11 @@ logs go to stderr.
   msig-funded <amount>      deploy a multisig and have the owner mint <amount> base units of
                             USDC to it with mintAndSendBridged for 421614, so the withdrawal
                             does not wait for the deposit: MSIG, MSIG_ACCOUNT, MSIG_KEYS
+  msig-nackl <amount>       deploy a multisig and have the giver send it <amount> base units of
+                            NACKL (ECC 1): MSIG, MSIG_ACCOUNT, MSIG_KEYS
+  nackl <evm bridge>        NACKL locked for 421614 (LOCKED) and locked to that bridge (LOCKED_TO)
   accepted <chain> <hash>   ACCEPTED=true|false
-  ecc <dapp::account>       ECC3=<base units of USDC on the account>
+  ecc <dapp::account>       ECC3=<base units of USDC>, ECC1=<base units of NACKL> on the account
 
 Env: as test_deploy_and_withdraw_only.py (MODE=local, NETWORK, WORK_DIR, PROVER_DIR,
 ACKI_NACKI_ROOT).
@@ -51,8 +56,11 @@ from helper.bridge_e2e import (  # noqa: E402
     materialize_usdc_bridge_key_from_node_config, validate_usdc_bridge_key,
 )
 from helper.msig import deploy_multisig, mint_usdc  # noqa: E402
+from helper.bridge_e2e import GIVER_ABI, GIVER_ADDRESS, GIVER_KEY_PATH  # noqa: E402
 
 ARB_SEPOLIA = 421614
+NACKL_ID = 1
+NACKL_MAX_TRANSFER = 100_000_000_000
 SEPOLIA = 11155111
 PROVER_DIR = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, "work-local"))
@@ -155,7 +163,7 @@ def main():
             answer = [f"VERIFIER={got.get('verifier', '')}", f"VERIFIER_PARENT={uint(got.get('parentChainId'))}",
                       f"VERIFIER_L2={uint(cfg.get('l2ChainId'))}", f"VERIFIER_L1={uint(cfg.get('l1ChainId'))}",
                       f"VERIFIER_ROLLUP={uint(cfg.get('rollup')):#042x}"]
-        elif cmd == "trust" and len(args) == 1:
+        elif cmd == "trust" and len(args) in (1, 2):
             usdc_token = int("75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", 16)
             owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": str(usdc_token),
                                           "tokenId": 3, "maxTransfer": "50000000", "maxTvl": "10000000000",
@@ -173,6 +181,14 @@ def main():
                 uint(getter("getEvmBridge", {"dstChainId": str(ARB_SEPOLIA)}).get("value0"))))
             answer = [f"TRUSTED={str(bool(trusted)).lower()}", "TOKEN_REGISTERED=true",
                       f"EVM_BRIDGE={bound or 0:#042x}"]
+            if len(args) == 2:
+                nackl = int(args[1], 16)
+                owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": str(nackl),
+                                              "tokenId": NACKL_ID, "maxTransfer": str(NACKL_MAX_TRANSFER),
+                                              "maxTvl": str(NACKL_MAX_TRANSFER * 10), "depositsEnabled": True})
+                registered = until(lambda: truth(getter("getTokenDepositConfig", {
+                    "chainId": str(ARB_SEPOLIA), "evmToken": str(nackl)}).get("listed")))
+                answer.append(f"NACKL_REGISTERED={str(bool(registered)).lower()}")
         elif cmd == "msig" and not args:
             gql = be.GqlClient(GRAPHQL_URL)
             keys = os.path.join(WORK_DIR, "msig_arbitrum_e2e.keys.json")
@@ -196,6 +212,27 @@ def main():
             mint_usdc(tracer, gql, "0:" + ext.split("::")[1], int(args[0]),
                       usdc_bridge_key_path=USDC_BRIDGE_KEYS, bridged=True)
             answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
+        elif cmd == "msig-nackl" and len(args) == 1:
+            gql = be.GqlClient(GRAPHQL_URL)
+            keys = os.path.join(WORK_DIR, "msig_arbitrum_withdraw_nackl.keys.json")
+            address, _abi = deploy_multisig(
+                tracer, gql, work_dir=WORK_DIR, msig_key_path=keys,
+                usdc_bridge_key_path=USDC_BRIDGE_KEYS, is_shellnet=False,
+                verbose_faucet=False, mint=False,
+            )
+            ext = address if "::" in address else common.to_dapp_address(address)
+            common.call_contract(GIVER_ADDRESS, GIVER_ABI, GIVER_KEY_PATH, "sendCurrencyWithFlag",
+                                 {"dest": "0:" + ext.split("::")[1], "value": "1000000000",
+                                  "ecc": {str(NACKL_ID): args[0]}, "flag": "1", "bounce": False})
+            held = until(lambda: int(((common.get_account(ext) or {}).get("ecc_balance") or {})
+                                     .get(str(NACKL_ID), 0)) >= int(args[0]))
+            if not held:
+                raise RuntimeError(f"the giver's NACKL did not reach {ext}")
+            answer = [f"MSIG={ext}", f"MSIG_ACCOUNT={ext.split('::')[1]}", f"MSIG_KEYS={keys}"]
+        elif cmd == "nackl" and len(args) == 1:
+            cfg = getter("getTokenWithdrawalConfig", {"chainId": str(ARB_SEPOLIA), "tokenId": NACKL_ID})
+            locked_to = getter("getNacklLockedTo", {"chainId": str(ARB_SEPOLIA), "evmBridge": str(int(args[0], 16))})
+            answer = [f"LOCKED={uint(cfg.get('outstanding'))}", f"LOCKED_TO={uint(locked_to.get('value0'))}"]
         elif cmd == "lightclient" and not args:
             with open(USDC_BRIDGE_KEYS) as f:
                 pubkey = json.load(f)["public"]
@@ -225,7 +262,8 @@ def main():
             answer = [f"ACCEPTED={str(accepted(args[0], args[1])).lower()}"]
         elif cmd == "ecc" and len(args) == 1:
             account = common.get_account(args[0]) or {}
-            answer = [f"ECC3={int((account.get('ecc_balance') or {}).get('3', 0))}"]
+            ecc = account.get("ecc_balance") or {}
+            answer = [f"ECC3={int(ecc.get('3', 0))}", f"ECC1={int(ecc.get('1', 0))}"]
         else:
             raise SystemExit(__doc__)
     print("\n".join(answer))

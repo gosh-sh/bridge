@@ -21,6 +21,7 @@ pub const ERR_PAUSED: i32 = 231;
 pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
 /// The source chain has no remaining deposit capacity.
 pub const ERR_TVL_CAP: i32 = 235;
+pub const ERR_CHAIN_BALANCE_EXCEEDED: i32 = 236;
 /// The proven log is not the bridge's `Deposit` in the shape it reads.
 pub const ERR_NOT_DEPOSIT_LOG: i32 = 244;
 /// The receipt proof does not prove a receipt of the block: a node too
@@ -74,6 +75,7 @@ pub enum Reaction {
     WaitPaused,
     /// Capacity becomes available after withdrawals on this chain.
     WaitCapacity,
+    WaitLock,
     /// The anchored block is not known yet: wait for the next anchor.
     BackToAnchor,
     /// Final refusal.
@@ -100,6 +102,7 @@ fn by_code(code: i32) -> Reaction {
     match code {
         ERR_PAUSED => Reaction::WaitPaused,
         ERR_TVL_CAP => Reaction::WaitCapacity,
+        ERR_CHAIN_BALANCE_EXCEEDED => Reaction::WaitLock,
         ERR_MESSAGE_WITH_HUGE_EXPIREAT => Reaction::Refused {
             code,
             hint: "message expiry is outside the bridge's five-minute window; check clock \
@@ -208,6 +211,7 @@ mod tests {
     fn the_table_of_refusals() {
         assert_eq!(react(&rejected(231)), Reaction::WaitPaused);
         assert_eq!(react(&rejected(235)), Reaction::WaitCapacity);
+        assert_eq!(react(&rejected(236)), Reaction::WaitLock);
         assert!(matches!(react(&rejected(234)), Reaction::Refused {
             code: 234,
             ..

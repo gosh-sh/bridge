@@ -30,6 +30,9 @@ use crate::{
 pub const DEPOSIT_FINALIZED_DST: &str =
     ":000000000000000000000000000000000000000000000000000000000000026b";
 
+pub const DEPOSIT_PENDING_DST: &str =
+    ":000000000000000000000000000000000000000000000000000000000000026d";
+
 /// A deposit as the bridge's `confirmDeposit` and `DepositFinalized` name
 /// it: the proven inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +70,12 @@ impl Identity {
             && u256(&v["anAccount"]) == Some(U256::from_be_bytes(self.account))
             && u256(&v["dappId"]) == Some(U256::ZERO)
     }
+
+    pub fn matches_pending(&self, v: &Value) -> bool {
+        u256(&v["chainId"]) == Some(U256::from(self.chain_id))
+            && u256(&v["amount"]) == Some(U256::from(self.amount))
+            && u256(&v["anAccount"]) == Some(U256::from_be_bytes(self.account))
+    }
 }
 
 /// What one look at the chain says about the credit.
@@ -79,6 +88,10 @@ pub enum Credit {
     Aborted {
         /// That transaction.
         bridge_tx: String,
+    },
+    Pending {
+        bridge_tx: String,
+        deposit_hash: String,
     },
     /// Not visible (yet): a message in transit, a lagging node, or nothing
     /// finalized this deposit.
@@ -108,6 +121,20 @@ pub async fn bridge_tx_verdict(
     if tx.aborted {
         return Ok(Credit::Aborted {
             bridge_tx: tx.hash.clone(),
+        });
+    }
+    let pending = tx.out.iter().find_map(|m| {
+        if !m.dst.ends_with(DEPOSIT_PENDING_DST) {
+            return None;
+        }
+        let (n, v) = an.decode(BRIDGE_ABI, m.body.as_deref()?, false)?;
+        (n == "DepositPending" && id.matches_pending(&v))
+            .then(|| v["depositHash"].as_str().unwrap_or_default().to_owned())
+    });
+    if let Some(deposit_hash) = pending {
+        return Ok(Credit::Pending {
+            bridge_tx: tx.hash.clone(),
+            deposit_hash,
         });
     }
     let event_ok = tx.out.iter().any(|m| {
@@ -475,6 +502,29 @@ pub async fn confirm(
                     ),
                 ));
             },
+            (
+                Credit::Pending {
+                    bridge_tx,
+                    deposit_hash,
+                },
+                _,
+            ) => {
+                return Err(CliError::deposit(
+                    ExitCode::CreditPending,
+                    Stage::Credit,
+                    Some(op_id),
+                    format!(
+                        "the deposit is proven, but the Acki Nacki bridge holds less NACKL locked \
+                         for chain {} than {} base units, so it recorded the deposit as pending \
+                         (transaction {bridge_tx}) and paid nothing yet. Nothing is lost: the \
+                         next NACKL withdrawals to that chain pay it once they lock enough, \
+                         oldest first, and anyone can pay it then with \
+                         releasePendingDeposit({deposit_hash}). getPendingDeposit({deposit_hash}) \
+                         shows it while it waits; --resume confirms the credit once it is paid.",
+                        id.chain_id, id.amount,
+                    ),
+                ));
+            },
             _ => {},
         }
         let now = tokio::time::Instant::now();
@@ -776,6 +826,80 @@ mod tests {
         assert_eq!(
             by_events(&an, BRIDGE, &id(0), 0).await.unwrap(),
             Credit::NotYet
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_nackl_deposit_is_confirmed_by_the_transaction_that_pays_it() {
+        let mut i = id(0);
+        i.token_id = 1;
+        let an = FakeAn::default();
+        chain(&an, &i, false, false);
+        let mut pending = msg(
+            "pend",
+            "ExtOut",
+            &format!("0:{}", hex::encode(BRIDGE)),
+            DEPOSIT_PENDING_DST,
+            Some("B-pending"),
+        );
+        pending.created_at = 3;
+        an.bodies.lock().unwrap().insert(
+            "B-pending".into(),
+            ("DepositPending".into(), json!({ "depositHash": "0x77", "chainId": i.chain_id.to_string(),
+                "amount": i.amount.to_string(), "anAccount": format!("0x{}", hex::encode(i.account)) })),
+        );
+        let paid_by = |hash: &str| an.transactions.lock().unwrap().get(hash).cloned().unwrap();
+        let mut payer = paid_by("btx");
+        payer.hash = "lock".into();
+        payer.now = 9;
+        an.transactions.lock().unwrap().get_mut("btx").unwrap().out = vec![pending];
+        let finalized = an
+            .ext_out
+            .lock()
+            .unwrap()
+            .get_mut(&BRIDGE)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let wait = |ui| {
+            confirm(
+                &an,
+                BRIDGE,
+                VOUCHER,
+                &i,
+                false,
+                0,
+                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(10),
+                "OP",
+                ui,
+            )
+        };
+        let err = wait(&ui).await.unwrap_err();
+        assert_eq!(err.exit_code(), ExitCode::CreditPending);
+        assert!(
+            err.to_string().contains("releasePendingDeposit(0x77)"),
+            "{err}"
+        );
+
+        an.transactions.lock().unwrap().insert("lock".into(), payer);
+        let mut event = finalized;
+        event.src_tx = Some("lock".into());
+        an.messages
+            .lock()
+            .unwrap()
+            .insert("ev".into(), event.clone());
+        an.ext_out
+            .lock()
+            .unwrap()
+            .entry(BRIDGE)
+            .or_default()
+            .push(event);
+        let c = wait(&ui).await.unwrap();
+        assert_eq!(
+            (c.confirm_tx.as_str(), c.delivery_tx.as_str(), c.via_events),
+            ("lock", "rtx", true)
         );
     }
 

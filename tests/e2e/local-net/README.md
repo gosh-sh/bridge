@@ -79,7 +79,9 @@ The other nodes' APIs are no way around this: they want the token `nginx0` adds.
 
 After `run-test`, the pytest suite in `tests/e2e/local-net/arbitrum/` deploys a fresh
 `AckiNackiBridge` on Arbitrum Sepolia (421614) and sends 2 USDC from it to this network with
-`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. Each
+`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. NACKL
+takes the same road beside it: 5 NACKL are withdrawn (locked on this network, minted on 421614)
+and 3 deposited back (burned there, unlocked here). Each
 test is one step and asserts what the step must have produced, from the chains or from the
 log of the job that did it; `-x` stops at the first failure, which names the step, what it
 waited for and the tail of the log.
@@ -87,13 +89,14 @@ waited for and the tail of the log.
 | Tests | Step |
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 2 hours |
-| `test_10`–`12` | The zerostate bridge is Active at 1.17.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_10`–`12` | The zerostate bridge is Active at 1.18.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the BK set at 0 from GraphQL, which has to serve `blockchain.latestBkSet`); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The relayer and burner keys (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`) and `arbitrum-anchors` log their start; an empty multisig |
 | `test_40`–`44` | `deposit`: sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
 | `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, the receipt proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
 | `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), 2 USDC back on the deployer |
+| NACKL (`test_21`, `23`, `42b`, `43`, `45`, `46`, `66`, `74`, `75`) | `deploy` adds a test NACKL token minted by the bridge, 1000 NACKL on the deployer, listed under id 1; `setBridgeToken(421614, NACKL, 1)`; a multisig gets 5 NACKL from the giver; the `cli-withdraw` job withdraws them beside the USDC (its log: `cli-withdraw-nackl`), and the bridge keeps them locked for 421614 and for this bridge (`getNacklLockedTo`); `cli-deposit-nackl` deposits 3 NACKL, burned on 421614 and unlocked to the deposit's multisig; `withdrawByProof` mints the 5 NACKL at once; the supply, the lock and `nacklState()` reconcile |
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain

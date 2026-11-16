@@ -33,6 +33,10 @@ from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC,
                       evm_address, keccak256, kv, tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
+NACKL = 1_000_000_000
+NACKL_SUPPLY = 1000 * NACKL
+NACKL_OUT = 5 * NACKL
+NACKL_IN = 3 * NACKL
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads only the BK set from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
@@ -73,7 +77,7 @@ def test_10_local_network_bridge_active(an):
     """The zerostate bridge is up at the version this commit ships."""
     got = an("bridge")
     assert got.get("BRIDGE_ACTIVE") == "true", f"eccBridge is not Active: {got}"
-    assert got.get("BRIDGE_VERSION") == "1.17.0", f"eccBridge is {got.get('BRIDGE_VERSION')}, not 1.17.0"
+    assert got.get("BRIDGE_VERSION") == "1.18.0", f"eccBridge is {got.get('BRIDGE_VERSION')}, not 1.18.0"
 
 
 def test_11_build_on_prover_host(ph, sha):
@@ -146,7 +150,13 @@ def test_21_evm_contracts_deployed(run, arb, ctx):
     assert arb.call(bridge, "usdc()") == int(ARB_USDC, 16), "the bridge does not take Circle's USDC"
     assert arb.call(bridge, "bundleStride()") == int(g["BUNDLE_STRIDE"])
     assert arb.call(bridge, "bridgeWithdrawalAccFr()") == int("1a" * 32, 16)
-    ctx.update(bridge=bridge, deploy_block=int(evm["BRIDGE_DEPLOY_BLOCK"]))
+    nackl = evm["NACKL_ADDRESS"]
+    assert arb.code(nackl) not in ("0x", ""), f"no code at the NACKL token {nackl}"
+    assert arb.call(nackl, "owner()") == int(bridge, 16), "the bridge is not the NACKL token's minter"
+    assert arb.call(nackl, "decimals()") == 9
+    assert arb.words(bridge, "tokenInfo(uint32)", (1).to_bytes(32, "big"))[0] == int(nackl, 16), \
+        "the bridge does not list the NACKL token under id 1"
+    ctx.update(bridge=bridge, deploy_block=int(evm["BRIDGE_DEPLOY_BLOCK"]), nackl=nackl)
 
 
 def test_22_l2_verifier_deployed(an, ctx):
@@ -161,8 +171,9 @@ def test_22_l2_verifier_deployed(an, ctx):
 
 def test_23_trust_set(an, arb, ctx):
     """Acki Nacki trusts the new bridge for 421614, and the bridge holds the genesis anchor."""
-    got = an("trust", ctx["bridge"])
+    got = an("trust", ctx["bridge"], ctx["nackl"])
     assert got.get("TOKEN_REGISTERED") == "true", "AN USDC token lane is not registered"
+    assert got.get("NACKL_REGISTERED") == "true", "AN NACKL token lane is not registered"
     assert got.get("TRUSTED") == "true", f"isTrustedL1Bridge({ARB_CHAIN}, bridge) is false after setTrustedL1Bridge"
     assert int(got.get("EVM_BRIDGE", "0"), 16) == int(ctx["bridge"], 16), \
         f"getEvmBridge({ARB_CHAIN}) is {got.get('EVM_BRIDGE')} after setEvmBridge, want {ctx['bridge']}"
@@ -286,26 +297,51 @@ def test_42_withdrawal_multisig_funded(an, ctx):
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
 
 
-def log_line(run, pattern, what, timeout):
+def test_42b_nackl_withdrawal_multisig_funded(an, ctx):
+    got = an("msig-nackl", NACKL_OUT)
+    ctx.update(nmsig=got["MSIG"], nmsig_keys=an.cat(got["MSIG_KEYS"]))
+    assert int(an("ecc", ctx["nmsig"])["ECC1"]) >= NACKL_OUT
+
+
+def log_line(run, pattern, what, timeout, log="cli-withdraw"):
     def check():
-        text = run.log("cli-withdraw")
+        text = run.log(log)
         code = run.wait("cli-withdraw", 1)
         m = re.search(pattern, text)
         assert m or code in (None, 0), f"ackinacki-bridge withdraw exited {code} before: {what}\n" + tail(text)
         return m
-    return wait_for(what, check, timeout, log=lambda: run.log("cli-withdraw"))
+    return wait_for(what, check, timeout, log=lambda: run.log(log))
 
 
 def test_43_burn_on_acki_nacki(run, ctx):
     """The CLI burns the 2 USDC on Acki Nacki."""
-    run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY") + "\n" + ctx["wmsig_keys"].replace("\n", ""),
-            FROM=ctx["wmsig"], TO=ctx["address"], AMOUNT="2")
+    stdin = "\n".join([env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"), ctx["wmsig_keys"].replace("\n", ""),
+                       ctx["nmsig_keys"].replace("\n", "")])
+    run.job("cli-withdraw", stdin=stdin, FROM=ctx["wmsig"], TO=ctx["address"], AMOUNT="2",
+            NACKL_FROM=ctx["nmsig"], NACKL_AMOUNT=str(NACKL_OUT // NACKL))
     log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
 
 
 def test_44_withdrawal_event_captured(run):
     """The bridge emits WithdrawalInitiated and the CLI captures it."""
     log_line(run, r"captured WithdrawalInitiated event", "WithdrawalInitiated is captured", 900)
+
+
+def test_45_nackl_locked_on_acki_nacki(run, an, ctx):
+    log_line(run, r"captured WithdrawalInitiated event", "the NACKL WithdrawalInitiated is captured", 900,
+             log="cli-withdraw-nackl")
+    got = an("nackl", ctx["bridge"])
+    assert int(got["LOCKED"]) == NACKL_OUT, f"locked for 421614: {got}"
+    assert int(got["LOCKED_TO"]) == NACKL_OUT, f"locked to the bridge: {got}"
+    assert int(an("ecc", ctx["nmsig"])["ECC1"]) < NACKL_OUT, "the NACKL multisig still holds the 5 NACKL"
+
+
+def test_46_nackl_deposit_sent(run, arb, ctx):
+    at = arb.block()
+    ctx["nackl_supply_before"] = arb.call(ctx["nackl"], "totalSupply()", block=at)
+    ctx["nackl_minted_before"] = arb.words(ctx["bridge"], "nacklState()", block=at)[4]
+    run.job("cli-deposit-nackl", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
+            FROM=ctx["address"], TO=ctx["msig"], AMOUNT=str(NACKL_IN // NACKL))
 
 
 # ── 5 · the light client, while the deposit waits for its assertion ────────
@@ -436,6 +472,16 @@ def test_65_deposit_delivered(run, an, ctx):
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the multisig does not hold the 2 USDC"
 
 
+def test_66_nackl_deposit_delivered(run, an, arb, ctx):
+    run.finish("cli-deposit-nackl", ANCHOR_SECS)
+    assert int(an("ecc", ctx["msig"])["ECC1"]) == NACKL_IN, "the multisig did not receive the 3 NACKL"
+    at = arb.block()
+    minted = arb.words(ctx["bridge"], "nacklState()", block=at)[4] - ctx["nackl_minted_before"]
+    assert arb.call(ctx["nackl"], "totalSupply()", block=at) == \
+        ctx["nackl_supply_before"] - NACKL_IN + minted, "the deposit did not burn the 3 NACKL"
+    assert int(an("nackl", ctx["bridge"])["LOCKED"]) == NACKL_OUT - NACKL_IN
+
+
 # ── 7 · the withdrawal lands ────────────────────────────────────────────────
 
 
@@ -453,7 +499,7 @@ def test_72_withdrawal_paid(run, ctx):
     """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
     m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
-    run.finish("cli-withdraw", 300)
+    run.finish("cli-withdraw", 3600)
     ctx.update(withdraw_tx=m.group(1))
 
 
@@ -480,3 +526,18 @@ def test_73_usdc_delivered(arb, an, ctx):
         f"{ctx['address']} holds {after / 1e6} USDC, {ctx['usdc_before'] / 1e6} before the deposit"
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == 0, "the withdrawal multisig still holds USDC"
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the deposit's 2 USDC left the recipient multisig"
+
+
+def test_74_nackl_minted(run, arb, ctx):
+    log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "the NACKL withdrawByProof is confirmed",
+             1800, log="cli-withdraw-nackl")
+    state = arb.words(ctx["bridge"], "nacklState()")
+    accepted, minted, pending = state[3], state[4], state[5]
+    assert (accepted, minted, pending) == (NACKL_OUT, NACKL_OUT, 0), f"nacklState: {state}"
+
+
+def test_75_nackl_reconciles(arb, an, ctx):
+    assert arb.call(ctx["nackl"], "totalSupply()") == NACKL_SUPPLY - NACKL_IN + NACKL_OUT
+    got = an("nackl", ctx["bridge"])
+    assert int(got["LOCKED"]) == NACKL_OUT - NACKL_IN, got
+    assert int(got["LOCKED_TO"]) == arb.words(ctx["bridge"], "nacklState()")[3], got

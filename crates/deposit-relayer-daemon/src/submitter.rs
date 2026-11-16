@@ -397,6 +397,7 @@ const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
 const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
 const EXIT_TVL_CAP: i32 = 235;
+const EXIT_CHAIN_BALANCE_EXCEEDED: i32 = 236;
 const EXIT_TOKEN_UNREGISTERED: i32 = 241;
 const EXIT_TOKEN_DEPOSITS_DISABLED: i32 = 243;
 const EXIT_NOT_DEPOSIT_LOG: i32 = 244;
@@ -520,6 +521,13 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
         EXIT_TVL_CAP => SubmitOutcome::Pending {
             reason: format!(
                 "ERR_TVL_CAP — source-chain deposit capacity is full; waiting for withdrawals \
+                 (exit_code={code}): {detail}"
+            ),
+        },
+        EXIT_CHAIN_BALANCE_EXCEEDED => SubmitOutcome::Pending {
+            reason: format!(
+                "ERR_CHAIN_BALANCE_EXCEEDED — the bridge holds less NACKL locked for the source \
+                 chain than this deposit; waiting for withdrawals to lock more \
                  (exit_code={code}): {detail}"
             ),
         },
@@ -953,6 +961,14 @@ mod tests {
                 other => panic!("expected Pending, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_nackl_deposit_above_the_lock_waits() {
+        assert!(matches!(
+            classify_reverted(Some(236), "Reverted"),
+            SubmitOutcome::Pending { .. }
+        ));
     }
 
     #[test]

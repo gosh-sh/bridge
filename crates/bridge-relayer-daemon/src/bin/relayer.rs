@@ -1817,6 +1817,21 @@ where
                 st.paid += 1;
                 st.done.insert(proof_path);
             },
+            WithdrawSubmitOutcome::Queued {
+                tx_hash,
+                payout_id,
+                ready_at,
+            } => {
+                info!(
+                    proof = %proof_path.display(),
+                    ?tx_hash,
+                    %payout_id,
+                    ready_at,
+                    "withdrawByProof accepted; NACKL payout QUEUED"
+                );
+                st.paid += 1;
+                st.done.insert(proof_path);
+            },
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: true,
@@ -1891,11 +1906,18 @@ async fn run_withdraw_daemon(
     );
 
     let mut st = WithdrawScanState::default();
+    let mut nackl_st = bridge_relayer_daemon::nackl_payouts::NacklPayoutScanState::default();
     let mut current_backoff = backoff.initial;
 
     loop {
-        let had_transient_failure =
+        let mut had_transient_failure =
             withdraw_scan_once(&bridge, &proofs_dir, dry_run, &mut st).await?;
+        had_transient_failure |= bridge_relayer_daemon::nackl_payouts::nackl_payout_scan_once(
+            &bridge,
+            dry_run,
+            &mut nackl_st,
+        )
+        .await;
 
         info!(
             paid = st.paid,
@@ -1978,6 +2000,7 @@ async fn run_bridge_daemon(
         .with_sender(sender)
         .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
     let mut wd_state = WithdrawScanState::default();
+    let mut nackl_state = bridge_relayer_daemon::nackl_payouts::NacklPayoutScanState::default();
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -2059,6 +2082,13 @@ async fn run_bridge_daemon(
             "daemon-bridge: withdraw scan complete"
         );
 
+        had_transient |= bridge_relayer_daemon::nackl_payouts::nackl_payout_scan_once(
+            &wd_bridge,
+            dry_run,
+            &mut nackl_state,
+        )
+        .await;
+
         // ── Shared backoff / poll sleep, interruptible by shutdown. ────
         let sleep_for = if had_transient {
             let d = current_backoff;
@@ -2129,6 +2159,16 @@ async fn submit_withdraw(
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Queued {
+            tx_hash,
+            payout_id,
+            ready_at,
+        } => info!(
+            ?tx_hash,
+            %payout_id,
+            ready_at,
+            "withdrawByProof accepted; NACKL payout queued, executeNacklPayout once due"
+        ),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
@@ -2248,6 +2288,16 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => info!(?tx_hash, "withdrawByProof paid out"),
+        WithdrawSubmitOutcome::Queued {
+            tx_hash,
+            payout_id,
+            ready_at,
+        } => info!(
+            ?tx_hash,
+            %payout_id,
+            ready_at,
+            "withdrawByProof accepted; NACKL payout queued, executeNacklPayout once due"
+        ),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,

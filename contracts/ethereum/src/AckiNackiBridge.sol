@@ -9,6 +9,8 @@ import "./IFallbackVerifier.sol";
 import "./ILayerHashesMovementVerifier.sol";
 import "./IBridgeWithdrawalVerifier.sol";
 import "./IPredecessorBridge.sol";
+import { NacklToken } from "./NacklToken.sol";
+import { NacklMint } from "./NacklMint.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -341,6 +343,8 @@ contract AckiNackiBridge {
     ///         `treasuryBalance` and whose idle balance AAVE may hold.
     uint32 public immutable usdcTokenId;
 
+    uint32 public constant NACKL_TOKEN_ID = 1;
+
     /// @notice The bridge this one replaces on the same chain, or zero. It
     ///         only authorizes the treasury handover: the predecessor may call
     ///         `fundTreasury`, and its `migrateTreasury` accepts only a bridge
@@ -382,6 +386,8 @@ contract AckiNackiBridge {
     }
 
     mapping(uint8 => HistoryWindow) private _layerWindows;
+
+    NacklMint.State private _nackl;
 
     // ---------------------------------------------------------------------
     // Events
@@ -1005,16 +1011,18 @@ contract AckiNackiBridge {
 
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
         if (amount > info.maxTransfer) revert TransferTooLarge();
-        uint256 owed = liabilitiesOf(tokenId);
-        if (owed > info.tvlCap || amount > info.tvlCap - owed) {
-            revert TvlCapReached();
+        if (token == address(_nackl.token)) {
+            if (_nackl.handedOver) revert TokenDepositsDisabled(tokenId);
+            NacklToken(token).burnFrom(msg.sender, amount);
+        } else {
+            uint256 owed = liabilitiesOf(tokenId);
+            if (owed > info.tvlCap || amount > info.tvlCap - owed) {
+                revert TvlCapReached();
+            }
+            _creditLiabilities(tokenId, _pullExact(IERC20(token), amount));
         }
-        uint256 credited = _pullExact(IERC20(token), amount);
 
-        uint256 depositId = depositCounter++;
-        _creditLiabilities(tokenId, credited);
-
-        emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token);
+        emit Deposit(depositCounter++, msg.sender, amount, anAccount, block.timestamp, token);
         if (tokenId == usdcTokenId) _supplyAboveTarget();
     }
 
@@ -1034,6 +1042,9 @@ contract AckiNackiBridge {
         if (
             tokenId == usdcTokenId && (maxTransfer > MAX_TRANSFER_AMOUNT || tvlCap > MAX_BRIDGE_TVL)
         ) {
+            revert TokenLimitsInvalid(maxTransfer, tvlCap);
+        }
+        if (tokenId == NACKL_TOKEN_ID && maxTransfer > _nackl.dailyLimit) {
             revert TokenLimitsInvalid(maxTransfer, tvlCap);
         }
         if (maxTransfer > info.maxWithdrawal) info.maxWithdrawal = maxTransfer;
@@ -1915,40 +1926,45 @@ contract AckiNackiBridge {
         bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
         if (!ok) revert WithdrawalProofRejected();
 
-        // ---- Treasury check (must happen before the AAVE pull). ----
-        uint256 owed = liabilitiesOf(payoutTokenId);
-        if (pub.amount > owed) {
-            revert WithdrawTreasuryShortfall(pub.amount, owed);
-        }
-
-        // Measured before the debit: the USDC on hand and the part of it
-        // that is principal.
-        uint256 onHand = usdc.balanceOf(address(this));
-        uint256 liquid = _liquidPrincipal();
-        uint256 overBooked =
-            suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
-
-        // ---- Effects (CEI: mutate state before any external call). ----
-        _nullifiers[nullifierKey] = true;
-        _debitLiabilities(payoutTokenId, pub.amount);
-
-        // ---- Interactions ----
-        // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
-        // pull; every other token sits liquid in the contract. Only what the
-        // USDC on hand cannot pay has to come from AAVE. The pull also tries to
-        // leave the target of the new book liquid and to bring
-        // `suppliedPrincipal` back within the book, so it is attempted whenever
-        // the liquid principal falls short. It may reach aUSDC above
-        // `suppliedPrincipal`: user principal is paid before yield.
-        if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
-            _refillFromAave(
-                onHand < pub.amount ? pub.amount - onHand : 0,
-                pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
-            );
-        }
-
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
-        _pushExact(IERC20(payoutInfo.token), recipient, pub.amount);
+        if (payoutInfo.token == address(_nackl.token)) {
+            _nullifiers[nullifierKey] = true;
+            NacklMint.pay(_nackl, recipient, pub.amount);
+        } else {
+            // ---- Treasury check (must happen before the AAVE pull). ----
+            uint256 owed = liabilitiesOf(payoutTokenId);
+            if (pub.amount > owed) {
+                revert WithdrawTreasuryShortfall(pub.amount, owed);
+            }
+
+            // Measured before the debit: the USDC on hand and the part of it
+            // that is principal.
+            uint256 onHand = usdc.balanceOf(address(this));
+            uint256 liquid = _liquidPrincipal();
+            uint256 overBooked =
+                suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
+
+            // ---- Effects (CEI: mutate state before any external call). ----
+            _nullifiers[nullifierKey] = true;
+            _debitLiabilities(payoutTokenId, pub.amount);
+
+            // ---- Interactions ----
+            // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
+            // pull; every other token sits liquid in the contract. Only what the
+            // USDC on hand cannot pay has to come from AAVE. The pull also tries to
+            // leave the target of the new book liquid and to bring
+            // `suppliedPrincipal` back within the book, so it is attempted whenever
+            // the liquid principal falls short. It may reach aUSDC above
+            // `suppliedPrincipal`: user principal is paid before yield.
+            if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
+                _refillFromAave(
+                    onHand < pub.amount ? pub.amount - onHand : 0,
+                    pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
+                );
+            }
+
+            _pushExact(IERC20(payoutInfo.token), recipient, pub.amount);
+        }
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
@@ -2224,6 +2240,11 @@ contract AckiNackiBridge {
         _requirePausedForSuccessor(successor);
         if (tokenId == usdcTokenId) revert CannotMigrateUsdc();
         TokenInfo storage info = _requireListedId(tokenId);
+        if (info.token == address(_nackl.token)) {
+            info.depositsEnabled = false;
+            NacklMint.handOver(_nackl, successor);
+            return;
+        }
         uint256 amount = info.liabilities;
         if (amount == 0) revert NothingToMigrate();
         uint256 cap = AckiNackiBridge(successor).maxWithdrawalAmount(tokenId);
@@ -2243,6 +2264,53 @@ contract AckiNackiBridge {
             revert WithdrawTransferFailed(successor, amount);
         }
         emit TokenMigrated(successor, tokenId, amount);
+    }
+
+    function listNackl(
+        NacklToken token,
+        uint256 maxTransfer,
+        uint256 dailyLimit,
+        uint256 delayThreshold
+    ) external onlyOwner {
+        if (address(token) == address(_nackl.token)) {
+            NacklMint.setLimits(
+                _nackl, dailyLimit, delayThreshold, _tokens[NACKL_TOKEN_ID].maxWithdrawal
+            );
+            return;
+        }
+        NacklMint.list(_nackl, token, dailyLimit, delayThreshold, maxTransfer, address(predecessor));
+        _listToken(NACKL_TOKEN_ID, address(token), 9, maxTransfer, type(uint256).max, true);
+    }
+
+    function executeNacklPayout(uint256 payoutId) external nonReentrant whenNotPaused {
+        NacklMint.execute(_nackl, payoutId);
+    }
+
+    function nacklState()
+        external
+        view
+        returns (
+            uint256 dailyLimit,
+            uint256 delayThreshold,
+            uint256 windowUsed,
+            uint256 accepted,
+            uint256 minted,
+            uint256 pendingCount,
+            uint256 payoutCount,
+            bool handedOver
+        )
+    {
+        NacklMint.State storage s = _nackl;
+        return (
+            s.dailyLimit,
+            s.delayThreshold,
+            NacklMint.windowUsed(s),
+            s.accepted,
+            s.minted,
+            s.pendingCount,
+            s.payoutCount,
+            s.handedOver
+        );
     }
 
     function _requirePausedForSuccessor(address successor) private view {

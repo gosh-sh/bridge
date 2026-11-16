@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.17.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
@@ -139,8 +139,7 @@ pin is moved.
 
 Before opening deposits from a source chain, call
 `setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)` as the AN owner.
-Only USDC can be registered, under ECC id `3`: Acki Nacki has no other currency for the bridge to
-mint, so any other id is refused with `242`. Both sides must use the same ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
+USDC is registered under ECC id `3` and NACKL under id `1`; any other id is refused with `242`. Both sides must use the same ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
 immutable; subsequent calls can raise the TVL ceiling, change the deposit transfer limit and
 the deposit switch, retaining outstanding
 inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
@@ -149,6 +148,34 @@ the configuration and per-chain outstanding amount. Closing or throttling deposi
 lower the withdrawal allowance. `finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
 1.5.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
 burns the attached currency and decrements only that currency's destination-chain inventory.
+
+### NACKL
+
+NACKL is Acki Nacki's own currency, so the bridge never mints or burns it
+([`docs/NACKL-bridge-extension.md`](../../docs/NACKL-bridge-extension.md)). Register it with
+`setBridgeToken(chainId, <ERC20 NACKL on that chain>, 1, maxTransfer, maxTvl, true)`; the USDC
+bounds do not apply, and `maxTvl` only has to be at least `maxTransfer`.
+
+- A NACKL `initiateWithdrawal` keeps the NACKL on the bridge: the lock. It adds the amount to the
+  chain's NACKL `outstanding` (`getTokenWithdrawalConfig(chainId, 1)`) and to
+  `getNacklLockedTo(chainId, evmBridge)`, the total ever locked for the EVM bridge the withdrawal
+  is bound to. Only the per-withdrawal cap refunds it (234).
+- A NACKL deposit unlocks: the bridge sends NACKL it holds from that chain's locks.
+  `finalizeDeposit` refuses one above the lock with 236 before accepting it, so the voucher stays
+  unspent and the deposit can be finalized later. One that still finds the lock short when it is
+  confirmed — another deposit took the lock first — is recorded as pending (`DepositPending`,
+  `getPendingDeposit(depositHash)`). The next NACKL withdrawals to that chain pay pending deposits
+  oldest first, at most four per withdrawal, while the lock covers them; anyone can also pay one with
+  `releasePendingDeposit(depositHash)`: 236 while the lock is short, 245 for no such deposit. Both
+  emit the deposit's `DepositFinalized`.
+- `mintAndSendTokenBridged` refuses id `1` with 242, and `getTotalBridged(1)` stays `(0, 0)`.
+- `updateCode` carries the locks, the amounts locked for each EVM bridge, the pending deposits and
+  their order.
+  From 1.17.0 the bridge starts with none of them.
+
+The owner key can still replace the code with `updateCode`, and the bridge is a special account
+that may mint ECC: only the node refusing `MintToken` and `BurnToken` with id 1 from this address
+takes that away.
 
 For an upgrade from 1.15.0, build `userCell` with
 `BridgeZerostateData.getTokenUpgradeData(newVoucherCode)` and pass it to the old `updateCode`.

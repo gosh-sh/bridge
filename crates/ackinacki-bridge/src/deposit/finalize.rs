@@ -367,6 +367,14 @@ async fn attempts(
                 );
                 tokio::time::sleep(cx.poll).await;
             },
+            Reaction::WaitLock => {
+                in_doubt.store(earlier, Ordering::SeqCst);
+                ui.status(
+                    "the bridge holds less NACKL locked for this chain than the deposit; waiting \
+                     for NACKL withdrawals to lock more before retrying",
+                );
+                tokio::time::sleep(cx.poll).await;
+            },
             Reaction::WaitPaused => {
                 // This refusal settles only this send; an earlier one may still be unindexed.
                 in_doubt.store(earlier, Ordering::SeqCst);

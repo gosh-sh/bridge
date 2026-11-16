@@ -108,7 +108,11 @@ pub enum Command {
 pub struct WithdrawArgs {
     /// ECC currency id registered for this token on AN and the destination
     /// bridge.
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(3..))]
+    #[arg(long, default_value_t = 3, value_parser = |raw: &str| match raw.parse::<u32>() {
+        Ok(id) if id == 1 || id >= 3 => Ok(id),
+        Ok(id) => Err(format!("ECC[{id}] is not bridged; use 1 (NACKL) or 3 (USDC)")),
+        Err(e) => Err(e.to_string()),
+    })]
     pub token_id: u32,
 
     /// Source multisig address in `dapp_id::account_id` form (both 64 hex,

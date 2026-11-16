@@ -54,7 +54,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.17.0";
+    string constant version = "1.18.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -76,6 +76,12 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint32 tokenId,
         address sender,
         uint16 reason
+    );
+    event DepositPending(
+        uint256 depositHash,
+        uint256 chainId,
+        uint128 amount,
+        uint256 anAccount
     );
     event DepositFinalized(
         uint256 depositId,
@@ -212,6 +218,22 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // anyway until the owner re-seeds them.
     bool _paused;
 
+    mapping(uint256 => mapping(uint160 => uint128)) _nacklLockedTo;
+
+    struct PendingDeposit {
+        uint256 depositId;
+        uint256 contractAddr;
+        uint256 dappId;
+        uint256 chainId;
+        uint128 amount;
+        uint256 anAccount;
+        uint256 prev;
+        uint256 next;
+    }
+    mapping(uint256 => PendingDeposit) _pendingDeposits;
+    mapping(uint256 => uint256) _pendingFirst;
+    mapping(uint256 => uint256) _pendingLast;
+
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
     ///       in the only deploy path that matters (zerostate premine stub +
@@ -345,6 +367,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                                      uint256 chainId, uint32 tokenId)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
+        require(tokenId != NACKL_ECC_ID, ERR_TOKEN_CONFIG);
         require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
         require(value > 0 && value <= uint128(type(uint64).max), ERR_OVERFLOW);
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
@@ -429,28 +452,37 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
-        uint128 minted = _totalMintedBridgeByToken[tokenId];
-        uint128 burned = _totalBurnedBridgeByToken[tokenId];
-        if (burned > minted || amount > minted - burned) {
-            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_BURN_EXCEEDS_BRIDGED);
-            return;
-        }
-        if (amount > _tokenOutstanding(dstChainId, tokenId)) {
-            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_CHAIN_BALANCE_EXCEEDED);
-            return;
+        bool nackl = tokenId == NACKL_ECC_ID;
+        if (!nackl) {
+            uint128 minted = _totalMintedBridgeByToken[tokenId];
+            uint128 burned = _totalBurnedBridgeByToken[tokenId];
+            if (burned > minted || amount > minted - burned) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                                  ERR_BURN_EXCEEDS_BRIDGED);
+                return;
+            }
+            if (amount > _tokenOutstanding(dstChainId, tokenId)) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                                  ERR_CHAIN_BALANCE_EXCEEDED);
+                return;
+            }
         }
 
         tvm.accept();
         ensureBalance();
 
-        gosh.burnecc(uint64(amount), tokenId);
-        _totalBurnedBridgeByToken[tokenId] += amount;
-        if (tokenId == USDC_ECC_ID) {
-            _outstandingByChain[dstChainId] -= amount;
+        if (nackl) {
+            _bridgeTokens[dstChainId][tokenId].outstanding += amount;
+            _nacklLockedTo[dstChainId][dstBridge] += amount;
+            _payPendingQueue(dstChainId);
         } else {
-            _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+            gosh.burnecc(uint64(amount), tokenId);
+            _totalBurnedBridgeByToken[tokenId] += amount;
+            if (tokenId == USDC_ECC_ID) {
+                _outstandingByChain[dstChainId] -= amount;
+            } else {
+                _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+            }
         }
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
@@ -686,8 +718,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     }
 
     /// @notice Register USDC for a source chain once, then update its deposit limits.
-    ///         ECC id 3 is the only id accepted: Acki Nacki has no other currency
-    ///         for the bridge to mint, and a new one takes a new version of this code.
     ///         The token/id association is immutable; TVL can only increase.
     ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
     function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
@@ -695,7 +725,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(chainId != 0 && evmToken != 0 && evmToken < (uint256(1) << 160), ERR_TOKEN_CONFIG);
-        require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);
+        require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID, ERR_TOKEN_CONFIG);
         require(maxTransfer > 0 && maxTransfer <= uint128(type(uint64).max)
                 && maxTvl >= maxTransfer, ERR_TOKEN_CONFIG);
         if (tokenId == USDC_ECC_ID) {
@@ -725,8 +755,11 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(!newDeposit || config.depositsEnabled, ERR_TOKEN_DEPOSITS_DISABLED);
         uint128 cap = newDeposit ? config.maxTransfer : config.maxWithdrawal;
         require(amount <= cap, ERR_TRANSFER_TOO_LARGE);
-        uint128 outstanding = _tokenOutstanding(chainId, tokenId);
-        require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding, ERR_TVL_CAP);
+        if (tokenId != NACKL_ECC_ID) {
+            uint128 outstanding = _tokenOutstanding(chainId, tokenId);
+            require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding,
+                    ERR_TVL_CAP);
+        }
     }
 
     function _creditToken(uint256 chainId, uint32 tokenId, uint128 amount) private {
@@ -966,7 +999,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
                 ERR_UNSUPPORTED_SRC_CHAIN);
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
-        _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
+        uint32 tokenId = _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
+        require(tokenId != NACKL_ECC_ID
+                || f.amount <= _bridgeTokens[f.chainId][NACKL_ECC_ID].outstanding,
+                ERR_CHAIN_BALANCE_EXCEEDED);
 
         tvm.accept();
         _saveMsg();
@@ -1034,9 +1070,94 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         tvm.accept();
         ensureBalance();
 
-        gosh.mintecc(uint64(amount), tokenId);
-        _creditToken(chainId, tokenId, amount);
+        if (tokenId == NACKL_ECC_ID) {
+            if (!_unlockNackl(chainId, amount, anAccount)) {
+                uint256 last = _pendingLast[chainId];
+                _pendingDeposits[depositHash] = PendingDeposit(
+                    depositId, contractAddr, dappId, chainId, amount, anAccount, last, 0);
+                if (last == 0) {
+                    _pendingFirst[chainId] = depositHash;
+                } else {
+                    _pendingDeposits[last].next = depositHash;
+                }
+                _pendingLast[chainId] = depositHash;
+                address pendingExtern = address.makeAddrExtern(DepositPendingEmit, bitCntAddress);
+                emit DepositPending{dest: pendingExtern}(depositHash, chainId, amount, anAccount);
+                return;
+            }
+        } else {
+            gosh.mintecc(uint64(amount), tokenId);
+            _creditToken(chainId, tokenId, amount);
+            _sendEcc(anAccount, tokenId, amount);
+        }
 
+        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
+        emit DepositFinalized{dest: addrExtern}(
+            depositId, contractAddr, dappId, chainId, amount, anAccount
+        );
+    }
+
+    function releasePendingDeposit(uint256 depositHash) public {
+        require(!_paused, ERR_PAUSED);
+        PendingDeposit p = _pendingDeposits[depositHash];
+        require(p.amount != 0, ERR_NO_PENDING_DEPOSIT);
+        require(p.amount <= _bridgeTokens[p.chainId][NACKL_ECC_ID].outstanding
+                && varuint32(p.amount) <= address(this).currencies[NACKL_ECC_ID],
+                ERR_CHAIN_BALANCE_EXCEEDED);
+        tvm.accept();
+        ensureBalance();
+        _saveMsg();
+        tvm.commit();
+        _payPending(depositHash, p);
+    }
+
+    function _payPendingQueue(uint256 chainId) private {
+        for (uint8 n = 0; n < 4; n++) {
+            uint256 depositHash = _pendingFirst[chainId];
+            if (depositHash == 0) {
+                return;
+            }
+            PendingDeposit p = _pendingDeposits[depositHash];
+            if (p.amount > _bridgeTokens[chainId][NACKL_ECC_ID].outstanding
+                || varuint32(p.amount) > address(this).currencies[NACKL_ECC_ID]) {
+                return;
+            }
+            _payPending(depositHash, p);
+        }
+    }
+
+    function _payPending(uint256 depositHash, PendingDeposit p) private {
+        if (p.prev == 0) {
+            _pendingFirst[p.chainId] = p.next;
+        } else {
+            _pendingDeposits[p.prev].next = p.next;
+        }
+        if (p.next == 0) {
+            _pendingLast[p.chainId] = p.prev;
+        } else {
+            _pendingDeposits[p.next].prev = p.prev;
+        }
+        delete _pendingDeposits[depositHash];
+        _unlockNackl(p.chainId, p.amount, p.anAccount);
+        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
+        emit DepositFinalized{dest: addrExtern}(
+            p.depositId, p.contractAddr, p.dappId, p.chainId, p.amount, p.anAccount
+        );
+    }
+
+    function _unlockNackl(uint256 chainId, uint128 amount, uint256 anAccount)
+        private returns (bool)
+    {
+        uint128 locked = _bridgeTokens[chainId][NACKL_ECC_ID].outstanding;
+        if (amount > locked || varuint32(amount) > address(this).currencies[NACKL_ECC_ID]) {
+            return false;
+        }
+        _bridgeTokens[chainId][NACKL_ECC_ID].outstanding = locked - amount;
+        _sendEcc(anAccount, NACKL_ECC_ID, amount);
+        return true;
+    }
+
+    function _sendEcc(uint256 anAccount, uint32 tokenId, uint128 amount) private pure {
         mapping(uint32 => varuint32) ecc;
         ecc[tokenId] = varuint32(amount);
         address.makeAddrStd(0, anAccount).transfer({
@@ -1045,11 +1166,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
             flag: 1,
             currencies: ecc
         });
-
-        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
-        emit DepositFinalized{dest: addrExtern}(
-            depositId, contractAddr, dappId, chainId, amount, anAccount
-        );
     }
 
     // DepositVoucher code rotation is intentionally not exposed as a
@@ -1094,7 +1210,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         ensureBalance();
         TvmCell registryState = abi.encode(
             userCell.toSlice().empty() ? _depositVoucherCode : userCell,
-            _bridgeTokens, _bridgeTokenIds);
+            _bridgeTokens, _bridgeTokenIds,
+            abi.encode(_nacklLockedTo, _pendingDeposits, _pendingFirst, _pendingLast));
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
@@ -1161,9 +1278,17 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _messages = messages;
         _depositVoucherCode = depositVoucherCode;
         if (!userCell.toSlice().empty()) {
-            (_depositVoucherCode, _bridgeTokens, _bridgeTokenIds) = abi.decode(userCell, (
+            TvmSlice registry = userCell.toSlice();
+            (_depositVoucherCode, _bridgeTokens, _bridgeTokenIds) = registry.load(
                 TvmCell, mapping(uint256 => mapping(uint32 => BridgeTokenConfig)),
-                mapping(uint256 => mapping(uint256 => uint32))));
+                mapping(uint256 => mapping(uint256 => uint32)));
+            if (registry.refs() != 0) {
+                (_nacklLockedTo, _pendingDeposits, _pendingFirst, _pendingLast)
+                    = abi.decode(registry.load(TvmCell), (
+                    mapping(uint256 => mapping(uint160 => uint128)),
+                    mapping(uint256 => PendingDeposit),
+                    mapping(uint256 => uint256), mapping(uint256 => uint256)));
+            }
         }
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
@@ -1208,6 +1333,17 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         return (config.evmToken == 0 ? MAX_TRANSFER_AMOUNT : config.maxTransfer,
                 config.evmToken == 0 ? MAX_BRIDGE_TVL : config.maxTvl,
                 _outstandingByChain[chainId]);
+    }
+
+    function getNacklLockedTo(uint256 chainId, uint160 evmBridge) external view returns (uint128) {
+        return _nacklLockedTo[chainId][evmBridge];
+    }
+
+    function getPendingDeposit(uint256 depositHash) external view returns (
+        uint256 chainId, uint128 amount, uint256 anAccount
+    ) {
+        PendingDeposit p = _pendingDeposits[depositHash];
+        return (p.chainId, p.amount, p.anAccount);
     }
 
     /// @notice Returns the hash of the currently installed DepositVoucher code.

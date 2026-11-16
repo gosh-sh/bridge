@@ -35,6 +35,8 @@ TRANSFER = 50_000_000
 TVL = 10_000_000_000
 USDC_TOKEN = 68
 SECOND_TOKEN = 85
+NACKL_TOKEN = 119
+NACKL = 10**9
 THIRD_TOKEN = 102
 EVM_BRIDGE = 0x3FB082A905A895151224F6D93BD074E816338638
 DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
@@ -62,9 +64,9 @@ class BridgeLimits(unittest.TestCase):
         shutil.copytree(REPO / "contracts/an", src)
         bridge = src / "exchange/eccBridge.sol"
         source = bridge.read_text()
-        usdc_only = "require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);"
+        usdc_only = "require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID, ERR_TOKEN_CONFIG);"
         assert source.count(usdc_only) == 1
-        source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || "
+        source = source.replace(usdc_only, "require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID || "
                                 "(_testAllowOtherTokens && tokenId > USDC_ECC_ID), ERR_TOKEN_CONFIG);")
         accept = "tvm.accept();\n        _saveMsg();\n        tvm.commit();"
         assert source.count(accept) == 1
@@ -74,8 +76,17 @@ class BridgeLimits(unittest.TestCase):
         source = source.replace(
             "bytes recipient, uint32 tokenId, uint16 reason) private pure {",
             "bytes recipient, uint32 tokenId, uint16 reason) private {")
-        source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
+        finalized = re.compile(r"emit DepositFinalized\{dest: addrExtern\}\((.*?)\);", re.S)
+        assert len(finalized.findall(source)) == 2
+        source = finalized.sub(r"_testRecordFinalized(\1);", source)
+        source = re.sub(r"emit (?:WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
+        held = "address(this).currencies[NACKL_ECC_ID]"
+        assert source.count(held) == 3
+        source = source.replace(held, "_testNacklHeld()")
+        pending = re.compile(r"emit DepositPending\{dest: pendingExtern\}\((.*?)\);", re.S)
+        assert len(pending.findall(source)) == 1
+        source = pending.sub(r"_testRecordPending(\1);", source)
         hooks = """
     function testLegacyUpgrade() public {
         tvm.accept();
@@ -84,6 +95,46 @@ class BridgeLimits(unittest.TestCase):
             _mintAccumulatorNonce, _totalMintedBridgeByToken, _totalBurnedBridgeByToken,
             _depositVoucherCode, userCell, _outstandingByChain, _messages);
         onCodeUpgrade(data);
+    }
+    function testUpgradeFrom117() public {
+        tvm.accept();
+        TvmCell registry = abi.encode(_depositVoucherCode, _bridgeTokens, _bridgeTokenIds);
+        TvmCell data = abi.encode(_ownerPubkey, _usdcWallet, _totalMinted, _mintNonce,
+            _mintAccumulatorNonce, _totalMintedBridgeByToken, _totalBurnedBridgeByToken,
+            _depositVoucherCode, registry, _outstandingByChain, _messages);
+        onCodeUpgrade(data);
+    }
+    uint128 _testNacklCredited;
+    function testCreditNackl(uint128 amount) public { tvm.accept(); _testNacklCredited = amount; }
+    function _testNacklHeld() private view returns (varuint32) {
+        return address(this).currencies[NACKL_ECC_ID] + varuint32(_testNacklCredited);
+    }
+    function testNacklBalance() public view returns (uint128 balance) {
+        balance = uint128(_testNacklHeld());
+    }
+    uint32 _testPendingEvents;
+    mapping(uint256 => uint32) _testFinalizedCount;
+    mapping(uint256 => TvmCell) _testFinalizedFields;
+    function _testRecordPending(uint256 depositHash, uint256 chainId, uint128 amount,
+                                uint256 anAccount) private {
+        depositHash; chainId; amount; anAccount;
+        _testPendingEvents += 1;
+    }
+    function _testRecordFinalized(uint256 depositId, uint256 contractAddr, uint256 dappId,
+                                  uint256 chainId, uint128 amount, uint256 anAccount) private {
+        _testFinalizedCount[depositId] += 1;
+        _testFinalizedFields[depositId] = abi.encode(contractAddr, dappId, chainId, amount, anAccount);
+    }
+    function testPendingEvents() public view returns (uint32 count) {
+        count = _testPendingEvents;
+    }
+    function testFinalized(uint256 depositId) public view returns (uint32 count, uint256 contractAddr,
+        uint256 dappId, uint256 chainId, uint128 amount, uint256 anAccount) {
+        count = _testFinalizedCount[depositId];
+        if (count != 0) {
+            (contractAddr, dappId, chainId, amount, anAccount) = abi.decode(
+                _testFinalizedFields[depositId], (uint256, uint256, uint256, uint128, uint256));
+        }
     }
     uint16 _testLastRefusal;
     function testLastRefusal() public view returns (uint16 reason) {
@@ -126,6 +177,13 @@ class BridgeLimits(unittest.TestCase):
         _outstandingByChain[2] = second;
         _trustedL1Bridge[1][42] = true;
         _trustedL1Bridge[2][42] = true;
+    }
+    function testSetLock(uint256 chainId, uint128 amount) public {
+        tvm.accept();
+        _bridgeTokens[chainId][NACKL_ECC_ID].outstanding = amount;
+    }
+    function testDepositHash(uint256 depositId, uint256 chainId) public pure returns (uint256) {
+        return tvm.hash(abi.encode(depositId, uint256(42), uint256(0), chainId));
     }
     function testVoucher(uint256 depositId, uint256 chainId) public view returns (address voucher) {
         uint256 h = tvm.hash(abi.encode(depositId, uint256(42), uint256(0), chainId));
@@ -283,7 +341,240 @@ class BridgeLimits(unittest.TestCase):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
                          source=SENDER, ecc={str(token_id): str(amount)})
 
-    def test_only_usdc_can_be_registered(self):
+
+    def nackl(self, max_transfer=100 * NACKL, max_tvl=1000 * NACKL, chain=1, expect=0):
+        return self.set_bridge_token(NACKL_TOKEN, 1, max_transfer, max_tvl, chain, expect=expect)
+
+    def lock(self, amount, chain=1):
+        self.credit(amount)
+        result = self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
+                           source=SENDER, ecc={"1": str(amount)})
+        if int(self.call("testLastRefusal")["response"]["reason"]) and \
+                any(m["destination"] == SENDER for m in result["messages"]):
+            self.credit(-amount)
+        return result
+
+    def credit(self, delta):
+        self.held = getattr(self, "held", 0) + delta
+        self.call("testCreditNackl", {"amount": str(self.held)})
+
+    def confirm_nackl(self, amount, deposit=300, chain=1, expect=0):
+        return self.confirm_token(token=NACKL_TOKEN, amount=amount, deposit=deposit, chain=chain,
+                                  expect=expect)
+
+    def locked(self, chain=1):
+        return int(self.token_limits(1, chain)["outstanding"])
+
+    def locked_to(self, chain=1, bridge=EVM_BRIDGE):
+        return int(self.call("getNacklLockedTo", {"chainId": str(chain), "evmBridge": str(bridge)})[
+            "response"]["value0"])
+
+    def nackl_balance(self):
+        return int(self.call("testNacklBalance")["response"]["balance"])
+
+    def deposit_hash(self, deposit, chain=1):
+        return self.call("testDepositHash", {"depositId": str(deposit), "chainId": str(chain)})[
+            "response"]["value0"]
+
+    def finalized(self, deposit, amount, chain=1, count=1):
+        got = self.call("testFinalized", {"depositId": str(deposit)})["response"]
+        self.assertEqual(int(got["count"]), count)
+        self.assertEqual((int(got["contractAddr"], 0), int(got["dappId"], 0), int(got["chainId"], 0),
+                          int(got["amount"]), int(got["anAccount"], 0)), (42, 0, chain, amount, 43))
+
+    def pending(self, deposit, chain=1):
+        return self.call("getPendingDeposit", {"depositHash": self.deposit_hash(deposit, chain)})[
+            "response"]
+
+    def paid(self, result, amount, recipient="0:" + "00" * 31 + "2b"):
+        sent = []
+        for m in result["messages"]:
+            if m.get("destination") != recipient:
+                continue
+            decoded = json.loads(command(["tvm-cli", "-j", "decode", "msg", m["boc"],
+                                          "--abi", str(self.abi)]))["Header"]
+            sent.append(int(decoded["value"]["other"]["1"]))
+        self.assertEqual(sent, [amount])
+        self.credit(-amount)
+
+    def test_nb_an_register_nackl_without_usdc_bounds(self):
+        self.nackl(max_transfer=TRANSFER * 1000, max_tvl=TVL * 1000)
+        config = self.token_limits(1)
+        self.assertTrue(config["listed"])
+        self.assertEqual(int(config["maxTransfer"]), TRANSFER * 1000)
+
+    def test_nb_an_lock_keeps_nackl_and_counts_it(self):
+        self.nackl()
+        result = self.lock(7 * NACKL)
+        self.assertTrue(result["vm_success"])
+        self.assertEqual(result["messages"], [])
+        self.assertEqual(self.locked(), 7 * NACKL)
+        self.assertEqual(self.locked_to(), 7 * NACKL)
+        self.assertEqual(self.nackl_balance(), 7 * NACKL)
+        self.assertEqual(self.call("getTotalBridged", {"tokenId": 1})["response"],
+                         {"minted": "0", "burned": "0"})
+
+    def test_nb_an_lock_is_capped_per_withdrawal_only(self):
+        self.nackl(max_transfer=10 * NACKL)
+        self.assertTrue(self.lock(10 * NACKL)["vm_success"])
+        result = self.lock(10 * NACKL + 1)
+        self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 234)
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(self.locked(), 10 * NACKL)
+
+    def test_nb_an_unlock_pays_from_the_lock(self):
+        self.nackl()
+        self.lock(10 * NACKL)
+        self.paid(self.confirm_nackl(4 * NACKL), 4 * NACKL)
+        self.assertEqual(self.locked(), 6 * NACKL)
+        self.assertEqual(self.nackl_balance(), 6 * NACKL)
+        self.assertEqual(self.locked_to(), 10 * NACKL)
+        self.assertEqual(self.call("getTotalBridged", {"tokenId": 1})["response"],
+                         {"minted": "0", "burned": "0"})
+
+    def test_nb_an_lock_of_another_chain_does_not_pay(self):
+        self.nackl(chain=1)
+        self.nackl(chain=2)
+        self.lock(5 * NACKL, chain=2)
+        result = self.confirm_nackl(5 * NACKL, chain=1)
+        self.assertEqual(result["messages"], [])
+        self.assertEqual(self.locked(chain=2), 5 * NACKL)
+        self.assertEqual(int(self.pending(300, 1)["amount"]), 5 * NACKL)
+
+    def test_nb_an_short_lock_makes_a_pending_deposit(self):
+        self.nackl()
+        result = self.confirm_nackl(5 * NACKL)
+        self.assertTrue(result["vm_success"])
+        self.assertEqual(result["messages"], [])
+        self.assertEqual(int(self.call("testPendingEvents")["response"]["count"]), 1)
+        key = self.deposit_hash(300)
+        self.assertEqual(int(self.pending(300)["amount"]), 5 * NACKL)
+        self.call("releasePendingDeposit", {"depositHash": key}, expect=236)
+        self.assertTrue(self.lock(3 * NACKL)["vm_success"])
+        self.assertEqual(int(self.pending(300)["amount"]), 5 * NACKL)
+        self.assertEqual(int(self.call("testFinalized", {"depositId": "300"})["response"]["count"]), 0)
+        self.paid(self.lock(2 * NACKL), 5 * NACKL)
+        self.finalized(300, 5 * NACKL)
+        self.assertEqual(self.locked(), 0)
+        self.assertEqual(int(self.pending(300)["amount"]), 0)
+        self.call("releasePendingDeposit", {"depositHash": key}, expect=245)
+        self.lock(NACKL)
+        self.finalized(300, 5 * NACKL)
+
+    def test_nb_an_pending_deposits_are_paid_oldest_first(self):
+        self.nackl()
+        self.confirm_nackl(2 * NACKL, deposit=301)
+        self.confirm_nackl(3 * NACKL, deposit=302)
+        self.confirm_nackl(1 * NACKL, deposit=303)
+        self.lock(1 * NACKL)
+        self.assertEqual(int(self.pending(301)["amount"]), 2 * NACKL)
+        self.paid(self.call("releasePendingDeposit", {"depositHash": self.deposit_hash(303)}),
+                  1 * NACKL)
+        result = self.lock(5 * NACKL)
+        self.assertEqual(int(self.pending(301)["amount"]), 0)
+        self.assertEqual(int(self.pending(302)["amount"]), 0)
+        self.assertEqual(self.locked(), 0)
+        recipients = [m for m in result["messages"] if m.get("destination", "").endswith("2b")]
+        self.assertEqual(len(recipients), 2)
+        self.credit(-5 * NACKL)
+        self.finalized(301, 2 * NACKL)
+        self.finalized(302, 3 * NACKL)
+        self.finalized(303, 1 * NACKL)
+
+    def test_nb_an_released_entries_do_not_use_up_the_lock_budget(self):
+        self.nackl()
+        for d in range(310, 319):
+            self.confirm_nackl(NACKL, deposit=d)
+        result = self.lock(9 * NACKL)
+        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 4)
+        self.credit(-4 * NACKL)
+        for d in range(314, 318):
+            self.paid(self.call("releasePendingDeposit", {"depositHash": self.deposit_hash(d)}), NACKL)
+        self.assertEqual(self.locked(), NACKL)
+        self.paid(self.lock(NACKL), NACKL)
+        self.finalized(318, NACKL)
+        self.assertEqual(self.locked(), NACKL)
+        for d in range(310, 319):
+            self.assertEqual(int(self.pending(d)["amount"]), 0)
+
+    def test_nb_an_manual_release_pays_once_the_lock_covers(self):
+        self.nackl()
+        self.confirm_nackl(4 * NACKL, deposit=304)
+        key = self.deposit_hash(304)
+        self.call("testSetLock", {"chainId": "1", "amount": str(4 * NACKL)})
+        self.credit(4 * NACKL)
+        self.paid(self.call("releasePendingDeposit", {"depositHash": key}), 4 * NACKL)
+        self.finalized(304, 4 * NACKL)
+        self.call("releasePendingDeposit", {"depositHash": key}, expect=245)
+        self.finalized(304, 4 * NACKL)
+
+    def test_nb_an_owner_cannot_mint_or_take_nackl(self):
+        self.nackl()
+        self.lock(5 * NACKL)
+        nonce = int(self.call("getNonces")["response"]["mintNonce"]) + 1
+        self.call("mintAndSendTokenBridged", {
+            "recipient": SENDER, "value": str(NACKL), "nonce": str(nonce), "chainId": "1",
+            "tokenId": 1}, signed=True, expect=242)
+        self.assertEqual(self.locked(), 5 * NACKL)
+        self.assertEqual(self.nackl_balance(), 5 * NACKL)
+
+    def test_nb_an_nackl_deposit_ignores_max_tvl(self):
+        self.nackl(max_transfer=10 * NACKL, max_tvl=10 * NACKL)
+        self.lock(10 * NACKL)
+        self.deployed(self.finalize(deposit=310, token=NACKL_TOKEN, amount=10 * NACKL), 310)
+        self.finalize(deposit=311, token=NACKL_TOKEN, amount=10 * NACKL + 1, expect=234)
+        self.set_bridge_token(NACKL_TOKEN, 1, 10 * NACKL, 10 * NACKL, enabled=False)
+        self.finalize(deposit=312, token=NACKL_TOKEN, amount=NACKL, expect=243)
+
+    def test_nb_an_finalize_refuses_a_deposit_above_the_lock(self):
+        self.nackl()
+        self.lock(3 * NACKL)
+        self.finalize(deposit=320, token=NACKL_TOKEN, amount=4 * NACKL, expect=236)
+        self.lock(NACKL)
+        self.deployed(self.finalize(deposit=320, token=NACKL_TOKEN, amount=4 * NACKL), 320)
+
+    def test_nb_an_upgrade_carries_locks_and_pending(self):
+        self.nackl()
+        self.lock(4 * NACKL)
+        self.confirm_nackl(9 * NACKL)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.assertEqual(self.locked(), 4 * NACKL)
+        self.assertEqual(self.locked_to(), 4 * NACKL)
+        self.assertEqual(int(self.pending(300)["amount"]), 9 * NACKL)
+        self.bind(1)
+        self.paid(self.lock(5 * NACKL), 9 * NACKL)
+        self.finalized(300, 9 * NACKL)
+        self.assertEqual(int(self.pending(300)["amount"]), 0)
+
+    def test_nb_an_upgrade_carries_the_queue_order(self):
+        self.nackl()
+        for d in (320, 321, 322):
+            self.confirm_nackl(NACKL, deposit=d)
+        self.call("testSetLock", {"chainId": "1", "amount": str(NACKL)})
+        self.credit(NACKL)
+        self.paid(self.call("releasePendingDeposit", {"depositHash": self.deposit_hash(321)}), NACKL)
+        self.finalized(321, NACKL)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.bind(1)
+        result = self.lock(2 * NACKL)
+        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 2)
+        self.credit(-2 * NACKL)
+        for d in (320, 322):
+            self.finalized(d, NACKL)
+        for d in (320, 321, 322):
+            self.assertEqual(int(self.pending(d)["amount"]), 0)
+
+    def test_nb_an_upgrade_from_1_17_reads_the_three_field_registry(self):
+        self.nackl()
+        self.lock(4 * NACKL)
+        self.call("testUpgradeFrom117")
+        self.assertTrue(self.token_limits(1)["listed"])
+        self.assertEqual(self.locked(), 4 * NACKL)
+        self.assertEqual(self.locked_to(), 0)
+        self.assertTrue(self.token_limits(3)["listed"])
+
+    def test_only_usdc_and_nackl_can_be_registered(self):
+        self.nackl()
         for token, token_id in ((SECOND_TOKEN, 4), (THIRD_TOKEN, 5), (SECOND_TOKEN, 2), (SECOND_TOKEN, 0)):
             self.set_bridge_token(token, token_id, 100, 1000, expect=242)
             self.assertFalse(self.token_limits(token_id)["listed"])

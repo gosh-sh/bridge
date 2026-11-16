@@ -1,7 +1,10 @@
 # ackinacki-bridge
 
 `withdraw --token-id <ECC_ID>` selects a token registered under the same id on AN and the
-EVM bridge; the default is `3` (USDC). The amount is read in that token's registered decimals,
+EVM bridge; the default is `3` (USDC), and `1` is NACKL (`docs/NACKL-bridge-extension.md`): the AN
+bridge locks it, and the EVM bridge mints the payout at once or queues it, in which case the run
+ends with `submit.status: "queued"`, `payout_id` and `ready_at`, and the relayer mints it once due.
+A NACKL deposit is refused above the NACKL the AN bridge holds locked for its chain. The amount is read in that token's registered decimals,
 without rounding. Preflight refuses mismatched token addresses, missing registrations,
 insufficient per-chain inventory and payout limits before burning. Records and locks are
 separate for each ECC id; existing USDC records retain their original keys. The JSON burn
@@ -1524,8 +1527,9 @@ without them it is refused with exit 2.
 | 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt; or a `--resume` could not open the state directory or read the operation's record | unknown | `--resume <op-id>`; never make a new deposit instead |
 | **35** | **The deposit is on chain but the Acki Nacki bridge cannot finalize it from its receipt, or it is not the deposit that was requested** | **in the EVM bridge** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 | **37** | **The voucher exists and the bridge transaction that should have minted the credit aborted** | **in the EVM bridge, beyond a retry; only the operator can pay it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
+| **38** | **A NACKL deposit is proven, but the AN bridge held less NACKL locked for its chain and recorded it as pending** | **pending on the AN bridge** | the next NACKL withdrawals to that chain pay it once they lock enough (anyone can also call `releasePendingDeposit(<depositHash>)`); then `--resume <op-id>` confirms the credit |
 
-`--resume <op-id>` continues 30–34. 22, 35 and 37 close the operation for
+`--resume <op-id>` continues 30–34 and 38. 22, 35 and 37 close the operation for
 good, and it blocks no new deposit. The withdrawal codes 10–13 never come from
 `deposit`.
 

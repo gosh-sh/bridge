@@ -323,6 +323,16 @@ pub async fn run_for_token(
                 reason: "AN bridge returned an invalid version".into(),
                 source: None,
             })?;
+        let nackl = token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID;
+        if nackl && version < crate::deposit::an_preflight::BridgeVersion(1, 18, 0) {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} predates NACKL (it locks NACKL \
+                     from 1.18.0 on); initiateWithdrawal would return the NACKL. Nothing was sent."
+                ),
+                source: None,
+            });
+        }
         if token_id != BRIDGED_USDC_TOKEN_ID
             || version >= crate::deposit::an_preflight::BridgeVersion(1, 16, 0)
         {
@@ -352,7 +362,7 @@ pub async fn run_for_token(
         // Match initiateWithdrawal's refund when burned already exceeds minted
         // or this amount would take it there. The first arm avoids
         // subtracting when burned > minted.
-        if burned > minted || amount.0 > minted - burned {
+        if !nackl && (burned > minted || amount.0 > minted - burned) {
             return Err(CliError::Preflight {
                 reason: format!(
                     "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
@@ -373,7 +383,7 @@ pub async fn run_for_token(
                     .await?;
             (cap, outstanding)
         };
-        if amount.0 > max_transfer || amount.0 > outstanding {
+        if amount.0 > max_transfer || (!nackl && amount.0 > outstanding) {
             return Err(CliError::Preflight {
                 reason: format!(
                     "getDepositLimits({}) reports maxTransfer={max_transfer}, \
@@ -3030,7 +3040,44 @@ pub async fn check_bridge_deploy_for_token(
     }
 
     let needed = U256::from(amount.0);
-    if treasury < needed {
+    if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
+        let nackl = client
+            .nackl_state()
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: nacklState() failed: {e}. The bridge does not \
+                     carry NACKL; nothing was burnt."
+                ),
+                source: None,
+            })?;
+        if nackl.handed_over {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge} has handed NACKL minting to its successor \
+                     (nacklState().handedOver): withdrawByProof would revert NacklMinterGone. \
+                     Nothing was burnt."
+                ),
+                source: None,
+            });
+        }
+        if needed > nackl.delay_threshold {
+            tracing::warn!(
+                amount = amount.0,
+                threshold = %nackl.delay_threshold,
+                "this NACKL payout is above the delay threshold: it is queued and minted no \
+                 earlier than 24 hours after its proof is accepted"
+            );
+        } else if nackl.window_used + needed > nackl.daily_limit {
+            tracing::warn!(
+                amount = amount.0,
+                window_used = %nackl.window_used,
+                daily_limit = %nackl.daily_limit,
+                "the NACKL daily limit is nearly spent: this payout may be queued until the \
+                 limit has room"
+            );
+        }
+    } else if treasury < needed {
         return Err(CliError::Preflight {
             reason: format!(
                 "--bridge-address {bridge}: {} but this withdrawal needs {needed} ({}). \

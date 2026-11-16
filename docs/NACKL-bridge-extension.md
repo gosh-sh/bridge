@@ -1,0 +1,154 @@
+# NACKL Bridge extension — requirements
+
+| | |
+|---|---|
+| Status | **Normative.** What the bridge must do to carry NACKL between Acki Nacki and an EVM chain, as set by gosh-sh/bridge-audit#152. Every requirement and property is covered by a test case listed in [§9](#9-traceability); a test carries its test case ID (`TC-NB-…`) in its name or NatSpec. |
+| Written against | `main` `40090b6c`. A `file:line` points at that commit and marks behaviour that stays as it is; a requirement without one is new. |
+| Genre | Design and correctness. The verified contract reference is [`EVM-contracts-spec.md`](EVM-contracts-spec.md); the Acki Nacki contracts are described in [`contracts/an/README.md`](../contracts/an/README.md). |
+| Paths | Relative to the repository root. |
+
+## 1. Method
+
+Requirements are written in **EARS** (Easy Approach to Requirements Syntax). Each one has an ID and
+one of five forms:
+
+| Form | Template | Becomes |
+|---|---|---|
+| Ubiquitous | The bridge shall … | a test that the behaviour holds |
+| Event-driven | When ‹trigger›, the bridge shall … | a test that fires the trigger |
+| State-driven | While ‹state›, the bridge shall … | a test in that state |
+| Unwanted behaviour | If ‹condition›, then the bridge shall … | a negative test that forces the condition |
+| Optional feature | Where ‹feature›, the bridge shall … | not used here |
+
+System-wide properties (§8) are invariants and high-level properties; each becomes a Foundry
+invariant, a fuzz test or a scenario test.
+
+## 2. Glossary
+
+| Term | Meaning |
+|---|---|
+| **NACKL** | The native currency of Acki Nacki: ECC currency id 1, nine decimal places. |
+| **AN bridge** | `eccBridge` on Acki Nacki (`contracts/an/exchange/eccBridge.sol`). |
+| **EVM bridge** | `AckiNackiBridge` on the EVM chain (`contracts/ethereum/src/AckiNackiBridge.sol`). |
+| **NACKL token** | `NacklToken`, the ERC20 that represents NACKL on the EVM chain (`contracts/ethereum/src/NacklToken.sol`). Its owner is the minter. |
+| **Minter** | The owner of the NACKL token: the one account that may mint it. |
+| **Lock** | A NACKL withdrawal on Acki Nacki: the NACKL stays on the AN bridge instead of being burned. |
+| **Unlock** | A NACKL deposit paid on Acki Nacki: the AN bridge sends NACKL it holds from earlier locks. |
+| **Locked amount** | Per destination chain: NACKL the AN bridge holds from locks to that chain and has not unlocked. The registry field `outstanding` of that chain's NACKL entry. |
+| **Locked to a bridge** | Per destination chain and EVM bridge: the total NACKL ever locked by withdrawals bound to that EVM bridge (never decreases). |
+| **Pending deposit** | A proven NACKL deposit the AN bridge could not pay because the locked amount was short. It waits on the AN bridge and is paid by `releasePendingDeposit`. |
+| **Payout** | The NACKL a proven withdrawal owes on the EVM chain. |
+| **Queued payout** | A payout the EVM bridge did not mint at once. It is minted later by `executeNacklPayout`. |
+| **Daily limit** | `L`: the most NACKL the EVM bridge mints in any 24 hours. |
+| **Delay threshold** | `T`: a payout above it is minted no earlier than 24 hours after its proof was accepted. |
+| **Mint window** | The NACKL minted in the current hour and the 24 hours before it (25 hourly buckets). Any 24-hour interval lies inside one such window, so keeping the window at or below `L` keeps every 24 hours at or below `L`. |
+| **Handover** | Moving the minter role from an EVM bridge to the successor that names it as `predecessor`. |
+
+## 3. Acki Nacki bridge (AN)
+
+| ID | Requirement |
+|---|---|
+| NB-AN-1 | The AN bridge shall never mint or burn NACKL: no path calls `gosh.mintecc` or `gosh.burnecc` with currency id 1. |
+| NB-AN-2 | When the owner calls `setBridgeToken` with currency id 1, the AN bridge shall register NACKL for that chain under the same rules as USDC (`eccBridge.sol:693-718`), except that the USDC bounds on `maxTransfer` and `maxTvl` do not apply. Any currency id other than 1 and 3 shall be refused with `ERR_TOKEN_CONFIG`. |
+| NB-AN-3 | When `initiateWithdrawal` receives NACKL registered for the destination chain and every check passes, the AN bridge shall keep the NACKL, add the amount to that chain's locked amount and to the amount locked to the chain's EVM bridge, and emit `WithdrawalInitiated` with the same fields as for USDC. |
+| NB-AN-4 | If a NACKL withdrawal is above the entry's per-withdrawal cap, then the AN bridge shall refund it with `ERR_TRANSFER_TOO_LARGE` (234). A NACKL withdrawal is not bounded by bridged inventory: `ERR_BURN_EXCEEDS_BRIDGED` (233) and `ERR_CHAIN_BALANCE_EXCEEDED` (236) do not apply to it. |
+| NB-AN-5 | When the AN bridge confirms a NACKL deposit and the source chain's locked amount covers it, the AN bridge shall send that amount of NACKL it holds to the recipient and subtract it from the locked amount. |
+| NB-AN-6 | If `finalizeDeposit` receives a NACKL deposit above the source chain's locked amount, then the AN bridge shall refuse it with `ERR_CHAIN_BALANCE_EXCEEDED` before accepting it, leaving the voucher unspent. If the AN bridge confirms a NACKL deposit that the locked amount no longer covers, then it shall record a pending deposit, emit `DepositPending`, and send nothing; the voucher stays spent, so the deposit cannot be finalized twice. |
+| NB-AN-7 | When a lock raises a chain's locked amount, the AN bridge shall pay that chain's pending deposits oldest first, at most four per lock, while the locked amount covers them. When anyone calls `releasePendingDeposit` for a pending deposit that the locked amount covers, the AN bridge shall pay it. Either payment sends as in NB-AN-5, deletes the pending deposit and emits `DepositFinalized` with the deposit's fields. If the locked amount does not cover it, then `releasePendingDeposit` shall fail with `ERR_CHAIN_BALANCE_EXCEEDED`, and with `ERR_NO_PENDING_DEPOSIT` for no such deposit. |
+| NB-AN-8 | The AN bridge shall send locked NACKL only by NB-AN-5 or NB-AN-7. `mintAndSendTokenBridged` with currency id 1 shall be refused with `ERR_TOKEN_CONFIG`. |
+| NB-AN-9 | A NACKL deposit shall pass `finalizeDeposit` under the entry's per-deposit cap and switch; the entry's `maxTvl` shall not bound it. |
+| NB-AN-10 | When `updateCode` runs, the AN bridge shall carry the locked amounts, the amounts locked to each EVM bridge and the pending deposits to the new code. An upgrade from 1.17.0 shall start with none of them. |
+| NB-AN-11 | `getTotalBridged(1)` shall return `(0, 0)`: NACKL never enters the minted/burned inventory. |
+
+The owner key of the AN bridge can replace its code with `updateCode` (`eccBridge.sol:1093`), and
+the replacing code can send away every locked NACKL or, because the bridge is a special account
+that may mint ECC, mint NACKL. Only a change in the node — refusing `MintToken` and `BurnToken`
+with id 1 from this address — removes that power; it is outside this repository. NB-AN-1 and
+NB-AN-8 hold for the code in this repository.
+
+## 4. NACKL token (TOK)
+
+| ID | Requirement |
+|---|---|
+| NB-TOK-1 | The NACKL token shall be an OpenZeppelin ERC20 with nine decimals, so an amount crosses the bridge unchanged. |
+| NB-TOK-2 | Only the minter shall mint the NACKL token. |
+| NB-TOK-3 | A holder, or an account the holder approved, shall be able to burn the holder's NACKL token (`burn`, `burnFrom`). |
+| NB-TOK-4 | The production NACKL token shall be deployed with zero supply and the EVM bridge as minter. Only a test token shall be deployed with an initial supply. |
+
+## 5. EVM bridge (EVM)
+
+| ID | Requirement |
+|---|---|
+| NB-EVM-1 | When the owner calls `listNackl`, the EVM bridge shall list the NACKL token under currency id 1 with the given per-deposit cap, daily limit and delay threshold. It shall be refused unless the token is not yet listed, its minter is the EVM bridge or, before a handover, the bridge's `predecessor`, the token has nine decimals, and no other token holds id 1. |
+| NB-EVM-2 | When `deposit` receives NACKL, the EVM bridge shall burn it from the depositor with `burnFrom` and emit `Deposit` with the same fields as for USDC. The per-deposit cap and the deposit switch apply; the TVL cap does not. |
+| NB-EVM-3 | When `withdrawByProof` accepts a NACKL proof, the EVM bridge shall run every check it runs for USDC, record the nullifier, and then: mint the payout at once if it is at or below the delay threshold and fits the mint window; queue it due in 24 hours if it is above the delay threshold; queue it due at once otherwise. |
+| NB-EVM-4 | When anyone calls `executeNacklPayout` for a queued payout that is due and fits the mint window, the EVM bridge shall mint it to its recipient and mark it executed. |
+| NB-EVM-5 | If `executeNacklPayout` is called for a payout that is unknown, executed, not yet due, or does not fit the mint window, then the call shall revert. |
+| NB-EVM-6 | The EVM bridge shall mint no more than the daily limit in any mint window. |
+| NB-EVM-7 | When the owner calls `listNackl` again with the listed token, the EVM bridge shall set the daily limit and the delay threshold for payouts evaluated after the call. It shall refuse a daily limit below the NACKL per-withdrawal cap, so that every payout can fit an empty window. A payout already queued keeps its due time. |
+| NB-EVM-8 | The EVM bridge shall have no way to cancel a queued payout. |
+| NB-EVM-9 | While the EVM bridge is paused, `deposit`, `withdrawByProof` and `executeNacklPayout` shall revert. |
+| NB-EVM-10 | When the owner calls `migrateToken(1, successor)`, the EVM bridge shall close NACKL deposits on itself and make `successor` the minter. It shall be refused unless this bridge is paused, `successor` names it as `predecessor` and lists the same NACKL token, and no queued payout is unexecuted. |
+| NB-EVM-11 | After a handover, a NACKL `withdrawByProof` or `executeNacklPayout` on the old EVM bridge shall revert with `NacklMinterGone`, and `deposit` of NACKL into it shall revert with `TokenDepositsDisabled`, whatever `setTokenDepositsEnabled` says. |
+| NB-EVM-12 | The USDC paths shall be unchanged: a USDC deposit and a USDC withdrawal move the same balances and emit the same events as on `40090b6c`. |
+
+## 6. Handover procedure (HO)
+
+A withdrawal proof is bound to one EVM bridge (bridge-audit#140), so a withdrawal bound to the old
+bridge can be paid only by the old bridge. The EVM chain cannot see which withdrawals Acki Nacki
+bound to it; the handover precondition is checked by comparing two counters.
+
+| ID | Requirement |
+|---|---|
+| NB-HO-1 | The AN bridge shall report, per chain and EVM bridge, the NACKL locked to that bridge (`getNacklLockedTo`). |
+| NB-HO-2 | The EVM bridge shall report the NACKL it has accepted for payment, minted and queued (`nacklState`). |
+| NB-HO-3 | The operator shall hand the minter over only when, for the old bridge, the NACKL locked to it on Acki Nacki equals the NACKL it has accepted for payment, and nothing is queued. The order is: `setEvmBridge` to the successor on Acki Nacki; let the old bridge pay out; pause it; `migrateToken(1, successor)`. |
+
+## 7. Unchanged parts (CR)
+
+| ID | Requirement |
+|---|---|
+| NB-CR-1 | The circuits, their verification keys and the public inputs of a withdrawal proof shall not change. |
+| NB-CR-2 | `Deposit` on the EVM chain and `WithdrawalInitiated` on Acki Nacki shall keep the encodings the circuits and `finalizeDeposit` bind (`AckiNackiBridge.sol:399-407`, `eccBridge.sol:64-71`). |
+
+## 8. Properties
+
+| ID | Property |
+|---|---|
+| NB-P-1 | (AN) For every chain, the NACKL the AN bridge holds is at least the sum over chains of the locked amounts. |
+| NB-P-2 | (AN) Locked amounts change only by a lock (up) and an unlock (down); an unlock never takes one below zero. |
+| NB-P-3 | (EVM) The NACKL token supply minted by the EVM bridge never exceeds the NACKL it accepted in proofs; queued plus minted equals accepted. |
+| NB-P-4 | (EVM) In every mint window the minted amount is at most the daily limit. |
+| NB-P-5 | (EVM) A nullifier pays at most once, whether the payout was minted at once or queued. |
+| NB-P-6 | (end to end) NACKL on the EVM chain comes only from NACKL locked on Acki Nacki: deposits unlock no more than earlier withdrawals locked. |
+
+## 9. Traceability
+
+| Requirement | Test case | Where |
+|---|---|---|
+| NB-AN-1, NB-AN-8 | TC-NB-AN-NOMINT | `scripts/test_an_bridge_limits.py` |
+| NB-AN-2 | TC-NB-AN-REGISTER | `scripts/test_an_bridge_limits.py` |
+| NB-AN-3, NB-HO-1 | TC-NB-AN-LOCK | `scripts/test_an_bridge_limits.py` |
+| NB-AN-4 | TC-NB-AN-CAP | `scripts/test_an_bridge_limits.py` |
+| NB-AN-5 | TC-NB-AN-UNLOCK | `scripts/test_an_bridge_limits.py` |
+| NB-AN-6, NB-AN-7 | TC-NB-AN-PENDING | `scripts/test_an_bridge_limits.py` |
+| NB-AN-9 | TC-NB-AN-DEPOSIT-CAPS | `scripts/test_an_bridge_limits.py` |
+| NB-AN-10 | TC-NB-AN-UPGRADE | `scripts/test_an_bridge_limits.py` |
+| NB-AN-11 | TC-NB-AN-INVENTORY | `scripts/test_an_bridge_limits.py` |
+| NB-TOK-1…4 | TC-NB-TOK-* | `contracts/ethereum/test/NacklToken.t.sol` |
+| NB-EVM-1 | TC-NB-EVM-LIST | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-2 | TC-NB-EVM-DEPOSIT | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-3 | TC-NB-EVM-WITHDRAW-* | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-4, NB-EVM-5 | TC-NB-EVM-EXECUTE-* | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-6, NB-P-4 | TC-NB-EVM-WINDOW, TC-NB-P-WINDOW | `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol` |
+| NB-EVM-7 | TC-NB-EVM-LIMITS | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-8 | TC-NB-EVM-NOCANCEL | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-9 | TC-NB-EVM-PAUSE | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-10, NB-EVM-11 | TC-NB-EVM-HANDOVER-* | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-12 | the existing USDC suites | `contracts/ethereum/test/` |
+| NB-HO-2 | TC-NB-EVM-STATE | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-HO-3 | TC-NB-HO-PROCEDURE | `contracts/ethereum/test/NacklBridge.t.sol` (two bridges: the order that pays everything, and an early handover that strands a withdrawal) |
+| NB-P-6 | TC-NB-E2E | `tests/e2e/local-net/arbitrum/test_arbitrum_e2e.py` |
+| NB-CR-1, NB-CR-2 | TC-NB-CR | `scripts/check_withdrawal_event_header.py`, unchanged circuit crates |
+| NB-P-1, NB-P-2 | TC-NB-P-AN | `scripts/test_an_bridge_limits.py` |
+| NB-P-3, NB-P-5 | TC-NB-P-SUPPLY | `contracts/ethereum/test/NacklBridgeInvariant.t.sol` |

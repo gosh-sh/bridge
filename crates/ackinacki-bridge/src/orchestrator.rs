@@ -115,6 +115,10 @@ pub struct SubmitSummary {
     /// `None` for `--dry-run` success; `Some(tx_hash)` for real submits.
     pub eth_tx: Option<String>,
     pub status: SubmitStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payout_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -124,6 +128,7 @@ pub struct SubmitSummary {
 pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
+    Queued,
 }
 
 /// `LockHold`'s `impl Drop` is what keeps the withdrawal lock borrowed to
@@ -819,6 +824,8 @@ pub async fn run(
             submit: SubmitSummary {
                 eth_tx: None,
                 status: SubmitStatus::DryRunOk,
+                payout_id: None,
+                ready_at: None,
             },
         });
     }
@@ -1314,6 +1321,32 @@ pub async fn run(
             SubmitSummary {
                 eth_tx: Some(tx),
                 status: SubmitStatus::Confirmed,
+                payout_id: None,
+                ready_at: None,
+            }
+        },
+        WithdrawSubmitOutcome::Queued {
+            tx_hash,
+            payout_id,
+            ready_at,
+        } => {
+            let tx = format!("{tx_hash:?}");
+            info!(tx = %tx, %payout_id, ready_at, "withdrawByProof accepted; NACKL payout queued");
+            if let Some(r) = record.as_mut() {
+                r.status = Status::Submitted;
+                r.eth_tx_hash = Some(tx.clone());
+                idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+                    e.after_send(&format!(
+                        "withdrawByProof was accepted on the EVM side as {tx} and its NACKL \
+                         payout {payout_id} queued — the proof is spent"
+                    ))
+                })?;
+            }
+            SubmitSummary {
+                eth_tx: Some(tx),
+                status: SubmitStatus::Queued,
+                payout_id: Some(payout_id.to_string()),
+                ready_at: Some(ready_at),
             }
         },
         WithdrawSubmitOutcome::Reverted {
@@ -1367,11 +1400,22 @@ pub async fn run(
     };
 
     if let Some(r) = record.as_mut() {
-        r.status = Status::Confirmed;
         r.eth_tx_hash = submit.eth_tx.clone();
-        idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
-            e.after_send("the withdrawal completed on both chains and its payout receipt was seen")
-        })?;
+        if matches!(submit.status, SubmitStatus::Queued) {
+            r.status = Status::Queued;
+            r.nackl_payout_id = submit.payout_id.clone();
+            r.nackl_ready_at = submit.ready_at;
+            idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+                e.after_send("the withdrawal was accepted and its NACKL payout queued")
+            })?;
+        } else {
+            r.status = Status::Confirmed;
+            idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+                e.after_send(
+                    "the withdrawal completed on both chains and its payout receipt was seen",
+                )
+            })?;
+        }
     }
 
     Ok(WithdrawSuccess {
@@ -2643,6 +2687,8 @@ mod tests {
             withdrawal_msg_id: None,
             block_seq_no: None,
             eth_tx_hash: None,
+            nackl_payout_id: None,
+            nackl_ready_at: None,
         }
     }
 

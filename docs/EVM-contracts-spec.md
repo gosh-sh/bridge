@@ -218,6 +218,7 @@ relying on them for a storage-level migration.
 | 16 | 0 | `storedPrevBkSetCommitment` | `uint256` | 271 | `applyBkSetUpdate` |
 | 17 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 365 | `withdrawByProof` |
 | 18 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 384 | `_appendLayer` |
+| 19–28 | — | `_nackl` | `NacklMint.State` | 388 | `listNackl`, `deposit` and `withdrawByProof` (NACKL), `executeNacklPayout`, `migrateToken(1, …)` |
 
 Regenerated from this tree with `forge inspect src/AckiNackiBridge.sol:AckiNackiBridge
 storageLayout`. **The token registry took slots 2–5**, so everything from
@@ -611,6 +612,30 @@ the layer cursor reaches N; `verifyBlock` accepts the outgoing set for
 rotations applies in order until one lands at or past the next owed
 bundle target; the rest wait for `verifyBlock` to reach the last
 boundary at or below it — usually just that one bundle.
+
+### 7.3a NACKL: minted payouts, the daily limit and the handover
+
+NACKL (ECC id `1`) is minted, not paid from custody
+([`NACKL-bridge-extension.md`](NACKL-bridge-extension.md)). The logic is the external library
+`src/NacklMint.sol`, linked at deployment and run by DELEGATECALL in the bridge's storage
+(`_nackl`, slots 19–28), so the bridge is the minter of `src/NacklToken.sol` and logs its events.
+
+- `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` (owner) lists the token under id `1`
+  with no TVL cap; its owner must be this bridge or, before a handover, `predecessor`. Called again
+  with the listed token it sets the two limits; `dailyLimit` may not be below `maxWithdrawal`.
+- `deposit` of NACKL burns it from the sender (`burnFrom`) and books no liabilities.
+- `withdrawByProof` of NACKL runs every check of §7.2 up to the proof, spends the nullifier and
+  then mints at once when the payout is at most `delayThreshold` and the NACKL minted in the
+  current hour and the 24 before it leaves room under `dailyLimit`. Otherwise it queues the payout
+  (`NacklPayoutQueued(payoutId, recipient, amount, readyAt)`): due in 24 hours above
+  `delayThreshold`, at once otherwise. It emits `WithdrawalByProofExecuted` either way.
+- `executeNacklPayout(payoutId)` (anyone, `whenNotPaused`) mints a due payout that fits the window.
+  Nothing cancels a queued payout.
+- `migrateToken(1, successor)` (owner, paused, nothing queued, `successor` lists the same token)
+  transfers the token's ownership to `successor` and closes NACKL deposits here; NACKL payouts here
+  then revert `NacklMinterGone`.
+- `nacklState()` returns `dailyLimit`, `delayThreshold`, `windowUsed`, `accepted`, `minted`,
+  `pendingCount`, `payoutCount`, `handedOver`.
 
 ### 7.4 Read surface for AN state
 

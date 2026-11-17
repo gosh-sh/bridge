@@ -2599,11 +2599,11 @@ fn confirm_before_burn(
         "\nAbout to withdraw {currency}:\n\x20 from      : {from}\n\x20 to        : 0x{to_hex} on \
          {chain_name} (chain {chain_id})\n\x20 amount    : {amount_display} {currency}\n\x20 \
          bridge    : {bridge}\n\x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\nThis \
-         will:\n\x20 1. broadcast a multisig sendTransaction {burning} {amount_display} {currency} \
-         on Acki Nacki\n\x20 2. wait for the covering anchor bundle to land on Sepolia\n\x20 3. \
-         produce a Circuit-4 SHPLONK proof\n\x20 4. submit withdrawByProof (spends ETH \
-         gas)\n\nThe AN {burn} is irreversible once broadcast. Pass --yes to skip this \
-         prompt.\nProceed? [y/N]: ",
+         will:\n\x20 1. broadcast a multisig sendTransaction {burning} {amount_display} \
+         {currency} on Acki Nacki\n\x20 2. wait for the covering anchor bundle to land on \
+         Sepolia\n\x20 3. produce a Circuit-4 SHPLONK proof\n\x20 4. submit withdrawByProof \
+         (spends ETH gas)\n\nThe AN {burn} is irreversible once broadcast. Pass --yes to skip \
+         this prompt.\nProceed? [y/N]: ",
         from = from.extended(),
         to_hex = hex::encode(to.address.as_slice()),
         chain_id = to.chain_id,
@@ -2617,7 +2617,11 @@ fn confirm_before_burn(
             3 => "USDC".to_owned(),
             id => format!("ECC[{id}]"),
         },
-        burning = if args.token_id == 1 { "locking" } else { "burning" },
+        burning = if args.token_id == 1 {
+            "locking"
+        } else {
+            "burning"
+        },
         burn = if args.token_id == 1 { "lock" } else { "burn" },
         bridge = args.bridge_address,
     );

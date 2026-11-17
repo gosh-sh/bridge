@@ -100,6 +100,7 @@ where
                     debug!(%payout_id, %reason, "the next NACKL payout moved; reading it again");
                 } else if reverted_with(&reason, A::NacklPayoutNotDue::SELECTOR)
                     || reverted_with(&reason, A::NacklWindowFull::SELECTOR)
+                    || reverted_with(&reason, A::NacklNotMinter::SELECTOR)
                 {
                     debug!(%payout_id, %reason, "the next NACKL payout is not executable yet");
                     return false;
@@ -227,6 +228,17 @@ mod tests {
         let b = fake(&[1, 2], &[(
             1,
             AckiNackiBridge::NacklPayoutNotDue::SELECTOR,
+        )]);
+        let mut st = NacklPayoutScanState::default();
+        assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
+        assert!(b.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bridge_not_yet_the_minter_waits_without_a_retry() {
+        let b = fake(&[1, 2], &[(
+            1,
+            AckiNackiBridge::NacklNotMinter::SELECTOR,
         )]);
         let mut st = NacklPayoutScanState::default();
         assert!(!nackl_payout_scan_once(&b, false, &mut st).await);

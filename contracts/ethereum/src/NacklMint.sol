@@ -88,7 +88,10 @@ library NacklMint {
         if (s.handedOver) revert NacklMinterGone();
         s.accepted += amount;
         bool large = amount > s.delayThreshold;
-        if (!large && next(s) == 0 && windowUsed(s) + amount <= s.dailyLimit) {
+        if (
+            !large && next(s) == 0 && windowUsed(s) + amount <= s.dailyLimit
+                && s.token.owner() == address(this)
+        ) {
             _mint(s, recipient, amount);
             return 0;
         }
@@ -112,6 +115,7 @@ library NacklMint {
         if (payoutId != first) revert NacklPayoutNotNext(payoutId, first);
         uint256 used = windowUsed(s);
         if (used + p.amount > s.dailyLimit) revert NacklWindowFull(used, p.amount, s.dailyLimit);
+        if (s.token.owner() != address(this)) revert NacklNotMinter(address(s.token));
         p.executed = true;
         s.pendingCount -= 1;
         if (s.windowHead < s.windowQueue.length && s.windowQueue[s.windowHead] == payoutId) {

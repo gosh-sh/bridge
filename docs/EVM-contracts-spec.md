@@ -626,7 +626,8 @@ NACKL (ECC id `1`) is minted, not paid from custody
 - `deposit` of NACKL burns it from the sender (`burnFrom`) and books no liabilities.
 - `withdrawByProof` of NACKL runs every check of §7.2 up to the proof, spends the nullifier and
   then mints at once when the payout is at most `delayThreshold`, the NACKL minted in the
-  current hour and the 24 before it leaves room under `dailyLimit`, and no queued payout is due.
+  current hour and the 24 before it leaves room under `dailyLimit`, no queued payout is due and
+  the bridge is the token's minter.
   Otherwise it queues the payout
   (`NacklPayoutQueued(payoutId, recipient, amount, readyAt)`): due in 24 hours above
   `delayThreshold`, at once otherwise. It emits `WithdrawalByProofExecuted` either way.
@@ -634,7 +635,8 @@ NACKL (ECC id `1`) is minted, not paid from custody
   Due payouts go oldest first, by `readyAt` and then id: any other id reverts
   `NacklPayoutNotNext(payoutId, next)`. `NacklMint` keeps two FIFO queues, one for payouts due at
   once and one for the 24-hour ones, and `next` is the older due head of the two.
-  Nothing cancels a queued payout.
+  Until the bridge is the token's minter (a successor before `migrateToken(1, …)` on the old
+  bridge) it reverts `NacklNotMinter(token)`. Nothing cancels a queued payout.
 - `migrateToken(1, successor)` (owner, paused, nothing queued, `successor` lists the same token)
   transfers the token's ownership to `successor` and closes NACKL deposits here; NACKL payouts here
   then revert `NacklMinterGone`.

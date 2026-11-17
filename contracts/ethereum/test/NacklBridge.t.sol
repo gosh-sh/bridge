@@ -375,8 +375,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         AckiNackiBridge s = _successor();
         _listOnSuccessor(s);
         _seedFirstBlock(s);
-        vm.expectRevert();
         s.withdrawByProof(hex"00", _pub(s, 1, 400, RECIPIENT));
+        (,,,,,,,, uint256 queuedFirst) = s.nacklState();
+        assertEq(queuedFirst, 1);
 
         AckiNackiBridge stranger = _newBridge(address(0));
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklNotMinter.selector, address(nackl)));
@@ -403,8 +404,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         vm.expectRevert(abi.encodeWithSelector(AckiNackiBridge.TokenDepositsDisabled.selector, 1));
         bridge.deposit(address(nackl), 1, bytes32(uint256(7)));
 
+        s.executeNacklPayout(1);
         s.withdrawByProof(hex"00", _pub(s, DELAY_THRESHOLD, 501, RECIPIENT));
-        assertEq(nackl.balanceOf(RECIPIENT), 2 * DELAY_THRESHOLD);
+        assertEq(nackl.balanceOf(RECIPIENT), 2 * DELAY_THRESHOLD + 1);
     }
 
     function _handoverReady(AckiNackiBridge b, uint256 lockedTo) internal view returns (bool) {
@@ -447,6 +449,27 @@ contract NacklBridgeTest is NacklBridgeFixture {
         bridge.unpause();
         vm.expectRevert(NacklMint.NacklMinterGone.selector);
         bridge.withdrawByProof(hex"00", _pub(bridge, 3 * NACKL_UNIT, 901, RECIPIENT));
+    }
+
+    function test_NB_HO_3_aSuccessorQueuesPayoutsUntilItIsTheMinter() public {
+        AckiNackiBridge s = _successor();
+        _listOnSuccessor(s);
+        _seedFirstBlock(s);
+        uint256 before = nackl.balanceOf(RECIPIENT);
+        s.withdrawByProof(hex"00", _pub(s, NACKL_UNIT, 902, RECIPIENT));
+        (,,, uint256 accepted, uint256 minted, uint256 pendingCount,,, uint256 nextPayout) =
+            s.nacklState();
+        assertEq(
+            abi.encode(accepted, minted, pendingCount, nextPayout), abi.encode(NACKL_UNIT, 0, 1, 1)
+        );
+        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklNotMinter.selector, address(nackl)));
+        s.executeNacklPayout(1);
+        assertEq(nackl.balanceOf(RECIPIENT), before);
+
+        bridge.pause();
+        bridge.migrateToken(1, address(s));
+        s.executeNacklPayout(1);
+        assertEq(nackl.balanceOf(RECIPIENT), before + NACKL_UNIT);
     }
 
     function test_NB_EVM_STATE_countsAcceptedMintedAndQueued() public {

@@ -52,9 +52,10 @@ assigns it when the release is tagged.
 - `AckiNackiBridge`: a NACKL `deposit` burns with `burnFrom`, without a TVL cap.
 - `AckiNackiBridge`: a NACKL `withdrawByProof` mints at once within `dailyLimit` and
   `delayThreshold` when nothing is due before it, otherwise queues the payout (`NacklPayoutQueued`),
-  24 hours above `delayThreshold`.
+  24 hours above `delayThreshold`; a successor queues every payout until it is the minter.
 - `AckiNackiBridge`: `executeNacklPayout(payoutId)` (anyone, not while paused) mints only the payout
-  `nacklState().nextPayout` names, once it fits the limit.
+  `nacklState().nextPayout` names, once it fits the limit; before the handover it reverts
+  `NacklNotMinter`.
 - `AckiNackiBridge`: `nacklState()` reports the limits, the window, `accepted`, `minted`, the queue
   and `nextPayout`.
 - `AckiNackiBridge`: new errors `NacklMinterGone`, `NacklPayoutUnknown`,

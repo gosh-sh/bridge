@@ -983,6 +983,7 @@ mod sol_bindings {
             error NacklPayoutNotDue(uint256 payoutId, uint64 readyAt);
             error NacklPayoutNotNext(uint256 payoutId, uint256 next);
             error NacklWindowFull(uint256 used, uint256 amount, uint256 dailyLimit);
+            error NacklNotMinter(address token);
 
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
@@ -2571,6 +2572,7 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
                 x.used, x.amount, x.dailyLimit
             ),
         ),
+        E::NacklNotMinter(x) => ("NacklNotMinter", format!("token: {}", x.token)),
     };
     BridgeRevert {
         name,

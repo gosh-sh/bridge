@@ -188,7 +188,7 @@ pub async fn check(
     .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
     .ok_or_else(|| {
         refuse(format!(
-            "{token} is not listed on bridge {bridge}; only USDC can be bridged today"
+            "{token} is not listed on bridge {bridge}; it cannot be deposited through this bridge"
         ))
     })?;
     if !listing.deposits_enabled {

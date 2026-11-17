@@ -148,35 +148,57 @@ pub async fn bridge_tx_verdict(
             deposit_hash,
         });
     }
-    let transfer = tx.out.iter().find(|m| {
-        is_recipient(&m.dst, &id.account)
-            && m.ecc
-                .iter()
-                .any(|(c, v)| *c == id.token_id && *v == id.amount)
-            && m.bounce == Some(false)
-    });
-    let (true, Some(t)) = (event_ok, transfer) else {
+    if !event_ok {
         return Ok(Credit::NotYet);
+    }
+    let same_payout = |v: &Value| {
+        u256(&v["amount"]) == Some(U256::from(id.amount))
+            && u256(&v["anAccount"]) == Some(U256::from_be_bytes(id.account))
     };
-    let Some(full) = an.message(&t.hash).await? else {
-        return Ok(Credit::NotYet);
-    };
-    let Some(d) = full.dst_tx else {
-        return Ok(Credit::NotYet);
-    };
-    let Some(dtx) = an.transaction(&d.hash).await? else {
-        return Ok(Credit::NotYet);
-    };
-    if !dtx
-        .ecc_delta
+    let rank = tx
+        .out
         .iter()
-        .any(|(c, v)| *c == id.token_id && *v == id.amount as i128)
-    {
+        .filter(|m| m.dst.ends_with(DEPOSIT_FINALIZED_DST))
+        .filter_map(|m| an.decode(BRIDGE_ABI, m.body.as_deref()?, false))
+        .filter(|(n, v)| n == "DepositFinalized" && same_payout(v))
+        .position(|(_, v)| id.matches(&v));
+    let transfers: Vec<_> = tx
+        .out
+        .iter()
+        .filter(|m| {
+            is_recipient(&m.dst, &id.account)
+                && m.ecc
+                    .iter()
+                    .any(|(c, v)| *c == id.token_id && *v == id.amount)
+                && m.bounce == Some(false)
+        })
+        .collect();
+    let Some(rank) = rank.filter(|r| *r < transfers.len()) else {
         return Ok(Credit::NotYet);
+    };
+    let mut deliveries = Vec::with_capacity(transfers.len());
+    for t in transfers {
+        let Some(full) = an.message(&t.hash).await? else {
+            return Ok(Credit::NotYet);
+        };
+        let Some(d) = full.dst_tx else {
+            return Ok(Credit::NotYet);
+        };
+        let Some(dtx) = an.transaction(&d.hash).await? else {
+            return Ok(Credit::NotYet);
+        };
+        if !dtx
+            .ecc_delta
+            .iter()
+            .any(|(c, v)| *c == id.token_id && *v == id.amount as i128)
+        {
+            return Ok(Credit::NotYet);
+        }
+        deliveries.push(dtx.hash);
     }
     Ok(Credit::Confirmed(CreditInfo {
         confirm_tx: tx.hash.clone(),
-        delivery_tx: dtx.hash,
+        delivery_tx: deliveries.swap_remove(rank),
         via_events,
     }))
 }
@@ -736,6 +758,82 @@ mod tests {
             (c.confirm_tx.as_str(), c.delivery_tx.as_str(), c.via_events),
             ("btx", "rtx", false)
         );
+    }
+
+    #[tokio::test]
+    async fn one_delivery_does_not_confirm_two_equal_deposits_paid_together() {
+        let an = FakeAn::default();
+        let (a, b) = (id(0), id(1));
+        let bridge = format!("0:{}", hex::encode(BRIDGE));
+        let acc = format!("0:{}", hex::encode(ACC));
+        let mut out = vec![];
+        for (n, i) in [("a", &a), ("b", &b)] {
+            let mut x = msg(&format!("xfer-{n}"), "Internal", &bridge, &acc, None);
+            x.ecc = vec![(i.token_id, i.amount)];
+            x.bounce = Some(false);
+            an.messages
+                .lock()
+                .unwrap()
+                .insert(x.hash.clone(), x.clone());
+            out.push(x);
+            let body = format!("B-ev-{n}");
+            an.bodies
+                .lock()
+                .unwrap()
+                .insert(body.clone(), ("DepositFinalized".into(), fields(i, "0")));
+            out.push(msg(
+                &format!("ev-{n}"),
+                "ExtOut",
+                &bridge,
+                DEPOSIT_FINALIZED_DST,
+                Some(&body),
+            ));
+        }
+        let tx = TxView {
+            hash: "both".into(),
+            aborted: false,
+            exit_code: Some(0),
+            account: String::new(),
+            now: 3,
+            out,
+            ecc_delta: vec![],
+        };
+        let deliver = |n: &str, i: &Identity| {
+            let mut m = an.messages.lock().unwrap()[&format!("xfer-{n}")].clone();
+            m.dst_tx = Some(TxRef {
+                hash: format!("rtx-{n}"),
+                aborted: false,
+                account: acc.clone(),
+                now: 4,
+            });
+            an.messages.lock().unwrap().insert(m.hash.clone(), m);
+            an.transactions
+                .lock()
+                .unwrap()
+                .insert(format!("rtx-{n}"), TxView {
+                    hash: format!("rtx-{n}"),
+                    aborted: false,
+                    exit_code: Some(0),
+                    account: String::new(),
+                    now: 4,
+                    out: vec![],
+                    ecc_delta: vec![(i.token_id, i.amount as i128)],
+                });
+        };
+        deliver("a", &a);
+        for i in [&a, &b] {
+            assert_eq!(
+                bridge_tx_verdict(&an, &tx, i, true).await.unwrap(),
+                Credit::NotYet
+            );
+        }
+        deliver("b", &b);
+        for (i, rtx) in [(&a, "rtx-a"), (&b, "rtx-b")] {
+            let Credit::Confirmed(c) = bridge_tx_verdict(&an, &tx, i, true).await.unwrap() else {
+                panic!()
+            };
+            assert_eq!(c.delivery_tx, rtx);
+        }
     }
 
     #[tokio::test]

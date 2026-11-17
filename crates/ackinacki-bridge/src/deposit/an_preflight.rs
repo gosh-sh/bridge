@@ -236,8 +236,8 @@ pub fn recipient_verdict(
                 ecc3: a.ecc3,
             },
             Some(format!(
-                "account {} is not deployed yet ({:?}); the eccUSDC will wait on it, and the dapp \
-                 in --to cannot be checked until it is deployed",
+                "account {} is not deployed yet ({:?}); the deposited currency will wait on it, \
+                 and the dapp in --to cannot be checked until it is deployed",
                 target.account_hex(),
                 a.status
             )),
@@ -245,9 +245,9 @@ pub fn recipient_verdict(
         None => Ok((
             RecipientState::Missing,
             Some(format!(
-                "account {} does not exist yet; the deposit will create it with the eccUSDC on \
-                 it, and it gets its dapp when it is deployed, so the dapp in --to cannot be \
-                 checked now",
+                "account {} does not exist yet; the deposit will create it with the deposited \
+                 currency on it, and it gets its dapp when it is deployed, so the dapp in --to \
+                 cannot be checked now",
                 target.account_hex()
             )),
         )),
@@ -838,6 +838,13 @@ mod tests {
             recipient_verdict(&t, None).unwrap(),
             (RecipientState::Missing, Some(_))
         ));
+        for a in [Some(&uninit), None] {
+            let w = recipient_verdict(&t, a).unwrap().1.unwrap();
+            assert!(
+                w.contains("deposited currency") && !w.contains("USDC"),
+                "{w}"
+            );
+        }
     }
 
     #[tokio::test]

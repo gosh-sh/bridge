@@ -79,6 +79,8 @@ assigns it when the release is tagged.
 - `ackinacki-bridge deposit` summary shows the token's currency and decimals and its balance; the
   JSON `tx` carries `token_id`.
 - `deposit-relayer` retries a deposit refused with 236.
+- `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
+  sends nothing.
 
 ## [0.9.0]
 

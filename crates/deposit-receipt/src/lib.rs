@@ -255,6 +255,27 @@ impl DepositWitness {
         }
         Ok(())
     }
+
+    pub fn deposit_log(&self) -> Option<(Address, B256)> {
+        use alloy::rlp::{Decodable, Header};
+        let node: Vec<Bytes> = Decodable::decode(&mut self.receipt_proof.last()?.as_ref()).ok()?;
+        let [_, value] = node.as_slice() else {
+            return None;
+        };
+        let mut v: &[u8] = value;
+        if v.first().is_some_and(|b| *b < 0x80) {
+            v = &v[1..];
+        }
+        let list = Header::decode(&mut v).ok().filter(|h| h.list)?;
+        let mut fields = v.get(..list.payload_length)?;
+        for _ in 0..3 {
+            let f = Header::decode(&mut fields).ok()?;
+            fields = fields.get(f.payload_length..)?;
+        }
+        let logs: Vec<Log> = Decodable::decode(&mut fields).ok()?;
+        let log = logs.get(usize::from(self.log_index))?;
+        Some((log.address, *log.topics().get(1)?))
+    }
 }
 
 /// The gas an external message may spend before the contract accepts it

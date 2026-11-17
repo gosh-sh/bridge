@@ -2980,9 +2980,6 @@ mod tests {
         assert!(matches!(other_event, WithdrawSubmitOutcome::Paid { .. }));
     }
 
-    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
-    /// slower than the daemons' bound must not come back to the user as a
-    /// failure. Only the daemons set a bound.
     /// A mined `withdrawByProof` with status 0 must not read as paid: the
     /// user's eccUSDC are already burned, so `Paid` would park an unpaid
     /// withdrawal in `done` behind a `PAID` log line.
@@ -3014,6 +3011,9 @@ mod tests {
         ));
     }
 
+    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
+    /// slower than the daemons' bound must not come back to the user as a
+    /// failure. Only the daemons set a bound.
     #[test]
     fn only_the_daemons_stop_waiting_for_a_withdraw_receipt() {
         let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new_http(

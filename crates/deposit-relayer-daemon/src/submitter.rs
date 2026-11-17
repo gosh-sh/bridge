@@ -212,7 +212,9 @@ pub struct AnSubmitConfig {
 /// lookup fails, it returns `Ok(false)` and the deposit is submitted. That is
 /// safe: a duplicate `finalizeDeposit` still exits 0, but its voucher deploy
 /// fails with exit 51, which [`settle_finalize`] reports as
-/// [`SubmitOutcome::AlreadyFinalized`].
+/// [`SubmitOutcome::AlreadyFinalized`]. A duplicate NACKL one above the NACKL
+/// now locked for its chain is refused with 236 instead and reads as
+/// [`SubmitOutcome::Pending`]; only the voucher check tells it is paid.
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,

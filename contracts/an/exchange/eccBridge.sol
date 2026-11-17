@@ -983,9 +983,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                              bytes[] receiptProof, uint16 logIndex) public {
         // Every check runs before accept, within the external message's gas
         // credit, so a refused deposit costs the bridge nothing. A deposit
-        // already finalized is not refused here: it passes every check, is
-        // accepted and paid for by the bridge, and ends at its existing
-        // voucher without a second mint. A deposit whose proof walk exceeds
+        // already finalized passes every check except a NACKL one above the
+        // NACKL now locked for its chain, refused with 236; it is accepted and
+        // paid for by the bridge, and ends at its existing voucher without a
+        // second mint. A deposit whose proof walk exceeds
         // the credit cannot be finalized; the CLI and deposit-relayer refuse
         // to send one.
         require(!_paused, ERR_PAUSED);

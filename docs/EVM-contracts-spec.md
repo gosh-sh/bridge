@@ -196,29 +196,29 @@ relying on them for a storage-level migration.
 
 | Slot | Offset | Var | Type | Line | Written by |
 |---:|---:|---|---|---:|---|
-| 0 | 0 | `depositCounter` | `uint256` | 116 | `deposit` |
-| 1 | 0 | `treasuryBalance` | `uint256` | 125 | `deposit` (+ USDC only), `fundTreasury` (+), `withdrawByProof` (− USDC only), `migrateTreasury` (→ 0) |
-| 2 | — | `_tokens` | `mapping(uint32 ⇒ TokenInfo)` | 159 | constructor, `setTokenLimits`, `setTokenDepositsEnabled`, `_creditLiabilities`, `_debitLiabilities` |
-| 3 | — | `_tokenIdOf` | `mapping(address ⇒ uint32)` | 163 | constructor |
-| 4 | — | `_tokenRegistered` | `mapping(address ⇒ bool)` | 166 | constructor |
-| 5 | 0 | `_listedTokenIds` | `uint32[]` | 170 | constructor |
-| 6 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 176 | constructor only |
-| 6 | 20 | `aaveEnabled` | `bool` | 192 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
-| 7 | 0 | `suppliedPrincipal` | `uint256` | 195 | `deposit` (+, through `_supplyAboveTarget`), `withdrawByProof` and `withdrawFromAave` (−, through `_bookPull`), `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
-| 8 | 0 | `liquidReserveBps` | `uint256` | 200 | constructor (`1_000`), `setLiquidReserveBps` |
-| 9 | 0 | `supplyMultiplierBps` | `uint256` | 205 | constructor (`20_000`), `setSupplyMultiplierBps` |
-| 10 | 0 | `owner` | `address` | 208 | constructor, `acceptOwnership` |
-| 11 | 0 | `pendingOwner` | `address` | 211 | `transferOwnership`, `acceptOwnership` |
-| 12 | 0 | `yieldRecipient` | `address` | 214 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
-| 12 | 20 | `paused` | `bool` | 220 | `pause`, `unpause` |
-| 13 | 0 | `_reentrancyStatus` | `uint256` | 225 | `nonReentrant` |
-| 14 | 0 | `storedBkSetCommitment` | `uint256` | 253 | constructor, `applyBkSetUpdate` |
-| 15 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 260 | `applyBkSetUpdate` |
-| 15 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 264 | constructor, `verifyBlock` |
-| 16 | 0 | `storedPrevBkSetCommitment` | `uint256` | 271 | `applyBkSetUpdate` |
-| 17 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 365 | `withdrawByProof` |
-| 18 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 384 | `_appendLayer` |
-| 19–28 | — | `_nackl` | `NacklMint.State` | 388 | `listNackl`, `deposit` and `withdrawByProof` (NACKL), `executeNacklPayout`, `migrateToken(1, …)` |
+| 0 | 0 | `depositCounter` | `uint256` | 118 | `deposit` |
+| 1 | 0 | `treasuryBalance` | `uint256` | 127 | `deposit` (+ USDC only), `fundTreasury` (+), `withdrawByProof` (− USDC only), `migrateTreasury` (→ 0) |
+| 2 | — | `_tokens` | `mapping(uint32 ⇒ TokenInfo)` | 161 | constructor, `setTokenLimits`, `setTokenDepositsEnabled`, `_creditLiabilities`, `_debitLiabilities` |
+| 3 | — | `_tokenIdOf` | `mapping(address ⇒ uint32)` | 165 | constructor |
+| 4 | — | `_tokenRegistered` | `mapping(address ⇒ bool)` | 168 | constructor |
+| 5 | 0 | `_listedTokenIds` | `uint32[]` | 172 | constructor |
+| 6 | 0 | `blockHeaderOracle` | `IBlockHeaderOracle` | 178 | constructor only |
+| 6 | 20 | `aaveEnabled` | `bool` | 194 | constructor, `setAaveEnabled`, `emergencyWithdrawAll` |
+| 7 | 0 | `suppliedPrincipal` | `uint256` | 197 | `deposit` (+, through `_supplyAboveTarget`), `withdrawByProof` and `withdrawFromAave` (−, through `_bookPull`), `emergencyWithdrawAll`, `writeOffUnbackedPrincipal` |
+| 8 | 0 | `liquidReserveBps` | `uint256` | 202 | constructor (`1_000`), `setLiquidReserveBps` |
+| 9 | 0 | `supplyMultiplierBps` | `uint256` | 207 | constructor (`20_000`), `setSupplyMultiplierBps` |
+| 10 | 0 | `owner` | `address` | 210 | constructor, `acceptOwnership` |
+| 11 | 0 | `pendingOwner` | `address` | 213 | `transferOwnership`, `acceptOwnership` |
+| 12 | 0 | `yieldRecipient` | `address` | 216 | constructor, `setYieldRecipient`, `acceptOwnership` (when it was the previous owner) |
+| 12 | 20 | `paused` | `bool` | 222 | `pause`, `unpause` |
+| 13 | 0 | `_reentrancyStatus` | `uint256` | 227 | `nonReentrant` |
+| 14 | 0 | `storedBkSetCommitment` | `uint256` | 255 | constructor, `applyBkSetUpdate` |
+| 15 | 0 | `storedLastBkSetUpdateSeqNo` | `uint64` | 262 | `applyBkSetUpdate` |
+| 15 | 8 | `storedLastSeenBlockSeqNo` | `uint64` | 266 | constructor, `verifyBlock` |
+| 16 | 0 | `storedPrevBkSetCommitment` | `uint256` | 273 | `applyBkSetUpdate` |
+| 17 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 369 | `withdrawByProof` |
+| 18 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 388 | `_appendLayer` |
+| 19–32 | — | `_nackl` | `NacklMint.State` | 390 | `listNackl`, `deposit` and `withdrawByProof` (NACKL), `executeNacklPayout`, `migrateToken(1, …)` |
 
 Regenerated from this tree with `forge inspect src/AckiNackiBridge.sol:AckiNackiBridge
 storageLayout`. **The token registry took slots 2–5**, so everything from
@@ -618,7 +618,7 @@ boundary at or below it — usually just that one bundle.
 NACKL (ECC id `1`) is minted, not paid from custody
 ([`NACKL-bridge-extension.md`](NACKL-bridge-extension.md)). The logic is the external library
 `src/NacklMint.sol`, linked at deployment and run by DELEGATECALL in the bridge's storage
-(`_nackl`, slots 19–28), so the bridge is the minter of `src/NacklToken.sol` and logs its events.
+(`_nackl`, slots 19–32), so the bridge is the minter of `src/NacklToken.sol` and logs its events.
 
 - `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` (owner) lists the token under id `1`
   with no TVL cap; its owner must be this bridge or, before a handover, `predecessor`. Called again

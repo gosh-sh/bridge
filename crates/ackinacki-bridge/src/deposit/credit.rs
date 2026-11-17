@@ -123,20 +123,6 @@ pub async fn bridge_tx_verdict(
             bridge_tx: tx.hash.clone(),
         });
     }
-    let pending = tx.out.iter().find_map(|m| {
-        if !m.dst.ends_with(DEPOSIT_PENDING_DST) {
-            return None;
-        }
-        let (n, v) = an.decode(BRIDGE_ABI, m.body.as_deref()?, false)?;
-        (n == "DepositPending" && id.matches_pending(&v))
-            .then(|| v["depositHash"].as_str().unwrap_or_default().to_owned())
-    });
-    if let Some(deposit_hash) = pending {
-        return Ok(Credit::Pending {
-            bridge_tx: tx.hash.clone(),
-            deposit_hash,
-        });
-    }
     let event_ok = tx.out.iter().any(|m| {
         m.dst.ends_with(DEPOSIT_FINALIZED_DST)
             && m.body
@@ -144,6 +130,24 @@ pub async fn bridge_tx_verdict(
                 .and_then(|b| an.decode(BRIDGE_ABI, b, false))
                 .is_some_and(|(n, v)| n == "DepositFinalized" && id.matches(&v))
     });
+    let pending = (!event_ok)
+        .then(|| {
+            tx.out.iter().find_map(|m| {
+                if !m.dst.ends_with(DEPOSIT_PENDING_DST) {
+                    return None;
+                }
+                let (n, v) = an.decode(BRIDGE_ABI, m.body.as_deref()?, false)?;
+                (n == "DepositPending" && id.matches_pending(&v))
+                    .then(|| v["depositHash"].as_str().unwrap_or_default().to_owned())
+            })
+        })
+        .flatten();
+    if let Some(deposit_hash) = pending {
+        return Ok(Credit::Pending {
+            bridge_tx: tx.hash.clone(),
+            deposit_hash,
+        });
+    }
     let transfer = tx.out.iter().find(|m| {
         is_recipient(&m.dst, &id.account)
             && m.ecc
@@ -906,6 +910,15 @@ mod tests {
         let mut payer = paid_by("btx");
         payer.hash = "lock".into();
         payer.now = 9;
+        let mut queued_next = pending.clone();
+        queued_next.hash = "pend-next".into();
+        queued_next.body = Some("B-pending-next".into());
+        an.bodies.lock().unwrap().insert(
+            "B-pending-next".into(),
+            ("DepositPending".into(), json!({ "depositHash": "0x88", "chainId": i.chain_id.to_string(),
+                "amount": i.amount.to_string(), "anAccount": format!("0x{}", hex::encode(i.account)) })),
+        );
+        payer.out.push(queued_next);
         an.transactions.lock().unwrap().get_mut("btx").unwrap().out = vec![pending];
         let finalized = an
             .ext_out

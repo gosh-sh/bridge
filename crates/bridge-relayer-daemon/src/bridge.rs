@@ -2945,12 +2945,6 @@ mod tests {
         Arc::new(|_| true)
     }
 
-    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
-    /// slower than the daemons' bound must not come back to the user as a
-    /// failure. Only the daemons set a bound.
-    /// A mined `withdrawByProof` with status 0 must not read as paid: the
-    /// user's eccUSDC are already burned, so `Paid` would park an unpaid
-    /// withdrawal in `done` behind a `PAID` log line.
     #[test]
     fn a_receipt_with_nackl_payout_queued_is_queued_not_paid() {
         use alloy::sol_types::SolEvent;
@@ -2986,6 +2980,12 @@ mod tests {
         assert!(matches!(other_event, WithdrawSubmitOutcome::Paid { .. }));
     }
 
+    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
+    /// slower than the daemons' bound must not come back to the user as a
+    /// failure. Only the daemons set a bound.
+    /// A mined `withdrawByProof` with status 0 must not read as paid: the
+    /// user's eccUSDC are already burned, so `Paid` would park an unpaid
+    /// withdrawal in `done` behind a `PAID` log line.
     #[test]
     fn a_mined_revert_is_reverted_not_paid() {
         let hash = B256::repeat_byte(0x42);

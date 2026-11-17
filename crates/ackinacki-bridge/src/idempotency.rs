@@ -145,14 +145,14 @@ impl Status {
                  funds again, use a different (amount, recipient, chain) — the identity is what \
                  the record is keyed on.",
             ),
-            // A broadcast EVM transaction whose receipt nobody has seen,
-            // so re-broadcasting risks a double payout.
             Status::Queued => Disposition::Terminal(
                 "This withdrawal was accepted and its NACKL payout queued: the proof is spent and \
                  is not sent again, and `--allow-retry` does not reopen it. executeNacklPayout \
                  mints the payout once it is due, after the payouts due before it, and within the \
                  bridge's daily limit; the relayer sends it, and anyone may.",
             ),
+            // A broadcast EVM transaction whose receipt nobody has seen,
+            // so re-broadcasting risks a double payout.
             Status::Submitted => Disposition::Terminal(
                 "There is a broadcast EVM transaction whose receipt was never observed, and \
                  `--allow-retry` does not override that: re-broadcasting risks a double payout. \

@@ -368,11 +368,13 @@ bridge pays the burns bound to it, and `setEvmBridge` with the new bridge reopen
 them once the principal has moved — the order is in `docs/aave-yield.md`,
 "Replacing a bridge on the same chain".
 
-On the EVM side `migrateTreasury` moves USDC. USDC is the only token listed today, so
-`migrateToken(tokenId, successor)` has nothing to move: it is for a later bridge version that
-lists another token, and moves its custody and liabilities together, with
-nothing minted here. Both run on the paused old bridge, and the registry here does
-not change. The new bridge must list the token under the same id, with a withdrawal
+On the EVM side `migrateTreasury` moves USDC. NACKL (id 1) is not held in custody:
+`migrateToken(1, successor)` hands the NACKL token's minter to the successor, and runs only once
+`getNacklLockedTo(chainId, oldBridge)` here equals the old bridge's `nacklState().accepted` and
+nothing is queued there (`docs/NACKL-bridge-extension.md`, NB-HO-3). Until then the successor
+queues NACKL payouts and executes none. For any other listed token `migrateToken(tokenId,
+successor)` moves its custody and liabilities together, with nothing minted here. All of them
+run on the paused old bridge, and the registry here does not change. The new bridge must list the token under the same id, with a withdrawal
 cap no lower than the old listing's (`FundedTokenMismatch`,
 `SuccessorWithdrawalCapTooLow`). A token left behind strands later burns:
 `setEvmBridge` binds every currency on a chain to one address, so the old bridge

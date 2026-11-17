@@ -1526,7 +1526,7 @@ without them it is refused with exit 2.
 | 33 | The Acki Nacki bridge refused `finalizeDeposit` | in the EVM bridge | 222: `--resume <op-id>` once the owner restores the allowlist; 244, 300–305, 307, 308: the bridge does not accept this receipt or its log — keep the work directory (`receipt_proof.json`) and report it; other codes: report them |
 | 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt; or a `--resume` could not open the state directory or read the operation's record | unknown | `--resume <op-id>`; never make a new deposit instead |
 | **35** | **The deposit is on chain but the Acki Nacki bridge cannot finalize it from its receipt, or it is not the deposit that was requested** | **in the EVM bridge** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
-| **37** | **The voucher exists and the bridge transaction that should have minted the credit aborted** | **in the EVM bridge, beyond a retry; only the operator can pay it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
+| **37** | **The voucher exists and the bridge transaction that should have minted (USDC) or unlocked (NACKL) the credit aborted** | **USDC: in the EVM bridge, beyond a retry; only the operator can pay it out. NACKL: burned on the EVM chain and still locked on the AN bridge; no call in this version pays it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 | **38** | **A NACKL deposit is proven, but the AN bridge held less NACKL locked for its chain and recorded it as pending** | **pending on the AN bridge** | the next NACKL withdrawals to that chain pay it once they lock enough (anyone can also call `releasePendingDeposit(<depositHash>)`); then `--resume <op-id>` confirms the credit |
 
 `--resume <op-id>` continues 30–34 and 38. 22, 35 and 37 close the operation for
@@ -1553,7 +1553,11 @@ record.
   through its own contract. The CLI does not finalize a deposit you did not
   ask for. The operator or the operator's relayer can finalize it to the
   recipient in its call data.
-- **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
+- **Exit 37, NACKL** — the voucher is spent and the NACKL stays locked on the AN
+  bridge. `mintAndSendBridged` mints USDC and `mintAndSendTokenBridged` refuses
+  id 1, so neither pays it out: only the bridge owner can release it, with new
+  bridge code, for this deposit's recipient and amount.
+- **Exit 37, USDC** — the voucher is spent, so the deposit cannot be finalized again.
   The operator pays it out (`mintAndSendBridged`) once, for this deposit's
   recipient, amount and source `chainId`. That call credits bridged inventory the way
   `confirmDeposit` would have; ordinary `mintAndSend` does not. The call
@@ -1633,7 +1637,7 @@ the exit code of the operation's stage, since the deposit may be on chain
 already. The minimum is `1.17.0`, the first bridge that finalizes a deposit
 from its receipt proof; an older one expects a Halo2 proof this CLI no longer
 makes. A bridge newer than the newest this build was checked against
-(`1.17.0`) is refused by a released CLI too, since its `finalizeDeposit` may
+(`1.18.0`) is refused by a released CLI too, since its `finalizeDeposit` may
 take other arguments. A source build with `--features dev-unfixed-bridge`
 turns the refusal of a newer bridge into a warning.
 

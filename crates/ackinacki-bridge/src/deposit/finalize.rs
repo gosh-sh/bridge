@@ -439,6 +439,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         assert_eq!(
             pre_send(H, H, Some(&v), false, false),
@@ -452,6 +453,7 @@ mod tests {
             status: AccStatus::Uninit,
             dapp_id: None,
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         assert_eq!(pre_send(H, H, Some(&v), false, false), PreSend::Send {
             via_events: false
@@ -464,6 +466,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         assert_eq!(
             pre_send(H, [1; 32], Some(&v), false, false),
@@ -1038,6 +1041,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         an.failing_getters.lock().unwrap().insert("isPaused".into());
         let ui = crate::deposit::ui::RecordingUi::new(true);
@@ -1073,6 +1077,7 @@ mod tests {
             status: AccStatus::Uninit,
             dapp_id: None,
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)

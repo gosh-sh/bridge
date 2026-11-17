@@ -1071,7 +1071,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         ensureBalance();
 
         if (tokenId == NACKL_ECC_ID) {
-            if (!_unlockNackl(chainId, amount, anAccount)) {
+            _payPendingQueue(chainId);
+            if (_pendingFirst[chainId] != 0 || !_unlockNackl(chainId, amount, anAccount)) {
                 uint256 last = _pendingLast[chainId];
                 _pendingDeposits[depositHash] = PendingDeposit(
                     depositId, contractAddr, dappId, chainId, amount, anAccount, last, 0);

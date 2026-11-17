@@ -212,6 +212,7 @@ pub fn recipient_verdict(
             status: AccStatus::Active,
             dapp_id: Some(d),
             ecc3,
+            ..
         }) => {
             if *d != target.dapp_id {
                 return Err(format!(
@@ -565,6 +566,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         an.getter(BRIDGE, "getVersion", vec![
             json!({ "value0": "1.17.0", "value1": "eccBridge" }),
@@ -809,6 +811,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([2; 32]),
             ecc3: 5,
+            ecc: vec![(3, 5)],
         };
         assert!(recipient_verdict(&t, Some(&other))
             .unwrap_err()
@@ -825,6 +828,7 @@ mod tests {
             status: AccStatus::Uninit,
             dapp_id: None,
             ecc3: 5,
+            ecc: vec![(3, 5)],
         };
         assert!(matches!(
             recipient_verdict(&t, Some(&uninit)).unwrap(),

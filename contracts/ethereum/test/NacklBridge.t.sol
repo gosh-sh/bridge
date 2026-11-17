@@ -36,7 +36,7 @@ contract NacklBridgeTest is NacklBridgeFixture {
         assertEq(decimals, 9);
         assertTrue(open);
         assertEq(maxTransfer, MAX_TRANSFER);
-        (uint256 limit, uint256 threshold,,,,,,) = bridge.nacklState();
+        (uint256 limit, uint256 threshold,,,,,,,) = bridge.nacklState();
         assertEq(limit, DAILY_LIMIT);
         assertEq(threshold, DELAY_THRESHOLD);
     }
@@ -180,6 +180,92 @@ contract NacklBridgeTest is NacklBridgeFixture {
         }
     }
 
+    function _next() internal view returns (uint256 id) {
+        (,,,,,,,, id) = bridge.nacklState();
+    }
+
+    function test_NB_EVM_ORDER_aQueuedPayoutIsNotStarvedBySmallerOnes() public {
+        bridge.listNackl(nackl, MAX_TRANSFER, MAX_TRANSFER, MAX_TRANSFER);
+        _withdraw(1);
+        _withdraw(MAX_TRANSFER);
+        assertEq(_next(), 1);
+        uint256 t = block.timestamp;
+        for (uint256 h = 0; h < 30; h++) {
+            t += 1 hours;
+            vm.warp(t);
+            _withdraw(1);
+        }
+        assertEq(nackl.balanceOf(RECIPIENT), 1);
+        (,, uint256 pending, uint256 payouts) = _state();
+        assertEq(pending, 31);
+        assertEq(payouts, 31);
+
+        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklPayoutNotNext.selector, 2, 1));
+        bridge.executeNacklPayout(2);
+
+        bridge.executeNacklPayout(1);
+        assertEq(nackl.balanceOf(RECIPIENT), 1 + MAX_TRANSFER);
+        assertEq(_next(), 2);
+
+        vm.warp(t + 25 hours);
+        for (uint256 id = 2; id <= 31; id++) {
+            assertEq(_next(), id);
+            bridge.executeNacklPayout(id);
+        }
+        (,, pending,) = _state();
+        assertEq(pending, 0);
+        assertEq(_next(), 0);
+        _withdraw(1);
+        assertEq(nackl.balanceOf(RECIPIENT), 1 + MAX_TRANSFER + 31);
+
+        AckiNackiBridge s = _successor();
+        _listOnSuccessor(s);
+        bridge.pause();
+        bridge.migrateToken(1, address(s));
+        assertEq(nackl.owner(), address(s));
+    }
+
+    function test_NB_EVM_ORDER_aDelayedPayoutNotYetDueHoldsNothingBack() public {
+        _withdraw(DELAY_THRESHOLD + 1);
+        assertEq(_next(), 0);
+        _withdraw(DELAY_THRESHOLD);
+        assertEq(nackl.balanceOf(RECIPIENT), DELAY_THRESHOLD);
+        (,, uint256 pending,) = _state();
+        assertEq(pending, 1);
+    }
+
+    function test_NB_EVM_ORDER_aDueDelayedPayoutGoesBeforeLaterOnes() public {
+        _withdraw(DELAY_THRESHOLD + 1);
+        vm.warp(block.timestamp + 24 hours);
+        assertEq(_next(), 1);
+        _withdraw(1);
+        assertEq(nackl.balanceOf(RECIPIENT), 0);
+        assertEq(_next(), 1);
+        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklPayoutNotNext.selector, 2, 1));
+        bridge.executeNacklPayout(2);
+        bridge.executeNacklPayout(1);
+        assertEq(_next(), 2);
+        bridge.executeNacklPayout(2);
+        assertEq(nackl.balanceOf(RECIPIENT), DELAY_THRESHOLD + 2);
+        assertEq(_next(), 0);
+    }
+
+    function test_NB_EVM_ORDER_windowQueuedPaysBeforeALaterDueDelayed() public {
+        for (uint256 i = 0; i < 20; i++) {
+            _withdraw(DELAY_THRESHOLD);
+        }
+        _withdraw(1);
+        _withdraw(DELAY_THRESHOLD + 1);
+        assertEq(_next(), 1);
+        vm.warp(block.timestamp + 25 hours);
+        assertEq(_next(), 1);
+        vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklPayoutNotNext.selector, 2, 1));
+        bridge.executeNacklPayout(2);
+        bridge.executeNacklPayout(1);
+        bridge.executeNacklPayout(2);
+        assertEq(_next(), 0);
+    }
+
     function test_NB_EVM_EXECUTE_unknownPayout() public {
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklPayoutUnknown.selector, 7));
         bridge.executeNacklPayout(7);
@@ -198,7 +284,7 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
     function test_NB_EVM_LIMITS_ownerSetsLimitsNotBelowTheCap() public {
         bridge.listNackl(nackl, 0, 2 * MAX_TRANSFER, 10);
-        (uint256 limit, uint256 threshold,,,,,,) = bridge.nacklState();
+        (uint256 limit, uint256 threshold,,,,,,,) = bridge.nacklState();
         assertEq(limit, 2 * MAX_TRANSFER);
         assertEq(threshold, 10);
 
@@ -299,7 +385,7 @@ contract NacklBridgeTest is NacklBridgeFixture {
         bridge.pause();
         bridge.migrateToken(1, address(s));
         assertEq(nackl.owner(), address(s));
-        (,,,,,,, bool handedOver) = bridge.nacklState();
+        (,,,,,,, bool handedOver,) = bridge.nacklState();
         assertTrue(handedOver);
         (,, bool open,,,) = bridge.tokenInfo(1);
         assertFalse(open);
@@ -322,7 +408,7 @@ contract NacklBridgeTest is NacklBridgeFixture {
     }
 
     function _handoverReady(AckiNackiBridge b, uint256 lockedTo) internal view returns (bool) {
-        (,,, uint256 accepted,, uint256 pendingCount,,) = b.nacklState();
+        (,,, uint256 accepted,, uint256 pendingCount,,,) = b.nacklState();
         return accepted == lockedTo && pendingCount == 0;
     }
 

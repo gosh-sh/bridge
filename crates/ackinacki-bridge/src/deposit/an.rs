@@ -75,6 +75,7 @@ pub struct AccountInfo {
     pub dapp_id: Option<[u8; 32]>,
     /// Its ECC[3] (eccUSDC) balance, in micro-USDC.
     pub ecc3: u128,
+    pub ecc: Vec<(u32, u128)>,
 }
 
 /// A message's transaction, as a message query resolves it.
@@ -232,6 +233,10 @@ pub fn parse_account(v: &Value) -> Option<AccountInfo> {
             .find(|(c, _)| *c == 3)
             .map(|(_, v)| v.max(0) as u128)
             .unwrap_or(0),
+        ecc: ecc(&info["balance_other"])
+            .into_iter()
+            .map(|(c, v)| (c, v.max(0) as u128))
+            .collect(),
     })
 }
 
@@ -1077,6 +1082,7 @@ mod tests {
             "balance_other": [{ "currency": 2.0, "value": "0xe8d4a51000" }, { "currency": 3.0, "value": "0x1c7ad7140" }] } }))
         .unwrap();
         assert_eq!(a.ecc3, 7_645_000_000);
+        assert_eq!(a.ecc, vec![(2, 1_000_000_000_000), (3, 7_645_000_000)]);
     }
 
     #[test]

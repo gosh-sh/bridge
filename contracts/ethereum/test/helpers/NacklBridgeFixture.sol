@@ -142,10 +142,10 @@ abstract contract NacklBridgeFixture is Test {
         view
         returns (uint256 accepted, uint256 minted, uint256 pendingCount, uint256 payoutCount)
     {
-        (,,, accepted, minted, pendingCount, payoutCount,) = bridge.nacklState();
+        (,,, accepted, minted, pendingCount, payoutCount,,) = bridge.nacklState();
     }
 
     function _windowUsed() internal view returns (uint256 used) {
-        (,, used,,,,,) = bridge.nacklState();
+        (,, used,,,,,,) = bridge.nacklState();
     }
 }

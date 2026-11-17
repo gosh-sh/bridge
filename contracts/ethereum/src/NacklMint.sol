@@ -26,6 +26,10 @@ library NacklMint {
         uint256 minted;
         uint256 pendingCount;
         bool handedOver;
+        uint256[] windowQueue;
+        uint256 windowHead;
+        uint256[] delayQueue;
+        uint256 delayHead;
     }
 
     event NacklListed(address indexed token, uint256 dailyLimit, uint256 delayThreshold);
@@ -42,6 +46,7 @@ library NacklMint {
     error NacklPayoutUnknown(uint256 payoutId);
     error NacklPayoutAlreadyExecuted(uint256 payoutId);
     error NacklPayoutNotDue(uint256 payoutId, uint64 readyAt);
+    error NacklPayoutNotNext(uint256 payoutId, uint256 next);
     error NacklWindowFull(uint256 used, uint256 amount, uint256 dailyLimit);
     error NacklMinterGone();
     error NacklPayoutsPending(uint256 count);
@@ -83,7 +88,7 @@ library NacklMint {
         if (s.handedOver) revert NacklMinterGone();
         s.accepted += amount;
         bool large = amount > s.delayThreshold;
-        if (!large && windowUsed(s) + amount <= s.dailyLimit) {
+        if (!large && next(s) == 0 && windowUsed(s) + amount <= s.dailyLimit) {
             _mint(s, recipient, amount);
             return 0;
         }
@@ -92,6 +97,8 @@ library NacklMint {
         s.payouts[payoutId] =
             Payout({ recipient: recipient, readyAt: readyAt, executed: false, amount: amount });
         s.pendingCount += 1;
+        if (large) s.delayQueue.push(payoutId);
+        else s.windowQueue.push(payoutId);
         emit NacklPayoutQueued(payoutId, recipient, amount, readyAt);
     }
 
@@ -101,10 +108,17 @@ library NacklMint {
         if (p.recipient == address(0)) revert NacklPayoutUnknown(payoutId);
         if (p.executed) revert NacklPayoutAlreadyExecuted(payoutId);
         if (block.timestamp < p.readyAt) revert NacklPayoutNotDue(payoutId, p.readyAt);
+        uint256 first = next(s);
+        if (payoutId != first) revert NacklPayoutNotNext(payoutId, first);
         uint256 used = windowUsed(s);
         if (used + p.amount > s.dailyLimit) revert NacklWindowFull(used, p.amount, s.dailyLimit);
         p.executed = true;
         s.pendingCount -= 1;
+        if (s.windowHead < s.windowQueue.length && s.windowQueue[s.windowHead] == payoutId) {
+            s.windowHead += 1;
+        } else {
+            s.delayHead += 1;
+        }
         _mint(s, p.recipient, p.amount);
         emit NacklPayoutExecuted(payoutId, p.recipient, p.amount);
     }
@@ -120,6 +134,18 @@ library NacklMint {
         s.handedOver = true;
         s.token.transferOwnership(successor);
         emit NacklMinterHandedOver(successor);
+    }
+
+    function next(State storage s) public view returns (uint256) {
+        uint256 w = s.windowHead < s.windowQueue.length ? s.windowQueue[s.windowHead] : 0;
+        uint256 d = s.delayHead < s.delayQueue.length ? s.delayQueue[s.delayHead] : 0;
+        if (d != 0 && s.payouts[d].readyAt > block.timestamp) d = 0;
+        if (w == 0) return d;
+        if (d == 0) return w;
+        Payout storage pw = s.payouts[w];
+        Payout storage pd = s.payouts[d];
+        if (pd.readyAt < pw.readyAt || (pd.readyAt == pw.readyAt && d < w)) return d;
+        return w;
     }
 
     function windowUsed(State storage s) public view returns (uint256 used) {

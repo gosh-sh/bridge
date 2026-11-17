@@ -456,6 +456,7 @@ pub async fn run_fresh(
         hex::encode(checked.an.voucher_code_hash),
     );
     rec.token_id = checked.token_id;
+    rec.token_decimals = Some(checked.evm.decimals);
     let op = rec.op_id.clone();
     let Some(op_lock) = OpLock::try_take(&p.state_dir, &op)? else {
         return Err(CliError::Preflight {
@@ -1120,7 +1121,12 @@ async fn walk(
     let balance_before = once(None, d.an.account(to.account_id))
         .await
         .flatten()
-        .map(|a| a.ecc3);
+        .map(|a| {
+            a.ecc
+                .iter()
+                .find(|(c, _)| *c == rec.token_id)
+                .map_or(0, |(_, v)| *v)
+        });
     let mut anchor_waited = None;
     let mut block_seen = None;
     loop {
@@ -1591,10 +1597,16 @@ async fn walk(
                         persist(store, rec)?;
                         board.done(StepId::Credit, &detail);
                         // Diagnostic only: one bounded read.
-                        let after = once(None, d.an.account(to.account_id))
-                            .await
-                            .flatten()
-                            .map(|a| a.ecc3);
+                        let after =
+                            once(None, d.an.account(to.account_id))
+                                .await
+                                .flatten()
+                                .map(|a| {
+                                    a.ecc
+                                        .iter()
+                                        .find(|(c, _)| *c == rec.token_id)
+                                        .map_or(0, |(_, v)| *v)
+                                });
                         return Ok(summary(rec, anchor_waited, (balance_before, after)));
                     },
                     Err(e) if e.exit_code() == ExitCode::CreditAborted => {
@@ -1646,7 +1658,8 @@ pub fn summary(
         dry_run: false,
         network: net.map(Network::arg).unwrap_or_default(),
         chain_id: rec.params.chain_id,
-        amount: UsdcAmount(u128::from(rec.params.amount_units)).display(),
+        amount: UsdcAmount(u128::from(rec.params.amount_units))
+            .display_with_decimals(rec.token_decimals.unwrap_or(6)),
         to: rec.params.to.clone(),
         deposit: rec.deposit.as_ref().map(|d| {
             json!({
@@ -2266,7 +2279,8 @@ pub async fn abandon(p: &DepositParams, op: &str, ui: &dyn Ui) -> CliResult<Depo
             .map(Network::arg)
             .unwrap_or_default(),
         chain_id: rec.params.chain_id,
-        amount: UsdcAmount(u128::from(rec.params.amount_units)).display(),
+        amount: UsdcAmount(u128::from(rec.params.amount_units))
+            .display_with_decimals(rec.token_decimals.unwrap_or(6)),
         to: rec.params.to.clone(),
         deposit: rec.tx.map(|t| {
             json!({
@@ -4146,6 +4160,106 @@ mod tests {
         let b = s.balance.unwrap();
         assert_eq!(b["before"], "7000000");
         assert_eq!(b["after"], "0", "less than before, and still exit 0");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_nackl_deposit_reports_its_own_currency_and_decimals() {
+        let mut w = World::healthy();
+        let op = w.proved_operation();
+        let store = crate::deposit::store::Store::open(w.state.path()).unwrap();
+        let mut r = store.load(&op).unwrap();
+        r.token_id = 1;
+        r.token_decimals = Some(9);
+        store.write(&mut r).unwrap();
+        w.credit_chain_for_mined_deposit();
+        for m in w.an.messages.lock().unwrap().values_mut() {
+            for c in m.ecc.iter_mut() {
+                c.0 = 1;
+            }
+        }
+        for t in w.an.transactions.lock().unwrap().values_mut() {
+            for c in t.ecc_delta.iter_mut() {
+                c.0 = 1;
+            }
+            for m in t.out.iter_mut() {
+                for c in m.ecc.iter_mut() {
+                    c.0 = 1;
+                }
+            }
+        }
+        w.recipient_spends_everything_after_the_send(7_000_000);
+        w.an.accounts
+            .lock()
+            .unwrap()
+            .get_mut(&W_ACC)
+            .unwrap()
+            .ecc
+            .push((1, 2_000_000_000));
+        for (_, a) in w.an.on_send_accounts.lock().unwrap().iter_mut() {
+            a.ecc = vec![(1, 5_000_000_000), (3, 7_000_000)];
+        }
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(
+            s.amount,
+            UsdcAmount(u128::from(r.params.amount_units)).display_with_decimals(9)
+        );
+        let b = s.balance.unwrap();
+        assert_eq!(b["before"], "2000000000");
+        assert_eq!(b["after"], "5000000000");
+    }
+
+    fn nackl_record(decimals: Option<u8>) -> OpRecord {
+        let mut r = OpRecord::new(
+            "op".into(),
+            OpParams {
+                chain_id: 421_614,
+                bridge: Address::ZERO,
+                to: "to".into(),
+                amount_units: 3_000_000_000,
+                token: Address::ZERO,
+                an_bridge: "bridge".into(),
+                an_network: "net".into(),
+            },
+            "00".into(),
+        );
+        r.token_id = 1;
+        r.token_decimals = decimals;
+        r
+    }
+
+    #[test]
+    fn a_nackl_summary_counts_nine_decimals() {
+        let s = summary(
+            &nackl_record(Some(9)),
+            None,
+            (Some(1_000_000_000), Some(4_000_000_000)),
+        );
+        assert_eq!(s.amount, "3.000000000");
+        let b = s.balance.unwrap();
+        assert_eq!(
+            (b["before"].as_str(), b["after"].as_str()),
+            (Some("1000000000"), Some("4000000000"))
+        );
+    }
+
+    #[test]
+    fn a_record_without_decimals_reads_as_usdc() {
+        assert_eq!(
+            summary(&nackl_record(None), None, (None, None)).amount,
+            "3000.000000"
+        );
+        let old: OpRecord = serde_json::from_value({
+            let mut v = serde_json::to_value(nackl_record(Some(9))).unwrap();
+            v.as_object_mut().unwrap().remove("token_decimals");
+            v
+        })
+        .unwrap();
+        assert_eq!(old.token_decimals, None);
     }
 
     // ---- a deposit somebody else finalized while this run was stopped ----

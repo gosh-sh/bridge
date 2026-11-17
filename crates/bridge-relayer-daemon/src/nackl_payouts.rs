@@ -1,4 +1,3 @@
-
 use alloy::{
     primitives::{B256, U256},
     sol_types::SolError,
@@ -45,9 +44,10 @@ where
 
 #[derive(Debug, Default)]
 pub struct NacklPayoutScanState {
-    pub first_open: u64,
     pub executed: u64,
 }
+
+const MAX_PAYOUTS_PER_PASS: usize = 64;
 
 fn reverted_with(reason: &str, selector: [u8; 4]) -> bool {
     reason
@@ -64,32 +64,27 @@ where
     B: NacklPayoutBridge + ?Sized,
 {
     use AckiNackiBridge as A;
-    let state = match bridge.nackl_state().await {
-        Ok(s) => s,
-        Err(e) => {
-            debug!(error = %e, "nacklState unavailable; skipping the NACKL payout lane");
+    for _ in 0..MAX_PAYOUTS_PER_PASS {
+        let state = match bridge.nackl_state().await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(error = %e, "nacklState unavailable; skipping the NACKL payout lane");
+                return false;
+            },
+        };
+        if state.handed_over || state.pending_count.is_zero() || state.next_payout.is_zero() {
             return false;
-        },
-    };
-    if state.handed_over || state.pending_count.is_zero() {
-        return false;
-    }
-    let count: u64 = state.payout_count.try_into().unwrap_or(u64::MAX);
-    st.first_open = st.first_open.max(1);
-    let mut id = st.first_open;
-    while id <= count {
-        let payout_id = U256::from(id);
+        }
+        let payout_id = state.next_payout;
         match bridge.dry_run_execute_nackl_payout(payout_id).await {
             Ok(DryRunOutcome::WouldSucceed) if dry_run => {
                 info!(%payout_id, "dry-run: executeNacklPayout would succeed");
+                return false;
             },
             Ok(DryRunOutcome::WouldSucceed) => match bridge.execute_nackl_payout(payout_id).await {
                 Ok(tx_hash) => {
                     info!(%payout_id, ?tx_hash, "NACKL payout EXECUTED");
                     st.executed += 1;
-                    if id == st.first_open {
-                        st.first_open = id + 1;
-                    }
                 },
                 Err(e) => {
                     warn!(%payout_id, error = %e, "executeNacklPayout failed; will retry");
@@ -99,17 +94,17 @@ where
             Ok(DryRunOutcome::WouldRevert {
                 reason,
             }) => {
-                if reverted_with(&reason, A::NacklPayoutAlreadyExecuted::SELECTOR) {
-                    if id == st.first_open {
-                        st.first_open = id + 1;
-                    }
+                if reverted_with(&reason, A::NacklPayoutAlreadyExecuted::SELECTOR)
+                    || reverted_with(&reason, A::NacklPayoutNotNext::SELECTOR)
+                {
+                    debug!(%payout_id, %reason, "the next NACKL payout moved; reading it again");
                 } else if reverted_with(&reason, A::NacklPayoutNotDue::SELECTOR)
                     || reverted_with(&reason, A::NacklWindowFull::SELECTOR)
                 {
-                    debug!(%payout_id, %reason, "NACKL payout not executable yet");
-                } else if reverted_with(&reason, A::NacklPayoutUnknown::SELECTOR) {
-                    break;
-                } else if reverted_with(&reason, A::BridgePaused::SELECTOR)
+                    debug!(%payout_id, %reason, "the next NACKL payout is not executable yet");
+                    return false;
+                } else if reverted_with(&reason, A::NacklPayoutUnknown::SELECTOR)
+                    || reverted_with(&reason, A::BridgePaused::SELECTOR)
                     || reverted_with(&reason, A::NacklMinterGone::SELECTOR)
                 {
                     return false;
@@ -123,40 +118,49 @@ where
                 return true;
             },
         }
-        id += 1;
     }
     false
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Mutex};
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        sync::Mutex,
+    };
 
     use super::*;
 
     struct FakeBridge {
-        state: NacklState,
-        reverts: Mutex<BTreeMap<u64, Option<[u8; 4]>>>,
+        queue: Mutex<VecDeque<u64>>,
+        reverts: Mutex<BTreeMap<u64, [u8; 4]>>,
+        stale_next: Mutex<Option<u64>>,
         sent: Mutex<Vec<u64>>,
-    }
-
-    fn state(pending: u64, count: u64) -> NacklState {
-        NacklState {
-            daily_limit: U256::ZERO,
-            delay_threshold: U256::ZERO,
-            window_used: U256::ZERO,
-            accepted: U256::ZERO,
-            minted: U256::ZERO,
-            pending_count: U256::from(pending),
-            payout_count: U256::from(count),
-            handed_over: false,
-        }
+        handed_over: bool,
     }
 
     #[async_trait]
     impl NacklPayoutBridge for FakeBridge {
         async fn nackl_state(&self) -> Result<NacklState, RelayerError> {
-            Ok(self.state)
+            let q = self.queue.lock().unwrap();
+            let next = self
+                .stale_next
+                .lock()
+                .unwrap()
+                .take()
+                .or(q.front().copied())
+                .unwrap_or(0);
+            Ok(NacklState {
+                daily_limit: U256::ZERO,
+                delay_threshold: U256::ZERO,
+                window_used: U256::ZERO,
+                accepted: U256::ZERO,
+                minted: U256::ZERO,
+                pending_count: U256::from(q.len()),
+                payout_count: U256::from(q.back().copied().unwrap_or(0)),
+                handed_over: self.handed_over,
+                next_payout: U256::from(next),
+            })
         }
 
         async fn dry_run_execute_nackl_payout(
@@ -164,15 +168,17 @@ mod tests {
             payout_id: U256,
         ) -> Result<DryRunOutcome, RelayerError> {
             let id: u64 = payout_id.to();
-            Ok(match self.reverts.lock().unwrap().get(&id) {
-                Some(Some(sel)) => DryRunOutcome::WouldRevert {
-                    reason: format!("execution reverted: 0x{}", hex::encode(sel)),
-                },
-                Some(None) => DryRunOutcome::WouldRevert {
+            if self.queue.lock().unwrap().front() != Some(&id) {
+                return Ok(DryRunOutcome::WouldRevert {
                     reason: format!(
                         "execution reverted: 0x{}",
                         hex::encode(AckiNackiBridge::NacklPayoutAlreadyExecuted::SELECTOR)
                     ),
+                });
+            }
+            Ok(match self.reverts.lock().unwrap().get(&id) {
+                Some(sel) => DryRunOutcome::WouldRevert {
+                    reason: format!("execution reverted: 0x{}", hex::encode(sel)),
                 },
                 None => DryRunOutcome::WouldSucceed,
             })
@@ -181,36 +187,64 @@ mod tests {
         async fn execute_nackl_payout(&self, payout_id: U256) -> Result<B256, RelayerError> {
             let id: u64 = payout_id.to();
             self.sent.lock().unwrap().push(id);
-            self.reverts.lock().unwrap().insert(id, None);
+            assert_eq!(self.queue.lock().unwrap().pop_front(), Some(id));
             Ok(B256::ZERO)
         }
     }
 
-    fn fake(pending: u64, count: u64, reverts: &[(u64, Option<[u8; 4]>)]) -> FakeBridge {
+    fn fake(queue: &[u64], reverts: &[(u64, [u8; 4])]) -> FakeBridge {
         FakeBridge {
-            state: state(pending, count),
+            queue: Mutex::new(queue.iter().copied().collect()),
             reverts: Mutex::new(reverts.iter().copied().collect()),
+            stale_next: Mutex::new(None),
             sent: Mutex::new(Vec::new()),
+            handed_over: false,
         }
     }
 
     #[tokio::test]
-    async fn executes_due_payouts_and_skips_the_rest() {
-        let b = fake(2, 4, &[
-            (1, None),
-            (2, Some(AckiNackiBridge::NacklPayoutNotDue::SELECTOR)),
-            (4, Some(AckiNackiBridge::NacklWindowFull::SELECTOR)),
-        ]);
+    async fn executes_the_queue_in_order() {
+        let b = fake(&[3, 4, 7], &[]);
         let mut st = NacklPayoutScanState::default();
         assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
-        assert_eq!(*b.sent.lock().unwrap(), vec![3]);
-        assert_eq!(st.executed, 1);
-        assert_eq!(st.first_open, 2);
+        assert_eq!(*b.sent.lock().unwrap(), vec![3, 4, 7]);
+        assert_eq!(st.executed, 3);
+    }
+
+    #[tokio::test]
+    async fn a_full_window_stops_the_pass_and_nothing_behind_it_is_sent() {
+        let b = fake(&[1, 2, 3], &[(
+            2,
+            AckiNackiBridge::NacklWindowFull::SELECTOR,
+        )]);
+        let mut st = NacklPayoutScanState::default();
+        assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
+        assert_eq!(*b.sent.lock().unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn a_payout_not_due_yet_stops_the_pass() {
+        let b = fake(&[1, 2], &[(
+            1,
+            AckiNackiBridge::NacklPayoutNotDue::SELECTOR,
+        )]);
+        let mut st = NacklPayoutScanState::default();
+        assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
+        assert!(b.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_payout_executed_by_someone_else_is_read_again() {
+        let b = fake(&[2], &[]);
+        *b.stale_next.lock().unwrap() = Some(1);
+        let mut st = NacklPayoutScanState::default();
+        assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
+        assert_eq!(*b.sent.lock().unwrap(), vec![2]);
     }
 
     #[tokio::test]
     async fn dry_run_sends_nothing() {
-        let b = fake(1, 1, &[]);
+        let b = fake(&[1], &[]);
         let mut st = NacklPayoutScanState::default();
         assert!(!nackl_payout_scan_once(&b, true, &mut st).await);
         assert!(b.sent.lock().unwrap().is_empty());
@@ -218,7 +252,16 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_pending_reads_no_payout() {
-        let b = fake(0, 3, &[]);
+        let b = fake(&[], &[]);
+        let mut st = NacklPayoutScanState::default();
+        assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
+        assert!(b.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_handed_over_minter_reads_no_payout() {
+        let mut b = fake(&[1], &[]);
+        b.handed_over = true;
         let mut st = NacklPayoutScanState::default();
         assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
         assert!(b.sent.lock().unwrap().is_empty());
@@ -226,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_paused_bridge_stops_the_pass_without_backoff() {
-        let b = fake(1, 2, &[(1, Some(AckiNackiBridge::BridgePaused::SELECTOR))]);
+        let b = fake(&[1, 2], &[(1, AckiNackiBridge::BridgePaused::SELECTOR)]);
         let mut st = NacklPayoutScanState::default();
         assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
         assert!(b.sent.lock().unwrap().is_empty());
@@ -234,8 +277,17 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_revert_backs_off() {
-        let b = fake(1, 1, &[(1, Some([0xde, 0xad, 0xbe, 0xef]))]);
+        let b = fake(&[1], &[(1, [0xde, 0xad, 0xbe, 0xef])]);
         let mut st = NacklPayoutScanState::default();
         assert!(nackl_payout_scan_once(&b, false, &mut st).await);
+    }
+
+    #[tokio::test]
+    async fn a_pass_is_bounded() {
+        let ids: Vec<u64> = (1..=100).collect();
+        let b = fake(&ids, &[]);
+        let mut st = NacklPayoutScanState::default();
+        assert!(!nackl_payout_scan_once(&b, false, &mut st).await);
+        assert_eq!(st.executed, MAX_PAYOUTS_PER_PASS as u64);
     }
 }

@@ -150,8 +150,8 @@ impl Status {
             Status::Queued => Disposition::Terminal(
                 "This withdrawal was accepted and its NACKL payout queued: the proof is spent and \
                  is not sent again, and `--allow-retry` does not reopen it. executeNacklPayout \
-                 mints the payout once it is due and within the bridge's daily limit; the relayer \
-                 sends it, and anyone may.",
+                 mints the payout once it is due, after the payouts due before it, and within the \
+                 bridge's daily limit; the relayer sends it, and anyone may.",
             ),
             Status::Submitted => Disposition::Terminal(
                 "There is a broadcast EVM transaction whose receipt was never observed, and \

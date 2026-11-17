@@ -974,12 +974,14 @@ mod sol_bindings {
                 uint256 minted,
                 uint256 pendingCount,
                 uint256 payoutCount,
-                bool handedOver
+                bool handedOver,
+                uint256 nextPayout
             );
             error NacklMinterGone();
             error NacklPayoutUnknown(uint256 payoutId);
             error NacklPayoutAlreadyExecuted(uint256 payoutId);
             error NacklPayoutNotDue(uint256 payoutId, uint64 readyAt);
+            error NacklPayoutNotNext(uint256 payoutId, uint256 next);
             error NacklWindowFull(uint256 used, uint256 amount, uint256 dailyLimit);
 
             /// Read-only getters the end-user CLI preflights the deploy
@@ -1506,6 +1508,7 @@ where
             pending_count: r.pendingCount,
             payout_count: r.payoutCount,
             handed_over: r.handedOver,
+            next_payout: r.nextPayout,
         })
     }
 
@@ -2375,6 +2378,7 @@ pub struct NacklState {
     pub pending_count: U256,
     pub payout_count: U256,
     pub handed_over: bool,
+    pub next_payout: U256,
 }
 
 /// The outcome of a `withdrawByProof` that was mined, from its receipt.
@@ -2555,6 +2559,10 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
         E::NacklPayoutNotDue(x) => (
             "NacklPayoutNotDue",
             format!("payoutId: {}, readyAt: {}", x.payoutId, x.readyAt),
+        ),
+        E::NacklPayoutNotNext(x) => (
+            "NacklPayoutNotNext",
+            format!("payoutId: {}, next: {}", x.payoutId, x.next),
         ),
         E::NacklWindowFull(x) => (
             "NacklWindowFull",

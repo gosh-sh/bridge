@@ -15,6 +15,7 @@ contract NacklHandler is Test {
     uint256 public acceptedByProofs;
     uint256[] public mintTimes;
     uint256[] public mintAmounts;
+    uint256 public jumpedTheQueue;
 
     constructor(
         AckiNackiBridge b,
@@ -35,6 +36,7 @@ contract NacklHandler is Test {
     function withdraw(uint256 amount) external {
         amount = bound(amount, 1, maxTransfer);
         uint256 before = nackl.totalSupply();
+        (,,,,,,,, uint256 waiting) = bridge.nacklState();
         uint256 a = uint256(uint160(address(0x1111111111111111111111111111111111111111)));
         bridge.withdrawByProof(
             hex"00",
@@ -54,11 +56,20 @@ contract NacklHandler is Test {
             })
         );
         acceptedByProofs += amount;
+        if (waiting != 0 && nackl.totalSupply() != before) jumpedTheQueue += 1;
+        _record(before);
+    }
+
+    function executeNext() external {
+        (,,,,,,,, uint256 id) = bridge.nacklState();
+        if (id == 0) return;
+        uint256 before = nackl.totalSupply();
+        try bridge.executeNacklPayout(id) { } catch { }
         _record(before);
     }
 
     function execute(uint256 id) external {
-        (,,,,,, uint256 count,) = bridge.nacklState();
+        (,,,,,, uint256 count,,) = bridge.nacklState();
         if (count == 0) return;
         id = bound(id, 1, count);
         uint256 before = nackl.totalSupply();
@@ -111,6 +122,24 @@ contract NacklBridgeInvariantTest is NacklBridgeFixture {
         }
         assertEq(accepted, minted + queued);
         assertEq(open, pendingCount);
+    }
+
+    function invariant_NB_EVM_ORDER_nextIsTheOldestDuePayoutAndNothingJumpsIt() public view {
+        assertEq(handler.jumpedTheQueue(), 0);
+        (,,,,,, uint256 payoutCount,, uint256 next) = bridge.nacklState();
+        uint256 bestId;
+        uint64 bestAt;
+        for (uint256 id = 1; id <= payoutCount; id++) {
+            bytes32 base = keccak256(abi.encode(id, NACKL_SLOT + 4));
+            uint256 word = uint256(vm.load(address(bridge), base));
+            uint64 readyAt = uint64(word >> 160);
+            if ((word >> 224) & 1 == 1 || readyAt > block.timestamp) continue;
+            if (bestId == 0 || readyAt < bestAt) {
+                bestId = id;
+                bestAt = readyAt;
+            }
+        }
+        assertEq(next, bestId);
     }
 
     function invariant_NB_P_4_any24HoursWithinTheLimit() public view {

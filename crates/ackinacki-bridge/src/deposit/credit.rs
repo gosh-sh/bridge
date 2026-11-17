@@ -469,6 +469,28 @@ pub async fn confirm(
                     bridge_tx,
                 },
             ) => {
+                if id.token_id == 1 {
+                    return Err(CliError::deposit(
+                        ExitCode::CreditAborted,
+                        Stage::Credit,
+                        Some(op_id),
+                        format!(
+                            "the deposit voucher exists, but the bridge transaction {bridge_tx} \
+                             that should have unlocked the NACKL aborted. The voucher is spent \
+                             and the deposit cannot be finalized again (CLI exit 37). The NACKL \
+                             stays locked on the bridge, and this bridge has no call that pays it \
+                             out: mintAndSendTokenBridged refuses ECC[1]. Only the bridge owner \
+                             can release it, with new bridge code. Give them depositId {}, {} \
+                             base units of ECC[1] to account {:#x}, EVM bridge {:#x}, chain {}, \
+                             operation {op_id}, Acki Nacki transaction {bridge_tx}",
+                            id.deposit_id,
+                            id.amount,
+                            B256::from(id.account),
+                            id.contract,
+                            id.chain_id,
+                        ),
+                    ));
+                }
                 let recovery = if id.token_id == 3 {
                     "mintAndSendBridged"
                 } else {
@@ -776,6 +798,38 @@ mod tests {
         assert!(m.contains("depositId 0"), "{m}");
         assert!(m.contains("1000000 USDC units"), "{m}");
         assert!(m.contains("EVM bridge"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn an_aborted_nackl_confirm_names_no_call_that_refuses_it() {
+        let an = FakeAn::default();
+        let nackl = Identity {
+            token_id: 1,
+            amount: 3_000_000_000,
+            ..id(0)
+        };
+        chain(&an, &nackl, false, true);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = confirm(
+            &an,
+            BRIDGE,
+            VOUCHER,
+            &nackl,
+            false,
+            0,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(1),
+            "OP",
+            &ui,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.exit_code(), crate::errors::ExitCode::CreditAborted);
+        let m = e.to_string();
+        assert!(m.contains("3000000000 base units of ECC[1]"), "{m}");
+        assert!(m.contains("stays locked"), "{m}");
+        assert!(!m.contains("pay it out (mintAndSendTokenBridged"), "{m}");
+        assert!(!m.contains("mintAndSendBridged"), "{m}");
     }
 
     #[tokio::test]

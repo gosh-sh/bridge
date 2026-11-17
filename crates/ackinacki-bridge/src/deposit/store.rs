@@ -128,6 +128,8 @@ pub struct OpRecord {
     pub voucher_code_hash: String,
     #[serde(default = "legacy_currency_id")]
     pub token_id: u32,
+    #[serde(default)]
+    pub token_decimals: Option<u8>,
     pub from: Option<Address>,
     pub stage: OpStage,
     pub request: Option<RequestInfo>,
@@ -160,6 +162,7 @@ impl OpRecord {
             params,
             voucher_code_hash,
             token_id: 3,
+            token_decimals: None,
             from: None,
             stage: OpStage::Reserved,
             request: None,

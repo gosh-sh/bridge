@@ -136,7 +136,8 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     let queued = match (&s.payout_id, s.ready_at) {
         (Some(id), Some(at)) => format!(
             "  NACKL payout: {id} queued, due at unix {at}; executeNacklPayout({id}) mints it \
-             once due and within the daily limit (the relayer sends it)\n"
+             once due, after the payouts due before it, and within the daily limit (the relayer \
+             sends it)\n"
         ),
         _ => String::new(),
     };

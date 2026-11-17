@@ -658,6 +658,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         an.accounts_hidden_for.lock().unwrap().insert([0xee; 32], 3);
         let cx = WaitCtx {
@@ -920,6 +921,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
     }
 

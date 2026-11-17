@@ -2297,7 +2297,8 @@ contract AckiNackiBridge {
             uint256 minted,
             uint256 pendingCount,
             uint256 payoutCount,
-            bool handedOver
+            bool handedOver,
+            uint256 nextPayout
         )
     {
         NacklMint.State storage s = _nackl;
@@ -2309,7 +2310,8 @@ contract AckiNackiBridge {
             s.minted,
             s.pendingCount,
             s.payoutCount,
-            s.handedOver
+            s.handedOver,
+            NacklMint.next(s)
         );
     }
 

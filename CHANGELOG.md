@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - **NACKL crosses the bridge** (`docs/NACKL-bridge-extension.md`): locked and unlocked on Acki
   Nacki, minted and burned by the bridge on the EVM chain. Redeploy `AckiNackiBridge` and upgrade
   `eccBridge` to 1.18.0, `relayer`, `deposit-relayer` and `ackinacki-bridge` together.
-- `eccBridge` 1.18.0 (code hash `576bb7a1…`, ABI with `DepositPending`, `releasePendingDeposit`,
+- `eccBridge` 1.18.0 (code hash `a13d8126…`, ABI with `DepositPending`, `releasePendingDeposit`,
   `getNacklLockedTo`, `getPendingDeposit`): upgrade a 1.17.0 bridge with `updateCode` and an empty
   `userCell`. `setBridgeToken` accepts ECC id `1` (NACKL) besides `3`; the USDC limits do not apply
   to it and its `maxTvl` bounds nothing.
@@ -43,7 +43,8 @@ assigns it when the release is tagged.
   chain's NACKL `outstanding` (the lock) and to `getNacklLockedTo(chainId, evmBridge)`; it is
   refunded only above the per-withdrawal cap (234). A NACKL deposit is paid out of that lock:
   `finalizeDeposit` refuses one above the lock with 236 before accepting it, and one that still
-  finds it short is recorded as pending (`DepositPending`, `getPendingDeposit`). The next NACKL
+  finds it short, or arrives while earlier deposits from its chain are pending, is recorded as
+  pending (`DepositPending`, `getPendingDeposit`) behind them. The next NACKL
   withdrawals to that chain pay pending deposits oldest first (at most four each) once they lock
   enough, and anyone may pay one with `releasePendingDeposit(depositHash)` (236 while the lock is
   short, 245 without such a deposit); either emits `DepositFinalized`. `mintAndSendTokenBridged` refuses id `1` with 242. `getTotalBridged(1)`
@@ -51,12 +52,13 @@ assigns it when the release is tagged.
 - `AckiNackiBridge`: `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` lists the NACKL
   token under id `1` once its minter is the bridge (or its `predecessor`, before a handover); called
   again with that token it sets the two limits. A NACKL `deposit` burns with `burnFrom`, no TVL cap.
-  A NACKL `withdrawByProof` mints at once when the payout is at most `delayThreshold` and fits
-  `dailyLimit` over the last 24 hours; otherwise it queues it (`NacklPayoutQueued`), due in 24 hours
-  above `delayThreshold`, at once otherwise. `executeNacklPayout(payoutId)` (anyone, not while paused)
-  mints a queued payout once due and within the limit; nothing cancels one. `nacklState()` reports
-  the limits, the window, `accepted`, `minted` and the queue. New errors `NacklMinterGone`,
-  `NacklPayoutUnknown`, `NacklPayoutAlreadyExecuted`, `NacklPayoutNotDue`, `NacklWindowFull`,
+  A NACKL `withdrawByProof` mints at once when the payout is at most `delayThreshold`, fits
+  `dailyLimit` over the last 24 hours and no queued payout is due; otherwise it queues it
+  (`NacklPayoutQueued`), due in 24 hours above `delayThreshold`, at once otherwise. Due payouts are
+  minted oldest first: `executeNacklPayout(payoutId)` (anyone, not while paused) mints only the one
+  `nacklState().nextPayout` names, once it fits the limit; nothing cancels one. `nacklState()` reports
+  the limits, the window, `accepted`, `minted`, the queue and `nextPayout`. New errors `NacklMinterGone`,
+  `NacklPayoutUnknown`, `NacklPayoutAlreadyExecuted`, `NacklPayoutNotDue`, `NacklPayoutNotNext`, `NacklWindowFull`,
   `NacklNotMinter`, `NacklBadDecimals`, `NacklLimitBelowWithdrawalCap`, `NacklPayoutsPending`,
   `NacklSuccessorNotReady`; events `NacklListed`, `NacklLimitsSet`, `NacklPayoutExecuted`,
   `NacklMinterHandedOver`.
@@ -68,13 +70,15 @@ assigns it when the release is tagged.
   `script/DeployNacklToken.s.sol` deploys it for `NACKL_BRIDGE` (supply `NACKL_INITIAL_SUPPLY`,
   zero for production) and with `NACKL_LIST=true` lists it (`NACKL_MAX_TRANSFER`,
   `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
-- `relayer daemon-withdraw` and `daemon-bridge` execute queued NACKL payouts once due
-  (`executeNacklPayout`), and park a proof whose bridge reverts `NacklMinterGone`.
+- `relayer daemon-withdraw` and `daemon-bridge` execute queued NACKL payouts in order once due
+  (`executeNacklPayout` of `nextPayout`, waiting while it does not fit the limit), and park a proof whose bridge reverts `NacklMinterGone`.
 - `ackinacki-bridge withdraw --token-id 1` withdraws NACKL (ids `0` and `2` are refused); a queued
   payout ends with `submit.status: "queued"`, `payout_id` and `ready_at`, and its record keeps status
   `queued` with them: a re-run does not send the proof again and names the payout. A NACKL `deposit` is
   refused above the lock for its chain and waits on 236 from `finalizeDeposit`; a deposit recorded
-  as pending exits 38 (`CreditPending`) with its key, and `--resume` confirms it once it is paid.
+  as pending exits 38 (`CreditPending`) with its key, and `--resume` confirms it once it is paid. The
+  deposit summary shows the amount in the token's decimals and the recipient's balance of that
+  token.
 - `deposit-relayer` retries a deposit refused with 236 instead of rejecting it.
 
 ## [0.9.0]

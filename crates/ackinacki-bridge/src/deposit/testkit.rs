@@ -1774,6 +1774,7 @@ impl World {
             status: AccStatus::Active,
             dapp_id: Some(dapp),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         an.accounts
             .lock()
@@ -2605,6 +2606,7 @@ impl World {
                 status: AccStatus::Active,
                 dapp_id: Some([0; 32]),
                 ecc3: 0,
+                ecc: vec![(3, 0)],
             });
     }
 
@@ -2616,6 +2618,7 @@ impl World {
             status: crate::deposit::an::AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3,
+            ecc: vec![(3, ecc3)],
         };
         self.an
             .accounts

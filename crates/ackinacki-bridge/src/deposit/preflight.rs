@@ -14,7 +14,7 @@ use alloy_primitives::{Address, U256};
 use serde_json::json;
 
 use crate::{
-    args::{UsdcAmount, USDC_DECIMALS},
+    args::{redact, UsdcAmount},
     deposit::{
         an::{AnRead, AnSend},
         an_preflight::{self, AnPreflight},
@@ -109,39 +109,41 @@ fn refuse(reason: String) -> CliError {
 
 /// `--amount` in the deposited token's base units.
 ///
-/// The flag is parsed as a decimal amount with USDC's six places, so the
-/// bridge's own USDC keeps its documented behaviour exactly, a token with
-/// more decimals scales up, and one with fewer has to divide exactly —
-/// an amount its precision cannot hold is refused rather than truncated.
+/// The flag is parsed as a decimal amount in the token's own precision, so
+/// the bridge's own USDC keeps its six places exactly and a token with
+/// more decimals takes as many fractional digits as it has; an amount its
+/// precision cannot hold is refused rather than truncated.
 /// The ceiling is `u64`: `gosh.mintecc` takes a `uint64`, which is also
 /// the contract's `MAX_DEPOSIT_AMOUNT`.
-fn base_units(typed: UsdcAmount, decimals: u8, token: Address) -> CliResult<u64> {
-    let micros = U256::from(typed.0);
-    let listed = u32::from(decimals);
-    let scaled = if listed >= USDC_DECIMALS {
-        let factor = U256::from(10u64).pow(U256::from(listed - USDC_DECIMALS));
-        micros.checked_mul(factor).ok_or_else(|| {
-            refuse(format!(
-                "{} of {token} does not fit in 256 bits at {decimals} decimals",
-                typed.display()
-            ))
-        })?
-    } else {
-        let factor = U256::from(10u64).pow(U256::from(USDC_DECIMALS - listed));
-        if !(micros % factor).is_zero() {
-            return Err(refuse(format!(
-                "{token} has {decimals} decimals and cannot hold {}: give an amount with at most \
-                 {decimals} fractional digits",
-                typed.display()
-            )));
-        }
-        micros / factor
+fn base_units(typed: &str, decimals: u8, token: Address) -> CliResult<u64> {
+    let invalid = |expected: String| CliError::ArgInvalid {
+        flag: "amount",
+        expected,
+        got: redact(typed),
     };
+    let d = typed
+        .parse::<rust_decimal::Decimal>()
+        .map_err(|_| invalid("decimal number, e.g. 1.000000".into()))?;
+    let listed = u32::from(decimals);
+    if d.scale() > listed {
+        return Err(invalid(format!(
+            "at most {decimals} fractional digits ({token} has {decimals} decimals)"
+        )));
+    }
+    let mantissa = u128::try_from(d.mantissa())
+        .ok()
+        .filter(|m| *m > 0)
+        .ok_or_else(|| invalid("positive token amount".into()))?;
+    let factor = U256::from(10u64).pow(U256::from(listed - d.scale()));
+    let scaled = U256::from(mantissa).checked_mul(factor).ok_or_else(|| {
+        refuse(format!(
+            "{typed} of {token} does not fit in 256 bits at {decimals} decimals"
+        ))
+    })?;
     u64::try_from(scaled).map_err(|_| {
         refuse(format!(
-            "{} of {token} is {scaled} base units, above the bridge's MAX_DEPOSIT_AMOUNT of {} \
-             base units",
-            typed.display(),
+            "{typed} of {token} is {scaled} base units, above the bridge's MAX_DEPOSIT_AMOUNT of \
+             {} base units",
             u64::MAX
         ))
     })
@@ -163,7 +165,7 @@ pub async fn check(
     from: Option<Address>,
 ) -> CliResult<Checked> {
     let net = p.network.expect("validated for a fresh run");
-    let typed = p.amount.expect("validated for a fresh run");
+    let typed = p.amount.as_deref().expect("validated for a fresh run");
     let to = p.to.expect("validated for a fresh run");
     let bridge = p.bridge.expect("validated");
     let bridge_acc = p.usdc_bridge_account.expect("validated");
@@ -620,11 +622,12 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         dry_run: true,
         network: net.arg(),
         chain_id: net.chain_id(),
-        amount: p.amount.expect("validated for a fresh run").display(),
+        amount: UsdcAmount(u128::from(amount)).display_with_decimals(c.evm.decimals),
         to: to.extended(),
         deposit: None,
         anchor: Some(json!({ "writer": writer, "light_client_ready": light_client_ready })),
         tx: Some(json!({
+            "token_id": c.token_id,
             "approve_calldata": format!("0x{}", hex::encode(approve_calldata(c.params.bridge, U256::from(amount)))),
             "deposit_calldata": format!("0x{}", hex::encode(deposit_calldata(token, amount, to.account_b256()))),
             "eip681": [eip681::uri(net.chain_id(), &approve), eip681::uri(net.chain_id(), &deposit)],
@@ -1074,7 +1077,7 @@ mod tests {
     async fn an_amount_past_the_bridge_limit_is_exit_2() {
         let world = World::healthy();
         let mut p = world.params(RunMode::Fresh);
-        p.amount = Some(crate::args::UsdcAmount(u128::from(u64::MAX) + 1));
+        p.amount = Some("18446744073709.551616".into());
         let store = Store::open(&p.state_dir).unwrap();
         let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
         let e = check(&p, &world.deps(), &store, None).await.unwrap_err();
@@ -1158,20 +1161,36 @@ mod tests {
     #[test]
     fn an_amount_is_scaled_by_the_tokens_own_precision() {
         let t = Address::repeat_byte(0x11);
-        assert_eq!(base_units(UsdcAmount(1_000_000), 6, t).unwrap(), 1_000_000);
+        assert_eq!(base_units("1", 6, t).unwrap(), 1_000_000);
+        assert_eq!(base_units("1.000000", 6, t).unwrap(), 1_000_000);
+        let e = base_units("1.0000001", 6, t).unwrap_err();
         assert_eq!(
-            base_units(UsdcAmount(1_000_000), 18, t).unwrap(),
-            1_000_000_000_000_000_000
+            e.exit_code(),
+            crate::errors::ExitCode::PreflightRefused,
+            "{e}"
         );
-        assert_eq!(base_units(UsdcAmount(1_500_000), 2, t).unwrap(), 150);
-        let e = base_units(UsdcAmount(1_505_000), 2, t).unwrap_err();
-        assert!(e.to_string().contains("cannot hold"), "{e}");
+        assert!(e.to_string().contains("at most 6 fractional digits"), "{e}");
+        assert_eq!(base_units("1", 18, t).unwrap(), 1_000_000_000_000_000_000);
+        assert_eq!(base_units("1.5", 2, t).unwrap(), 150);
+        let e = base_units("1.505", 2, t).unwrap_err();
+        assert!(e.to_string().contains("at most 2 fractional digits"), "{e}");
+        assert_eq!(base_units("0.000000001", 9, t).unwrap(), 1);
+        assert_eq!(base_units("3.123456789", 9, t).unwrap(), 3_123_456_789);
+        assert!(base_units("0.0000000001", 9, t).is_err());
         assert_eq!(
-            base_units(UsdcAmount(18_446_744), 18, t).unwrap(),
+            base_units("18.446744", 18, t).unwrap(),
             18_446_744_000_000_000_000
         );
-        let e = base_units(UsdcAmount(18_446_745), 18, t).unwrap_err();
+        let e = base_units("18.446745", 18, t).unwrap_err();
         assert!(e.to_string().contains("MAX_DEPOSIT_AMOUNT"), "{e}");
+        for bad in ["0", "-1", "abc"] {
+            let e = base_units(bad, 9, t).unwrap_err();
+            assert_eq!(
+                e.exit_code(),
+                crate::errors::ExitCode::PreflightRefused,
+                "{bad}: {e}"
+            );
+        }
     }
 
     /// The two chains must agree on the currency before any funds leave L1.
@@ -1203,7 +1222,7 @@ mod tests {
         );
         let mut p = world.params(RunMode::Fresh);
         p.token = Some(DAI);
-        p.amount = Some(UsdcAmount(1_000_000));
+        p.amount = Some("1".into());
         let store = Store::open(&p.state_dir).unwrap();
         let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
         let e = check(&p, &world.deps(), &store, Some(sepolia_sender()))
@@ -1248,7 +1267,7 @@ mod tests {
         ]);
         let mut p = world.params(RunMode::DryRun);
         p.token = Some(DAI);
-        p.amount = Some(UsdcAmount(1_000_000));
+        p.amount = Some("1".into());
         let store = Store::open(&p.state_dir).unwrap();
         let checked = check(&p, &world.deps(), &store, Some(sepolia_sender()))
             .await

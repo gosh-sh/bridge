@@ -6,7 +6,7 @@ use alloy_primitives::{Address, B256, U256};
 use serde_json::json;
 
 use crate::{
-    args::{parse_amount, redact, UsdcAmount},
+    args::{parse_amount, redact},
     deposit::qr_display::QrDisplay,
     errors::{CliError, CliResult},
 };
@@ -226,8 +226,9 @@ pub struct DepositArgs {
     /// EVM network the deposit is made on.
     #[arg(long, value_enum)]
     pub network: Option<Network>,
-    /// USDC amount, at most 6 fractional digits (never rounded).
-    #[arg(long, value_name = "USDC")]
+    /// Amount of the deposited token, at most as many fractional digits as
+    /// the token has decimals: 6 for USDC, 9 for NACKL (never rounded).
+    #[arg(long, value_name = "AMOUNT")]
     pub amount: Option<String>,
     /// ERC-20 to deposit. Defaults to the bridge's `usdc()`. The token must
     /// be listed on the bridge (`tokenIdOf`), and the amount is read in that
@@ -384,7 +385,7 @@ pub struct DepositParams {
     pub mode: RunMode,
     pub globals: GlobalFlags,
     pub network: Option<Network>,
-    pub amount: Option<UsdcAmount>,
+    pub amount: Option<String>,
     /// The ERC-20 to deposit, when `--token` named one. `None` means the
     /// run resolves the bridge's `usdc()` and deposits that.
     pub token: Option<Address>,
@@ -449,7 +450,14 @@ impl DepositArgs {
         let starts_new = matches!(mode, RunMode::Fresh | RunMode::DryRun);
         // Shapes first: a malformed value is the user's first problem, not
         // the profile keys that happen to be missing as well.
-        let amount = self.amount.as_deref().map(parse_amount).transpose()?;
+        let amount = self
+            .amount
+            .clone()
+            .map(|raw| match rust_decimal::Decimal::from_str(&raw) {
+                Ok(d) if d.is_sign_positive() && !d.is_zero() => Ok(raw),
+                _ => parse_amount(&raw).map(|_| raw),
+            })
+            .transpose()?;
         let to = self.to.as_deref().map(AnTarget::parse).transpose()?;
         for (flag, secs, max) in [
             ("anchor-timeout-s", self.anchor_timeout_s, MAX_WAIT_S),
@@ -676,6 +684,56 @@ mod tests {
         let e = a.validate(&GlobalFlags::default()).unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("--network") && msg.contains("--to"), "{msg}");
+    }
+
+    #[test]
+    fn an_amount_keeps_every_fractional_digit_for_the_token_to_decide() {
+        let to = format!("{DAPP}::{ACC}");
+        let acc = "1a".repeat(32);
+        for raw in ["0.000000001", "3.123456789", "1", "1.000000"] {
+            let a = crate::deposit::testkit::deposit_args(&[
+                "--dry-run",
+                "--network",
+                "sepolia",
+                "--amount",
+                raw,
+                "--to",
+                &to,
+                "--rpc-url",
+                "http://rpc.invalid",
+                "--bridge-address",
+                "0x0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7",
+                "--gql-endpoint",
+                "http://gql.invalid",
+                "--usdc-bridge-account",
+                &acc,
+                "--wc-project-id",
+                "p",
+                "--work-dir",
+                "work",
+                "--state-dir",
+                "./state",
+            ]);
+            let p = a.validate(&GlobalFlags::default()).unwrap();
+            assert_eq!(p.amount.as_deref(), Some(raw));
+        }
+        for raw in ["0", "-1", "abc", ""] {
+            let a = crate::deposit::testkit::deposit_args(&[
+                "--dry-run",
+                "--network",
+                "sepolia",
+                &format!("--amount={raw}"),
+                "--to",
+                &to,
+            ]);
+            let e = a.validate(&GlobalFlags::default()).unwrap_err();
+            assert_eq!(
+                e.exit_code(),
+                crate::errors::ExitCode::PreflightRefused,
+                "{raw}: {e}"
+            );
+            assert!(e.to_string().contains("amount"), "{raw}: {e}");
+        }
     }
 
     #[test]

@@ -77,8 +77,10 @@ assigns it when the release is tagged.
   `queued` with them: a re-run does not send the proof again and names the payout. A NACKL `deposit` is
   refused above the lock for its chain and waits on 236 from `finalizeDeposit`; a deposit recorded
   as pending exits 38 (`CreditPending`) with its key, and `--resume` confirms it once it is paid. The
-  deposit summary shows the amount in the token's decimals and the recipient's balance of that
-  token.
+  deposit summary shows the amount in the token's decimals and currency, and the recipient's
+  balance of that token; its JSON `tx` carries `token_id`. `deposit --amount` takes as many
+  fractional digits as the deposited token has decimals (9 for NACKL), still never rounded; the
+  account-check message the wallet signs names the token.
 - `deposit-relayer` retries a deposit refused with 236 instead of rejecting it.
 
 ## [0.9.0]

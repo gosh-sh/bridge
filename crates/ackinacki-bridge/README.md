@@ -1249,7 +1249,7 @@ profile it installed before deposits existed.
 | Flag | Value | Refused with exit 2 |
 |------|-------|---------------------|
 | `--network` | `sepolia` (chain id 11155111) or `arbitrum-sepolia` (chain id 421614) | any other name |
-| `--amount` | USDC, at most 6 fractional digits, never rounded; above 0 and at most `u64::MAX` micro-USDC | anything else |
+| `--amount` | the deposited token's amount, at most as many fractional digits as it has decimals (6 for USDC, 9 for NACKL), never rounded; above 0 and at most `u64::MAX` base units | anything else |
 | `--to` | `dapp_id::account_id`, both halves 64 hex characters without `0x`, the account non-zero | a wrong shape; an active account that lives in another dapp: `--to names dapp <x>, but account <acc> lives in dapp <y>` |
 
 The bridge takes only the account id, and the eccUSDC land on that account in

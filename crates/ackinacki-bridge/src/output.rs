@@ -208,8 +208,18 @@ fn deposit_summary(s: &crate::deposit::DepositSuccess) -> String {
     // network's name.
     let network = crate::deposit::args::Network::from_chain_id(s.chain_id)
         .map_or_else(|| s.network.clone(), |n| n.name().to_string());
+    let unit = match s
+        .tx
+        .as_ref()
+        .and_then(|t| t.get("token_id"))
+        .and_then(|v| v.as_u64())
+    {
+        Some(1) => "NACKL".to_string(),
+        Some(3) | None => "USDC".to_string(),
+        Some(id) => format!("ECC[{id}]"),
+    };
     let mut out = format!(
-        "\n{head}:\n\x20 network:      {network} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
+        "\n{head}:\n\x20 network:      {network} ({})\n\x20 amount:       {} {unit}\n\x20 to:           \
          {}\n",
         s.chain_id, s.amount, s.to,
     );
@@ -509,6 +519,27 @@ mod tests {
             !text.contains("anchored by") && !text.contains("null"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_deposit_summary_names_the_deposited_currency() {
+        let mut d = sample();
+        assert!(deposit_summary(&d).contains("  amount:       5 USDC\n"));
+        d.amount = "3.000000001".into();
+        d.tx = Some(json!({"token_id": 1}));
+        let text = deposit_summary(&d);
+        assert!(
+            text.contains("  amount:       3.000000001 NACKL\n"),
+            "{text}"
+        );
+        assert!(!text.contains("USDC"), "{text}");
+        d.tx = Some(json!({"token_id": 3}));
+        assert!(deposit_summary(&d).contains(" USDC\n"));
+        d.tx = Some(json!({"token_id": 7}));
+        assert!(deposit_summary(&d).contains(" ECC[7]\n"));
+        d.abandoned = true;
+        d.tx = Some(json!({"token_id": 1}));
+        assert!(deposit_summary(&d).contains("3.000000001 NACKL\n"));
     }
 
     #[tokio::test]

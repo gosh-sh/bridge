@@ -1849,7 +1849,7 @@ impl World {
             mode,
             globals: Default::default(),
             network: Some(crate::deposit::args::Network::Sepolia),
-            amount: Some(crate::args::UsdcAmount(u128::from(W_AMOUNT))),
+            amount: Some(crate::args::UsdcAmount(u128::from(W_AMOUNT)).display()),
             to: Some(Self::target()),
             rpc_url: Some("http://rpc.invalid/key".into()),
             bridge: Some(W_BRIDGE),
@@ -1880,7 +1880,7 @@ impl World {
         mode: crate::deposit::args::RunMode,
     ) -> crate::deposit::args::DepositParams {
         let mut p = self.params(mode);
-        p.amount = Some(crate::args::UsdcAmount(u128::from(W_AMOUNT + 1)));
+        p.amount = Some(crate::args::UsdcAmount(u128::from(W_AMOUNT + 1)).display());
         p
     }
 

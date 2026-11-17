@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Normative.** What the bridge must do to carry NACKL between Acki Nacki and an EVM chain, as set by gosh-sh/bridge-audit#152. Every requirement and property is covered by a test case listed in [§9](#9-traceability); a test carries its test case ID (`TC-NB-…`) in its name or NatSpec. |
+| Status | **Normative.** What the bridge must do to carry NACKL between Acki Nacki and an EVM chain, as set by gosh-sh/bridge-audit#152. Every requirement and property is covered by a test case listed in [§9](#9-traceability); §9 names the tests behind each test case ID (`TC-NB-…`): a test whose name starts with the case (`test_nb_an_lock_…` for TC-NB-AN-LOCK, `test_NB_EVM_LIST_…` for TC-NB-EVM-LIST), or the test named in the row. |
 | Written against | `main` `40090b6c`. A `file:line` points at that commit and marks behaviour that stays as it is; a requirement without one is new. |
 | Genre | Design and correctness. The verified contract reference is [`EVM-contracts-spec.md`](EVM-contracts-spec.md); the Acki Nacki contracts are described in [`contracts/an/README.md`](../contracts/an/README.md). |
 | Paths | Relative to the repository root. |
@@ -126,29 +126,29 @@ bound to it; the handover precondition is checked by comparing two counters.
 
 | Requirement | Test case | Where |
 |---|---|---|
-| NB-AN-1, NB-AN-8 | TC-NB-AN-NOMINT | `scripts/test_an_bridge_limits.py` |
+| NB-AN-1, NB-AN-8 | TC-NB-AN-NOMINT | `scripts/test_an_bridge_limits.py`: `test_nb_an_owner_cannot_mint_or_take_nackl`, `test_nb_an_lock_keeps_nackl_and_counts_it` |
 | NB-AN-2 | TC-NB-AN-REGISTER | `scripts/test_an_bridge_limits.py` |
 | NB-AN-3, NB-HO-1 | TC-NB-AN-LOCK | `scripts/test_an_bridge_limits.py` |
-| NB-AN-4 | TC-NB-AN-CAP | `scripts/test_an_bridge_limits.py` |
+| NB-AN-4 | TC-NB-AN-CAP | `scripts/test_an_bridge_limits.py`: `test_nb_an_lock_is_capped_per_withdrawal_only` |
 | NB-AN-5 | TC-NB-AN-UNLOCK | `scripts/test_an_bridge_limits.py` |
 | NB-AN-6, NB-AN-7 | TC-NB-AN-PENDING | `scripts/test_an_bridge_limits.py` |
-| NB-AN-9 | TC-NB-AN-DEPOSIT-CAPS | `scripts/test_an_bridge_limits.py` |
+| NB-AN-9 | TC-NB-AN-DEPOSIT-CAPS | `scripts/test_an_bridge_limits.py`: `test_nb_an_nackl_deposit_ignores_max_tvl` |
 | NB-AN-10 | TC-NB-AN-UPGRADE | `scripts/test_an_bridge_limits.py` |
-| NB-AN-11 | TC-NB-AN-INVENTORY | `scripts/test_an_bridge_limits.py` |
+| NB-AN-11 | TC-NB-AN-INVENTORY | `scripts/test_an_bridge_limits.py`: `test_nb_an_lock_keeps_nackl_and_counts_it`, `test_nb_an_unlock_pays_from_the_lock` |
 | NB-TOK-1…4 | TC-NB-TOK-* | `contracts/ethereum/test/NacklToken.t.sol` |
 | NB-EVM-1 | TC-NB-EVM-LIST | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-2 | TC-NB-EVM-DEPOSIT | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-3 | TC-NB-EVM-WITHDRAW-* | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-4, NB-EVM-5 | TC-NB-EVM-EXECUTE-*, TC-NB-EVM-ORDER-* | `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol` (the oldest due payout goes first and nothing is minted ahead of it) |
-| NB-EVM-6, NB-P-4 | TC-NB-EVM-WINDOW, TC-NB-P-WINDOW | `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol` |
+| NB-EVM-6, NB-P-4 | TC-NB-EVM-WINDOW, TC-NB-P-WINDOW | `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol`: `invariant_NB_P_4_any24HoursWithinTheLimit` |
 | NB-EVM-7 | TC-NB-EVM-LIMITS | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-8 | TC-NB-EVM-NOCANCEL | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-9 | TC-NB-EVM-PAUSE | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-10, NB-EVM-11 | TC-NB-EVM-HANDOVER-* | `contracts/ethereum/test/NacklBridge.t.sol` |
-| NB-EVM-12 | the existing USDC suites | `contracts/ethereum/test/` |
+| NB-EVM-12 | the existing USDC suites | `contracts/ethereum/test/`, and `test_NB_EVM_12_usdcStillPaysFromCustody` |
 | NB-HO-2 | TC-NB-EVM-STATE | `contracts/ethereum/test/NacklBridge.t.sol` |
-| NB-HO-3 | TC-NB-HO-PROCEDURE | `contracts/ethereum/test/NacklBridge.t.sol` (two bridges: the order that pays everything, and an early handover that strands a withdrawal) |
-| NB-P-6 | TC-NB-E2E | `tests/e2e/local-net/arbitrum/test_arbitrum_e2e.py` |
-| NB-CR-1, NB-CR-2 | TC-NB-CR | `scripts/check_withdrawal_event_header.py`, unchanged circuit crates |
-| NB-P-1, NB-P-2 | TC-NB-P-AN | `scripts/test_an_bridge_limits.py` |
-| NB-P-3, NB-P-5 | TC-NB-P-SUPPLY | `contracts/ethereum/test/NacklBridgeInvariant.t.sol` |
+| NB-HO-3 | TC-NB-HO-PROCEDURE | `contracts/ethereum/test/NacklBridge.t.sol`: `test_NB_HO_3_procedureHandsOverOnlyWhenEverythingBoundIsPaid`, `test_NB_HO_3_earlyHandoverStrandsAWithdrawalOfTheOldBridge` |
+| NB-P-6 | TC-NB-E2E | `tests/e2e/local-net/arbitrum/test_arbitrum_e2e.py`: `test_45_nackl_locked_on_acki_nacki`, `test_46_nackl_deposit_sent`, `test_66_nackl_deposit_delivered`, `test_74_nackl_minted`, `test_75_nackl_reconciles` |
+| NB-CR-1, NB-CR-2 | TC-NB-CR | the check `scripts/check_withdrawal_event_header.py`, and no change in the circuit crates |
+| NB-P-1, NB-P-2 | TC-NB-P-AN | `scripts/test_an_bridge_limits.py`: `test_nb_an_unlock_pays_from_the_lock`, `test_nb_an_lock_of_another_chain_does_not_pay`, `test_nb_an_finalize_refuses_a_deposit_above_the_lock`, `test_nb_an_pending_deposits_are_paid_oldest_first` |
+| NB-P-3, NB-P-5 | TC-NB-P-SUPPLY | `NacklBridgeInvariant.t.sol`: `invariant_NB_P_3_supplyIsMintedAndAcceptedIsMintedPlusQueued`; `NacklBridge.t.sol`: `test_NB_P_SUPPLY_queuedNullifierIsSpent` |

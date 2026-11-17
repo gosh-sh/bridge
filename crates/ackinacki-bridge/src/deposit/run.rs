@@ -392,9 +392,9 @@ pub async fn run_fresh(
 ) -> Result<DepositSuccess, FreshError> {
     let ui = d.ui.as_ref();
     let board = Board::new(ui);
-    let (Some(net), Some(amount), Some(to), Some(bridge_acc), Some(_), Some(work_dir)) = (
+    let (Some(net), Some(_), Some(to), Some(bridge_acc), Some(_), Some(work_dir)) = (
         p.network,
-        p.amount,
+        p.amount.as_ref(),
         p.to,
         p.usdc_bridge_account,
         p.rpc_url.as_ref(),
@@ -504,7 +504,6 @@ pub async fn run_fresh(
         },
     };
     let ask = Ask {
-        amount: &amount,
         net,
         to: &to,
         from,
@@ -530,8 +529,6 @@ pub async fn run_fresh(
 
 /// What a new deposit asks the wallet for, and from whom.
 struct Ask<'a> {
-    /// The amount as typed, for the account check's message.
-    amount: &'a UsdcAmount,
     /// The network.
     net: Network,
     /// The recipient.
@@ -588,8 +585,17 @@ async fn request(
         };
         return Err(closed_before_request(d, store, rec, FailReason::Refused, e));
     }
+    let signed_amount = format!(
+        "{} {}",
+        UsdcAmount(u128::from(units)).display_with_decimals(rec.token_decimals.unwrap_or(6)),
+        match rec.token_id {
+            1 => "NACKL".to_string(),
+            3 => "USDC".to_string(),
+            id => format!("ECC[{id}]"),
+        }
+    );
     if let Err(e) =
-        account_check::check(evm, wallet, ui, from, &op, bridge, ask.amount, ask.net).await
+        account_check::check(evm, wallet, ui, from, &op, bridge, &signed_amount, ask.net).await
     {
         return Err(closed_before_request(d, store, rec, FailReason::Refused, e));
     }
@@ -1676,6 +1682,7 @@ pub fn summary(
             "waited_ms": anchor_waited.map(|w| u64::try_from(w.as_millis()).unwrap_or(u64::MAX)),
         })),
         tx: Some(json!({
+            "token_id": rec.token_id,
             "type": 2,
             "calldata_len": DEPOSIT_CALLDATA_LEN,
         })),
@@ -2289,7 +2296,7 @@ pub async fn abandon(p: &DepositParams, op: &str, ui: &dyn Ui) -> CliResult<Depo
             })
         }),
         anchor: None,
-        tx: None,
+        tx: Some(json!({ "token_id": rec.token_id })),
         confirmation: None,
         balance: None,
         abandoned: true,
@@ -4208,6 +4215,7 @@ mod tests {
             s.amount,
             UsdcAmount(u128::from(r.params.amount_units)).display_with_decimals(9)
         );
+        assert_eq!(s.tx.as_ref().unwrap()["token_id"], 1);
         let b = s.balance.unwrap();
         assert_eq!(b["before"], "2000000000");
         assert_eq!(b["after"], "5000000000");

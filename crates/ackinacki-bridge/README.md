@@ -17,7 +17,11 @@ Each direction runs whole, or in two steps, each a run of its own:
 `finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet. The proof is
 always built; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
 proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "already_paid"`,
-`finalize: "already_finalized"`.
+`finalize: "already_finalized"`. For NACKL, `already_paid` means the bridge accepted a proof of the
+burn: the payout may still be queued, and the relayer mints it once due.
+`deposit proof` takes a deposit made through a contract wallet too: the `Deposit` event decides, not
+the transaction's calldata. One operation holds one deposit: a second `deposit proof` of the same
+transaction is refused with exit 3 and the operation to `--resume`.
 
 End-user CLI for the Acki Nacki ↔ EVM bridge, one subcommand per direction:
 

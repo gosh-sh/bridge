@@ -1062,6 +1062,25 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
         });
     };
     let store = Store::open(&p.state_dir)?;
+    // One operation per deposit: a second would prove and send it again.
+    if let Some(r) = store
+        .list()?
+        .into_iter()
+        .find(|r| r.tx.is_some_and(|t| t.tx_hash == tx_hash) && r.stage != OpStage::Failed)
+    {
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            Some(&r.op_id),
+            format!(
+                "operation {} in {} already holds the deposit {tx_hash:#x}: continue it with \
+                 `deposit --resume {}` (nothing was sent)",
+                r.op_id,
+                p.state_dir.display(),
+                r.op_id
+            ),
+        ));
+    }
 
     // Step 1: the deposit, as its receipt says, and the checks it still needs.
     board.start(StepId::Preflight, "");
@@ -1097,7 +1116,7 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
     let amount = u64::try_from(ev.amount)
         .map_err(|_| refused(format!("its amount {} does not fit 64 bits", ev.amount)))?;
     let seen = preflight::DepositSeen {
-        from: tx.from,
+        from: ev.sender,
         nonce: tx.nonce,
         amount,
         token,
@@ -1118,6 +1137,7 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
     rec.token_id = checked.token_id;
     rec.token_decimals = Some(checked.evm.decimals);
     rec.from = Some(seen.from);
+    rec.found_by_tx = true;
     rec.tx = Some(TxClaim {
         tx_hash,
         tx_nonce: seen.nonce,
@@ -1212,13 +1232,14 @@ async fn walk(
     let exp = Expect {
         bridge: rec.params.bridge,
         from,
-        calldata: rec
-            .request
-            .as_ref()
-            .map(|q| q.calldata.clone())
-            .unwrap_or_else(|| {
-                deposit_calldata(rec.params.token, rec.params.amount_units, to.account_b256())
-            }),
+        calldata: (!rec.found_by_tx).then(|| {
+            rec.request
+                .as_ref()
+                .map(|q| q.calldata.clone())
+                .unwrap_or_else(|| {
+                    deposit_calldata(rec.params.token, rec.params.amount_units, to.account_b256())
+                })
+        }),
         amount: rec.params.amount_units,
         account: to.account_b256(),
         confirmations: p.confirmations,

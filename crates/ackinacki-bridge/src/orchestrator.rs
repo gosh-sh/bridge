@@ -148,10 +148,11 @@ pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
     Queued,
-    /// The bridge has paid this withdrawal out, and not by a receipt this
-    /// run saw: the relayer daemon, an earlier run, another operator, or a
-    /// transaction of this run whose receipt never came. The USDC is on the
-    /// recipient; a success, like `Confirmed`.
+    /// The bridge has accepted a proof of this withdrawal, and not by a
+    /// receipt this run saw: the relayer daemon, an earlier run, another
+    /// operator, or a transaction of this run whose receipt never came. USDC
+    /// is on the recipient; NACKL is minted, or queued until `executeNacklPayout`
+    /// mints it. A success, like `Confirmed`.
     AlreadyPaid,
 }
 

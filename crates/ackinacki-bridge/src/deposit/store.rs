@@ -145,6 +145,10 @@ pub struct OpRecord {
     /// For the summary of a finished operation, which needs no network.
     pub an_bridge_dapp: Option<String>,
     pub anchor_writer: Option<String>,
+    /// Created by `deposit proof` for a deposit made elsewhere: any
+    /// transaction that emits it is accepted, whatever its calldata.
+    #[serde(default)]
+    pub found_by_tx: bool,
 }
 
 fn legacy_currency_id() -> u32 {
@@ -175,6 +179,7 @@ impl OpRecord {
             work_dir: None,
             an_bridge_dapp: None,
             anchor_writer: None,
+            found_by_tx: false,
         }
     }
 

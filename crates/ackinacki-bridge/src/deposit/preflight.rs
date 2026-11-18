@@ -285,9 +285,10 @@ pub async fn check(
 /// The deposit `deposit proof --tx-hash` proves, as its receipt says.
 #[derive(Debug, Clone)]
 pub struct DepositSeen {
-    /// The account that sent the deposit transaction.
+    /// The depositor, as the `Deposit` event names it: the account that
+    /// sent the transaction, or the contract wallet it went through.
     pub from: Address,
-    /// Its nonce, which the operation records with the claim.
+    /// The transaction's nonce, which the operation records with the claim.
     pub nonce: u64,
     /// The amount, in the token's base units.
     pub amount: u64,

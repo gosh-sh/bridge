@@ -34,9 +34,11 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
-from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, REPO, SEPOLIA_CHAIN, env,
-                      evm_address, keccak256, kv, tail, wait_for)
+from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO,
+                      SEPOLIA_BEACON_GENESIS, SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv,
+                      tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 NACKL = 1_000_000_000
@@ -47,6 +49,10 @@ GENESIS_SECS = 600          # the genesis at seq_no 0 reads only the BK set from
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
+RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: ~104 min)
+# What eth-lc-relayer logs once Sepolia's committee period has moved on: with no rotate proof and no
+# owner hop in the e2e, its light client cannot follow, and no later Sepolia block is accepted.
+PERIOD_ENDED = "committee period advanced"
 # The local network's GraphQL behind nginx0, on this runner's end of the tunnels fixture.
 GRAPHQL = "http://127.0.0.1:18080/graphql"
 
@@ -77,6 +83,18 @@ def test_01_deployer_key_matches_its_address(arb, ctx):
 
 
 # ── 1 · the network ─────────────────────────────────────────────────────────
+
+
+def test_02_no_sepolia_committee_change_during_the_run():
+    """The Sepolia sync committee stays the same for the whole run. The light client follows a
+    new committee only through a rotate proof, which the e2e does not run, or by the owner's hand,
+    which test_54 forbids: a run across the change would stall at the deposit's anchor."""
+    slot = int((time.time() - SEPOLIA_BEACON_GENESIS) // SLOT_SECS)
+    left = (PERIOD_SLOTS - slot % PERIOD_SLOTS) * SLOT_SECS
+    change = datetime.fromtimestamp(time.time() + left, timezone.utc)
+    print(f"  Sepolia period {slot // PERIOD_SLOTS}, next committee at {change:%F %H:%M} UTC")
+    assert left > RUN_SECS, (f"the Sepolia sync committee changes in {left // 60} min, at {change:%H:%M} UTC; "
+                             f"start the run after that")
 
 
 def test_10_local_network_bridge_active(an):
@@ -488,8 +506,14 @@ def test_60_light_client_accepts_spans(run):
     """arbitrum-anchors sends the light client the Sepolia blocks of the epoch an Arbitrum
     assertion landed in (submitAncestry), between the two checkpoints around it."""
     sent = "submitAncestry sent for the assertion's parent-chain block"
-    wait_for("arbitrum-anchors gets a span accepted", lambda: sent in run.log("anchors"),
-             ANCHOR_SECS, log=lambda: run.log("anchors"))
+
+    def span_sent():
+        lc = run.log("lc-relayer")
+        assert PERIOD_ENDED not in lc, ("Sepolia's sync committee changed during the run: the light client "
+                                        "stops there and the deposit's block cannot be anchored; run again\n"
+                                        + tail(lc))
+        return sent in run.log("anchors")
+    wait_for("arbitrum-anchors gets a span accepted", span_sent, ANCHOR_SECS, log=lambda: run.log("anchors"))
     assert "no more submitAncestry" not in run.log("anchors"), \
         "arbitrum-anchors gave a span up: its block will never be accepted\n" + tail(run.log("anchors"))
 

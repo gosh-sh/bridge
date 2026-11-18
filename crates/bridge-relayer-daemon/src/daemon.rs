@@ -365,7 +365,14 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                 },
             };
             summary.last_outcome = Some(last_tag);
-            between_ticks().await;
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    info!(?summary, "daemon: shutdown signalled, exiting");
+                    return Ok(summary);
+                }
+                _ = between_ticks() => {}
+            }
 
             // 3. Backoff: success -> reset; failure -> grow.
             if success {
@@ -563,6 +570,38 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), summary.ticks);
         assert!(summary.verified >= 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hook_that_never_returns_does_not_hold_off_shutdown() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(InMemoryBlockSource::new());
+        let mut relayer = make_relayer(source, bridge, dir.path().join("state.json"));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = shutdown_tx.send(());
+        });
+        let summary = tokio::time::timeout(
+            Duration::from_secs(60),
+            relayer.run_until_shutdown_with(
+                fast_backoff(),
+                None,
+                async {
+                    let _ = shutdown_rx.await;
+                },
+                || std::future::pending::<()>(),
+            ),
+        )
+        .await
+        .expect("shutdown is honoured while the hook waits")
+        .unwrap();
+        assert_eq!(summary.ticks, 1);
     }
 
     #[tokio::test(start_paused = true)]

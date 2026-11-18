@@ -2463,7 +2463,9 @@ async fn run_daemon_live(
     );
     let bridge_probe = {
         let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan).with_sender(sender)
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
+            .with_sender(sender)
+            .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT)
     };
     let chain_full = bridge_probe
         .read_full_state()
@@ -3399,6 +3401,88 @@ mod daemon_live_startup_tests {
         .await
         .unwrap();
         source.fetches.load(Ordering::SeqCst)
+    }
+
+    #[derive(Default)]
+    struct StuckPayouts {
+        sent: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge for StuckPayouts {
+        async fn nackl_state(
+            &self,
+        ) -> Result<bridge_relayer_daemon::bridge::NacklState, RelayerError> {
+            let z = alloy::primitives::U256::ZERO;
+            Ok(bridge_relayer_daemon::bridge::NacklState {
+                daily_limit: z,
+                delay_threshold: z,
+                window_used: z,
+                accepted: z,
+                minted: z,
+                pending_count: alloy::primitives::U256::from(1u64),
+                payout_count: alloy::primitives::U256::from(1u64),
+                handed_over: false,
+                next_payout: alloy::primitives::U256::from(1u64),
+            })
+        }
+
+        async fn dry_run_execute_nackl_payout(
+            &self,
+            _: alloy::primitives::U256,
+        ) -> Result<bridge_relayer_daemon::bridge::DryRunOutcome, RelayerError> {
+            Ok(bridge_relayer_daemon::bridge::DryRunOutcome::WouldSucceed)
+        }
+
+        async fn execute_nackl_payout(
+            &self,
+            _: alloy::primitives::U256,
+        ) -> Result<alloy::primitives::B256, RelayerError> {
+            self.sent.store(true, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn daemon_live_runs_the_nackl_payout_lane_and_stops_while_a_payout_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(CountingSource::default());
+        let bridge = Arc::new(bridge_relayer_daemon::MockBridgeClient::with_genesis(
+            alloy::primitives::U256::from(1u64),
+            alloy::primitives::U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let payouts = Arc::new(StuckPayouts::default());
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let _ = tx.send(());
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            spawn_and_run(
+                RelayerConfig::new(
+                    dir.path().join(RELAYER_STATE_FILE_NAME),
+                    bridge_prover_lib::BUNDLE_STRIDE_L1,
+                ),
+                Arc::clone(&source),
+                Arc::new(EmptyBkUpdateSource),
+                bridge,
+                Some(Arc::clone(&payouts) as _),
+                BackoffConfig::default(),
+                "http://gql.invalid",
+                dir.path(),
+                dir.path(),
+                async {
+                    let _ = rx.await;
+                },
+            ),
+        )
+        .await
+        .expect("daemon-live stops while a payout waits for its receipt")
+        .unwrap();
+        assert!(payouts.sent.load(Ordering::SeqCst));
+        assert_eq!(source.fetches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

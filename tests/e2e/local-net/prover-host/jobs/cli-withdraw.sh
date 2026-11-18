@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ackinacki-bridge withdraw proof, at once for every burn in BURNS ("<token>:<AN tx>+..."): each
 # captures the burn, waits for the bundle that covers it, builds its Circuit 4 proof and sends
-# withdrawByProof. The runner starts this job once daemon-live has paid every one of them out,
+# withdrawByProof. The runner starts this job once daemon-withdraw-live has paid every one of them out,
 # so each send finds its burn paid and the run ends in success, submit.status already_paid.
 # Each run logs to /logs/cli-withdraw-<token>.log. The name is the one the host's ci-entry
 # gives a prover's limits.

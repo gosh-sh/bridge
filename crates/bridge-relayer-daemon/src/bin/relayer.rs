@@ -474,6 +474,16 @@ enum Cmd {
         /// rate-limited RPC (Alchemy free tier: ~250).
         #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
         get_logs_pause_ms: u64,
+        /// The Acki Nacki bridge account, `dapp_id::account_id` in hex,
+        /// whose `WithdrawalInitiated` events the daemon pays out on this
+        /// bridge (see `withdraw_claimer`).
+        #[arg(
+            long,
+            env = "AN_TOKEN_BRIDGE",
+            hide_env_values = true,
+            default_value = DEFAULT_AN_TOKEN_BRIDGE
+        )]
+        an_token_bridge: String,
     },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
@@ -922,7 +932,10 @@ async fn main() -> anyhow::Result<()> {
             bridge_deploy_block,
             get_logs_chunk_blocks,
             get_logs_pause_ms,
+            an_token_bridge,
         } => {
+            let an_token_bridge = parse_an_address(&an_token_bridge)
+                .map_err(|e| anyhow::anyhow!("--an-token-bridge: {e}"))?;
             let scan = LogScanConfig {
                 deploy_block: bridge_deploy_block.unwrap_or(0),
                 chunk_blocks: get_logs_chunk_blocks,
@@ -990,6 +1003,7 @@ async fn main() -> anyhow::Result<()> {
                 aggregation,
                 anchor_mode,
                 scan,
+                an_token_bridge,
             )
             .await
             .map_err(|e| {
@@ -2400,6 +2414,7 @@ async fn run_daemon_live(
     aggregation: C12AggregationCfg,
     anchor_mode: bridge_prover_lib::AnchorMode,
     scan: LogScanConfig,
+    an_token_bridge: (String, String),
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
     use bridge_prover_lib::{
@@ -2461,6 +2476,9 @@ async fn run_daemon_live(
         request_timeout_secs = rpc_request_timeout_from_env()?.as_secs(),
         "daemon-live: Ethereum RPC",
     );
+    // The withdrawal claimer sends through this client too: its
+    // `withdrawByProof` must not wait for a receipt without a bound, or the
+    // client's send lock would hold `verifyBlock` back with it.
     let bridge_probe = {
         let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
         EthBridgeClient::with_scan_config(bridge_address, provider, scan)
@@ -2678,10 +2696,13 @@ async fn run_daemon_live(
         PoseidonSnarkWrapper::new(&params_dir).with_scratch_dir(&work_dir),
         SubprocessAggregator::new(aggregator_cfg),
     );
-    let aggregated = Arc::new(AggregatedBlockSource::new(
-        Arc::clone(&live_source),
-        pipeline,
-    ));
+    // One proof at a time in this process: a bundle (or a rotation) and a
+    // withdrawal take turns, so the peak is the larger of the two.
+    let prove_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let aggregated = Arc::new(
+        AggregatedBlockSource::new(Arc::clone(&live_source), pipeline)
+            .with_prove_gate(Arc::clone(&prove_gate)),
+    );
     info!(
         aggregate_proof_bin = %aggregation.aggregate_proof_bin.display(),
         verifiers_dir = %aggregation.verifiers_dir.display(),
@@ -2690,7 +2711,44 @@ async fn run_daemon_live(
     );
     let payouts: Arc<dyn bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge> =
         Arc::clone(&bridge) as _;
-    spawn_and_run(
+
+    // Every burn on the Acki Nacki bridge that names this bridge is paid out
+    // from this daemon's account (`withdraw_claimer`).
+    let chain_id = bridge
+        .contract()
+        .provider()
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("eth_chainId: {e}"))?;
+    let claimer_gql = create_client_with_failover(
+        &gql_endpoint,
+        &gql_failover_endpoints,
+        GqlClientConfig::from_env()
+            .map_err(|e| anyhow::anyhow!("GraphQL client configuration: {e}"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+    let claimer = bridge_relayer_daemon::withdraw_claimer::WithdrawClaimer::new(
+        bridge_relayer_daemon::withdraw_claimer::ClaimerConfig {
+            an_bridge_dapp_id_hex: an_token_bridge.0,
+            an_bridge_account_id_hex: an_token_bridge.1,
+            gql_endpoint: gql_endpoint.clone(),
+            chain_id,
+            anchor_level: anchor_mode.level(),
+            stride: anchor_mode.stride(),
+            state_dir: prover_state_dir.clone(),
+            work_dir: work_dir.clone(),
+            params_dir: params_dir.clone(),
+            verifiers_dir: aggregation.verifiers_dir.clone(),
+            aggregate_proof_bin: aggregation.aggregate_proof_bin.clone(),
+            pk_cache_dir: aggregation.pk_cache_dir.clone(),
+        },
+        claimer_gql,
+        Arc::clone(&bridge),
+        prove_gate,
+    )?;
+    let mut claimer = tokio::spawn(claimer.run());
+
+    let relayer = spawn_and_run(
         cfg,
         Arc::clone(&aggregated),
         aggregated,
@@ -2701,8 +2759,41 @@ async fn run_daemon_live(
         &params_dir,
         &prover_state_dir,
         shutdown,
-    )
-    .await
+    );
+    // The claimer runs until the daemon stops. If it ends on its own, it
+    // panicked: the daemon stops too, so that the failure is seen and a
+    // restart brings the payouts back, instead of running on without them.
+    tokio::select! {
+        result = relayer => {
+            claimer.abort();
+            result
+        },
+        ended = &mut claimer => Err(anyhow::anyhow!(
+            "the withdrawal claimer stopped: {}",
+            match ended {
+                Err(e) if e.is_panic() => format!("it panicked: {e}"),
+                Err(e) => e.to_string(),
+                Ok(()) => "it returned".to_string(),
+            }
+        )),
+    }
+}
+
+/// The zerostate's token bridge: System dApp, account `1a…1a`.
+const DEFAULT_AN_TOKEN_BRIDGE: &str = "0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a";
+
+/// `dapp_id::account_id`, each 64 hex digits, into lower-case halves.
+fn parse_an_address(raw: &str) -> anyhow::Result<(String, String)> {
+    let (dapp, account) = raw
+        .split_once("::")
+        .ok_or_else(|| anyhow::anyhow!("{raw:?} is not dapp_id::account_id"))?;
+    for half in [dapp, account] {
+        anyhow::ensure!(
+            half.len() == 64 && half.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{raw:?}: each half must be 64 hex digits"
+        );
+    }
+    Ok((dapp.to_ascii_lowercase(), account.to_ascii_lowercase()))
 }
 
 /// Whether `shutdown` has already resolved, without waiting for it. Once it

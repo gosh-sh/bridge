@@ -133,7 +133,11 @@ next to it.
 ## Install
 
 1. Create the user and the layout above (`BRIDGE_UID`/`GID` in `.env` must be the user's).
-2. Params. Withdraw relayer: the SRS and inner keys into `params/relayer/`, then
+2. Params. Withdraw relayer: the SRS and inner keys into `params/relayer/`, among them the
+   Circuit 4 keys `daemon-live` proves withdrawals with: `event_pk.bin`, `event_vk.bin`,
+   `event_config_params.json` and `event_manifest.json`. Copy them from the `params/` of an
+   `ackinacki-bridge withdraw` of the same release, which generates them on its first
+   withdrawal; the container reads `params/` only and cannot. Then
    `docker/relayer/finalize-params.sh $BRIDGE_DATA/params/relayer bridge` seals them and
    writes `SHA256SUMS`; its sha256 goes into `daemon-live.env` as `PARAMS_MANIFEST_SHA256`.
    The deposit relayer needs no params. Light client: `kzg_bn254_19.srs` into

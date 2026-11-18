@@ -5161,7 +5161,7 @@ pub(crate) mod tests {
         let rechecked = orchestrator
             .find("preflight::recheck_aggregate_proof(")
             .expect("and the aggregator preflight hashed");
-        let proved = orchestrator.find("run_once_with_state(").unwrap();
+        let proved = orchestrator.find("prove_enriched(").unwrap();
         let noted = orchestrator
             .find("aggregator_slot::note_proof(")
             .expect("a proof notes the slot it used");

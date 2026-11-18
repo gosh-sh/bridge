@@ -24,6 +24,11 @@ against it. [`README.md`](README.md) walks through both directions and the repos
 depth: the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
+**Withdrawal destinations.** The bridge supports EVM destinations, and Circuit 4 commits to a
+[20-byte EVM recipient](crates/bridge-circuits/bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs#L165).
+Before enabling a non-EVM withdrawal destination, update Circuit 4, its witness decoder, and the
+payout path to support the destination's recipient format.
+
 ## Issues, branches and pull requests
 
 One Linear issue (or one GitHub issue) → one branch and one pull request → one assignee.
@@ -324,6 +329,14 @@ with more than 16 live locals fails with `Stack too deep` there even though `for
 The nightly is pinned in `rust-toolchain.toml` because `rustfmt.toml` uses nightly-only options and
 `make lint` runs clippy with `-D warnings`. When bumping it, land the resulting reformat in the same
 commit.
+
+### Before every commit and push
+
+Before the local commit, review and update the relevant docs.
+After the local commit and before every push, review the unpushed commits with a fresh run of the
+same agent from its CLI: no context of the work, the same model and reasoning effort, read-only.
+Push only when it finds nothing critical, that is, at least nothing that can lead to funds being
+stolen or stuck in the bridge.
 
 ## Where to look next
 

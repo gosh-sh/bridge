@@ -59,6 +59,9 @@ required=(
   primary_pk.bin primary_vk.bin primary_config_params.json
   fallback_pk.bin fallback_vk.bin fallback_config_params.json
   layer_pk.bin layer_vk.bin layer_config_params.json
+  # Circuit 4: daemon-live proves the withdrawals it pays out, and the params
+  # are mounted read-only, so it cannot generate these keys itself.
+  event_pk.bin event_vk.bin event_config_params.json event_manifest.json
 )
 for file_name in "${required[@]}"; do
   grep -Eq "^[0-9a-fA-F]{64}  ${file_name//./\\.}$" "$PARAMS_SHA256SUMS" ||

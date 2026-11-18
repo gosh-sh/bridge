@@ -13,21 +13,16 @@ interface IDepositConfirmation {
 }
 
 /// @title DepositVoucher
-/// @notice Deterministic one-shot marker contract for inbound bridge deposits
-///         from any source chain. Its address is derived from `_depositHash`,
-///         so re-deploying with the same hash collides with the existing
-///         account and the second constructor call is a no-op — natural
-///         replay protection.
+/// @notice Forwards an inbound deposit confirmation from a deterministic
+///         address. The bridge checks this address against the pending record
+///         and marks the deposit minted when it pays the proven recipient.
 contract DepositVoucher is eccBridgeModifiers {
     string constant version = "1.5.0";
 
     /// @notice Hash of the proof-bound deposit identity (deposit_id,
     ///         contract_addr, dapp_id, chain_id). Forms the deterministic
-    ///         address of this voucher. amount/recipient are deliberately NOT
-    ///         hashed: they are fixed by the proof, so keying the replay slot on
-    ///         the identity alone makes one L1 deposit = one voucher = one mint,
-    ///         and a replay can never re-route the payout (same identity ⇒ same
-    ///         voucher).
+    ///         address of this voucher. The bridge stores the proven amount
+    ///         and recipient in the pending record under the same hash.
     uint256 static _depositHash;
 
     /// @notice Deploy callback: forwards confirmation to eccBridge so it mints

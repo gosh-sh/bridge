@@ -28,8 +28,8 @@ assigns it when the release is tagged.
 
 ### Fixes
 
-- `finalizeDeposit` returns 245 for an already recorded deposit, and `retryDeposit` returns 246 for an unknown or already minted deposit. Read `getDepositStatus` to distinguish pending (1) from minted (2).
-- Keep `deposit-relayer-state.json` when restarting against the same deployment. The relayer retries pending credits even after Ethereum prunes the receipt. A retry without a VM exit code stays queued for another attempt.
+- `finalizeDeposit` aborts with exit code 245 for an already recorded deposit, and `retryDeposit` aborts with exit code 246 for an unknown or already minted deposit. Read `getDepositStatus` to distinguish pending (1) from minted (2).
+- Keep `deposit-relayer-state.json` when restarting against the same deployment. The relayer retries pending credits even after Ethereum prunes the receipt. A `retryDeposit` failure without a VM exit code logs a warning and records an `an_pending` tick without counting toward `--skip-after-attempts`.
 - The CLI retries pending credits automatically and reports the source chain's TVL cap (235) while waiting for withdrawals to free capacity.
 
 ## [0.9.0]

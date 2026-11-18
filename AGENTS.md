@@ -193,7 +193,7 @@ cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemo
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- --help
 # daemon-bridge runs both ETH legs in one process on one EOA: verifyBlock, falling forward through
 # proof_<N>.json, and withdrawByProof on proof_event_*.json. daemon-withdraw is the payout leg alone;
-# daemon-live proves in-process.
+# daemon-live proves in-process; daemon-withdraw-live finds every burn itself, proves and pays it.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --state-dir <state dir/> --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
 # daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();

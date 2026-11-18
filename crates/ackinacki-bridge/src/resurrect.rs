@@ -78,7 +78,7 @@ pub fn anchor_level_for(anchor: AnchorLayerMode) -> u8 {
 /// The covering bundle is the strictly-next multiple of `stride`: for an
 /// event at seq 1024 (`W·P`) it is 2048, because the root at key block 1024
 /// covers the *previous* batch (`real_chain_builder::l1_anchor_boundaries`
-/// uses the same rule). daemon-live's withdrawal claimer waits for the same
+/// uses the same rule). daemon-withdraw-live's claimer waits for the same
 /// bundle, so the rule lives in one place.
 pub use bridge_relayer_daemon::withdraw_claimer::covering_bundle_seq_no;
 

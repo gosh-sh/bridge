@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Gas for the relayer's key, derived from the deployer's: it sends verifyBlock and
-# withdrawByProof. The key is the same every run, so it is topped up to GAS_PER_SENDER
+# Gas for the two daemon keys, derived from the deployer's: relayer sends verifyBlock,
+# withdraw sends withdrawByProof. The key is the same every run, so it is topped up to GAS_PER_SENDER
 # (default 0.002 ether), not sent that much again. Input: the deployer's private key. Writes
 # fund.env.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
@@ -8,7 +8,7 @@ pk=$(tr -d '[:space:]' </run/input)
 # GAS_PER_SENDER in cast's form: wei, or a decimal followed by "ether".
 want=$(python3 -c 'import sys; from decimal import Decimal; v = sys.argv[1]
 print(int(Decimal(v[:-5]) * 10**18) if v.endswith("ether") else int(v))' "${GAS_PER_SENDER:-0.002ether}")
-for role in relayer; do
+for role in relayer withdraw; do
   addr=$(cast wallet address --private-key "$(derive_key "$pk" "$role")")
   have=$(cast balance "$addr" --rpc-url "$ARB_RPC")
   if python3 -c 'import sys; sys.exit(int(sys.argv[1]) >= int(sys.argv[2]))' "$have" "$want"; then

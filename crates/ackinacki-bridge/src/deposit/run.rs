@@ -1142,7 +1142,10 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
     // deposit in its nonce slot by its own rules, as `--resume --tx-hash`
     // also refuses.
     let in_its_slot = |r: &OpRecord| {
-        r.is_unresolved()
+        seen.from == tx.from
+            && r.params.chain_id == checked.params.chain_id
+            && r.params.bridge == bridge
+            && r.is_unresolved()
             && r.from == Some(tx.from)
             && r.tx.is_none()
             && !r.abandoned_ever
@@ -1150,22 +1153,35 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
                 .as_ref()
                 .is_some_and(|q| q.nonce_before == tx.nonce)
     };
-    if let Some(r) = store.list()?.into_iter().find(|r| {
-        r.stage != OpStage::Failed
-            && (r.tx.is_some_and(|t| t.tx_hash == tx_hash)
-                || r.request.as_ref().and_then(|q| q.wallet_hash) == Some(tx_hash)
-                || in_its_slot(r))
-    }) {
+    let holds = |r: &OpRecord| {
+        r.tx.is_some_and(|t| t.tx_hash == tx_hash)
+            || r.request.as_ref().and_then(|q| q.wallet_hash) == Some(tx_hash)
+    };
+    if let Some(r) = store
+        .list()?
+        .into_iter()
+        .find(|r| r.stage != OpStage::Failed && (holds(r) || in_its_slot(r)))
+    {
+        let how = if holds(&r) {
+            format!(
+                "holds the deposit {tx_hash:#x}: continue it with `deposit --resume {}`",
+                r.op_id
+            )
+        } else {
+            format!(
+                "may hold the deposit {tx_hash:#x}, in its nonce slot: continue it with `deposit \
+                 --resume {} --tx-hash {tx_hash:#x}`",
+                r.op_id
+            )
+        };
         return Err(CliError::deposit(
             ExitCode::DuplicateRefused,
             Stage::Preflight,
             Some(&r.op_id),
             format!(
-                "operation {} in {} holds, or may hold, the deposit {tx_hash:#x}: continue it \
-                 with `deposit --resume {} --tx-hash {tx_hash:#x}` (nothing was sent)",
+                "operation {} in {} {how} (nothing was sent)",
                 r.op_id,
-                p.state_dir.display(),
-                r.op_id
+                p.state_dir.display()
             ),
         ));
     }
@@ -1309,6 +1325,8 @@ async fn walk(
                 .map_or(0, |(_, v)| *v)
         });
     let mut anchor_waited = None;
+    // Since when `deposit proof`'s transaction has not been shown.
+    let mut lost_since: Option<Instant> = None;
     let mut block_seen = None;
     loop {
         phase = match phase {
@@ -1368,7 +1386,27 @@ async fn walk(
                     // `deposit proof` binds the one transaction it was given: a
                     // contract wallet's deposit has no sender's nonce slot to
                     // search, so the same hash is read again.
+                    // Within --recovery-window-s: a lagging RPC shows it again; a
+                    // reorg that dropped it does not.
                     Outcome::Lost if rec.found_by_tx => {
+                        let since = *lost_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= p.recovery_window {
+                            return Err(err(
+                                ExitCode::DepositOutcomeUnknown,
+                                Stage::Deposit,
+                                &op,
+                                format!(
+                                    "the node has not shown the deposit transaction {:#x} for {} \
+                                     s: a reorg dropped it, or the RPC lags. Continue with \
+                                     `deposit --resume {op}`; if the deposit went in under \
+                                     another transaction, release this operation with `deposit \
+                                     --abandon {op}` and run `deposit proof --tx-hash` with that \
+                                     one",
+                                    claim.tx_hash,
+                                    since.elapsed().as_secs()
+                                ),
+                            ));
+                        }
                         ui.warn(
                             "the node does not show the deposit transaction now; reading it again \
                              (deposit proof binds no other transaction)",
@@ -1493,8 +1531,9 @@ async fn walk(
                              transaction"
                         });
                         // Back to an unknown outcome: under the directory
-                        // lock, like the first confirmation.
-                        if dir_lock.is_none() {
+                        // lock, like the first confirmation. `deposit proof`
+                        // searches nothing, so it takes none.
+                        if dir_lock.is_none() && !rec.found_by_tx {
                             let lock = DirLock::wait(&p.state_dir).await;
                             dir_lock = Some(lock.map_err(|e| after_request(store, &op, e))?);
                         }

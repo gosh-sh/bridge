@@ -7,7 +7,9 @@
 > the script describe bridges already deployed and no longer apply to a new one.
 
 For paying every withdrawal as it comes, run `relayer daemon-withdraw-live` (compose
-service `withdraw-live`, [`docker/README.md`](../../../docker/README.md)).
+service `withdraw-live`, [`docker/README.md`](../../../docker/README.md)). On the CI prover host
+(a container capped at 32 CPUs, shared with `daemon-live`) it proves a withdrawal in about 3
+minutes: Circuit 4 about 80 s, `aggregate-proof` 92–94 s (local-network e2e, 2026-11-18).
 
 Operational guide for driving a full AN→ETH withdrawal E2E through the
 in-process `relayer withdraw-e2e` orchestrator against a deployed

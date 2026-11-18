@@ -521,3 +521,25 @@ def test_73_usdc_delivered(arb, an, ctx):
         f"{ctx['address']} holds {after / 1e6} USDC, {ctx['usdc_before'] / 1e6} before the deposit"
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == 0, "the withdrawal multisig still holds USDC"
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the deposit's 2 USDC left the recipient multisig"
+
+
+# The timing lines daemon-live and daemon-withdraw-live log for each proof: the attestation
+# (Circuit 1A/1B), the layer-hashes proof (Circuit 2), a rotation's attestation, and every
+# aggregate-proof subprocess (Primary, LayerHashes, BridgeWithdrawal). A withdrawal's whole proof,
+# Circuit 4 and its aggregation, runs from "proving the withdrawal" to "proof built": the
+# timestamps of the two lines.
+PROOF_TIMING = re.compile(
+    r"proof generated in \d+ ms|aggregate-proof subprocess \(\w+\) took \d+ ms"
+    r"|wrap\+aggregate \(attestation \+ layer\) total \d+ ms"
+    r"|withdraw claimer: (proving the withdrawal|proof built)")
+
+
+def test_74_proof_timings(run):
+    """Prints how long each proof took on the prover host, from the relayer job's log: the
+    runbooks quote these figures. A bundle and the withdrawal were proven above, so their lines
+    are there; a run without them is a log that lost them."""
+    # The most ci-entry serves: the bundle's lines are near the start of a long log.
+    lines = [l for l in run.log("relayer", 999999).splitlines() if PROOF_TIMING.search(l)]
+    print("\n".join(f"  {l}" for l in lines))
+    assert any("Circuit 2 proof generated" in l for l in lines), "no bundle timing in the relayer log"
+    assert any("BridgeWithdrawalAggregatorVerifier" in l for l in lines), "no withdrawal timing in the relayer log"

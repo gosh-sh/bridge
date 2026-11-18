@@ -94,6 +94,7 @@ waited for and the tail of the log.
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
 | `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, the receipt proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
 | `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), 2 USDC back on the deployer |
+| `test_74` | How long each proof took on the prover host, printed from the relayer job's log: the bundle's Circuit 1A/1B and Circuit 2 proofs, every `aggregate-proof` run, the start and end of the withdrawal's proof |
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain

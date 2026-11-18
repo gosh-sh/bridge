@@ -20,6 +20,7 @@ if [ -n "${NACKL_FROM:-}" ]; then
   mkdir -p "$WORK/cli-nackl" "$WORK/cli-state-nackl"
   log "withdraw $NACKL_AMOUNT NACKL from $NACKL_FROM to $TO on 421614"
   BRIDGE_WORK_DIR=$WORK/cli-nackl BRIDGE_WITHDRAW_STATE_DIR=$WORK/cli-state-nackl \
+    BURNER_PRIVATE_KEY=$(derive_key "$(sed -n 1p /run/input | tr -d '[:space:]')" withdraw-nackl-burner) \
     ackinacki-bridge --json --yes --non-interactive withdraw --token-id 1 --from "$NACKL_FROM" \
     --from-keys "$WORK/msig-nackl.keys.json" --to "$TO" --to-chain 421614 --amount "$NACKL_AMOUNT" \
     >>/logs/cli-withdraw-nackl.log 2>&1 &

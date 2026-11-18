@@ -24,6 +24,11 @@ against it. [`README.md`](README.md) walks through both directions and the repos
 depth: the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
+**Withdrawal destinations.** The bridge supports EVM destinations, and Circuit 4 commits to a
+[20-byte EVM recipient](crates/bridge-circuits/bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs#L165).
+Before enabling a non-EVM withdrawal destination, update Circuit 4, its witness decoder, and the
+payout path to support the destination's recipient format.
+
 ## Issues, branches and pull requests
 
 One Linear issue (or one GitHub issue) → one branch and one pull request → one assignee.

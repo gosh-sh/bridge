@@ -429,8 +429,12 @@ async fn recover_pending(
     let mut attempts = 0u32;
     let mut seen_pending = false;
     loop {
-        *waiting_for_capacity = false;
-        let reason = match tokio::time::timeout(ONE_READ, deposit_status(an, bridge, id)).await {
+        let status = tokio::time::timeout(ONE_READ, deposit_status(an, bridge, id)).await;
+        // Pending is consistent with the previous refusal until the retry answers.
+        if !matches!(status, Ok(Ok(DepositStatus::Pending))) {
+            *waiting_for_capacity = false;
+        }
+        let reason = match status {
             Ok(Ok(DepositStatus::Minted)) => return,
             Ok(Ok(DepositStatus::Absent)) => {
                 seen_pending = false;
@@ -445,16 +449,17 @@ async fn recover_pending(
             },
             Ok(Ok(DepositStatus::Pending)) => {
                 ui.status("the bridge has accepted the deposit proof; sending retryDeposit");
-                match tokio::time::timeout(ONE_READ, an.send_retry(bridge, bridge_dapp, id)).await {
+                let retry =
+                    tokio::time::timeout(ONE_READ, an.send_retry(bridge, bridge_dapp, id)).await;
+                *waiting_for_capacity =
+                    matches!(&retry, Ok(outcome) if react(outcome) == Reaction::WaitCapacity);
+                match retry {
                     Ok(FinalizeSend::Executed {
                         aborted: false,
                         exit_code: None | Some(0),
                         ..
                     }) => return,
-                    Ok(outcome) if react(&outcome) == Reaction::WaitCapacity => {
-                        *waiting_for_capacity = true;
-                        RETRY_TVL_CAP.into()
-                    },
+                    Ok(_) if *waiting_for_capacity => RETRY_TVL_CAP.into(),
                     Ok(outcome) => format!("retryDeposit: {outcome:?}"),
                     Err(_) => "retryDeposit outcome is unknown".into(),
                 }
@@ -954,6 +959,50 @@ mod tests {
             assert_eq!(error.exit_code(), ExitCode::CreditUnconfirmed);
             assert!(!error.to_string().contains("TVL"), "{error}");
             assert!(error.to_string().contains("--resume OP"), "{error}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credit_deadline_keeps_the_last_tvl_refusal_during_a_status_read_or_retry() {
+        for stall_status_read in [true, false] {
+            let an = FakeAn::default();
+            an.getter(BRIDGE, "getDepositStatus", vec![json!({"status": 1})]);
+            if stall_status_read {
+                an.hang_getter_after
+                    .lock()
+                    .unwrap()
+                    .insert("getDepositStatus".into(), 2);
+            }
+            *an.send_delay.lock().unwrap() = Duration::from_secs(3);
+            an.sends.lock().unwrap().push_back(FinalizeSend::Rejected {
+                exit_code: Some(235),
+                message: "TVL cap".into(),
+            });
+
+            // The first retry returns 235 at 5s. The next read or send is
+            // still in flight when the credit deadline expires at 8s.
+            let err = confirm(
+                &an,
+                BRIDGE,
+                BRIDGE,
+                VOUCHER,
+                &id(7),
+                true,
+                0,
+                Duration::from_secs(8),
+                Duration::from_secs(2),
+                "OP",
+                &crate::deposit::ui::RecordingUi::new(true),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                an.retries.lock().unwrap().len(),
+                if stall_status_read { 1 } else { 2 }
+            );
+            assert_eq!(err.exit_code(), ExitCode::CreditUnconfirmed);
+            assert!(err.to_string().contains("235"), "{err}");
+            assert!(err.to_string().contains("--resume OP"));
         }
     }
 

@@ -69,8 +69,8 @@ assigns it when the release is tagged.
 - `NacklToken`: OpenZeppelin ERC20 `NACKL`, nine decimals, deployed and optionally listed by
   `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_LIST`,
   `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
-- `relayer daemon-withdraw` and `daemon-bridge` execute due NACKL payouts in `nextPayout` order and
-  park a proof refused with `NacklMinterGone`.
+- `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` execute due NACKL payouts in
+  `nextPayout` order and park a proof refused with `NacklMinterGone`.
 - `ackinacki-bridge withdraw --token-id 1` withdraws NACKL; a queued payout ends with
   `submit.status: "queued"`, `payout_id` and `ready_at`, and a re-run does not resend the proof.
 - `ackinacki-bridge deposit` of NACKL exits 38 (`CreditPending`) while the deposit is pending;

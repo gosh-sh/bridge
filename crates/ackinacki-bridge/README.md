@@ -3,7 +3,7 @@
 `withdraw --token-id <ECC_ID>` selects a token registered under the same id on AN and the
 EVM bridge; the default is `3` (USDC), and `1` is NACKL (`docs/NACKL-bridge-extension.md`): the AN
 bridge locks it, and the EVM bridge mints the payout at once or queues it, in which case the run
-ends with `submit.status: "queued"`, `payout_id` and `ready_at`, and the relayer mints it once due.
+ends with `submit.status: "queued"`, `payout_id` and `ready_at`, and the relayer (`relayer daemon-live`) mints it once due.
 A NACKL deposit is refused above the NACKL the AN bridge holds locked for its chain. The amount is read in that token's registered decimals,
 without rounding. Preflight refuses mismatched token addresses, missing registrations,
 insufficient per-chain inventory and payout limits before burning. Records and locks are

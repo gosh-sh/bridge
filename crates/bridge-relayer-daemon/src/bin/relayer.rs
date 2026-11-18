@@ -2686,11 +2686,14 @@ async fn run_daemon_live(
         pk_cache_dir = %aggregation.pk_cache_dir.display(),
         "daemon-live: C1/C2 R15 SHPLONK aggregation",
     );
+    let payouts: Arc<dyn bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge> =
+        Arc::clone(&bridge) as _;
     spawn_and_run(
         cfg,
         Arc::clone(&aggregated),
         aggregated,
         bridge,
+        Some(payouts),
         backoff,
         &gql_endpoint,
         &params_dir,
@@ -2723,6 +2726,7 @@ async fn spawn_and_run<S, U, B, D>(
     source: Arc<S>,
     bk_update_source: Arc<U>,
     bridge: Arc<B>,
+    payouts: Option<Arc<dyn bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge>>,
     backoff: BackoffConfig,
     gql_endpoint: &str,
     params_dir: &Path,
@@ -2773,8 +2777,23 @@ where
         prover_state = %prover_state_dir.display(),
         "daemon-live starting"
     );
+    let nackl = Arc::new(tokio::sync::Mutex::new(
+        bridge_relayer_daemon::nackl_payouts::NacklPayoutScanState::default(),
+    ));
     let summary = relayer
-        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
+        .run_until_shutdown_with(backoff, Some(metrics.clone()), shutdown, || {
+            let payouts = payouts.clone();
+            let nackl = Arc::clone(&nackl);
+            async move {
+                if let Some(p) = payouts {
+                    let mut st = nackl.lock().await;
+                    bridge_relayer_daemon::nackl_payouts::nackl_payout_scan_once(
+                        &*p, false, &mut st,
+                    )
+                    .await;
+                }
+            }
+        })
         .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon-live stopped");
     Ok(())
@@ -3370,6 +3389,7 @@ mod daemon_live_startup_tests {
             Arc::clone(&source),
             Arc::new(EmptyBkUpdateSource),
             bridge,
+            None,
             BackoffConfig::default(),
             "http://gql.invalid",
             dir.path(),

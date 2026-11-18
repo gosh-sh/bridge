@@ -324,8 +324,10 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    takes as long as anchoring and proving the last of those burns, and withdrawals to the chain stay
    closed for all of it. For NACKL, `WithdrawalByProofExecuted` is emitted when a payout is only
    queued: the old bridge has paid NACKL once `getNacklLockedTo(<chainId>, <old>)` on `eccBridge`
-   equals its `nacklState().accepted` and its `nacklState().pendingCount` is 0, which takes up to
-   24 hours more for a delayed payout (`docs/NACKL-bridge-extension.md`, NB-HO-3).
+   equals its `nacklState().accepted` and its `nacklState().pendingCount` is 0. A delayed payout
+   is due no earlier than 24 hours after it was queued, and a payout also waits for room in the
+   daily limit and for the payouts ahead of it, so there is no fixed upper bound
+   (`docs/NACKL-bridge-extension.md`, NB-HO-3).
 4. **Retire the old bridge and move the principal.** `pause()` it and pull its AAVE position back
    (`withdrawFromAave` or `emergencyWithdrawAll`) so its whole `treasuryBalance` is liquid USDC.
    - An old bridge that has `migrateTreasury(address)`: its owner calls

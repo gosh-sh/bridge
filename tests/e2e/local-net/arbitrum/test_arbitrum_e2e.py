@@ -525,9 +525,12 @@ def test_61_deposit_block_anchored(run, an, arb, ctx):
     wait_for("the deposit block is accepted on Acki Nacki",
              lambda: an("accepted", ARB_CHAIN, block).get("ACCEPTED") == "true", ANCHOR_SECS,
              log=lambda: run.log("anchors"))
-    log = run.log("anchors")
-    assert "proveBlock sent" in log and "the bridge accepts the deposit block" in log, \
-        "arbitrum-anchors did not get the block accepted through proveBlock\n" + tail(log)
+    # arbitrum-anchors logs the acceptance on its next tick, up to a tick after Acki Nacki has it.
+    wait_for("arbitrum-anchors sees the block accepted",
+             lambda: "the bridge accepts the deposit block" in run.log("anchors"), 120,
+             log=lambda: run.log("anchors"))
+    assert "proveBlock sent" in run.log("anchors"), \
+        "arbitrum-anchors did not get the block accepted through proveBlock\n" + tail(run.log("anchors"))
 
 
 def test_62_deposits_finalized_by_the_relayer(run, an, ctx):

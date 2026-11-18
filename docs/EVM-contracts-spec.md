@@ -340,16 +340,17 @@ Sequence (`:906-929`):
    `TransferFromFailed`. The received balance delta must equal `amount`, else
    `TransferAmountMismatch` — the exact-balance check applies to every custody token, so a
    fee-on-transfer token is rejected whichever id it is listed under.
-7. `depositId = depositCounter++`, then `_creditLiabilities(tokenId, credited)` (`:1126`).
+7. `depositId = depositCounter++`, then, for a custody token only, `_creditLiabilities(tokenId,
+   credited)` (`:1126`); NACKL credits nothing.
 8. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token)` (`:386`).
 
 Notes that matter downstream:
 
-* Funds stay as the plain ERC-20 in the contract; batching into AAVE is a separate owner action
+* Custody tokens stay as the plain ERC-20 in the contract (NACKL is burned, §7.3a); batching into AAVE is a separate owner action
   (§10) and stays **USDC-only** — the yield invariants are single-asset. Listing an aToken is
   refused outright (`CannotListAToken`), because its rebasing balance would make depositor
   principal look like harvestable yield.
-* The received amount must match the requested amount exactly; a fee-on-transfer token is
+* For a custody token the received amount must match the requested amount exactly; a fee-on-transfer token is
   rejected before `depositCounter` or the listing's liabilities change (`:1911`).
 * The `Deposit` **event layout is a hard cross-repo ABI**: the AN `eccBridge` reads it byte for
   byte out of the proven receipt (`contracts/an/exchange/eccBridge.sol:1233-1264`). It accepts

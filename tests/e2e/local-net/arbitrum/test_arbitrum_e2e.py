@@ -1,6 +1,8 @@
 """Arbitrum Sepolia e2e: a fresh AckiNackiBridge on Arbitrum Sepolia, 2 USDC deposited through
-it to the local Acki Nacki network with `ackinacki-bridge deposit`, and the same 2 USDC
-withdrawn back with `ackinacki-bridge withdraw`.
+it to the local Acki Nacki network and the same 2 USDC withdrawn back, both proven by the
+relayers. `ackinacki-bridge deposit` only sends the deposit and waits for its credit: the
+deposit relayer finalizes it. The withdrawal is a burn on Acki Nacki, as the wallet makes it;
+daemon-live finds it, proves it and pays it out with withdrawByProof.
 
 Nothing is accepted by hand. The one trusted input on the Acki Nacki side is the Sepolia
 light client's committee, proven from the beacon chain and set once (section 5); then the
@@ -13,7 +15,7 @@ deployed and the deposit sent as soon as the network is up; the light client is 
 the deposit waits for its Arbitrum assertion (half an hour at least), and daemon-live proves
 the network's 16384-block bundles from the start. The withdrawal does not wait for the deposit:
 its 2 USDC are minted by the owner for 421614 and burned right away, so the burn lands in the
-first bundle, and the bridge pays it out of the deposit's 2 USDC.
+first bundle, and daemon-live pays it out of the deposit's 2 USDC.
 
 The tests run in file order and pytest stops at the first failure (-x): each one is a step
 of the scenario and asserts what that step must have produced, from the chains or from the
@@ -181,20 +183,20 @@ def owner_keys():
 
 
 def test_30_sender_keys_funded(run, arb):
-    """The relayer and the withdrawal's burner have gas of their own, so no two senders share a nonce."""
+    """The relayer has gas of its own for verifyBlock and withdrawByProof: no other sender
+    shares its nonce."""
     run.job("fund", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     run.finish("fund", 600)
     f = kv(run.get("fund.env"))
-    for role in ("RELAYER", "WITHDRAW_BURNER"):
-        assert arb.eth(f[f"{role}_ADDRESS"]) > 0, f"{role.lower()} {f[f'{role}_ADDRESS']} has no ETH"
+    assert arb.eth(f["RELAYER_ADDRESS"]) > 0, f"relayer {f['RELAYER_ADDRESS']} has no ETH"
 
 
 def test_31_deposit_services_started(run):
     """daemon-live, eth-lc-relayer arbitrum-anchors and deposit-relayer daemon start from their
     images and say so in their logs. arbitrum-anchors has to run before the deposit: it takes
     the slot proofs when the deposit's batch lands, a minute or two after the deposit. The
-    deposit relayer finalizes the deposit beside the CLI; the second finalizeDeposit is a
-    no-op."""
+    deposit relayer finalizes the deposit; the CLI waits for it (--relayer-grace-s). daemon-live
+    also pays out every burn that names the run's bridge."""
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     # The ARB_RPC secret, when set, follows the keys on the job's stdin: ci-entry logs every
     # command line, so a secret never travels as a job argument.
@@ -207,6 +209,8 @@ def test_31_deposit_services_started(run):
              600, log=lambda: run.log("relayer", 200))
     wait_for("daemon-live starts its loop", lambda: "daemon-live starting" in run.log("relayer"),
              900, log=lambda: run.log("relayer", 200))
+    wait_for("daemon-live starts its withdrawal claimer", lambda: "withdraw claimer starting" in run.log("relayer"),
+             300, log=lambda: run.log("relayer", 200))
     # relayer.rs logs `startup: Cold — contract at genesis, bootstrapping policy=Explicit(0)`.
     assert "Explicit(0)" in run.log("relayer"), \
         "daemon-live did not start from the genesis seed\n" + tail(run.log("relayer", 200))
@@ -259,6 +263,7 @@ def test_40_deposit_sent(run, ctx):
             FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2")
     state = step_done(run, "deposit", "the deposit transaction is sent", 900)
     print(f"  deposit https://sepolia.arbiscan.io/tx/{state[1]}")
+    ctx.update(deposit_tx=state[1])
 
 
 def test_41_deposit_event_received(run, arb, ctx):
@@ -274,7 +279,7 @@ def test_41_deposit_event_received(run, arb, ctx):
     ctx.update(supplied=supplied)
 
 
-# ── 4b · withdrawal: ackinacki-bridge withdraw, alongside the deposit ──────
+# ── 4b · withdrawal: a burn on Acki Nacki, alongside the deposit ──────────
 
 
 def test_42_withdrawal_multisig_funded(an, ctx):
@@ -282,30 +287,33 @@ def test_42_withdrawal_multisig_funded(an, ctx):
     withdrawal runs alongside the deposit instead of after it: the bridge on Arbitrum Sepolia
     already holds the deposit's 2 USDC to pay it with."""
     got = an("msig-funded", AMOUNT)
-    ctx.update(wmsig=got["MSIG"], wmsig_keys=an.cat(got["MSIG_KEYS"]))
+    ctx.update(wmsig=got["MSIG"], wmsig_keys_path=got["MSIG_KEYS"])
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
 
 
-def log_line(run, pattern, what, timeout):
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def relayer_line(run, pattern, what, timeout):
+    """The first match of `pattern` in daemon-live's log, waited for; daemon-live must keep running."""
     def check():
-        text = run.log("cli-withdraw")
-        code = run.wait("cli-withdraw", 1)
-        m = re.search(pattern, text)
-        assert m or code in (None, 0), f"ackinacki-bridge withdraw exited {code} before: {what}\n" + tail(text)
-        return m
-    return wait_for(what, check, timeout, log=lambda: run.log("cli-withdraw"))
+        text = ANSI.sub("", run.log("relayer"))
+        code = run.wait("relayer", 1)
+        assert code is None, f"daemon-live exited {code} before: {what}\n" + tail(text)
+        return re.search(pattern, text)
+    return wait_for(what, check, timeout, log=lambda: ANSI.sub("", run.log("relayer", 200)))
 
 
-def test_43_burn_on_acki_nacki(run, ctx):
-    """The CLI burns the 2 USDC on Acki Nacki."""
-    run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY") + "\n" + ctx["wmsig_keys"].replace("\n", ""),
-            FROM=ctx["wmsig"], TO=ctx["address"], AMOUNT="2")
-    log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
+def test_43_burn_on_acki_nacki(an, ctx):
+    """The multisig burns the 2 USDC on Acki Nacki to ARBITRUM_SEPOLIA_E2E_ADDRESS, as the wallet
+    does: sendTransaction to the bridge with initiateWithdrawal, and nothing after it."""
+    got = an("burn", ctx["wmsig"], ctx["wmsig_keys_path"], AMOUNT, ctx["address"])
+    assert int(got["ECC3_AFTER"]) == 0, "the multisig still holds the USDC it burned"
 
 
-def test_44_withdrawal_event_captured(run):
-    """The bridge emits WithdrawalInitiated and the CLI captures it."""
-    log_line(run, r"captured WithdrawalInitiated event", "WithdrawalInitiated is captured", 900)
+def test_44_withdrawal_found_by_the_relayer(run):
+    """The bridge emits WithdrawalInitiated and daemon-live finds it on its next poll."""
+    relayer_line(run, r"withdraw claimer: found withdrawal", "daemon-live finds the burn", 600)
 
 
 # ── 5 · the light client, while the deposit waits for its assertion ────────
@@ -400,24 +408,30 @@ def test_60_light_client_accepts_spans(run):
         "arbitrum-anchors gave a span up: its block will never be accepted\n" + tail(run.log("anchors"))
 
 
-def test_61_deposit_block_anchored(run, an):
+def test_61_deposit_block_anchored(run, an, arb, ctx):
     """The deposit's Arbitrum block reaches the anchor set through ArbitrumBlockVerifier, from an
-    assertion in a Sepolia block the light client accepted."""
-    state = step_done(run, "anchor", "the deposit block is accepted on Acki Nacki", ANCHOR_SECS)
-    assert an("accepted", ARB_CHAIN, state[1]).get("ACCEPTED") == "true", f"isAcceptedBlockHash({ARB_CHAIN}, {state[1]})"
+    assertion in a Sepolia block the light client accepted. The CLI may see the deposit
+    finalized by the relayer before it sees the anchor, and then skips its anchor step: the
+    block hash comes from the deposit's receipt."""
+    step_done(run, "anchor", "the deposit block is accepted on Acki Nacki", ANCHOR_SECS)
+    block = arb.receipt(ctx["deposit_tx"])["blockHash"]
+    assert an("accepted", ARB_CHAIN, block).get("ACCEPTED") == "true", f"isAcceptedBlockHash({ARB_CHAIN}, {block})"
     log = run.log("anchors")
     assert "proveBlock sent" in log and "the bridge accepts the deposit block" in log, \
         "arbitrum-anchors did not get the block accepted through proveBlock\n" + tail(log)
 
 
-def test_62_deposit_proof_generated(run):
-    """The CLI builds the deposit's receipt proof from the block's receipts."""
-    step_done(run, "prove", "the deposit's receipt proof is built", 600)
-
-
-def test_63_deposit_finalized_on_acki_nacki(run):
-    """finalizeDeposit is sent to Acki Nacki and accepted."""
-    step_done(run, "finalize", "finalizeDeposit is confirmed", 900)
+def test_62_deposit_finalized_by_the_relayer(run):
+    """The deposit relayer builds the deposit's receipt proof and finalizes it on Acki Nacki;
+    the CLI, waiting for it, proves nothing and sends nothing."""
+    wait_for("the deposit relayer finalizes the deposit", lambda: "daemon: finalized" in run.log("deposit-relayer"),
+             900, log=lambda: run.log("deposit-relayer"))
+    for step in ("prove", "finalize"):
+        state = step_done(run, step, f"the CLI's {step} step ends", 900)
+        # "the operator's relayer finalized it" once the CLI saw the anchor first, "the deposit
+        # is finalized already" when the relayer was quicker than its anchor poll.
+        assert state[0] == "skipped" and "finalized" in state[1], \
+            f"the CLI's {step} step: {state}, not left to the relayer\n" + tail(run.log("cli-deposit"))
 
 
 def test_64_deposit_minted(run):
@@ -440,20 +454,25 @@ def test_65_deposit_delivered(run, an, ctx):
 
 
 def test_70_burn_bundle_verified(run):
-    """daemon-live gets the bundle that holds the burn verified on Arbitrum Sepolia."""
-    log_line(run, r"stage 5/6", "verifyBlock covers the burn's bundle", COVERAGE_SECS)
+    """daemon-live gets the bundle that holds the burn verified on Arbitrum Sepolia, and its
+    claimer starts proving the withdrawal."""
+    relayer_line(run, r"withdraw claimer: proving the withdrawal", "verifyBlock covers the burn's bundle",
+                 COVERAGE_SECS)
 
 
 def test_71_withdrawal_proof_generated(run):
-    """Circuit 4 and its SHPLONK aggregation prove the withdrawal."""
-    log_line(run, r"capture \+ prove complete", "the withdrawal proof is generated", 3600)
+    """Circuit 4 and its SHPLONK aggregation prove the withdrawal in daemon-live."""
+    relayer_line(run, r"withdraw claimer: proof built", "the withdrawal proof is generated", 3600)
 
 
-def test_72_withdrawal_paid(run, ctx):
-    """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
-    m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
+def test_72_withdrawal_paid(run, arb, ctx):
+    """daemon-live sends withdrawByProof from its own key and it is confirmed on Arbitrum Sepolia."""
+    m = relayer_line(run, r"withdraw claimer: withdrawByProof paid out tx=(0x[0-9a-fA-F]+)",
+                     "withdrawByProof is confirmed", 1800)
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
-    run.finish("cli-withdraw", 300)
+    relayer = kv(run.get("fund.env"))["RELAYER_ADDRESS"].lower()
+    sender = arb.receipt(m.group(1))["from"].lower()
+    assert sender == relayer, f"withdrawByProof came from {sender}, not the relayer {relayer}"
     ctx.update(withdraw_tx=m.group(1))
 
 

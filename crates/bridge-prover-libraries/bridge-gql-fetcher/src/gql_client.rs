@@ -1375,38 +1375,64 @@ impl GqlClient {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let mut out = Vec::with_capacity(edges.len());
-        for edge in &edges {
-            let node = edge.get("node").unwrap_or(&Value::Null);
-            let id = node.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let boc = node.get("boc").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let dst = node.get("dst").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let created_at = node.get("created_at").and_then(|v| v.as_u64());
-            let src_dapp_id = node
-                .get("src_dapp_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let block_id = node
-                .get("block_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    node.get("src_transaction")
-                        .and_then(|tx| tx.get("block_id"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                });
-            out.push(BridgeExtOutMessage {
-                id,
-                boc,
-                dst,
-                created_at,
-                src_dapp_id,
-                block_id,
-            });
-        }
-        Ok(out)
+        Ok(edges
+            .iter()
+            .map(|edge| parse_bridge_extout(edge.get("node").unwrap_or(&Value::Null)))
+            .collect())
+    }
+
+    /// One page of the ExtOut messages a bridge account emitted, oldest
+    /// first: the `first` after the cursor `after` (from the start when
+    /// `None`). Each comes with its own cursor, the one to pass as `after`
+    /// to read on from it. A page shorter than `first` is the last one for
+    /// now.
+    pub async fn query_bridge_extouts_page(
+        &self,
+        account_id_hex: &str,
+        dapp_id_hex: &str,
+        first: u32,
+        after: Option<&str>,
+    ) -> anyhow::Result<Vec<(String, BridgeExtOutMessage)>> {
+        let after_arg = match after {
+            Some(cur) => format!(r#", after: "{}""#, escape_graphql_string(cur)),
+            None => String::new(),
+        };
+        let q = format!(
+            r#"{{
+              blockchain {{
+                account(account_id: "{account_id_hex}", dapp_id: "{dapp_id_hex}") {{
+                  messages(msg_type: [ExtOut], first: {first}{after_arg}) {{
+                    edges {{ cursor node {{
+                      id boc dst created_at
+                      block_id src_dapp_id
+                      src_transaction {{ block_id }}
+                    }} }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let data = self.query_op("bridge_extouts_page", &q, &[]).await?;
+        let edges = data
+            .pointer("/blockchain/account/messages/edges")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        edges
+            .iter()
+            .map(|edge| {
+                let cursor = edge
+                    .get("cursor")
+                    .and_then(|v| v.as_str())
+                    .filter(|c| !c.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::format_err!("bridge_extouts_page: an edge has no cursor")
+                    })?
+                    .to_string();
+                let node = edge.get("node").unwrap_or(&Value::Null);
+                Ok((cursor, parse_bridge_extout(node)))
+            })
+            .collect()
     }
 
     /// Resolve the on-chain `dapp_id` for an account. Zerostate-deployed
@@ -1583,6 +1609,40 @@ impl GqlClient {
             src_dapp_id,
             block_id,
         }))
+    }
+}
+
+/// One `Message` node of [`GqlClient::query_bridge_extouts`] and
+/// [`GqlClient::query_bridge_extouts_page`]. `Message.block_id` is `null` on
+/// ExtOut in this GQL schema; `src_transaction.block_id` stands in for it.
+fn parse_bridge_extout(node: &Value) -> BridgeExtOutMessage {
+    let text = |key: &str| {
+        node.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let block_id = node
+        .get("block_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            node.get("src_transaction")
+                .and_then(|tx| tx.get("block_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    BridgeExtOutMessage {
+        id: text("id"),
+        boc: text("boc"),
+        dst: text("dst"),
+        created_at: node.get("created_at").and_then(|v| v.as_u64()),
+        src_dapp_id: node
+            .get("src_dapp_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        block_id,
     }
 }
 

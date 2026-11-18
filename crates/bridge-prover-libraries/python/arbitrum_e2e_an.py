@@ -24,6 +24,11 @@ logs go to stderr.
   msig-funded <amount>      deploy a multisig and have the owner mint <amount> base units of
                             USDC to it with mintAndSendBridged for 421614, so the withdrawal
                             does not wait for the deposit: MSIG, MSIG_ACCOUNT, MSIG_KEYS
+  burn <dapp::account> <keys> <amount> <0x recipient>
+                            the multisig burns <amount> base units of USDC to <recipient> on
+                            421614: sendTransaction to the bridge with initiateWithdrawal, as the
+                            wallet does, and nothing after it (daemon-live pays it out). Waits
+                            until the multisig holds no USDC: ECC3_AFTER
   accepted <chain> <hash>   ACCEPTED=true|false
   ecc <dapp::account>       ECC3=<base units of USDC on the account>
 
@@ -49,6 +54,10 @@ from helper import bridge_e2e as be  # noqa: E402
 from helper.bridge_e2e import (  # noqa: E402
     USDC_BRIDGE_ABI, USDC_BRIDGE_ADDRESS, USDC_BRIDGE_KEYS,
     materialize_usdc_bridge_key_from_node_config, validate_usdc_bridge_key,
+)
+from helper.bridge_e2e import (  # noqa: E402
+    MSIG_ABI, USDC_BRIDGE_ADDRESS_LEGACY, USDC_TOKEN_ID, encode_initiate_withdrawal_body,
+    require_bridged_headroom, require_evm_bridge,
 )
 from helper.msig import deploy_multisig, mint_usdc  # noqa: E402
 
@@ -221,6 +230,26 @@ def main():
             answer = [f"OWNER_ANCHORS={str(not until(lambda: not owner_anchors(args[0]))).lower()}"]
         elif cmd == "owner-anchors" and len(args) == 1:
             answer = [f"OWNER_ANCHORS={str(owner_anchors(args[0])).lower()}"]
+        elif cmd == "burn" and len(args) == 4:
+            msig, keys, amount, recipient = args[0], args[1], int(args[2]), args[3].lower()
+            if recipient.startswith("0x"):
+                recipient = recipient[2:]
+            require_bridged_headroom(amount, ARB_SEPOLIA)
+            require_evm_bridge(ARB_SEPOLIA)
+            result = common.call_contract(msig, MSIG_ABI, keys, "sendTransaction", {
+                "dest": USDC_BRIDGE_ADDRESS_LEGACY,
+                "value": "1000000000",
+                "cc": {str(USDC_TOKEN_ID): str(amount)},
+                "bounce": True,
+                "flags": 1,
+                "payload": encode_initiate_withdrawal_body(ARB_SEPOLIA, recipient),
+            }, True)
+            print(f"sendTransaction: {result}", file=sys.stderr)
+
+            def usdc():
+                return int(((common.get_account(msig) or {}).get("ecc_balance") or {}).get("3", 0))
+            until(lambda: usdc() == 0)
+            answer = [f"ECC3_AFTER={usdc()}"]
         elif cmd == "accepted" and len(args) == 2:
             answer = [f"ACCEPTED={str(accepted(args[0], args[1])).lower()}"]
         elif cmd == "ecc" and len(args) == 1:

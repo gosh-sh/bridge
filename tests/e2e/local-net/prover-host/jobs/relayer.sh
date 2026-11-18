@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # relayer daemon-live: proves the local network's bundles from the genesis seed (L2
 # anchoring, one bundle per 16384 seq_nos, as the live relayer runs) and submits verifyBlock
-# to the run's bridge.
+# to the run's bridge. Its withdrawal claimer finds every burn on the zerostate bridge that
+# names the run's bridge, proves it (Circuit 4) and sends withdrawByProof from the same key.
 # Input: the deployer's private key; it signs with the relayer key derived from it (fund.sh
 # gives that one gas). Runs until the runner stops the run.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh

@@ -187,6 +187,12 @@ where
     pipeline: Circuit12ShplonkPipeline<W, A>,
     bundle_calldata: CalldataSlot,
     bk_update_calldata: CalldataSlot,
+    /// Taken for the whole of [`BlockSource::fetch`] and
+    /// [`BkUpdateSource::fetch_bk_update`], where the bundles and rotations
+    /// are proven, when [`Self::with_prove_gate`] set one: daemon-live shares
+    /// it with its withdrawal claimer, so a bundle and a withdrawal are never
+    /// proven at once and the process peaks at the larger of the two.
+    prove_gate: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl<I, W, A> AggregatedBlockSource<I, W, A>
@@ -201,6 +207,20 @@ where
             pipeline,
             bundle_calldata: Mutex::new(None),
             bk_update_calldata: Mutex::new(None),
+            prove_gate: None,
+        }
+    }
+
+    /// Prove only while holding `gate` (see the field).
+    pub fn with_prove_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
+        self.prove_gate = Some(gate);
+        self
+    }
+
+    async fn gate(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match &self.prove_gate {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
         }
     }
 
@@ -219,6 +239,7 @@ where
     A: ProofAggregator + 'static,
 {
     async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+        let _proving = self.gate().await;
         let Some(mut block) = self.inner.fetch(target).await? else {
             return Ok(None);
         };
@@ -321,6 +342,7 @@ where
     A: ProofAggregator + 'static,
 {
     async fn fetch_bk_update(&self, target: u64) -> Result<Option<BkSetUpdateData>, RelayerError> {
+        let _proving = self.gate().await;
         let Some(mut upd) = self.inner.fetch_bk_update(target).await? else {
             return Ok(None);
         };

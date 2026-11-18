@@ -19,6 +19,27 @@ assigns it when the release is tagged.
 ### Fixes
 -->
 
+## [Unreleased]
+
+### Breaking Changes
+
+- `daemon-live`'s container refuses to start without Circuit 4's keys in `params/relayer/`:
+  `event_pk.bin`, `event_vk.bin`, `event_config_params.json`, `event_manifest.json`
+  (`verify-params.sh`, `finalize-params.sh`). Copy them from a params directory where
+  `ackinacki-bridge withdraw` of the same release generated them, rerun
+  `docker/relayer/finalize-params.sh` and put the new `PARAMS_MANIFEST_SHA256` into `daemon-live.env`.
+
+### New / Improvements
+
+- `relayer daemon-live` pays out withdrawals: once a minute it reads the `WithdrawalInitiated` events of
+  the Acki Nacki bridge (`--an-token-bridge`, `AN_TOKEN_BRIDGE`, default
+  `0000…0000::1a1a…1a`), proves every burn whose `dstChainId` and `dstBridge` are its own bridge and
+  sends `withdrawByProof` from `RELAYER_PRIVATE_KEY`, which pays the gas: keep it funded. A burn
+  already paid (by `ackinacki-bridge withdraw`, say) is skipped by its nullifier.
+- Its record is `withdraw-claims.json` in `BRIDGE_STATE_DIR`; a burn refused three times is parked
+  there with the reason and taken up again at the next restart. Bundles and withdrawals are proven
+  one at a time.
+
 ## [0.9.0]
 
 ### Breaking Changes

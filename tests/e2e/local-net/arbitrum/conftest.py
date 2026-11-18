@@ -258,7 +258,7 @@ def run(ph, an, sha):
     threading.Thread(target=heartbeat, daemon=True).start()
     yield r
     stop.set()
-    for job in ("lc-prove", "lc-bootstrap", "lc-relayer", "relayer", "anchors", "cli-deposit", "cli-withdraw"):
+    for job in ("lc-prove", "lc-bootstrap", "lc-relayer", "relayer", "anchors", "deposit-relayer", "cli-deposit"):
         text = r.log(job, 80)
         if text:
             print(f"\n----- {job} (last 80 lines)\n{text}")

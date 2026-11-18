@@ -21,7 +21,7 @@ use crate::{
         an::{AccStatus, AnRead, ExtDir, TxView},
         identity::BRIDGE_ABI,
         preflight::AnBoth,
-        refusals::FinalizeSend,
+        refusals::{react, FinalizeSend, Reaction},
         retry::{base_delay, deadline_after, jittered, once, until, ONE_READ},
         store::CreditInfo,
         ui::Ui,
@@ -411,6 +411,9 @@ pub async fn by_events(
     bridge_tx_verdict(an, &tx, id, true).await
 }
 
+const RETRY_TVL_CAP: &str = "retryDeposit hit the source chain's TVL cap (exit 235). Wait for \
+                             withdrawals to free capacity on that chain";
+
 /// Observe bridge state independently of GraphQL indexing. A pending proof
 /// can be minted by anyone. The bridge serializes competing retries and
 /// the original callback against the same deposit record.
@@ -421,12 +424,14 @@ async fn recover_pending(
     id: &Identity,
     poll: Duration,
     ui: &dyn Ui,
+    waiting_for_capacity: &mut bool,
 ) {
     let mut attempts = 0u32;
     loop {
         let reason = match tokio::time::timeout(ONE_READ, deposit_status(an, bridge, id)).await {
-            Ok(Ok(DepositStatus::Minted)) => return,
+            Ok(Ok(DepositStatus::Minted)) => break,
             Ok(Ok(DepositStatus::Absent)) => {
+                *waiting_for_capacity = false;
                 tokio::time::sleep(poll).await;
                 continue;
             },
@@ -437,7 +442,11 @@ async fn recover_pending(
                         aborted: false,
                         exit_code: None | Some(0),
                         ..
-                    }) => return,
+                    }) => break,
+                    Ok(outcome) if react(&outcome) == Reaction::WaitCapacity => {
+                        *waiting_for_capacity = true;
+                        RETRY_TVL_CAP.into()
+                    },
                     Ok(outcome) => format!("retryDeposit: {outcome:?}"),
                     Err(_) => "retryDeposit outcome is unknown".into(),
                 }
@@ -453,6 +462,7 @@ async fn recover_pending(
         ui.retry("checking the deposit before retry", attempts, &reason);
         tokio::time::sleep(delay.max(poll)).await;
     }
+    *waiting_for_capacity = false;
 }
 
 /// Step 9. Pending deposits are retried while the voucher and event paths
@@ -480,15 +490,38 @@ pub async fn confirm(
         not_before,
         deadline_after(timeout),
         poll,
-        op_id,
         ui,
     );
     tokio::pin!(delivery);
-    tokio::select! {
+    let mut waiting_for_capacity = false;
+    let recovery = recover_pending(
+        an,
+        bridge,
+        bridge_dapp,
+        id,
+        poll,
+        ui,
+        &mut waiting_for_capacity,
+    );
+    let credit = tokio::select! {
         biased;
         result = &mut delivery => result,
-        _ = recover_pending(an, bridge, bridge_dapp, id, poll, ui) => delivery.await,
-    }
+        _ = recovery => delivery.await,
+    };
+    credit.ok_or_else(|| {
+        let reason = if waiting_for_capacity {
+            RETRY_TVL_CAP
+        } else {
+            "finalizeDeposit was sent and the credit could not be confirmed yet (a message in \
+             transit, a lagging or failing GraphQL)"
+        };
+        CliError::deposit(
+            ExitCode::CreditUnconfirmed,
+            Stage::Credit,
+            Some(op_id),
+            format!("{reason}; continue with --resume {op_id}"),
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -501,9 +534,8 @@ async fn watch_delivery(
     not_before: u64,
     deadline: tokio::time::Instant,
     poll: Duration,
-    op_id: &str,
     ui: &dyn Ui,
-) -> CliResult<CreditInfo> {
+) -> Option<CreditInfo> {
     let mut failures = 0u32;
     loop {
         let (v, e) = tokio::join!(
@@ -529,20 +561,11 @@ async fn watch_delivery(
         let v = read(v, "following the deposit voucher");
         let e = read(e, "reading the bridge's DepositFinalized events");
         if let (Credit::Confirmed(c), _) | (_, Credit::Confirmed(c)) = (v, e) {
-            return Ok(c);
+            return Some(c);
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return Err(CliError::deposit(
-                ExitCode::CreditUnconfirmed,
-                Stage::Credit,
-                Some(op_id),
-                format!(
-                    "finalizeDeposit was sent and the credit could not be confirmed yet (a \
-                     message in transit, a lagging or failing GraphQL); continue with --resume \
-                     {op_id}"
-                ),
-            ));
+            return None;
         }
         ui.status(if via_events_only {
             "waiting for the credit: DepositFinalized → transfer → delivery"
@@ -829,6 +852,100 @@ mod tests {
             "depositId": "7", "contractAddr": "52733", "chainId": "11155111"
         })]);
         assert_eq!(*an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_tvl_cap_explains_the_wait_and_how_to_resume_at_timeout() {
+        use crate::deposit::ui::{RecordingUi, UiEvent};
+
+        for outcome in [
+            FinalizeSend::Rejected {
+                exit_code: Some(235),
+                message: "node refusal".into(),
+            },
+            FinalizeSend::Executed {
+                tx_id: "retry".into(),
+                aborted: true,
+                exit_code: Some(235),
+            },
+        ] {
+            let an = FakeAn::default();
+            an.getter(BRIDGE, "getDepositStatus", vec![json!({"status": 1})]);
+            an.sends.lock().unwrap().push_back(outcome);
+            let ui = RecordingUi::new(true);
+            let timeout = Duration::from_secs(5);
+            let start = tokio::time::Instant::now();
+            let error = confirm(
+                &an,
+                BRIDGE,
+                BRIDGE,
+                VOUCHER,
+                &id(7),
+                true,
+                0,
+                timeout,
+                timeout,
+                "OP",
+                &ui,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(start.elapsed(), timeout);
+            assert_eq!(error.exit_code(), ExitCode::CreditUnconfirmed);
+            let capacity = |s: &str| {
+                s.contains("TVL") && s.contains("source chain") && s.contains("withdrawals")
+            };
+            assert!(
+                ui.events().iter().any(|event| match event {
+                    UiEvent::Retry(_, _, s) | UiEvent::Status(s) => capacity(s),
+                    _ => false,
+                }),
+                "{:?}",
+                ui.events()
+            );
+            assert!(capacity(&error.to_string()), "{error}");
+            assert!(error.to_string().contains("--resume OP"), "{error}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_tvl_cap_diagnosis_clears_when_the_mint_succeeds() {
+        for next_status in [1, 2] {
+            let an = FakeAn::default();
+            an.getter(BRIDGE, "getDepositStatus", vec![
+                json!({"status": 1}),
+                json!({"status": next_status}),
+            ]);
+            an.sends.lock().unwrap().extend([
+                FinalizeSend::Rejected {
+                    exit_code: Some(235),
+                    message: "node refusal".into(),
+                },
+                FinalizeSend::Executed {
+                    tx_id: "mint".into(),
+                    aborted: false,
+                    exit_code: Some(0),
+                },
+            ]);
+            let error = confirm(
+                &an,
+                BRIDGE,
+                BRIDGE,
+                VOUCHER,
+                &id(7),
+                true,
+                0,
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+                "OP",
+                &crate::deposit::ui::RecordingUi::new(true),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.exit_code(), ExitCode::CreditUnconfirmed);
+            assert!(!error.to_string().contains("TVL"), "{error}");
+            assert!(error.to_string().contains("--resume OP"), "{error}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

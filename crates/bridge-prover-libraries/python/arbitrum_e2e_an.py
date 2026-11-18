@@ -33,7 +33,8 @@ logs go to stderr.
                             the multisig burns <amount> base units of USDC to <recipient> on
                             421614: sendTransaction to the bridge with initiateWithdrawal, as the
                             wallet does, and nothing after it (daemon-live pays it out). Waits
-                            until the multisig holds no USDC: ECC3_AFTER
+                            until the multisig holds no USDC: ECC3_AFTER, and the multisig's
+                            transaction that sent it: BURN_TX
   accepted <chain> <hash>   ACCEPTED=true|false
   ecc <dapp::account>       ECC3=<base units of USDC>, ECC1=<base units of NACKL> on the account
 
@@ -147,6 +148,24 @@ def lc_getter(target, method):
 def verifier_config(target, l2):
     cfg = common.run_getter(target, VERIFIER_ABI, "getConfig", {})
     return cfg if isinstance(cfg, dict) and uint(cfg.get("l2ChainId")) == int(l2) else None
+
+
+def burn_tx(msig):
+    """The hash of the last transaction of `msig` (dapp::account) that sent a message: the burn's
+    sendTransaction, which `ackinacki-bridge withdraw proof --burn-tx` takes."""
+    dapp, account = msig.split("::")
+    query = (f'{{ blockchain {{ account(account_id: "{account}", dapp_id: "{dapp}") {{ '
+             f'transactions(last: 10, archive: true) {{ edges {{ node {{ hash: id out_msgs }} }} }} }} }} }}')
+
+    def last_sender():
+        edges = ((((be.GqlClient(GRAPHQL_URL)._gql(query).get("data") or {}).get("blockchain") or {})
+                  .get("account") or {}).get("transactions") or {}).get("edges") or []
+        sent = [e["node"]["hash"] for e in edges if e["node"].get("out_msgs")]
+        return sent[-1].removeprefix("transaction/") if sent else None
+    found = until(last_sender)
+    if not found:
+        raise RuntimeError(f"no transaction of {msig} that sent a message")
+    return found
 
 
 def main():
@@ -286,7 +305,7 @@ def main():
             def usdc():
                 return int(((common.get_account(msig) or {}).get("ecc_balance") or {}).get("3", 0))
             until(lambda: usdc() == 0)
-            answer = [f"ECC3_AFTER={usdc()}"]
+            answer = [f"ECC3_AFTER={usdc()}", f"BURN_TX={burn_tx(msig)}"]
         elif cmd == "accepted" and len(args) == 2:
             answer = [f"ACCEPTED={str(accepted(args[0], args[1])).lower()}"]
         elif cmd == "ecc" and len(args) == 1:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# deposit-relayer daemon: finalizes the run's deposits. The CLI that sends the deposit leaves
-# that to it (cli-deposit.sh, --relayer-grace-s).
+# deposit-relayer daemon: finalizes the run's deposits. `deposit send` (cli-deposit.sh) only
+# makes them; `deposit proof` (cli-deposit-proof.sh) proves them again once this has finalized.
 # Runs from the deposit-relayer image, so its binary is the image's. Input: a tvm keys JSON that signs finalizeDeposit (the bridge owner's, the sender
 # being the bridge account, as on the stand). Runs until the runner stops the run.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh

@@ -91,13 +91,13 @@ dependency graph as it is.
 
 ## 4. Gas amounts in the deposit path are literals
 
-**Where:** `contracts/an/exchange/eccBridge.sol:695,875` (`value: 2 vmshell`
+**Where:** `contracts/an/exchange/eccBridge.sol:982` (`value: 2 vmshell`
 on the `DepositVoucher` deploy) and
-`contracts/an/exchange/DepositVoucher.sol:44` (`value: 0.5 vmshell` on the
-`confirmDeposit` callback).
+`contracts/an/exchange/DepositVoucher.sol:48` (`value: 0.5 vmshell` on the
+`confirmTokenDeposit` callback).
 
 The bridge itself cannot run out: `ensureBalance()` mints vmshell when its
-balance falls below `MIN_BALANCE` (`eccBridge.sol:406-409`). The voucher has
+balance falls below `MIN_BALANCE` (`eccBridge.sol:245-248`). The voucher has
 no such floor — it executes on the 2 vmshell it was deployed with.
 
 If the initial callback runs out of gas, the deposit stays pending and the CLI

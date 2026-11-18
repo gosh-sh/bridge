@@ -3,8 +3,7 @@
 ## Documentation status — read before citing any document
 
 **Everything outside `docs/archive/` is current. `docs/archive/` is not.** When code and prose
-disagree, the code wins, except over the documents `DOCS.md` marks Normative: the code is judged
-against those.
+disagree, the code wins.
 
 - [`DOCS.md`](DOCS.md) is the register of current documents, the rules for writing a new one, and a
   list of claims the archived docs get wrong that have already been checked against the source —
@@ -333,57 +332,10 @@ commit.
 
 ### Self-review before every push
 
-Every push an agent makes to `origin` comes after a self-review of the commits it carries. Run
-`make -i pre-push` before the review and check that the only error it reports as `(ignored)` is
-`aggregator-fmt`, the failure described above; a plain `make pre-push` stops there and runs no
-tests. Any change made after the review is a new `HEAD` and needs a new review. Commit locally, then
-run a fresh instance of the same agent from its CLI: no context of the work, the same model and the
-same reasoning effort as the session that wrote the change, read-only tools. Run `git fetch`
-yourself before starting it, start it from the repository root, with `PROMPT` and `OUT` set to files
-outside the repository. For Claude Code:
-
-```bash
-CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude -p "$(cat "$PROMPT")" \
-  --model <the session's model> --effort <the session's effort> \
-  --tools "Read,Grep,Glob,Bash" --permission-mode dontAsk --strict-mcp-config \
-  --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(grep:*)" \
-  --output-format text > "$OUT"
-```
-
-Without `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` the reviewer loads the author's auto-memory, and with it
-the author's conclusions. `--allowedTools` alone only skips the prompts; `--tools`,
-`--permission-mode dontAsk` and `--strict-mcp-config` keep the reviewer to read-only commands, as
-long as no settings file pre-approves a write tool. `--output=<file>` on `git diff`, `git log` or
-`git show` would still write; the `git status` check below catches it inside the repository. Another
-agent uses its own CLI the same way, with read-only enforced by the CLI rather than only asked for
-in the prompt.
-
-The prompt says what the change is meant to do, names the specifications it has to follow and the
-range to review (`git diff origin/main...HEAD`), and asks for findings, each with its severity,
-`file:line` and a scenario, ending with `CRITICAL: none` or `CRITICAL: <count>`. It does not hand
-the reviewer your conclusions.
-
-**Critical** is at least anything that can lead to funds being stolen or stuck in the bridge, on
-either chain: a mint or payout without a deposit or burn behind it, a mint or payout made twice, for
-the wrong amount or to the wrong recipient, a proof accepted for a state or event that did not
-happen, the bridge's holdings dropping below what it owes, an owner or upgrade path that can move or
-freeze user funds, a leaked key that can move or freeze funds, a deposit or a burn that can never
-complete.
-
-Findings are judged against the normative specifications: the rows of [`DOCS.md`](DOCS.md) marked
-Normative. A document written from the code (marked Verified) describes the code and does not settle
-a finding about it. A critical finding is closed by a fix, or by showing, with `file:line` in the
-specification and in the code, that the reviewer's scenario cannot happen; never by running the
-review until it stays silent. Where no normative specification describes the exact behavior, or the
-scenario holds while the code does what the specification says, a person decides; for most of the
-bridge no normative specification exists yet, so a critical finding there is closed by a fix or by a
-person.
-
-Fix, run `make -i pre-push`, commit locally and review again. Push only once the last review reports
-`CRITICAL: none`, or each critical finding it reports is closed against the specification or by a
-person's decision and written down in the pull request description (opened right after the push if
-there is none yet) with the `file:line` or the decision and who made it; `git status` clean and
-`HEAD` still the commit that was reviewed.
+After the local commit and before every push, review the unpushed commits with a fresh run of the
+same agent from its CLI: no context of the work, the same model and reasoning effort, read-only.
+Push only when it finds nothing critical, that is, at least nothing that can lead to funds being
+stolen or stuck in the bridge.
 
 ## Where to look next
 

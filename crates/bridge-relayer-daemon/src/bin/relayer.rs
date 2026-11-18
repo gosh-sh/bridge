@@ -2694,9 +2694,9 @@ async fn run_daemon_live(
         Arc::clone(&bridge),
         prove_gate,
     )?;
-    let claimer = tokio::spawn(claimer.run());
+    let mut claimer = tokio::spawn(claimer.run());
 
-    let result = spawn_and_run(
+    let relayer = spawn_and_run(
         cfg,
         Arc::clone(&aggregated),
         aggregated,
@@ -2706,10 +2706,24 @@ async fn run_daemon_live(
         &params_dir,
         &prover_state_dir,
         shutdown,
-    )
-    .await;
-    claimer.abort();
-    result
+    );
+    // The claimer runs until the daemon stops. If it ends on its own, it
+    // panicked: the daemon stops too, so that the failure is seen and a
+    // restart brings the payouts back, instead of running on without them.
+    tokio::select! {
+        result = relayer => {
+            claimer.abort();
+            result
+        },
+        ended = &mut claimer => Err(anyhow::anyhow!(
+            "the withdrawal claimer stopped: {}",
+            match ended {
+                Err(e) if e.is_panic() => format!("it panicked: {e}"),
+                Err(e) => e.to_string(),
+                Ok(()) => "it returned".to_string(),
+            }
+        )),
+    }
 }
 
 /// The zerostate's token bridge: System dApp, account `1a…1a`.

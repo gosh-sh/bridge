@@ -255,6 +255,17 @@ pub async fn enrich_captured(
     captured: &CapturedEvent,
 ) -> Result<EnrichedWitness> {
     let gql = create_client(&cfg.gql_endpoint).context("create GqlClient")?;
+    enrich_captured_with(&gql, cfg, bridge_state, captured).await
+}
+
+/// [`enrich_captured`] through `gql`, a client the caller built (with its
+/// failover endpoints and retry policy, say).
+pub async fn enrich_captured_with(
+    gql: &GqlClient,
+    cfg: &WithdrawE2EConfig,
+    bridge_state: &BridgeState,
+    captured: &CapturedEvent,
+) -> Result<EnrichedWitness> {
     info!(
         window_size = bridge_state.window_size,
         num_active_layers = bridge_state.num_active_layers(),
@@ -271,7 +282,7 @@ pub async fn enrich_captured(
         "enricher: single-shot against caller-provided state",
     );
     let enriched = enrich_witness(
-        &gql,
+        gql,
         bridge_state,
         partial,
         cfg.anchor_mode,
@@ -290,6 +301,8 @@ pub async fn prove_enriched(
     captured: CapturedEvent,
     enriched: EnrichedWitness,
 ) -> Result<WithdrawE2ESummary> {
+    std::fs::create_dir_all(&cfg.work_dir)
+        .with_context(|| format!("mkdir work_dir {}", cfg.work_dir.display()))?;
     prove_and_finalize(cfg, captured, enriched).await
 }
 

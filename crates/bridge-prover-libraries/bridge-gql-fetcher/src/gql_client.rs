@@ -1385,7 +1385,8 @@ impl GqlClient {
     /// first: the `first` after the cursor `after` (from the start when
     /// `None`). Each comes with its own cursor, the one to pass as `after`
     /// to read on from it. A page shorter than `first` is the last one for
-    /// now.
+    /// now. Archived messages included, as `ackinacki-bridge deposit` reads
+    /// them.
     pub async fn query_bridge_extouts_page(
         &self,
         account_id_hex: &str,
@@ -1401,7 +1402,7 @@ impl GqlClient {
             r#"{{
               blockchain {{
                 account(account_id: "{account_id_hex}", dapp_id: "{dapp_id_hex}") {{
-                  messages(msg_type: [ExtOut], first: {first}{after_arg}) {{
+                  messages(msg_type: [ExtOut], archive: true, first: {first}{after_arg}) {{
                     edges {{ cursor node {{
                       id boc dst created_at
                       block_id src_dapp_id

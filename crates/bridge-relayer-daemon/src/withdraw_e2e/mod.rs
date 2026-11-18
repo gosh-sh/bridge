@@ -36,6 +36,6 @@ pub use capture::{
     CapturedEvent,
 };
 pub use driver::{
-    enrich_captured, prove_enriched, run_once, run_once_with_state, WithdrawE2EConfig,
-    WithdrawE2ESummary,
+    enrich_captured, enrich_captured_with, prove_enriched, run_once, run_once_with_state,
+    WithdrawE2EConfig, WithdrawE2ESummary,
 };

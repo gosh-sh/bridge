@@ -49,11 +49,11 @@ use tracing::{info, warn};
 
 use crate::{
     bridge::{
-        decode_withdraw_revert, DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome,
-        HISTORY_PROOF_WINDOW,
+        classify_withdraw_revert, decode_withdraw_revert, DryRunOutcome, EthBridgeClient,
+        WithdrawRevertKind, WithdrawSubmitOutcome, HISTORY_PROOF_WINDOW,
     },
     withdraw_e2e::{
-        driver::{enrich_captured, prove_enriched},
+        driver::{enrich_captured_with, prove_enriched},
         CapturedEvent, WithdrawE2EConfig,
     },
     withdrawal::PartnerWithdrawalProof,
@@ -111,14 +111,15 @@ pub enum ClaimState {
 }
 
 /// One `WithdrawalInitiated` the claimer saw.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
     /// The ExtOut message id.
     pub message_id: String,
     /// The block's `hash` (what `src_transaction.block_id` carries).
     pub block_hash: String,
     pub created_at: Option<u64>,
-    /// The event BOC while the burn is pending; dropped once it is final.
+    /// The event BOC while the burn is pending or parked; dropped once it is
+    /// paid or not ours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boc: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,8 +156,30 @@ impl ClaimsFile {
     pub fn load(state_dir: &Path) -> Result<Self> {
         let path = state_dir.join(CLAIMS_FILE);
         let mut file: Self = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("{} does not parse", path.display()))?,
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(file) => file,
+                // Moved aside, not fatal: the claimer reads the bridge's
+                // events from the start again, and every burn paid already
+                // is recognised by its nullifier before anything is proven.
+                Err(e) => {
+                    let aside = state_dir.join(format!(
+                        "{CLAIMS_FILE}.corrupt-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0)
+                    ));
+                    std::fs::rename(&path, &aside)
+                        .with_context(|| format!("move the unreadable {} aside", path.display()))?;
+                    warn!(
+                        error = %e,
+                        moved_to = %aside.display(),
+                        "withdraw claimer: the record does not parse; starting from the first \
+                         event again",
+                    );
+                    Self::default()
+                },
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
@@ -201,15 +224,6 @@ impl ClaimsFile {
             if self.withdrawals.iter().any(|c| c.message_id == msg.id) {
                 continue;
             }
-            let (state, last_error) = match msg.block_id.as_deref() {
-                Some(_) => (ClaimState::Pending, None),
-                None => (
-                    ClaimState::Parked {
-                        reason: "GraphQL gave the event no block".into(),
-                    },
-                    Some("GraphQL gave the event no block".into()),
-                ),
-            };
             added.push(msg.id.clone());
             self.withdrawals.push(Claim {
                 message_id: msg.id,
@@ -220,9 +234,9 @@ impl ClaimsFile {
                 amount: None,
                 token_id: None,
                 recipient: None,
-                state,
+                state: ClaimState::Pending,
                 failures: 0,
-                last_error,
+                last_error: None,
             });
         }
         added
@@ -348,12 +362,17 @@ where
     /// Reads the new burns, then moves each pending one on.
     pub async fn round(&mut self) -> Result<()> {
         self.round_state = None;
-        self.discover().await?;
+        // The burns found before still move on when GraphQL cannot list new
+        // ones this round.
+        if let Err(e) = self.discover().await {
+            warn!(error = %format!("{e:#}"), "withdraw claimer: could not read new withdrawals");
+        }
         for i in 0..self.file.withdrawals.len() {
             if self.file.withdrawals[i].state != ClaimState::Pending {
                 continue;
             }
-            let mut claim = self.file.withdrawals[i].clone();
+            let before = self.file.withdrawals[i].clone();
+            let mut claim = before.clone();
             let id = claim.message_id.clone();
             match self.advance(&mut claim).await {
                 Ok(Outcome::Wait) => {},
@@ -381,17 +400,19 @@ where
                     );
                     if claim.failures >= PARK_AFTER {
                         warn!(message_id = %id, %reason, "withdraw claimer: parked; a restart tries it again");
+                        // The BOC stays: a restart takes the burn up again.
                         claim.state = ClaimState::Parked {
                             reason: reason.clone(),
                         };
-                        claim.boc = None;
                         let _ = std::fs::remove_dir_all(self.work_dir_for(&id));
                     }
                     claim.last_error = Some(reason);
                 },
             }
-            self.file.withdrawals[i] = claim;
-            self.file.save(&self.cfg.state_dir)?;
+            if claim != before {
+                self.file.withdrawals[i] = claim;
+                self.file.save(&self.cfg.state_dir)?;
+            }
         }
         Ok(())
     }
@@ -432,6 +453,22 @@ where
 
     /// One burn, as far as it goes this round.
     async fn advance(&mut self, claim: &mut Claim) -> Result<Outcome, StepError> {
+        if claim.block_hash.is_empty() {
+            // GraphQL listed the message before its block: read it again.
+            let msg = self
+                .gql
+                .query_bridge_extout_by_id(&claim.message_id)
+                .await
+                .context("the event's block")?;
+            match msg.and_then(|m| m.block_id) {
+                Some(block) => claim.block_hash = block,
+                None => {
+                    return Err(StepError::Retry(anyhow::anyhow!(
+                        "GraphQL gives the event no block yet"
+                    )))
+                },
+            }
+        }
         let Some(boc) = claim.boc.clone() else {
             return Err(StepError::Refused(
                 "no event BOC kept for a pending withdrawal".into(),
@@ -545,7 +582,7 @@ where
                     key_block: block.key_block,
                 };
                 let e2e_cfg = self.e2e_config(&claim.message_id, block.seq_no);
-                let enriched = enrich_captured(&e2e_cfg, &state, &captured)
+                let enriched = enrich_captured_with(&self.gql, &e2e_cfg, &state, &captured)
                     .await
                     .map_err(|e| StepError::Refused(format!("the witness: {e:#}")))?;
 
@@ -669,13 +706,26 @@ where
     }
 }
 
-/// A revert of the dry run or the send: a spent nullifier ends the claim,
-/// anything else counts toward parking.
+/// A revert of the dry run or the send. A spent nullifier ends the claim. A
+/// revert intrinsic to the proof ([`classify_withdraw_revert`]), and an anchor
+/// the bridge no longer holds, count toward parking and drop the proof. A
+/// state of the bridge that passes (paused, the treasury short while AAVE
+/// pays back), and anything that does not decode, is tried again next round
+/// with the same proof.
 fn refusal(reason: &str) -> Result<Outcome, StepError> {
     match decode_withdraw_revert(reason) {
         Some(r) if r.name == "NullifierAlreadyUsed" => Ok(Outcome::Final(ClaimState::AlreadyPaid)),
-        Some(r) => Err(StepError::Refused(format!(
-            "withdrawByProof reverts {}",
+        Some(r)
+            if r.name == "UnknownAnchor"
+                || classify_withdraw_revert(reason) == WithdrawRevertKind::Permanent =>
+        {
+            Err(StepError::Refused(format!(
+                "withdrawByProof reverts {}",
+                r.rendered
+            )))
+        },
+        Some(r) => Err(StepError::Retry(anyhow::anyhow!(
+            "withdrawByProof reverts {} for now",
             r.rendered
         ))),
         None => Err(StepError::Retry(anyhow::anyhow!(
@@ -765,13 +815,29 @@ mod tests {
     }
 
     #[test]
-    fn an_event_without_a_block_is_parked_at_once() {
+    fn an_event_listed_without_its_block_waits_for_it() {
         let mut file = ClaimsFile::default();
         file.take_page(vec![("c1".into(), msg("a", WITHDRAWAL_EVENT_DST, None))]);
-        assert!(matches!(
-            file.withdrawals[0].state,
-            ClaimState::Parked { .. }
-        ));
+        assert_eq!(file.withdrawals[0].state, ClaimState::Pending);
+        assert!(file.withdrawals[0].block_hash.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_record_is_moved_aside_and_the_claimer_starts_over() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(CLAIMS_FILE), b"{not json").unwrap();
+        let file = ClaimsFile::load(dir.path()).unwrap();
+        assert!(file.cursor.is_none() && file.withdrawals.is_empty());
+        assert!(!dir.path().join(CLAIMS_FILE).exists());
+        let aside = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("withdraw-claims.json.corrupt-")
+            });
+        assert!(aside, "the unreadable record is kept beside");
     }
 
     #[test]
@@ -798,6 +864,7 @@ mod tests {
         });
         assert_eq!(back.withdrawals[1].state, ClaimState::Pending);
         assert_eq!(back.withdrawals[1].failures, 0);
+        assert_eq!(back.withdrawals[1].boc.as_deref(), Some("boc-b"));
         assert_eq!(back.withdrawals[2].state, ClaimState::Pending);
     }
 
@@ -825,6 +892,14 @@ mod tests {
             selector("WithdrawalProofRejected()")
         );
         assert!(matches!(refusal(&rejected), Err(StepError::Refused(_))));
+        let evicted = format!(
+            "execution reverted: 0x{}{:064x}",
+            selector("UnknownAnchor(uint256)"),
+            5
+        );
+        assert!(matches!(refusal(&evicted), Err(StepError::Refused(_))));
+        let paused = format!("execution reverted: 0x{}", selector("BridgePaused()"));
+        assert!(matches!(refusal(&paused), Err(StepError::Retry(_))));
         assert!(matches!(
             refusal("connection reset"),
             Err(StepError::Retry(_))

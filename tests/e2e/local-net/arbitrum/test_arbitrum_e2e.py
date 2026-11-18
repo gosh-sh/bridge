@@ -2,7 +2,7 @@
 it to the local Acki Nacki network and the same 2 USDC withdrawn back, both proven by the
 relayers. `ackinacki-bridge deposit` only sends the deposit and waits for its credit: the
 deposit relayer finalizes it. The withdrawal is a burn on Acki Nacki, as the wallet makes it;
-daemon-live finds it, proves it and pays it out with withdrawByProof.
+daemon-withdraw-live finds it, proves it and pays it out with withdrawByProof.
 
 Nothing is accepted by hand. The one trusted input on the Acki Nacki side is the Sepolia
 light client's committee, proven from the beacon chain and set once (section 5); then the
@@ -15,7 +15,7 @@ deployed and the deposit sent as soon as the network is up; the light client is 
 the deposit waits for its Arbitrum assertion (half an hour at least), and daemon-live proves
 the network's 16384-block bundles from the start. The withdrawal does not wait for the deposit:
 its 2 USDC are minted by the owner for 421614 and burned right away, so the burn lands in the
-first bundle, and daemon-live pays it out of the deposit's 2 USDC.
+first bundle, and daemon-withdraw-live pays it out of the deposit's 2 USDC.
 
 The tests run in file order and pytest stops at the first failure (-x): each one is a step
 of the scenario and asserts what that step must have produced, from the chains or from the
@@ -194,20 +194,21 @@ def owner_keys():
 
 
 def test_30_sender_keys_funded(run, arb):
-    """The relayer has gas of its own for verifyBlock and withdrawByProof: no other sender
-    shares its nonce."""
+    """daemon-live has gas of its own for verifyBlock, daemon-withdraw-live for withdrawByProof:
+    two keys, so neither shares the other's nonce."""
     run.job("fund", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     run.finish("fund", 600)
     f = kv(run.get("fund.env"))
-    assert arb.eth(f["RELAYER_ADDRESS"]) > 0, f"relayer {f['RELAYER_ADDRESS']} has no ETH"
+    for role in ("RELAYER", "WITHDRAW"):
+        assert arb.eth(f[f"{role}_ADDRESS"]) > 0, f"{role.lower()} {f[f'{role}_ADDRESS']} has no ETH"
 
 
 def test_31_deposit_services_started(run):
     """daemon-live, eth-lc-relayer arbitrum-anchors and deposit-relayer daemon start from their
     images and say so in their logs. arbitrum-anchors has to run before the deposit: it takes
     the slot proofs when the deposit's batch lands, a minute or two after the deposit. The
-    deposit relayer finalizes the deposit; the CLI waits for it (--relayer-grace-s). daemon-live
-    also pays out every burn that names the run's bridge."""
+    deposit relayer finalizes the deposit; the CLI waits for it (--relayer-grace-s). Beside
+    daemon-live, daemon-withdraw-live pays out every burn that names the run's bridge."""
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     # The ARB_RPC secret, when set, follows the keys on the job's stdin: ci-entry logs every
     # command line, so a secret never travels as a job argument.
@@ -220,7 +221,7 @@ def test_31_deposit_services_started(run):
              600, log=lambda: run.log("relayer", 200))
     wait_for("daemon-live starts its loop", lambda: "daemon-live starting" in run.log("relayer"),
              900, log=lambda: run.log("relayer", 200))
-    wait_for("daemon-live starts its withdrawal claimer", lambda: "withdraw claimer starting" in run.log("relayer"),
+    wait_for("daemon-withdraw-live starts", lambda: "withdraw claimer starting" in run.log("relayer"),
              300, log=lambda: run.log("relayer", 200))
     # relayer.rs logs `startup: Cold — contract at genesis, bootstrapping policy=Explicit(0)`.
     assert "Explicit(0)" in run.log("relayer"), \
@@ -326,10 +327,11 @@ def test_43_burn_on_acki_nacki(run, ctx):
             NACKL_FROM=ctx["nmsig"], NACKL_AMOUNT=str(NACKL_OUT // NACKL))
     log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
 def the_claim(run, ctx):
-    """daemon-live's record of this run's burn (its withdraw-claims.json, kept in /out), or None
-    while it has not seen it. daemon-live must keep running."""
+    """daemon-withdraw-live's record of this run's burn (its withdraw-claims.json, kept in /out), or None
+    while it has not seen it. The relayer job, daemon-live and daemon-withdraw-live, must keep
+    running: it ends as soon as either stops."""
     code = run.wait("relayer", 1)
-    assert code is None, f"daemon-live exited {code}\n" + tail(run.log("relayer", 200))
+    assert code is None, f"the relayer job (daemon-live or daemon-withdraw-live) exited {code}\n" + tail(run.log("relayer", 200))
     try:
         claims = json.loads(run.get("withdraw-claims.json"))
     except ValueError:
@@ -535,10 +537,10 @@ def test_70_burn_bundle_verified(arb, ctx):
 
 
 def test_71_withdrawal_paid_by_the_relayer(run, ctx):
-    """daemon-live proves the withdrawal (Circuit 4 and its SHPLONK aggregation) and pays it out
-    with withdrawByProof: its record says paid, with the transaction."""
-    claim = claim_reaches(run, ctx, "daemon-live pays the withdrawal out", lambda c: c["state"] != "pending", 5400)
-    assert claim["state"] == "paid", f"the burn ended {claim['state']}, not paid by daemon-live: {claim}"
+    """daemon-withdraw-live proves the withdrawal (Circuit 4 and its SHPLONK aggregation) and pays
+    it out with withdrawByProof: its record says paid, with the transaction."""
+    claim = claim_reaches(run, ctx, "daemon-withdraw-live pays the withdrawal out", lambda c: c["state"] != "pending", 5400)
+    assert claim["state"] == "paid", f"the burn ended {claim['state']}, not paid by daemon-withdraw-live: {claim}"
     ctx.update(withdraw_tx=claim["tx_hash"])
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{claim['tx_hash']}")
 
@@ -553,11 +555,11 @@ WITHDRAWAL_PAID = "0x" + keccak256(b"WithdrawalByProofExecuted(uint256,address,u
 
 
 def test_72_withdrawal_sent_from_the_relayer(run, arb, ctx):
-    """The payout went to ARBITRUM_SEPOLIA_E2E_ADDRESS in a transaction the relayer's key sent
-    and paid the gas for."""
+    """The payout went to ARBITRUM_SEPOLIA_E2E_ADDRESS in a transaction daemon-withdraw-live's own
+    key sent and paid the gas for, not daemon-live's."""
     receipt = arb.receipt(ctx["withdraw_tx"])
-    relayer = kv(run.get("fund.env"))["RELAYER_ADDRESS"].lower()
-    assert receipt["from"].lower() == relayer, f"withdrawByProof came from {receipt['from']}, not the relayer {relayer}"
+    payer = kv(run.get("fund.env"))["WITHDRAW_ADDRESS"].lower()
+    assert receipt["from"].lower() == payer, f"withdrawByProof came from {receipt['from']}, not the withdrawal payer {payer}"
     paid = [l for l in receipt["logs"] if l["address"].lower() == ctx["bridge"].lower() and l["topics"][0] == WITHDRAWAL_PAID]
     assert paid, "no WithdrawalByProofExecuted in the payout"
     assert int(paid[0]["topics"][2], 16) == int(ctx["address"], 16), f"paid to {paid[0]['topics'][2]}"
@@ -601,3 +603,23 @@ def test_75_nackl_reconciles(arb, an, ctx):
     got = an("nackl", ctx["bridge"])
     assert int(got["LOCKED"]) == NACKL_OUT - NACKL_IN, got
     assert int(got["LOCKED_TO"]) == arb.words(ctx["bridge"], "nacklState()")[3], got
+# The timing lines daemon-live and daemon-withdraw-live log for each proof: the attestation
+# (Circuit 1A/1B), the layer-hashes proof (Circuit 2), a rotation's attestation, and every
+# aggregate-proof subprocess (Primary, LayerHashes, BridgeWithdrawal). A withdrawal's whole proof,
+# Circuit 4 and its aggregation, runs from "proving the withdrawal" to "proof built": the
+# timestamps of the two lines.
+PROOF_TIMING = re.compile(
+    r"proof generated in \d+ ms|aggregate-proof subprocess \(\w+\) took \d+ ms"
+    r"|wrap\+aggregate \(attestation \+ layer\) total \d+ ms"
+    r"|withdraw claimer: (proving the withdrawal|proof built)")
+
+
+def test_74_proof_timings(run):
+    """Prints how long each proof took on the prover host, from the relayer job's log: the
+    runbooks quote these figures. A bundle and the withdrawal were proven above, so their lines
+    are there; a run without them is a log that lost them."""
+    # The most ci-entry serves: the bundle's lines are near the start of a long log.
+    lines = [l for l in run.log("relayer", 999999).splitlines() if PROOF_TIMING.search(l)]
+    print("\n".join(f"  {l}" for l in lines))
+    assert any("Circuit 2 proof generated" in l for l in lines), "no bundle timing in the relayer log"
+    assert any("BridgeWithdrawalAggregatorVerifier" in l for l in lines), "no withdrawal timing in the relayer log"

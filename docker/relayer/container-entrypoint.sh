@@ -39,9 +39,18 @@ set +a
 source "$script_dir/container-paths.sh"
 remap_compose_runtime_paths
 
-[[ "${BRIDGE_ANCHOR_LEVEL:-}" == 2 ]] || die "only L2 anchor level 2 is allowed"
 [[ "${EXPECTED_EVM_CHAIN_ID:-}" =~ ^[0-9]+$ ]] || die "EXPECTED_EVM_CHAIN_ID must be the decimal chain id the bridge is deployed on"
 
+# RELAYER_ROLE picks the daemon: daemon-live proves bundles and rotations,
+# daemon-withdraw-live pays withdrawals out from its own key.
+if [[ "${RELAYER_ROLE:-bundles}" == withdrawals ]]; then
+  printf 'Starting the withdrawal payer on EVM chain %s: source=%s bridge=%s EOA=%s\n' \
+    "$EXPECTED_EVM_CHAIN_ID" "$EXPECTED_BRIDGE_COMMIT" "$BRIDGE_ADDRESS" "$WITHDRAW_ADDRESS"
+  cd "$BRIDGE_WORK_DIR"
+  exec "$RELAYER_BINARY" daemon-withdraw-live
+fi
+
+[[ "${BRIDGE_ANCHOR_LEVEL:-}" == 2 ]] || die "only L2 anchor level 2 is allowed"
 printf 'Starting shellnet -> EVM chain %s L2 relayer: source=%s bridge=%s EOA=%s seed=%s\n' \
   "$EXPECTED_EVM_CHAIN_ID" "$EXPECTED_BRIDGE_COMMIT" "$BRIDGE_ADDRESS" \
   "$RELAYER_ADDRESS" "$BRIDGE_BOOTSTRAP_SEQNO"

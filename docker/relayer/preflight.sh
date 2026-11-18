@@ -63,7 +63,7 @@ verify_verifier_lane() {
 
 env_file=${1:-}
 [[ -n "$env_file" && -f "$env_file" ]] ||
-  die "usage: $0 /path/to/daemon-live.env"
+  die "usage: $0 /path/to/daemon-live.env|withdraw-live.env"
 
 set -a
 # shellcheck disable=SC1090
@@ -82,6 +82,21 @@ case "$runtime_layout" in
   *) die "unknown RELAYER_RUNTIME_LAYOUT: $runtime_layout" ;;
 esac
 
+# Which daemon the checks are for: daemon-live (bundles and rotations, from
+# RELAYER_*) or daemon-withdraw-live (withdrawals, from WITHDRAW_*). The
+# withdrawal payer's key goes through the same key, nonce and balance checks.
+role=${RELAYER_ROLE:-bundles}
+key_prefix=RELAYER
+case "$role" in
+  bundles) ;;
+  withdrawals)
+    key_prefix=WITHDRAW
+    RELAYER_ADDRESS=${WITHDRAW_ADDRESS-}
+    RELAYER_PRIVATE_KEY=${WITHDRAW_PRIVATE_KEY-}
+    ;;
+  *) die "unknown RELAYER_ROLE: $role" ;;
+esac
+
 # The paths come from the image (container-paths.sh) or, on a host, from the
 # env file. The binary checksums are optional pins: with images built by CI
 # the image digest pins them, and the image checks its own IMAGE-SHA256SUMS.
@@ -91,19 +106,24 @@ required=(
   RPC_URL BRIDGE_ADDRESS BRIDGE_DEPLOY_BLOCK
   RELAYER_ADDRESS RELAYER_PRIVATE_KEY
   MIN_RELAYER_BALANCE_WEI BRIDGE_GQL_ENDPOINT BRIDGE_PARAMS_DIR
-  BRIDGE_BOOTSTRAP_SEQNO BRIDGE_STATE_DIR BRIDGE_WORK_DIR BRIDGE_LOG_DIR
-  EXPECTED_BK_SET_COMMITMENT
-  EXPECTED_GENESIS_PREV_ANCHOR EXPECTED_WITHDRAW_DAPP_FR
+  BRIDGE_STATE_DIR BRIDGE_WORK_DIR BRIDGE_LOG_DIR
+  EXPECTED_WITHDRAW_DAPP_FR
   EXPECTED_WITHDRAW_ACC_FR EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID
   EXPECTED_WITHDRAW_ALT_DST_HOST_CHAIN_ID EXPECTED_USDC_TOKEN_ID
   EXPECTED_USDC_ADDRESS
   BRIDGE_AGGREGATE_PROOF_BIN BRIDGE_VERIFIERS_DIR
-  BRIDGE_PK_CACHE_DIR BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_ANCHOR_LEVEL
+  BRIDGE_PK_CACHE_DIR
   EXPECTED_EVM_CHAIN_ID
 )
+if [[ "$role" == bundles ]]; then
+  required+=(
+    BRIDGE_BOOTSTRAP_SEQNO EXPECTED_BK_SET_COMMITMENT EXPECTED_GENESIS_PREV_ANCHOR
+    BRIDGE_DUMP_SUBMISSIONS_DIR BRIDGE_ANCHOR_LEVEL
+  )
+fi
 for name in "${required[@]}"; do
   value=${!name-}
-  [[ -n "$value" && "$value" != *CHANGEME* ]] || die "$name is missing"
+  [[ -n "$value" && "$value" != *CHANGEME* ]] || die "${name/#RELAYER_/${key_prefix}_} is missing"
 done
 
 required_commands=(cast curl jq od sha256sum xxd)
@@ -112,18 +132,20 @@ for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null || die "$command_name is not installed"
 done
 
-[[ "$BRIDGE_ANCHOR_LEVEL" == 2 ]] || die "only L2 anchor level 2 is allowed"
+if [[ "$role" == bundles ]]; then
+  [[ "$BRIDGE_ANCHOR_LEVEL" == 2 ]] || die "only L2 anchor level 2 is allowed"
+  [[ "$BRIDGE_BOOTSTRAP_SEQNO" =~ ^[0-9]+$ ]] || die "bad bootstrap seqno"
+  (( BRIDGE_BOOTSTRAP_SEQNO % 16384 == 0 )) || die "bootstrap is not L2-aligned"
+  [[ "$EXPECTED_GENESIS_PREV_ANCHOR" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "bad genesis anchor"
+fi
 [[ "$EXPECTED_EVM_CHAIN_ID" =~ ^[0-9]+$ ]] || die "EXPECTED_EVM_CHAIN_ID must be the decimal chain id the bridge is deployed on"
 [[ "$BRIDGE_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad bridge address"
 [[ "$BRIDGE_DEPLOY_BLOCK" =~ ^[0-9]+$ ]] || die "BRIDGE_DEPLOY_BLOCK must be a block number"
 BRIDGE_DEPLOY_BLOCK=$((10#$BRIDGE_DEPLOY_BLOCK)) # decimal even with leading zeros
 (( BRIDGE_DEPLOY_BLOCK > 0 )) || die "BRIDGE_DEPLOY_BLOCK=0 scans from genesis; set the bridge's deploy block"
-[[ "$RELAYER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad relayer address"
-[[ "$RELAYER_PRIVATE_KEY" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "bad private key shape"
-[[ "$BRIDGE_BOOTSTRAP_SEQNO" =~ ^[0-9]+$ ]] || die "bad bootstrap seqno"
-(( BRIDGE_BOOTSTRAP_SEQNO % 16384 == 0 )) || die "bootstrap is not L2-aligned"
+[[ "$RELAYER_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bad ${key_prefix}_ADDRESS"
+[[ "$RELAYER_PRIVATE_KEY" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "bad ${key_prefix}_PRIVATE_KEY shape"
 [[ "$MIN_RELAYER_BALANCE_WEI" =~ ^[0-9]+$ ]] || die "bad minimum balance"
-[[ "$EXPECTED_GENESIS_PREV_ANCHOR" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "bad genesis anchor"
 [[ "$EXPECTED_WITHDRAW_DAPP_FR" =~ ^(0x[0-9a-fA-F]{1,64}|[0-9]+)$ ]] || die "bad withdraw dApp Fr"
 [[ "$EXPECTED_WITHDRAW_ACC_FR" =~ ^(0x[0-9a-fA-F]{1,64}|[0-9]+)$ ]] || die "bad withdraw acc Fr"
 for value in "$EXPECTED_WITHDRAW_ALT_DST_CHAIN_ID" \
@@ -192,14 +214,16 @@ done
 [[ -d "$BRIDGE_STATE_DIR" && -w "$BRIDGE_STATE_DIR" ]] || die "prover state directory is not writable"
 [[ -d "$BRIDGE_WORK_DIR" && -w "$BRIDGE_WORK_DIR" ]] || die "work directory is not writable"
 [[ -d "$BRIDGE_LOG_DIR" && -w "$BRIDGE_LOG_DIR" ]] || die "log directory is not writable"
-mkdir -p "$BRIDGE_DUMP_SUBMISSIONS_DIR" 2>/dev/null || true
-[[ -d "$BRIDGE_DUMP_SUBMISSIONS_DIR" && -w "$BRIDGE_DUMP_SUBMISSIONS_DIR" ]] ||
-  die "submission dump directory is not writable"
+if [[ "$role" == bundles ]]; then
+  mkdir -p "$BRIDGE_DUMP_SUBMISSIONS_DIR" 2>/dev/null || true
+  [[ -d "$BRIDGE_DUMP_SUBMISSIONS_DIR" && -w "$BRIDGE_DUMP_SUBMISSIONS_DIR" ]] ||
+    die "submission dump directory is not writable"
+fi
 ok "Hermez SRS K=17/19/20/21/22, and writable state, work and log directories"
 
 # Child diagnostics below do not need the signing key. This does not alter the
 # EnvironmentFile inherited later by the daemon process.
-export -n RELAYER_PRIVATE_KEY 2>/dev/null || true
+export -n RELAYER_PRIVATE_KEY WITHDRAW_PRIVATE_KEY 2>/dev/null || true
 
 # The checks below go to the first endpoint that answers, in the order the
 # daemon tries them: RPC_URL, then RPC_FAILOVER_URLS. A primary that is down
@@ -266,29 +290,37 @@ rm -f "$cast_err"
 trap - EXIT
 
 owner=$(call_word "$BRIDGE_ADDRESS" 'owner()(address)')
-[[ "${owner,,}" == "${RELAYER_ADDRESS,,}" ]] || die "bridge owner $owner != expected EOA $RELAYER_ADDRESS"
+if [[ "$role" == bundles ]]; then
+  [[ "${owner,,}" == "${RELAYER_ADDRESS,,}" ]] || die "bridge owner $owner != expected EOA $RELAYER_ADDRESS"
+else
+  # daemon-live sends from the owner's EOA: the payer needs one of its own.
+  [[ "${owner,,}" != "${RELAYER_ADDRESS,,}" ]] ||
+    die "WITHDRAW_ADDRESS is the bridge owner, daemon-live's EOA; give withdraw-live its own"
+fi
 usdc=$(call_word "$BRIDGE_ADDRESS" 'usdc()(address)')
 [[ "${usdc,,}" == "${EXPECTED_USDC_ADDRESS,,}" ]] || die "bridge USDC $usdc != $EXPECTED_USDC_ADDRESS"
 
 last_seen=$(call_word "$BRIDGE_ADDRESS" 'storedLastSeenBlockSeqNo()(uint64)')
-(( last_seen >= BRIDGE_BOOTSTRAP_SEQNO )) || die "on-chain cursor $last_seen is behind bootstrap"
-(( (last_seen - BRIDGE_BOOTSTRAP_SEQNO) % 16384 == 0 )) || die "on-chain cursor is off the L2 deployment lane"
-bk_decimal=$(call_word "$BRIDGE_ADDRESS" 'storedBkSetCommitment()(uint256)')
-prev_bk_decimal=$(call_word "$BRIDGE_ADDRESS" 'storedPrevBkSetCommitment()(uint256)')
-expected_bk_decimal=$(cast to-dec "$EXPECTED_BK_SET_COMMITMENT")
-# EXPECTED_BK_SET_COMMITMENT is the set the bridge was deployed with. Once the
-# daemon has applied a rotation the contract holds a newer set, so the pin is
-# accepted as the current set, as the outgoing set, or, when the rotation
-# cursor has moved past both, as the deploy-time set; only a contract that
-# never held the pinned set (a fresh deploy with another set) is refused.
-last_bk_upd=$(call_word "$BRIDGE_ADDRESS" 'storedLastBkSetUpdateSeqNo()(uint64)')
-if [[ "$bk_decimal" != "$expected_bk_decimal" && "$prev_bk_decimal" != "$expected_bk_decimal" ]]; then
-  (( last_bk_upd > 0 )) || die "on-chain BK commitment mismatch"
-  ok "BK set rotated past the deploy-time pin (rotation cursor $last_bk_upd)"
+if [[ "$role" == bundles ]]; then
+  (( last_seen >= BRIDGE_BOOTSTRAP_SEQNO )) || die "on-chain cursor $last_seen is behind bootstrap"
+  (( (last_seen - BRIDGE_BOOTSTRAP_SEQNO) % 16384 == 0 )) || die "on-chain cursor is off the L2 deployment lane"
+  bk_decimal=$(call_word "$BRIDGE_ADDRESS" 'storedBkSetCommitment()(uint256)')
+  prev_bk_decimal=$(call_word "$BRIDGE_ADDRESS" 'storedPrevBkSetCommitment()(uint256)')
+  expected_bk_decimal=$(cast to-dec "$EXPECTED_BK_SET_COMMITMENT")
+  # EXPECTED_BK_SET_COMMITMENT is the set the bridge was deployed with. Once the
+  # daemon has applied a rotation the contract holds a newer set, so the pin is
+  # accepted as the current set, as the outgoing set, or, when the rotation
+  # cursor has moved past both, as the deploy-time set; only a contract that
+  # never held the pinned set (a fresh deploy with another set) is refused.
+  last_bk_upd=$(call_word "$BRIDGE_ADDRESS" 'storedLastBkSetUpdateSeqNo()(uint64)')
+  if [[ "$bk_decimal" != "$expected_bk_decimal" && "$prev_bk_decimal" != "$expected_bk_decimal" ]]; then
+    (( last_bk_upd > 0 )) || die "on-chain BK commitment mismatch"
+    ok "BK set rotated past the deploy-time pin (rotation cursor $last_bk_upd)"
+  fi
+  genesis_prev=$(call_word "$BRIDGE_ADDRESS" 'storedPrevMaxLevelLayerHash()(uint256)')
+  expected_genesis_prev=$(cast to-dec "$EXPECTED_GENESIS_PREV_ANCHOR")
+  [[ "$genesis_prev" == "$expected_genesis_prev" ]] || die "immutable genesis anchor mismatch"
 fi
-genesis_prev=$(call_word "$BRIDGE_ADDRESS" 'storedPrevMaxLevelLayerHash()(uint256)')
-expected_genesis_prev=$(cast to-dec "$EXPECTED_GENESIS_PREV_ANCHOR")
-[[ "$genesis_prev" == "$expected_genesis_prev" ]] || die "immutable genesis anchor mismatch"
 withdraw_dapp=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalDappFr()(uint256)')
 expected_withdraw_dapp=$(cast to-dec "$EXPECTED_WITHDRAW_DAPP_FR")
 [[ "$withdraw_dapp" == "$expected_withdraw_dapp" ]] || die "withdraw dApp Fr mismatch"
@@ -302,25 +334,30 @@ withdraw_alt_host=$(call_word "$BRIDGE_ADDRESS" 'bridgeWithdrawalAltDstHostChain
 usdc_token_id=$(call_word "$BRIDGE_ADDRESS" 'usdcTokenId()(uint32)')
 [[ "$usdc_token_id" == "$EXPECTED_USDC_TOKEN_ID" ]] || die "USDC token id mismatch"
 
-if [[ ! -f "$BRIDGE_STATE_DIR/prover_state.json" ]]; then
-  # At its seed the contract still expects the genesis anchor. Past it,
-  # daemon-live rebuilds the local state from the contract on start.
-  if [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]]; then
-    expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
-    [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+if [[ "$role" == bundles ]]; then
+  if [[ ! -f "$BRIDGE_STATE_DIR/prover_state.json" ]]; then
+    # At its seed the contract still expects the genesis anchor. Past it,
+    # daemon-live rebuilds the local state from the contract on start.
+    if [[ "$last_seen" == "$BRIDGE_BOOTSTRAP_SEQNO" ]]; then
+      expected_prev=$(call_word "$BRIDGE_ADDRESS" 'expectedPrevAnchor(uint8)(uint256)' 2)
+      [[ "$expected_prev" == "$expected_genesis_prev" ]] || die "cold contract expectedPrevAnchor(2) mismatch"
+    else
+      ok "no local state; daemon-live rebuilds it from the contract at cursor $last_seen (BK set from GraphQL, gql-server >= 1.5.0)"
+    fi
   else
-    ok "no local state; daemon-live rebuilds it from the contract at cursor $last_seen (BK set from GraphQL, gql-server >= 1.5.0)"
+    jq -e '.initialized == true and .anchor_level == 2' "$BRIDGE_STATE_DIR/prover_state.json" >/dev/null ||
+      die "existing prover state is not initialized L2 state"
   fi
-else
-  jq -e '.initialized == true and .anchor_level == 2' "$BRIDGE_STATE_DIR/prover_state.json" >/dev/null ||
-    die "existing prover state is not initialized L2 state"
 fi
 ok "bridge owner/config/anchors on chain $EXPECTED_EVM_CHAIN_ID cursor=$last_seen"
 
-verify_verifier_lane 'primaryVerifier()(address)' 'PrimaryAggregatorVerifier.bin' 'primary'
-verify_verifier_lane 'fallbackVerifier()(address)' 'FallbackAggregatorVerifier.bin' 'fallback'
-verify_verifier_lane 'layerHashesVerifier()(address)' 'LayerHashesAggregatorVerifier.bin' 'layer-hashes'
-verify_verifier_lane 'bridgeWithdrawalVerifier()(address)' 'BridgeWithdrawalAggregatorVerifier.bin' 'withdrawal'
+if [[ "$role" == bundles ]]; then
+  verify_verifier_lane 'primaryVerifier()(address)' 'PrimaryAggregatorVerifier.bin' 'primary'
+  verify_verifier_lane 'fallbackVerifier()(address)' 'FallbackAggregatorVerifier.bin' 'fallback'
+  verify_verifier_lane 'layerHashesVerifier()(address)' 'LayerHashesAggregatorVerifier.bin' 'layer-hashes'
+else
+  verify_verifier_lane 'bridgeWithdrawalVerifier()(address)' 'BridgeWithdrawalAggregatorVerifier.bin' 'withdrawal'
+fi
 
 latest_nonce=$(cast nonce "$RELAYER_ADDRESS" --block latest --rpc-url "$check_rpc")
 pending_nonce=$(cast nonce "$RELAYER_ADDRESS" --block pending --rpc-url "$check_rpc")
@@ -329,13 +366,13 @@ pending_nonce=$(cast nonce "$RELAYER_ADDRESS" --block pending --rpc-url "$check_
 # higher fees. Refusing here kept the container restarting while the very
 # transaction the daemon would replace held it back.
 if (( pending_nonce > latest_nonce + 1 )); then
-  warn "$((pending_nonce - latest_nonce)) transactions wait unmined from the relayer EOA (latest=$latest_nonce pending=$pending_nonce). The daemon sends one at a time: something else sends from this account, and it must be the relayer's alone"
+  warn "$((pending_nonce - latest_nonce)) transactions wait unmined from the $role EOA (latest=$latest_nonce pending=$pending_nonce). The daemon sends one at a time: something else sends from this account, and it must be this daemon's alone"
 elif (( pending_nonce > latest_nonce )); then
-  warn "a transaction waits unmined at nonce $latest_nonce of the relayer EOA; the daemon replaces it with higher fees once it runs"
+  warn "a transaction waits unmined at nonce $latest_nonce of the $role EOA; the daemon replaces it with higher fees once it runs"
 fi
 balance=$(cast balance "$RELAYER_ADDRESS" --rpc-url "$check_rpc")
 (( balance >= MIN_RELAYER_BALANCE_WEI )) ||
-  die "relayer balance $balance wei is below minimum $MIN_RELAYER_BALANCE_WEI"
+  die "$role EOA balance $balance wei is below minimum $MIN_RELAYER_BALANCE_WEI"
 ok "EOA nonce=$latest_nonce balance=$balance wei"
 
 # The daemon retries the primary and then cycles through the failover list at

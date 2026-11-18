@@ -1,11 +1,11 @@
-# The four bridge services from the images docker/Dockerfile builds
+# The five bridge services from the images docker/Dockerfile builds
 # (bridge-audit#135), and the one-shot commands around them (profile `ops`).
 #
 # Nothing here names a host, an address or a key: every value comes from
 # `.env` next to this file (image tags, the two directory roots, the metrics
 # address, the service UID) and from the env files under $BRIDGE_OPT/env/
-# (chain addresses, endpoints; the withdraw relayer's EOA key). The Acki
-# Nacki keys are files under $BRIDGE_OPT/keys/: each daemon is given only
+# (chain addresses, endpoints; the EOA keys of daemon-live and withdraw-live).
+# The Acki Nacki keys are files under $BRIDGE_OPT/keys/: each daemon is given only
 # the one it signs with, the operator's `cli` one-shot gets the directory.
 # `.env.example` and `env/*.env.example` are the templates.
 #
@@ -92,6 +92,51 @@ services:
     stop_signal: SIGTERM
     # A tick may be inside a multi-minute proof; let it finish on stop.
     stop_grace_period: 20m
+
+  # Acki Nacki -> EVM withdrawals: proves every burn on the Acki Nacki bridge
+  # that names this bridge (Circuit 4) and pays it with withdrawByProof from its
+  # own EOA, which pays the gas. Apart from daemon-live, with its own key: the
+  # two never wait for each other's proofs or stop together. Same image and
+  # entrypoint; RELAYER_ROLE picks the daemon and the checks. It shares the
+  # read-only params and the proving-key cache with daemon-live.
+  withdraw-live:
+    <<: *service
+    image: ${BRIDGE_REGISTRY:-docker.gosh.sh}/bridge-relayer:${BRIDGE_IMAGE_TAG:?}
+    pull_policy: ${BRIDGE_PULL_POLICY:-missing}
+    environment:
+      RELAYER_RUNTIME_ENV_FILE: /run/secrets/runtime-env
+      RELAYER_ROLE: withdrawals
+    volumes:
+      - type: bind
+        source: ${BRIDGE_OPT:?}/env/withdraw-live.env
+        target: /run/secrets/runtime-env
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_OPT}/withdraw-live/state
+        target: /data/state
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA:?}/withdraw-live/work
+        target: /data/work
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/withdraw-live/logs
+        target: /data/logs
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params/relayer
+        target: /data/params
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${BRIDGE_DATA}/params/relayer/pk_cache
+        target: /data/params/pk_cache
+        bind: { create_host_path: false }
+    stop_signal: SIGTERM
+    # Stopping waits for a Circuit 4 proof in flight (a minute or two); a killed one is proven
+    # again on the next start.
+    stop_grace_period: 5m
 
   # EVM -> Acki Nacki: finalizes Deposit events on eccBridge with each
   # deposit's receipt proof, read from the source chain's RPC. Nothing to

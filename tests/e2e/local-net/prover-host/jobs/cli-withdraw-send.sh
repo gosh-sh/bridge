@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ackinacki-bridge withdraw send, one after another for every burn in SENDS
-# ("<token>,<multisig dapp::account>,<amount> ..."): the multisig burns the amount of the token
+# ("<token>,<multisig dapp::account>,<amount>+..."; `+` because ci-entry splits a job's arguments
+# on spaces): the multisig burns the amount of the token
 # on Acki Nacki to TO on Arbitrum Sepolia, and the run stops once the bridge's
 # WithdrawalInitiated is captured; nothing is proven or sent to Arbitrum Sepolia. daemon-live
 # pays each burn out; cli-withdraw proves it again afterwards with the burn.an_tx of the --json
@@ -11,7 +12,8 @@ load evm.env
 export RPC_URL=$ARB_RPC BRIDGE_GQL_ENDPOINT=$GQL BRIDGE_ANCHOR_LAYER=2 BRIDGE_I_KNOW_THE_WAIT=true
 export USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 line=0
-for send in $SENDS; do
+IFS=+ read -r -a sends <<<"$SENDS"
+for send in "${sends[@]}"; do
   line=$((line + 1))
   IFS=, read -r token from amount <<<"$send"
   keys=$WORK/withdraw-send-$token.keys.json

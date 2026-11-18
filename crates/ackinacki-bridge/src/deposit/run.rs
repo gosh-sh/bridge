@@ -1162,26 +1162,25 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
         .into_iter()
         .find(|r| r.stage != OpStage::Failed && (holds(r) || in_its_slot(r)))
     {
-        let how = if holds(&r) {
-            format!(
-                "holds the deposit {tx_hash:#x}: continue it with `deposit --resume {}`",
+        // The deposit `deposit send` made, say: its operation goes on.
+        if holds(&r) {
+            drop(dir_lock);
+            ui.warn(&format!(
+                "operation {} already holds the deposit {tx_hash:#x}; continuing it",
                 r.op_id
-            )
-        } else {
-            format!(
-                "may hold the deposit {tx_hash:#x}, in its nonce slot: continue it with `deposit \
-                 --resume {} --tx-hash {tx_hash:#x}`",
-                r.op_id
-            )
-        };
+            ));
+            return resume(p, d, &OpRef::Op(r.op_id.clone()), None).await;
+        }
         return Err(CliError::deposit(
             ExitCode::DuplicateRefused,
             Stage::Preflight,
             Some(&r.op_id),
             format!(
-                "operation {} in {} {how} (nothing was sent)",
+                "operation {} in {} may hold the deposit {tx_hash:#x}, in its nonce slot: \
+                 continue it with `deposit --resume {} --tx-hash {tx_hash:#x}` (nothing was sent)",
                 r.op_id,
-                p.state_dir.display()
+                p.state_dir.display(),
+                r.op_id
             ),
         ));
     }
@@ -3323,7 +3322,8 @@ mod tests {
     /// `deposit proof --tx-hash` of a deposit the relayer finalized: an
     /// operation is created from the receipt, the proof is built, nothing is
     /// sent, and the run ends in success, `already_finalized`. A second run
-    /// for the same transaction is refused with the operation to resume.
+    /// for the same transaction continues that operation: it is credited,
+    /// and answers from its record.
     #[tokio::test]
     async fn deposit_proof_of_a_finalized_deposit_builds_the_proof_and_sends_none() {
         let mut w = World::healthy();
@@ -3340,8 +3340,10 @@ mod tests {
         assert!(s.confirmation.is_some());
         assert_eq!(w.witness_builds(), 1);
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
-        let again = run_proof(&p, &d, h).await.unwrap_err();
-        assert_eq!(again.exit_code(), ExitCode::DuplicateRefused, "{again}");
+        let again = run_proof(&p, &d, h).await.unwrap();
+        assert_eq!(again.op_id, s.op_id, "the same operation goes on");
+        assert_eq!(again.finalize, Some("already_finalized"));
+        assert_eq!(w.witness_builds(), 1, "nothing is proven twice");
     }
 
     #[tokio::test]

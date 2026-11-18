@@ -358,7 +358,7 @@ def test_43_burns_by_withdraw_send(run, an, ctx):
     sends = {"usdc": (ctx["wmsig"], ctx["wmsig_keys"], "2"),
              "nackl": (ctx["nmsig"], ctx["nmsig_keys"], str(NACKL_OUT // NACKL))}
     run.job("cli-withdraw-send", stdin="\n".join(keys.replace("\n", "") for _, keys, _ in sends.values()),
-            TO=ctx["address"], SENDS=" ".join(f"{t},{f},{a}" for t, (f, _, a) in sends.items()))
+            TO=ctx["address"], SENDS="+".join(f"{t},{f},{a}" for t, (f, _, a) in sends.items()))
     run.finish("cli-withdraw-send", 900)
     for token, ecc in (("usdc", 3), ("nackl", 1)):
         got = summary(run, f"cli-withdraw-send-{token}", "burn")
@@ -520,7 +520,7 @@ def test_63_deposit_proofs_find_them_finalized(run, ctx):
     receipt proof, finds the deposit finalized before sending, sends nothing, confirms the credit
     and ends in success, finalize: already_finalized."""
     deposits = {"usdc": ctx["deposit_tx"], "nackl": ctx["nackl_deposit_tx"]}
-    run.job("cli-deposit-proof", DEPOSITS=" ".join(f"{t}:{tx}" for t, tx in deposits.items()))
+    run.job("cli-deposit-proof", DEPOSITS="+".join(f"{t}:{tx}" for t, tx in deposits.items()))
     run.finish("cli-deposit-proof", 1800)
     for token in deposits:
         log = f"cli-deposit-proof-{token}"
@@ -614,7 +614,7 @@ def test_73_withdraw_proofs_find_them_paid(run, ctx):
     success, submit.status already_paid."""
     burns = {"usdc": ctx["usdc_burn_tx"], "nackl": ctx["nackl_burn_tx"]}
     run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
-            BURNS=" ".join(f"{t}:{tx}" for t, tx in burns.items()))
+            BURNS="+".join(f"{t}:{tx}" for t, tx in burns.items()))
     run.finish("cli-withdraw", 3600)
     for token, tx in burns.items():
         got = summary(run, f"cli-withdraw-{token}", "submit")

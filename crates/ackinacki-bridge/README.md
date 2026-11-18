@@ -21,8 +21,8 @@ proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "a
 burn: the payout may still be queued, and the relayer mints it once due.
 `deposit proof` takes a deposit made through a contract wallet too: the `Deposit` event decides, not
 the transaction's calldata. A transaction with several deposits to the bridge is refused (the
-deposit relayer's `finalize-one` takes it). One operation holds one deposit: a second `deposit proof` of the same
-transaction is refused with exit 3 and the operation to `--resume`.
+deposit relayer's `finalize-one` takes it). One operation holds one deposit: `deposit proof` of a transaction an operation in
+the state directory already holds (the one `deposit send` made, say) continues that operation.
 
 End-user CLI for the Acki Nacki ↔ EVM bridge, one subcommand per direction:
 

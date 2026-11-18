@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ackinacki-bridge withdraw proof, at once for every burn in BURNS ("<token>:<AN tx> ..."): each
+# ackinacki-bridge withdraw proof, at once for every burn in BURNS ("<token>:<AN tx>+..."): each
 # captures the burn, waits for the bundle that covers it, builds its Circuit 4 proof and sends
 # withdrawByProof. The runner starts this job once daemon-live has paid every one of them out,
 # so each send finds its burn paid and the run ends in success, submit.status already_paid.
@@ -16,7 +16,8 @@ export USDC_BRIDGE_ACCOUNT_ID=1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
 export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache BRIDGE_VERIFIERS_DIR=/src/contracts/ethereum/verifiers
 export BRIDGE_AGGREGATOR_DIR=$WORK/aggregator
 pids=()
-for burn in $BURNS; do
+IFS=+ read -r -a burns <<<"$BURNS"
+for burn in "${burns[@]}"; do
   token=${burn%%:*} tx=${burn#*:}
   # One proof per snark directory: each burn has its own.
   mkdir -p "$WORK/withdraw-proof-$token/snark"

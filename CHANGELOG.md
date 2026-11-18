@@ -19,6 +19,27 @@ assigns it when the release is tagged.
 ### Fixes
 -->
 
+## [Unreleased]
+
+### Breaking Changes
+
+- `daemon-live`'s container refuses to start without the Circuit 4 keys `event_pk.bin`, `event_vk.bin`,
+  `event_config_params.json` and `event_manifest.json` in `params/relayer/`: copy them from the params
+  directory of an `ackinacki-bridge withdraw` of the same release, rerun `finalize-params.sh` and set
+  the new `PARAMS_MANIFEST_SHA256`.
+- `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
+  `submit.status` `already_paid` and `submit.nullifier`, not 13; found before proving, `proof` is
+  `null` in the JSON output.
+
+### New / Improvements
+
+- `relayer daemon-live` pays out every burn on the Acki Nacki bridge (`--an-token-bridge`,
+  `AN_TOKEN_BRIDGE`) whose `dstChainId` and `dstBridge` are its own, with `withdrawByProof` from
+  `RELAYER_PRIVATE_KEY`, which pays the gas: keep that account funded.
+- `daemon-live` keeps each burn in `withdraw-claims.json` in `BRIDGE_STATE_DIR`, with its state, payout
+  transaction or last error; a failing burn is retried after a minute, then twice as late each time, up
+  to six hours.
+
 ## [0.9.0]
 
 ### Breaking Changes

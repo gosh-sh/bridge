@@ -380,7 +380,7 @@ mod tests {
         let recheck = after_lock
             .find("recheck_proving_key(")
             .expect("the key is rechecked after the lock");
-        let prove = after_lock.find("run_once_with_state(").expect("the proof");
+        let prove = after_lock.find("prove_enriched(").expect("the proof");
         assert!(refresh < recheck && recheck < prove);
         assert_eq!(
             src.matches("recheck_proving_key(").count(),
@@ -401,7 +401,7 @@ mod tests {
         let lock = src
             .find("let prove_lock = crate::prove_lock::take(")
             .expect("stage 5 takes the lock into a named binding");
-        let prove = src.find("run_once_with_state(").expect("the proof");
+        let prove = src.find("prove_enriched(").expect("the proof");
         let proved = prove
             + src[prove..]
                 .find("})?;")
@@ -436,7 +436,7 @@ mod tests {
         let reread = after_lock
             .find("wait_for_coverage(")
             .expect("the bridge state is read again after the lock");
-        let prove = after_lock.find("run_once_with_state(").expect("the proof");
+        let prove = after_lock.find("prove_enriched(").expect("the proof");
         assert!(reread < prove, "the fresh read comes before the proof");
         assert!(
             after_lock[..reread].contains(".waited()"),

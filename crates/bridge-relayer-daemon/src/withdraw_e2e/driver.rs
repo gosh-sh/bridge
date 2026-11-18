@@ -239,17 +239,42 @@ pub async fn run_once_with_state(
 ) -> Result<WithdrawE2ESummary> {
     std::fs::create_dir_all(&cfg.work_dir)
         .with_context(|| format!("mkdir work_dir {}", cfg.work_dir.display()))?;
+    let enriched = enrich_captured(&cfg, &bridge_state, &captured).await?;
+    prove_enriched(&cfg, captured, enriched).await
+}
 
+/// The capture's witness, enriched against `bridge_state`: the events-tree
+/// and block-tree proofs and the anchor, everything the proof needs and
+/// nothing proven yet. `bridge_state` has to cover the burn's block already;
+/// the enricher is tried once. The proof's public inputs, its nullifier
+/// among them, follow from the result without proving
+/// ([`bridge_event_prover_lib::prover::build_proof_inputs`]).
+pub async fn enrich_captured(
+    cfg: &WithdrawE2EConfig,
+    bridge_state: &BridgeState,
+    captured: &CapturedEvent,
+) -> Result<EnrichedWitness> {
     let gql = create_client(&cfg.gql_endpoint).context("create GqlClient")?;
+    enrich_captured_with(&gql, cfg, bridge_state, captured).await
+}
+
+/// [`enrich_captured`] through `gql`, a client the caller built (with its
+/// failover endpoints and retry policy, say).
+pub async fn enrich_captured_with(
+    gql: &GqlClient,
+    cfg: &WithdrawE2EConfig,
+    bridge_state: &BridgeState,
+    captured: &CapturedEvent,
+) -> Result<EnrichedWitness> {
     info!(
         window_size = bridge_state.window_size,
         num_active_layers = bridge_state.num_active_layers(),
         stored_last_seen_block_seq_no = bridge_state.stored_last_seen_block_seq_no,
         captured_block_seq_no = captured.block_seq_no,
-        "run_once_with_state: caller-provided BridgeState + already-captured event",
+        "enrich: caller-provided BridgeState + already-captured event",
     );
 
-    let partial = export_stage(&captured)?;
+    let partial = export_stage(captured)?;
 
     info!(
         anchor_mode = ?cfg.anchor_mode,
@@ -257,8 +282,8 @@ pub async fn run_once_with_state(
         "enricher: single-shot against caller-provided state",
     );
     let enriched = enrich_witness(
-        &gql,
-        &bridge_state,
+        gql,
+        bridge_state,
         partial,
         cfg.anchor_mode,
         cfg.i_know_the_wait,
@@ -266,8 +291,19 @@ pub async fn run_once_with_state(
     .await
     .context("enrich_witness failed (caller-provided state did not cover the target burn)")?;
     log_enriched_summary(&enriched);
+    Ok(enriched)
+}
 
-    prove_and_finalize(&cfg, captured, enriched).await
+/// Prove `enriched` ([`enrich_captured`]): Circuit 4 in process, then the
+/// SHPLONK aggregation the deployed verifier takes.
+pub async fn prove_enriched(
+    cfg: &WithdrawE2EConfig,
+    captured: CapturedEvent,
+    enriched: EnrichedWitness,
+) -> Result<WithdrawE2ESummary> {
+    std::fs::create_dir_all(&cfg.work_dir)
+        .with_context(|| format!("mkdir work_dir {}", cfg.work_dir.display()))?;
+    prove_and_finalize(cfg, captured, enriched).await
 }
 
 async fn capture_stage(gql: &GqlClient, cfg: &WithdrawE2EConfig) -> Result<CapturedEvent> {

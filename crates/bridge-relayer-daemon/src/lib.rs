@@ -26,6 +26,7 @@ pub mod source;
 pub mod startup_decide;
 pub mod state;
 pub mod types;
+pub mod withdraw_claimer;
 pub mod withdraw_e2e;
 pub mod withdraw_prover;
 pub mod withdrawal;

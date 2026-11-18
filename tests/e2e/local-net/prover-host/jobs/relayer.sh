@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # relayer daemon-live: proves the local network's bundles from the genesis seed (L2
 # anchoring, one bundle per 16384 seq_nos, as the live relayer runs) and submits verifyBlock
-# to the run's bridge.
+# to the run's bridge. Its withdrawal claimer finds every burn on the zerostate bridge that
+# names the run's bridge, proves it (Circuit 4) and sends withdrawByProof from the same key.
 # Input: the deployer's private key; it signs with the relayer key derived from it (fund.sh
 # gives that one gas). Runs until the runner stops the run.
 . /src/tests/e2e/local-net/prover-host/jobs/common.sh
@@ -13,7 +14,9 @@ export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache
 # The three directories (bridge-audit#132): relayer-state.json sits in the state directory
 # with the prover state; the work directory holds the proof in flight; the log directory
 # the daemon's own log beside this one.
-export BRIDGE_STATE_DIR=$WORK/relayer-state BRIDGE_WORK_DIR=$WORK/relayer-work BRIDGE_LOG_DIR=/logs/relayer
+# The state directory is /out itself, so that the runner reads the withdrawal claimer's record
+# (withdraw-claims.json) with `ci-entry get`.
+export BRIDGE_STATE_DIR=$OUT BRIDGE_WORK_DIR=$WORK/relayer-work BRIDGE_LOG_DIR=/logs/relayer
 # The image's aggregate-proof when running from it, /bin-ci's otherwise.
 export BRIDGE_AGGREGATE_PROOF_BIN; BRIDGE_AGGREGATE_PROOF_BIN=$(command -v aggregate-proof)
 export BRIDGE_VERIFIERS_DIR=/src/contracts/ethereum/verifiers

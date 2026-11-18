@@ -985,7 +985,7 @@ contract AckiNackiBridge {
     /// @notice Deposit a listed ERC-20 to be bridged to Acki Nacki.
     /// @dev Caller must `approve` this contract for `amount` before calling.
     ///      Emits a `Deposit` event that is later proven by a ZK circuit.
-    ///      Funds stay in custody; only USDC can be supplied to AAVE. The USDC
+    ///      Funds stay in custody, except NACKL, which is burned; only USDC can be supplied to AAVE. The USDC
     ///      deposit that lifts the liquid principal to the supply threshold
     ///      supplies everything above the target to AAVE
     ///      (`_supplyAboveTarget`); a refusing pool never reverts it.
@@ -1840,7 +1840,7 @@ contract AckiNackiBridge {
     ///
     /// State updates (CEI):
     ///   - **Effects**: mark `nullifier` used; debit the listing's liabilities
-    ///     (and `treasuryBalance` for USDC).
+    ///     (and `treasuryBalance` for USDC), or for NACKL mint or queue the payout.
     ///   - **Interactions**: for a USDC payout whose liquid principal is short,
     ///     a pull from AAVE (`_refillFromAave`) — required for what the USDC on
     ///     hand cannot pay, best effort up to the target of the new book; then

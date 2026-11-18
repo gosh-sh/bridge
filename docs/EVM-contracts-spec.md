@@ -331,12 +331,14 @@ Sequence (`:906-929`):
    `gosh.mintecc` imposes on the AN side — then `amount <= info.maxTransfer` else
    `TransferTooLarge`. The cap is **per listing**; for USDC it cannot exceed the
    `MAX_TRANSFER_AMOUNT` ceiling.
+   NACKL (id 1) leaves the sequence here: `burnFrom` burns `amount` from the sender, no TVL cap,
+   custody or liabilities apply, and steps 7–8 follow (§7.3a). Steps 5–6 are for custody tokens.
 5. `liabilitiesOf(tokenId) + amount <= info.tvlCap` else `TvlCapReached`, before any token call.
    `liabilitiesOf` (`:1055`) answers `treasuryBalance` for `usdcTokenId` and the listing's own
    counter for every other token, so USDC keeps one book and the Aave accounting is untouched.
 6. `_pullExact(IERC20(token), amount)` (`:1911`) calls `transferFrom`; a `false` return ⇒
    `TransferFromFailed`. The received balance delta must equal `amount`, else
-   `TransferAmountMismatch` — the exact-balance check now applies to **every** token, so a
+   `TransferAmountMismatch` — the exact-balance check applies to every custody token, so a
    fee-on-transfer token is rejected whichever id it is listed under.
 7. `depositId = depositCounter++`, then `_creditLiabilities(tokenId, credited)` (`:1126`).
 8. `emit Deposit(depositId, msg.sender, amount, anAccount, block.timestamp, token)` (`:386`).
@@ -498,14 +500,17 @@ finalRoot, anchorLayer, dstBridge`.
 | 11 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1977-1981 | `LayerOutOfRange` |
 | 12 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1982-1984 | `UnknownAnchor` |
 | 13 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1990-1991 | `WithdrawalProofRejected` |
-| 14 | `pub.amount ≤ liabilitiesOf(tokenId)` | 1994-1997 | `WithdrawTreasuryShortfall` |
+| 14 | `pub.amount ≤ liabilitiesOf(tokenId)` (custody tokens only; NACKL is minted or queued instead, §7.3a) | 1994-1997 | `WithdrawTreasuryShortfall` |
 
 Read `maxWithdrawalAmount(usdcTokenId())` before burning ECC (`ackinacki-bridge` does through
 `BridgeClient::usdc_payout_cap`). The payout cap is stored in `TokenInfo.maxWithdrawal`; it is
 initialized on listing and can increase with `setTokenLimits`, but lowering deposit limits never
 reduces it. The existing six-value `tokenInfo` getter continues to report deposit limits.
 
-Effects then interactions (`:2007-2031`): mark the nullifier used, debit the token's book —
+For NACKL, after check 13 the bridge marks the nullifier used and mints or queues the payout
+(§7.3a); check 14 and the custody steps below do not apply.
+
+Effects then interactions for custody tokens (`:2007-2031`): mark the nullifier used, debit the token's book —
 `treasuryBalance` for `usdcTokenId`, the listing's own `liabilities` for every other id, both
 through `_debitLiabilities`; then, **for USDC only**, when the liquid principal is short of
 `amount`, `_refillFromAave` pulls what the USDC on hand cannot pay — if the pool cannot return

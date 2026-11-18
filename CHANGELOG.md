@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `8911fbc1…`: upgrade a 1.17.0 bridge with `updateCode` and an empty
+- `eccBridge` 1.18.0, code hash `ea45d7b9…`: upgrade a 1.17.0 bridge with `updateCode` and an empty
   `userCell`.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
 - `AckiNackiBridge` storage adds `_nackl` at slots 19–32; no earlier slot moves.

@@ -1480,7 +1480,7 @@ mod tests {
             .as_hex_string();
         assert_eq!(
             &hash[..8],
-            "8911fbc1",
+            "ea45d7b9",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

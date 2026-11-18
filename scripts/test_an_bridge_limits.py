@@ -178,6 +178,14 @@ class BridgeLimits(unittest.TestCase):
         _trustedL1Bridge[1][42] = true;
         _trustedL1Bridge[2][42] = true;
     }
+    function testWithdrawPaddedRecipient(uint256 dstChainId) public {
+        TvmBuilder b;
+        b.store(uint160(0x1111111111111111111111111111111111111111));
+        b.storeRef(TvmBuilder().toCell());
+        TvmBuilder o;
+        o.storeRef(b.toCell());
+        initiateWithdrawal(dstChainId, o.toSlice().load(bytes));
+    }
     function testSetLock(uint256 chainId, uint128 amount) public {
         tvm.accept();
         _bridgeTokens[chainId][NACKL_ECC_ID].outstanding = amount;
@@ -431,6 +439,15 @@ class BridgeLimits(unittest.TestCase):
             self.assertEqual(result["messages"][0]["destination"], SENDER)
             self.assertEqual(self.locked(), 0)
             self.assertEqual(self.locked_to(), 0)
+        self.credit(NACKL)
+        result = self.call("testWithdrawPaddedRecipient", {"dstChainId": "1"},
+                           source=SENDER, ecc={"1": str(NACKL)})
+        self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 246)
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(result["messages"][0]["destination"], SENDER)
+        self.credit(-NACKL)
+        self.assertEqual(self.locked(), 0)
+        self.assertEqual(self.locked_to(), 0)
         self.assertTrue(self.lock(NACKL)["vm_success"])
         self.assertEqual(self.locked_to(), NACKL)
 

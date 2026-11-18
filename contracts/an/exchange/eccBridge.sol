@@ -413,7 +413,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // Cross-chain bridge — outbound (AN -> any chain): burn ECC, emit proof-source event
     // ========================================================
 
-    /// @notice Burns the ECC currency attached to this message and emits an event
+    /// @notice Burns the ECC currency attached to this message (NACKL is locked instead) and emits an event
     ///         carrying the data needed to mint the equivalent on the destination
     ///         chain. Exactly one ECC currency must be attached; its id and amount
     ///         are taken from `msg.currencies`. The destination chain is opaque
@@ -453,7 +453,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         bool nackl = tokenId == NACKL_ECC_ID;
-        if (nackl && recipient.length != 20) {
+        if (nackl && (recipient.toSlice().bits() != 160 || recipient.toSlice().refs() != 0)) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                               ERR_RECIPIENT_NOT_EVM);
             return;

@@ -1845,7 +1845,8 @@ impl World {
     ) -> crate::deposit::args::DepositParams {
         use std::time::Duration;
         crate::deposit::args::DepositParams {
-            token: None,
+            part: crate::deposit::args::DepositPart::Whole,
+            token: Some(crate::args::Token::Usdc),
             mode,
             globals: Default::default(),
             network: Some(crate::deposit::args::Network::Sepolia),
@@ -1859,7 +1860,6 @@ impl World {
             state_dir: self.state.path().to_path_buf(),
             work_dir: Some(self.work.path().to_path_buf()),
             anchor_timeout: Some(Duration::from_secs(3600)),
-            relayer_grace: Duration::from_secs(1),
             recovery_window: Duration::from_secs(60),
             credit_timeout: Duration::from_secs(300),
             pair_timeout: Duration::from_secs(60),
@@ -2656,9 +2656,10 @@ pub fn deposit_args(argv: &[&str]) -> crate::deposit::args::DepositArgs {
     use clap::Parser as _;
     let cli = crate::args::Cli::try_parse_from(["ackinacki-bridge", "deposit"].iter().chain(argv))
         .unwrap();
-    let crate::args::Command::Deposit(mut a) = cli.cmd else {
+    let crate::args::Command::Deposit(cmd) = cli.cmd else {
         panic!("not a deposit command line")
     };
+    let mut a = cmd.run;
     let given = |flag: &str| argv.contains(&flag);
     if !given("--rpc-url") {
         a.rpc_url = None;

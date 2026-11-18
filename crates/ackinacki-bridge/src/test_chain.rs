@@ -953,6 +953,7 @@ impl FakeWorld {
         self.args
             .as_mut()
             .expect("the arguments are still here")
+            .prove
             .anchor_layer = layer.to_string();
     }
 
@@ -1002,11 +1003,11 @@ impl FakeWorld {
         )
         .unwrap();
         let args = self.args.as_mut().expect("the arguments are still here");
-        args.eth_private_key = Some("1a".repeat(32));
-        args.aggregator_dir = Some(path.clone());
-        args.verifiers_dir = Some(path.clone());
-        args.params_dir = Some(path.clone());
-        args.work_dir = Some(path);
+        args.prove.eth_private_key = Some("1a".repeat(32));
+        args.prove.aggregator_dir = Some(path.clone());
+        args.prove.verifiers_dir = Some(path.clone());
+        args.prove.params_dir = Some(path.clone());
+        args.prove.work_dir = Some(path);
         self._plumbing = Some(dir);
     }
 
@@ -1028,7 +1029,7 @@ impl FakeWorld {
     ) -> crate::errors::CliResult<crate::orchestrator::WithdrawSuccess> {
         let mut args = self.args.take().expect("a world puts one run through it");
         args.dry_run = dry_run;
-        let outcome = crate::orchestrator::run(args, dry_run, true).await;
+        let outcome = crate::orchestrator::run(args, crate::orchestrator::Part::Whole, true).await;
         // Before the caller reads the outcome: a refusal caused by this
         // node refusing to answer is not a fact about the withdrawal.
         self.node.complaint();
@@ -1171,26 +1172,28 @@ pub(crate) async fn fake_world_for_token(
         amount: amount.to_string(),
         dry_run: false,
         allow_retry: false,
-        allow_verifier_drift: false,
-        gql_endpoint: node.url.clone(),
-        usdc_bridge_account: usdc_bridge_account_id,
-        anchor_layer: "1".to_string(),
-        i_know_the_wait: false,
-        rpc_url: rpc,
-        bridge_address: BOUND_EVM_BRIDGE,
-        bridge_deploy_block: None,
-        get_logs_chunk_blocks: None,
-        get_logs_pause_ms: None,
-        eth_private_key: None,
-        aggregator_dir: None,
-        verifiers_dir: None,
-        params_dir: None,
-        snark_dir: state_dir.path().join("snark"),
-        pk_cache_dir: None,
-        prover_out_dir: None,
-        prover_timeout_s: 60,
-        work_dir: None,
         state_dir: Some(state_dir.path().to_path_buf()),
+        prove: crate::args::ProveArgs {
+            allow_verifier_drift: false,
+            gql_endpoint: node.url.clone(),
+            usdc_bridge_account: usdc_bridge_account_id,
+            anchor_layer: "1".to_string(),
+            i_know_the_wait: false,
+            rpc_url: rpc,
+            bridge_address: BOUND_EVM_BRIDGE,
+            bridge_deploy_block: None,
+            get_logs_chunk_blocks: None,
+            get_logs_pause_ms: None,
+            eth_private_key: None,
+            aggregator_dir: None,
+            verifiers_dir: None,
+            params_dir: None,
+            snark_dir: state_dir.path().join("snark"),
+            pk_cache_dir: None,
+            prover_out_dir: None,
+            prover_timeout_s: 60,
+            work_dir: None,
+        },
     };
 
     FakeWorld {

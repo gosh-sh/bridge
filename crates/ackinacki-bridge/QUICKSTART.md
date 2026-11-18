@@ -106,7 +106,7 @@ so if you change the profile, open a new shell or re-`export`.
 ```bash
 BIN=../bridge-prover-libraries/target/release/ackinacki-bridge
 
-$BIN withdraw --dry-run \
+$BIN withdraw --dry-run --token usdc \
   --from "$WITHDRAW_FROM" --from-keys "$WITHDRAW_FROM_KEYS" \
   --to "$WITHDRAW_TO" --to-chain "$WITHDRAW_TO_CHAIN" \
   --amount "$WITHDRAW_AMOUNT"
@@ -129,7 +129,7 @@ prompts — the confirmation belongs to the burn, which a dry run skips.
 ## 5. The real withdrawal
 
 ```bash
-$BIN withdraw \
+$BIN withdraw --token usdc \
   --from "$WITHDRAW_FROM" --from-keys "$WITHDRAW_FROM_KEYS" \
   --to "$WITHDRAW_TO" --to-chain "$WITHDRAW_TO_CHAIN" \
   --amount "$WITHDRAW_AMOUNT"
@@ -246,7 +246,7 @@ profile, replace its old deployment values before running this build.
 ## 10. Dry run
 
 ```bash
-ackinacki-bridge deposit --dry-run --network sepolia \
+ackinacki-bridge deposit --dry-run --network sepolia --token usdc \
   --amount "$DEPOSIT_AMOUNT" --to "$DEPOSIT_TO"
 echo "exit=$?"
 ```
@@ -267,7 +267,7 @@ the same amount to the same recipient has an unknown outcome (section 12).
 ## 11. The deposit
 
 ```bash
-ackinacki-bridge deposit --network sepolia \
+ackinacki-bridge deposit --network sepolia --token usdc \
   --amount "$DEPOSIT_AMOUNT" --to "$DEPOSIT_TO"
 echo "exit=$?"
 ```

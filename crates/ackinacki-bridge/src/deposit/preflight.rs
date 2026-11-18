@@ -170,27 +170,8 @@ pub async fn check(
     let bridge = p.bridge.expect("validated");
     let bridge_acc = p.usdc_bridge_account.expect("validated");
     evm_preflight::check_bridge(d.evm.as_ref(), d.ui.as_ref(), net, bridge).await?;
-    // Which ERC-20 this deposit moves. `--token` names it; left out, the
-    // bridge's own `usdc()` is deposited, which is what every single-token
-    // invocation meant. Either way it has to be listed and open for
-    // deposits, and the per-token caps are the bridge's, not the USDC
-    // constants.
-    let bridge_usdc = evm_preflight::read(d.ui.as_ref(), "reading the bridge's USDC", || {
-        crate::deposit::evm::read_usdc(d.evm.as_ref(), bridge)
-    })
-    .await
-    .map_err(|e| refuse(format!("cannot read the bridge's usdc(): {e}")))?;
-    let token = p.token.unwrap_or(bridge_usdc);
-    let listing = evm_preflight::read(d.ui.as_ref(), "reading the token's listing", || {
-        crate::deposit::evm::read_token_listing(d.evm.as_ref(), bridge, token)
-    })
-    .await
-    .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
-    .ok_or_else(|| {
-        refuse(format!(
-            "{token} is not listed on bridge {bridge}; it cannot be deposited through this bridge"
-        ))
-    })?;
+    let (token, listing) =
+        resolve_token(d, bridge, p.token.expect("validated for a new operation")).await?;
     if !listing.deposits_enabled {
         return Err(refuse(format!(
             "deposits are closed for {token} (token id {}); withdrawals are unaffected",
@@ -299,6 +280,141 @@ pub async fn check(
         plan,
         params,
     })
+}
+
+/// The deposit `deposit proof --tx-hash` proves, as its receipt says.
+#[derive(Debug, Clone)]
+pub struct DepositSeen {
+    /// The account that sent the deposit transaction.
+    pub from: Address,
+    /// Its nonce, which the operation records with the claim.
+    pub nonce: u64,
+    /// The amount, in the token's base units.
+    pub amount: u64,
+    /// The ERC-20 the deposit moved.
+    pub token: Address,
+    /// The Acki Nacki recipient account.
+    pub an_account: [u8; 32],
+}
+
+/// Step 1 of `deposit proof`: the checks a deposit already made still
+/// needs, and the parameters of the operation that proves it. The caps, the
+/// balance and the allowance guarded the deposit, which is made: they are
+/// not read. The recipient's dApp is the one its account lives in.
+pub async fn check_proof(p: &DepositParams, d: &Deps, seen: &DepositSeen) -> CliResult<Checked> {
+    let net = p.network.expect("validated for a new operation");
+    let bridge = p.bridge.expect("validated");
+    let bridge_acc = p.usdc_bridge_account.expect("validated");
+    evm_preflight::check_bridge(d.evm.as_ref(), d.ui.as_ref(), net, bridge).await?;
+    let named = p.token.expect("validated for a new operation");
+    let (token, listing) = resolve_token(d, bridge, named).await?;
+    if seen.token != token {
+        return Err(CliError::ArgInvalid {
+            flag: "token",
+            expected: format!("the token the deposit moved, {}", seen.token),
+            got: crate::args::redact(named.name()),
+        });
+    }
+    let dapp_id = evm_preflight::read(d.ui.as_ref(), "reading the recipient account", || {
+        d.an.account(seen.an_account)
+    })
+    .await
+    .map_err(|e| refuse(format!("cannot read the recipient account: {e}")))?
+    .and_then(|a| a.dapp_id)
+    .unwrap_or([0u8; 32]);
+    let to = AnTarget {
+        dapp_id,
+        account_id: seen.an_account,
+    };
+    let an = an_preflight::run_with(
+        d.an.as_ref(),
+        bridge_acc,
+        net.chain_id(),
+        bridge,
+        &to,
+        d.ui.as_ref(),
+        d.min_bridge,
+        cfg!(feature = "dev-unfixed-bridge"),
+        true,
+    )
+    .await?;
+    let plan = anchor_plan(d, bridge_acc, net.chain_id(), &an).await?;
+    writable_work_dir(
+        p.work_dir
+            .as_deref()
+            .expect("validated for a new operation"),
+    )
+    .map_err(|e| refuse(format!("--work-dir (BRIDGE_WORK_DIR): {e}")))?;
+    Ok(Checked {
+        token_id: listing.token_id,
+        evm: EvmPreflight {
+            token,
+            decimals: listing.decimals,
+        },
+        an,
+        plan,
+        params: OpParams {
+            chain_id: net.chain_id(),
+            bridge,
+            to: to.extended(),
+            amount_units: seen.amount,
+            token,
+            an_bridge: hex::encode(bridge_acc),
+            an_network: an_network_id(p.gql_endpoint.as_deref().expect("validated"))?,
+        },
+    })
+}
+
+/// The ERC-20 `--token` names on `bridge`, and the bridge's listing for it:
+/// USDC is the bridge's `usdc()`, NACKL the token it lists under ECC id 1.
+/// Either has to be listed under the ECC id of its name.
+pub async fn resolve_token(
+    d: &Deps,
+    bridge: Address,
+    named: crate::args::Token,
+) -> CliResult<(Address, crate::deposit::evm::TokenListing)> {
+    let token = match named {
+        crate::args::Token::Usdc => {
+            evm_preflight::read(d.ui.as_ref(), "reading the bridge's USDC", || {
+                crate::deposit::evm::read_usdc(d.evm.as_ref(), bridge)
+            })
+            .await
+            .map_err(|e| refuse(format!("cannot read the bridge's usdc(): {e}")))?
+        },
+        crate::args::Token::Nackl => {
+            evm_preflight::read(d.ui.as_ref(), "reading the bridge's NACKL", || {
+                crate::deposit::evm::read_token_of_id(d.evm.as_ref(), bridge, named.ecc_id())
+            })
+            .await
+            .map_err(|e| refuse(format!("cannot read the bridge's tokenInfo(1): {e}")))?
+        },
+    };
+    if token == Address::ZERO {
+        return Err(refuse(format!(
+            "bridge {bridge} lists no {} (ECC id {}); it cannot be deposited through this bridge",
+            named.name(),
+            named.ecc_id()
+        )));
+    }
+    let listing = evm_preflight::read(d.ui.as_ref(), "reading the token's listing", || {
+        crate::deposit::evm::read_token_listing(d.evm.as_ref(), bridge, token)
+    })
+    .await
+    .map_err(|e| refuse(format!("cannot read the bridge's listing for {token}: {e}")))?
+    .ok_or_else(|| {
+        refuse(format!(
+            "{token} is not listed on bridge {bridge}; it cannot be deposited through this bridge"
+        ))
+    })?;
+    if listing.token_id != named.ecc_id() {
+        return Err(refuse(format!(
+            "bridge {bridge} lists {token} under ECC id {}, not {} ({})",
+            listing.token_id,
+            named.ecc_id(),
+            named.name()
+        )));
+    }
+    Ok((token, listing))
 }
 
 /// Creates the work directory `dir` if it is missing and proves that a
@@ -636,6 +752,7 @@ pub fn dry_run_summary(p: &DepositParams, c: &Checked) -> DepositSuccess {
         confirmation: None,
         balance: None,
         abandoned: false,
+        finalize: None,
     }
 }
 
@@ -1200,15 +1317,15 @@ mod tests {
 
         use crate::deposit::evm::IErc20;
         const DAI: Address = alloy_primitives::address!("68194a729c2450ad26072b3d33adacbcef39d574");
-        const ONE: u128 = 1_000_000_000_000_000_000;
+        const ONE: u128 = 1_000_000_000;
         let world = World::healthy();
         world
             .evm
-            .set_token_listing(W_BRIDGE, DAI, 7, 18, true, ONE * 50, ONE * 10_000, 0);
+            .set_token_listing(W_BRIDGE, DAI, 1, 9, true, ONE * 50, ONE * 10_000, 0);
         world.evm.set_call(
             DAI,
             IErc20::decimalsCall::SELECTOR,
-            U256::from(18u8).abi_encode().into(),
+            U256::from(9u8).abi_encode().into(),
         );
         world.evm.set_call(
             DAI,
@@ -1221,7 +1338,7 @@ mod tests {
             U256::ZERO.abi_encode().into(),
         );
         let mut p = world.params(RunMode::Fresh);
-        p.token = Some(DAI);
+        p.token = Some(crate::args::Token::Nackl);
         p.amount = Some("1".into());
         let store = Store::open(&p.state_dir).unwrap();
         let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
@@ -1240,15 +1357,15 @@ mod tests {
 
         use crate::deposit::evm::IErc20;
         const DAI: Address = alloy_primitives::address!("68194a729c2450ad26072b3d33adacbcef39d574");
-        const ONE: u128 = 1_000_000_000_000_000_000;
+        const ONE: u128 = 1_000_000_000;
         let world = World::healthy();
         world
             .evm
-            .set_token_listing(W_BRIDGE, DAI, 7, 18, true, ONE * 50, ONE * 10_000, 0);
+            .set_token_listing(W_BRIDGE, DAI, 1, 9, true, ONE * 50, ONE * 10_000, 0);
         world.evm.set_call(
             DAI,
             IErc20::decimalsCall::SELECTOR,
-            U256::from(18u8).abi_encode().into(),
+            U256::from(9u8).abi_encode().into(),
         );
         world.evm.set_call(
             DAI,
@@ -1261,12 +1378,12 @@ mod tests {
             U256::ZERO.abi_encode().into(),
         );
         world.an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
-            serde_json::json!({"listed": true, "tokenId": "7", "depositsEnabled": true,
+            serde_json::json!({"listed": true, "tokenId": "1", "depositsEnabled": true,
                 "maxTransfer": ONE.to_string(), "maxTvl": (ONE * 10).to_string(),
-                "outstanding": "0"}),
+                "outstanding": (ONE * 10).to_string()}),
         ]);
         let mut p = world.params(RunMode::DryRun);
-        p.token = Some(DAI);
+        p.token = Some(crate::args::Token::Nackl);
         p.amount = Some("1".into());
         let store = Store::open(&p.state_dir).unwrap();
         let checked = check(&p, &world.deps(), &store, Some(sepolia_sender()))
@@ -1274,19 +1391,18 @@ mod tests {
             .unwrap();
         assert_eq!(checked.params.token, DAI);
         assert_eq!(checked.params.amount_units, ONE as u64);
-        assert_eq!(checked.evm.decimals, 18);
+        assert_eq!(checked.evm.decimals, 9);
         assert!(store.list().unwrap().is_empty());
         assert_eq!(*world.an.sent.lock().unwrap(), 0);
     }
 
-    /// Naming the bridge's own token explicitly is the same deposit as
-    /// leaving `--token` out: the listing is read either way, and the
-    /// calldata carries the token.
+    /// `--token usdc` is the bridge's own `usdc()`: its listing is read, and
+    /// the calldata carries the token.
     #[tokio::test]
     async fn naming_the_bridges_own_token_is_the_same_deposit() {
         let world = World::healthy();
         let mut p = world.params(RunMode::DryRun);
-        p.token = Some(W_USDC);
+        p.token = Some(crate::args::Token::Usdc);
         let store = Store::open(&p.state_dir).unwrap();
         let _dir = DirLock::try_take(&p.state_dir).unwrap().unwrap();
         let c = check(&p, &world.deps(), &store, None).await.unwrap();

@@ -119,7 +119,29 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     }
 
     // Human summary — final block of stderr, distinct from tracing lines.
-    let s = &summary.submit;
+    let unit = crate::args::Token::from_ecc_id(summary.burn.token_id).map_or_else(
+        || format!("ECC[{}]", summary.burn.token_id),
+        |t| t.name().to_string(),
+    );
+    let Some(s) = &summary.submit else {
+        // `withdraw send`: the burn and its event, nothing proven or sent.
+        emit(
+            &format!(
+                "\nwithdraw sent:\n\x20 amount:       {} {unit}\n\x20 AN tx:        {}\n\x20 msg \
+                 id:       {}\n\x20 block:        seq={} id={}\n\x20 next:         \
+                 ackinacki-bridge withdraw proof --burn-tx {} --token {}\n",
+                summary.burn.amount,
+                summary.burn.an_tx,
+                summary.capture.withdrawal_msg_id,
+                summary.capture.block_seq_no,
+                summary.capture.block_id,
+                summary.burn.an_tx,
+                unit.to_ascii_lowercase(),
+            ),
+            false,
+        );
+        return;
+    };
     let status = match s.status {
         crate::orchestrator::SubmitStatus::DryRunOk => "dry-run-ok",
         crate::orchestrator::SubmitStatus::Confirmed => "confirmed",
@@ -146,7 +168,7 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
             "{} bytes, {} public inputs, self_verified={}",
             p.calldata_bytes, p.pi_count, p.self_verified
         ),
-        None => "(not built: already paid out)".to_string(),
+        None => "(none)".to_string(),
     };
     let queued = match (&s.payout_id, s.ready_at) {
         (Some(id), Some(at)) => format!(
@@ -155,11 +177,6 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
              sends it)\n"
         ),
         _ => String::new(),
-    };
-    let unit = match summary.burn.token_id {
-        1 => "NACKL".to_string(),
-        3 => "USDC".to_string(),
-        id => format!("ECC[{id}]"),
     };
     emit(
         &format!(
@@ -501,6 +518,7 @@ mod tests {
             confirmation: Some(json!({"confirm_tx": "c", "delivery_tx": null})),
             balance: None,
             abandoned: false,
+            finalize: None,
         }
     }
 

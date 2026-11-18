@@ -201,10 +201,24 @@ impl OpRef {
     }
 }
 
+/// Which part of a deposit a new run executes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepositPart {
+    /// `deposit`: the deposit, its proof, `finalizeDeposit` and the credit.
+    Whole,
+    /// `deposit send`: the deposit, until it is confirmed on chain.
+    Send,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunMode {
     Fresh,
     DryRun,
+    /// `deposit proof --tx-hash`: a deposit already on the EVM bridge,
+    /// proven and finalized by a new operation.
+    Proof {
+        tx_hash: B256,
+    },
     Resume {
         target: OpRef,
         tx_hash: Option<B256>,
@@ -220,6 +234,111 @@ pub struct GlobalFlags {
     pub non_interactive: bool,
 }
 
+/// `deposit`: a subcommand for one step, or the flags of the whole run.
+#[derive(Debug, clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct DepositCmd {
+    #[command(subcommand)]
+    pub step: Option<DepositStep>,
+    /// The whole run's flags; empty when a subcommand is given.
+    #[command(flatten)]
+    pub run: DepositArgs,
+}
+
+/// The two steps of a deposit, each a run of its own.
+#[derive(Debug, clap::Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "parsed once per process and matched on; boxing the flags would only satisfy a lint \
+              about a size that is never multiplied"
+)]
+pub enum DepositStep {
+    /// Make the deposit on the EVM bridge and wait until it is confirmed
+    /// there: nothing is proven or sent to Acki Nacki. Finish it with
+    /// `deposit proof --tx-hash <the deposit's transaction>`.
+    Send(DepositArgs),
+    /// Prove a deposit already on the EVM bridge and send finalizeDeposit:
+    /// wait for its block's anchor, build the receipt proof and send it. A
+    /// deposit finalized meanwhile (a relayer, say) ends in success,
+    /// `already_finalized`.
+    Proof(DepositProofArgs),
+}
+
+/// `deposit proof`'s flags as clap parsed them, raw.
+#[derive(Debug, Clone, clap::Args)]
+pub struct DepositProofArgs {
+    /// The deposit: the hash of its transaction on the EVM chain.
+    #[arg(long, value_name = "HASH")]
+    pub tx_hash: B256,
+    /// The token the deposit moved; a deposit of another token is refused.
+    #[arg(long, value_enum)]
+    pub token: crate::args::Token,
+    /// EVM network the deposit was made on.
+    #[arg(long, value_enum)]
+    pub network: Option<Network>,
+    #[arg(long, env = "RPC_URL", value_name = "URL", hide_env_values = true)]
+    pub rpc_url: Option<String>,
+    #[arg(long, env = "BRIDGE_ADDRESS")]
+    pub bridge_address: Option<Address>,
+    #[arg(
+        long,
+        env = "BRIDGE_GQL_ENDPOINT",
+        value_name = "URL",
+        hide_env_values = true
+    )]
+    pub gql_endpoint: Option<String>,
+    #[arg(long, env = "USDC_BRIDGE_ACCOUNT_ID")]
+    pub usdc_bridge_account: Option<String>,
+    #[arg(long, env = "BRIDGE_DEPOSIT_CONFIRMATIONS", default_value_t = 12)]
+    pub confirmations: u64,
+    /// Deposit operations, their locks and their claims.
+    #[arg(long, env = "BRIDGE_DEPOSIT_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+    #[arg(long, env = "BRIDGE_WORK_DIR")]
+    pub work_dir: Option<PathBuf>,
+    /// 0 waits forever.
+    #[arg(long, default_value_t = 0)]
+    pub anchor_timeout_s: u64,
+    #[arg(long, default_value_t = 300)]
+    pub credit_timeout_s: u64,
+}
+
+impl DepositProofArgs {
+    /// The run this command line asks for, checked once.
+    pub fn validate(&self, g: &GlobalFlags) -> CliResult<DepositParams> {
+        let as_deposit = DepositArgs {
+            network: self.network,
+            amount: None,
+            token: Some(self.token),
+            to: None,
+            rpc_url: self.rpc_url.clone(),
+            bridge_address: self.bridge_address,
+            gql_endpoint: self.gql_endpoint.clone(),
+            usdc_bridge_account: self.usdc_bridge_account.clone(),
+            confirmations: self.confirmations,
+            state_dir: self.state_dir.clone(),
+            work_dir: self.work_dir.clone(),
+            anchor_timeout_s: self.anchor_timeout_s,
+            recovery_window_s: 600,
+            credit_timeout_s: self.credit_timeout_s,
+            pair_timeout_s: 300,
+            qr_mode: QrMode::Walletconnect,
+            qr_out: None,
+            uri_only: false,
+            qr_invert: false,
+            qr_display: QrDisplayArg::Auto,
+            wc_project_id: None,
+            wc_relay_url: "wss://relay.walletconnect.org".into(),
+            from_address: None,
+            dry_run: false,
+            resume: None,
+            tx_hash: None,
+            abandon: None,
+        };
+        as_deposit.validate_as(g, std::env::var_os("HOME"), Some(self.tx_hash))
+    }
+}
+
 /// `deposit`'s flags as clap parsed them, raw.
 #[derive(Debug, clap::Args)]
 pub struct DepositArgs {
@@ -230,11 +349,11 @@ pub struct DepositArgs {
     /// the token has decimals: 6 for USDC, 9 for NACKL (never rounded).
     #[arg(long, value_name = "AMOUNT")]
     pub amount: Option<String>,
-    /// ERC-20 to deposit. Defaults to the bridge's `usdc()`. The token must
-    /// be listed on the bridge (`tokenIdOf`), and the amount is read in that
-    /// token's base units.
-    #[arg(long, env = "DEPOSIT_TOKEN", hide_env_values = true)]
-    pub token: Option<Address>,
+    /// The token to deposit; required for a new deposit. It must be listed
+    /// on the bridge and open for deposits, and `--amount` is read in its
+    /// decimals.
+    #[arg(long, value_enum)]
+    pub token: Option<crate::args::Token>,
     /// Acki Nacki recipient, `dapp_id::account_id`.
     #[arg(long, value_name = "dapp_id::account_id")]
     pub to: Option<String>,
@@ -266,8 +385,6 @@ pub struct DepositArgs {
     /// 0 waits forever.
     #[arg(long, default_value_t = 0)]
     pub anchor_timeout_s: u64,
-    #[arg(long, default_value_t = 120)]
-    pub relayer_grace_s: u64,
     #[arg(long, default_value_t = 600)]
     pub recovery_window_s: u64,
     #[arg(long, default_value_t = 300)]
@@ -335,8 +452,8 @@ pub fn an_network_id(endpoint: &str) -> CliResult<String> {
         })
 }
 
-/// The longest wait a `--*-timeout-s`, `--recovery-window-s` or
-/// `--relayer-grace-s` may ask for: ten years. No one means a longer one,
+/// The longest wait a `--*-timeout-s` or `--recovery-window-s` may ask
+/// for: ten years. No one means a longer one,
 /// and a far longer one does not fit the clock a run measures it on.
 pub const MAX_WAIT_S: u64 = 10 * 365 * 86_400;
 
@@ -383,12 +500,14 @@ fn no_default_dirs(state: bool, work: bool) -> CliError {
 #[derive(Debug, Clone)]
 pub struct DepositParams {
     pub mode: RunMode,
+    /// `deposit send` stops once the deposit is confirmed on chain.
+    pub part: DepositPart,
     pub globals: GlobalFlags,
     pub network: Option<Network>,
     pub amount: Option<String>,
-    /// The ERC-20 to deposit, when `--token` named one. `None` means the
-    /// run resolves the bridge's `usdc()` and deposits that.
-    pub token: Option<Address>,
+    /// `--token`; `None` only for a resume or an abandon, which take the
+    /// token from the operation's record.
+    pub token: Option<crate::args::Token>,
     pub to: Option<AnTarget>,
     pub rpc_url: Option<String>,
     pub bridge: Option<Address>,
@@ -401,7 +520,6 @@ pub struct DepositParams {
     /// every operation records its own before its first write.
     pub work_dir: Option<PathBuf>,
     pub anchor_timeout: Option<Duration>,
-    pub relayer_grace: Duration,
     pub recovery_window: Duration,
     pub credit_timeout: Duration,
     pub pair_timeout: Duration,
@@ -423,13 +541,42 @@ impl DepositArgs {
         self.validate_with_home(g, std::env::var_os("HOME"))
     }
 
+    /// `deposit send`: [`DepositArgs::validate`] for a run that stops once
+    /// the deposit is confirmed on chain. Only a new deposit can be sent.
+    pub fn validate_send(&self, g: &GlobalFlags) -> CliResult<DepositParams> {
+        let mut p = self.validate(g)?;
+        if !matches!(p.mode, RunMode::Fresh | RunMode::DryRun) {
+            return Err(CliError::Usage {
+                reason: "deposit send makes a new deposit: --resume and --abandon belong to \
+                         `deposit`"
+                    .into(),
+            });
+        }
+        p.part = DepositPart::Send;
+        Ok(p)
+    }
+
     /// [`DepositArgs::validate`] with `home` as the value of `HOME`.
     pub(crate) fn validate_with_home(
         &self,
         g: &GlobalFlags,
         home: Option<std::ffi::OsString>,
     ) -> CliResult<DepositParams> {
+        self.validate_as(g, home, None)
+    }
+
+    /// [`DepositArgs::validate_with_home`]; `proof` is `deposit proof`'s
+    /// `--tx-hash`, which makes the run a [`RunMode::Proof`].
+    fn validate_as(
+        &self,
+        g: &GlobalFlags,
+        home: Option<std::ffi::OsString>,
+        proof: Option<B256>,
+    ) -> CliResult<DepositParams> {
         let mode = match (&self.abandon, &self.resume) {
+            _ if proof.is_some() => RunMode::Proof {
+                tx_hash: proof.unwrap_or_default(),
+            },
             (Some(op), _) => RunMode::Abandon(match OpRef::parse(op)? {
                 OpRef::Op(id) => id,
                 OpRef::DepositId(_) => {
@@ -448,6 +595,11 @@ impl DepositArgs {
             (None, None) => RunMode::Fresh,
         };
         let starts_new = matches!(mode, RunMode::Fresh | RunMode::DryRun);
+        // A new operation: a new deposit, or `deposit proof` of one made
+        // elsewhere. Both need the endpoints, the bridges and a work
+        // directory; only a new deposit needs the amount, the recipient and a
+        // wallet.
+        let new_op = starts_new || matches!(mode, RunMode::Proof { .. });
         // Shapes first: a malformed value is the user's first problem, not
         // the profile keys that happen to be missing as well.
         let amount = self
@@ -461,7 +613,6 @@ impl DepositArgs {
         let to = self.to.as_deref().map(AnTarget::parse).transpose()?;
         for (flag, secs, max) in [
             ("anchor-timeout-s", self.anchor_timeout_s, MAX_WAIT_S),
-            ("relayer-grace-s", self.relayer_grace_s, MAX_WAIT_S),
             ("recovery-window-s", self.recovery_window_s, MAX_WAIT_S),
             ("credit-timeout-s", self.credit_timeout_s, MAX_WAIT_S),
             ("pair-timeout-s", self.pair_timeout_s, MAX_PAIR_TIMEOUT_S),
@@ -476,10 +627,10 @@ impl DepositArgs {
         }
 
         let mut missing = Vec::new();
+        if new_op && self.network.is_none() {
+            missing.push("--network");
+        }
         if starts_new {
-            if self.network.is_none() {
-                missing.push("--network");
-            }
             if self.amount.is_none() {
                 missing.push("--amount");
             }
@@ -487,11 +638,14 @@ impl DepositArgs {
                 missing.push("--to");
             }
         }
+        if new_op && self.token.is_none() {
+            missing.push("--token");
+        }
         // A resume takes the chain, both bridges and the recipient from the
         // operation's record, and needs the endpoints only for the steps its stage has
         // left: a finished operation answers from the record alone. What a
         // stage needs is asked for there.
-        if starts_new {
+        if new_op {
             if self.rpc_url.is_none() {
                 missing.push("--rpc-url (RPC_URL)");
             }
@@ -559,7 +713,7 @@ impl DepositArgs {
         let state_dir = under_home(&self.state_dir, ".bridge-deposit-state");
         let work_dir = under_home(&self.work_dir, ".bridge-deposit-work");
         let no_state_dir = state_dir.is_none();
-        let no_work_dir = starts_new && work_dir.is_none();
+        let no_work_dir = new_op && work_dir.is_none();
         let (Some(state_dir), false) = (state_dir, no_work_dir) else {
             return Err(no_default_dirs(no_state_dir, no_work_dir));
         };
@@ -575,6 +729,7 @@ impl DepositArgs {
         let secs = Duration::from_secs;
         Ok(DepositParams {
             mode,
+            part: DepositPart::Whole,
             globals: *g,
             network: self.network,
             amount,
@@ -588,7 +743,6 @@ impl DepositArgs {
             state_dir: abs(state_dir, "state-dir")?,
             work_dir: work_dir.map(|w| abs(w, "work-dir")).transpose()?,
             anchor_timeout: (self.anchor_timeout_s > 0).then(|| secs(self.anchor_timeout_s)),
-            relayer_grace: secs(self.relayer_grace_s),
             recovery_window: secs(self.recovery_window_s),
             credit_timeout: secs(self.credit_timeout_s),
             pair_timeout: secs(self.pair_timeout_s),
@@ -678,7 +832,10 @@ mod tests {
         let cli =
             crate::args::Cli::try_parse_from(["ackinacki-bridge", "deposit", "--amount", "1"])
                 .unwrap();
-        let crate::args::Command::Deposit(a) = cli.cmd else {
+        let crate::args::Command::Deposit(DepositCmd {
+            run: a, ..
+        }) = cli.cmd
+        else {
             panic!()
         };
         let e = a.validate(&GlobalFlags::default()).unwrap_err();
@@ -693,6 +850,8 @@ mod tests {
         for raw in ["0.000000001", "3.123456789", "1", "1.000000"] {
             let a = crate::deposit::testkit::deposit_args(&[
                 "--dry-run",
+                "--token",
+                "usdc",
                 "--network",
                 "sepolia",
                 "--amount",
@@ -720,6 +879,8 @@ mod tests {
         for raw in ["0", "-1", "abc", ""] {
             let a = crate::deposit::testkit::deposit_args(&[
                 "--dry-run",
+                "--token",
+                "usdc",
                 "--network",
                 "sepolia",
                 &format!("--amount={raw}"),
@@ -741,6 +902,8 @@ mod tests {
         let cli = crate::args::Cli::try_parse_from([
             "ackinacki-bridge",
             "deposit",
+            "--token",
+            "usdc",
             "--network",
             "sepolia",
             "--amount",
@@ -749,7 +912,10 @@ mod tests {
             &format!("{DAPP}::{ACC}"),
         ])
         .unwrap();
-        let crate::args::Command::Deposit(a) = cli.cmd else {
+        let crate::args::Command::Deposit(DepositCmd {
+            run: a, ..
+        }) = cli.cmd
+        else {
             panic!()
         };
         let e = a.validate(&GlobalFlags::default()).unwrap_err();
@@ -765,6 +931,8 @@ mod tests {
         for mode in ["eip681", "local-key"] {
             let to = format!("{DAPP}::{ACC}");
             let a = crate::deposit::testkit::deposit_args(&[
+                "--token",
+                "usdc",
                 "--network",
                 "arbitrum-sepolia",
                 "--amount",
@@ -785,6 +953,8 @@ mod tests {
             "ackinacki-bridge",
             "deposit",
             "--dry-run",
+            "--token",
+            "usdc",
             "--network",
             "sepolia",
             "--amount",
@@ -807,7 +977,10 @@ mod tests {
             "./state",
         ])
         .unwrap();
-        let crate::args::Command::Deposit(a) = cli.cmd else {
+        let crate::args::Command::Deposit(DepositCmd {
+            run: a, ..
+        }) = cli.cmd
+        else {
             panic!()
         };
         let p = a.validate(&GlobalFlags::default()).unwrap();
@@ -861,6 +1034,8 @@ mod tests {
         let mut argv = vec![
             "ackinacki-bridge",
             "deposit",
+            "--token",
+            "usdc",
             "--network",
             "sepolia",
             "--amount",
@@ -880,7 +1055,10 @@ mod tests {
         ];
         argv.extend_from_slice(extra);
         let cli = crate::args::Cli::try_parse_from(argv).unwrap();
-        let crate::args::Command::Deposit(a) = cli.cmd else {
+        let crate::args::Command::Deposit(DepositCmd {
+            run: a, ..
+        }) = cli.cmd
+        else {
             panic!()
         };
         a.validate_with_home(&GlobalFlags::default(), Some(HOME.into()))
@@ -900,6 +1078,8 @@ mod tests {
     fn every_mode() -> Vec<Vec<String>> {
         let op = "01J9ZQ4X7T8V5N6M3K2P1R0S9A";
         let fresh = [
+            "--token",
+            "usdc",
             "--network",
             "sepolia",
             "--amount",
@@ -1035,7 +1215,6 @@ mod tests {
         let max = u64::MAX.to_string();
         for flag in [
             "anchor-timeout-s",
-            "relayer-grace-s",
             "recovery-window-s",
             "credit-timeout-s",
             "pair-timeout-s",
@@ -1100,6 +1279,8 @@ mod tests {
         let to = format!("{DAPP}::{ACC}");
         for extra in [None, Some("--dry-run")] {
             let mut argv = vec![
+                "--token",
+                "usdc",
                 "--network",
                 "sepolia",
                 "--amount",

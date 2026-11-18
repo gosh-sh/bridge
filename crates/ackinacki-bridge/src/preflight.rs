@@ -172,6 +172,66 @@ pub async fn run(
     .await
 }
 
+/// The Acki Nacki bridge `--usdc-bridge-account` names, resolved: its
+/// dApp id, its address in both forms and the two ids the proof binds.
+pub struct AnBridge {
+    pub dapp_id_hex: String,
+    /// `dapp_id::account_id`.
+    pub extended: String,
+    /// `0:account_id`, the form the ABI encoder takes.
+    pub legacy: String,
+    pub dapp_id: [u8; 32],
+    pub account_id: [u8; 32],
+}
+
+/// Resolve the Acki Nacki bridge's dApp id and check the account is Active:
+/// one GraphQL round-trip through the same helper the daemon uses.
+pub async fn resolve_an_bridge(
+    gql_endpoint: &str,
+    usdc_bridge_account_id_hex: &str,
+) -> CliResult<AnBridge> {
+    let gql = create_client(gql_endpoint).map_err(|e| CliError::Preflight {
+        reason: format!("failed to build GraphQL client for {gql_endpoint}: {e}"),
+        source: Some(e),
+    })?;
+    let (usdc_bridge_dapp_id, usdc_bridge_acc_type) =
+        query_usdc_bridge_state(&gql, usdc_bridge_account_id_hex).await?;
+    if usdc_bridge_acc_type != "Active" {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "USDCBridge account {usdc_bridge_account_id_hex}: acc_type is \
+                 {usdc_bridge_acc_type} (need Active) — is the bridge deployed?"
+            ),
+            source: None,
+        });
+    }
+    let usdc_bridge_extended = format!("{usdc_bridge_dapp_id}::{usdc_bridge_account_id_hex}");
+    let usdc_bridge_legacy = format!("0:{usdc_bridge_account_id_hex}");
+
+    // Decode once, here, where both hex strings are in hand and already
+    // known good — `query_usdc_bridge_state` normalises the zerostate
+    // empty dapp_id to 64 zeros, and the account id was validated by
+    // `args`. A helper keeps the two identical; hand-rolling the second
+    // one is how they end up differing.
+    let decode_id = |label: &str, hex_str: &str| -> CliResult<[u8; 32]> {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(hex_str, &mut out).map_err(|e| CliError::Preflight {
+            reason: format!("{label}: expected 64 hex chars, got {hex_str:?} ({e})"),
+            source: None,
+        })?;
+        Ok(out)
+    };
+    let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
+    let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+    Ok(AnBridge {
+        dapp_id_hex: usdc_bridge_dapp_id,
+        extended: usdc_bridge_extended,
+        legacy: usdc_bridge_legacy,
+        dapp_id: bridge_dapp_id,
+        account_id: bridge_account_id,
+    })
+}
+
 /// Validate the source account and AN inventory for the selected ECC currency.
 pub async fn run_for_token(
     from: &FromAddress,
@@ -263,41 +323,14 @@ pub async fn run_for_token(
         });
     }
 
-    // 6. USDCBridge lookup: resolve dapp_id AND verify the account is Active. One
-    //    GQL round-trip through the same helper the daemon uses.
-    let gql = create_client(gql_endpoint).map_err(|e| CliError::Preflight {
-        reason: format!("failed to build GraphQL client for {gql_endpoint}: {e}"),
-        source: Some(e),
-    })?;
-    let (usdc_bridge_dapp_id, usdc_bridge_acc_type) =
-        query_usdc_bridge_state(&gql, usdc_bridge_account_id_hex).await?;
-    if usdc_bridge_acc_type != "Active" {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "USDCBridge account {usdc_bridge_account_id_hex}: acc_type is \
-                 {usdc_bridge_acc_type} (need Active) — is the bridge deployed?"
-            ),
-            source: None,
-        });
-    }
-    let usdc_bridge_extended = format!("{usdc_bridge_dapp_id}::{usdc_bridge_account_id_hex}");
-    let usdc_bridge_legacy = format!("0:{usdc_bridge_account_id_hex}");
-
-    // Decode once, here, where both hex strings are in hand and already
-    // known good — `query_usdc_bridge_state` normalises the zerostate
-    // empty dapp_id to 64 zeros, and the account id was validated by
-    // `args`. A helper keeps the two identical; hand-rolling the second
-    // one is how they end up differing.
-    let decode_id = |label: &str, hex_str: &str| -> CliResult<[u8; 32]> {
-        let mut out = [0u8; 32];
-        hex::decode_to_slice(hex_str, &mut out).map_err(|e| CliError::Preflight {
-            reason: format!("{label}: expected 64 hex chars, got {hex_str:?} ({e})"),
-            source: None,
-        })?;
-        Ok(out)
-    };
-    let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
-    let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+    // 6. USDCBridge lookup: resolve dapp_id AND verify the account is Active.
+    let AnBridge {
+        dapp_id_hex: usdc_bridge_dapp_id,
+        extended: usdc_bridge_extended,
+        legacy: usdc_bridge_legacy,
+        dapp_id: bridge_dapp_id,
+        account_id: bridge_account_id,
+    } = resolve_an_bridge(gql_endpoint, usdc_bridge_account_id_hex).await?;
 
     // 6b. The AN bridge's own pause. While it is set `initiateWithdrawal`
     //     refuses the burn with 231, the ECC bounces back to the multisig,
@@ -2776,6 +2809,7 @@ pub async fn check_bridge_deploy(
         amount,
         3,
         None,
+        false,
     )
     .await
 }
@@ -2790,6 +2824,7 @@ pub async fn check_bridge_deploy_for_token(
     amount: &UsdcAmount,
     token_id: u32,
     expected_token: Option<Address>,
+    burn_on_wire: bool,
 ) -> CliResult<()> {
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
@@ -3028,68 +3063,74 @@ pub async fn check_bridge_deploy_for_token(
         }
         (info.max_withdrawal, info.liabilities)
     };
-    if U256::from(amount.0) > max_transfer {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "withdrawal exceeds the bridge's current payout cap for {}; reduce the amount \
-                 before burning ECC",
-                payout_cap_label(token_id, max_transfer),
-            ),
-            source: None,
-        });
-    }
-
-    let needed = U256::from(amount.0);
-    if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
-        let nackl = client
-            .nackl_state()
-            .await
-            .map_err(|e| CliError::Preflight {
-                reason: format!(
-                    "--bridge-address {bridge}: nacklState() failed: {e}. The bridge does not \
-                     carry NACKL; nothing was burnt."
-                ),
-                source: None,
-            })?;
-        if nackl.handed_over {
+    // Once the burn is on the wire, the payout cap and the treasury guard
+    // nothing: the burn cannot be taken back, and the dry run before the
+    // send reads what the bridge says then, a payout by someone else
+    // included.
+    if !burn_on_wire {
+        if U256::from(amount.0) > max_transfer {
             return Err(CliError::Preflight {
                 reason: format!(
-                    "--bridge-address {bridge} has handed NACKL minting to its successor \
-                     (nacklState().handedOver): withdrawByProof would revert NacklMinterGone. \
-                     Nothing was burnt."
+                    "withdrawal exceeds the bridge's current payout cap for {}; reduce the amount \
+                     before burning ECC",
+                    payout_cap_label(token_id, max_transfer),
                 ),
                 source: None,
             });
         }
-        if needed > nackl.delay_threshold {
-            tracing::warn!(
-                amount = amount.0,
-                threshold = %nackl.delay_threshold,
-                "this NACKL payout is above the delay threshold: it is queued and minted no \
-                 earlier than 24 hours after its proof is accepted"
-            );
-        } else if nackl.window_used + needed > nackl.daily_limit {
-            tracing::warn!(
-                amount = amount.0,
-                window_used = %nackl.window_used,
-                daily_limit = %nackl.daily_limit,
-                "the NACKL daily limit is nearly spent: this payout may be queued until the \
-                 limit has room"
-            );
+
+        let needed = U256::from(amount.0);
+        if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
+            let nackl = client
+                .nackl_state()
+                .await
+                .map_err(|e| CliError::Preflight {
+                    reason: format!(
+                        "--bridge-address {bridge}: nacklState() failed: {e}. The bridge does not \
+                         carry NACKL; nothing was burnt."
+                    ),
+                    source: None,
+                })?;
+            if nackl.handed_over {
+                return Err(CliError::Preflight {
+                    reason: format!(
+                        "--bridge-address {bridge} has handed NACKL minting to its successor \
+                         (nacklState().handedOver): withdrawByProof would revert NacklMinterGone. \
+                         Nothing was burnt."
+                    ),
+                    source: None,
+                });
+            }
+            if needed > nackl.delay_threshold {
+                tracing::warn!(
+                    amount = amount.0,
+                    threshold = %nackl.delay_threshold,
+                    "this NACKL payout is above the delay threshold: it is queued and minted no \
+                     earlier than 24 hours after its proof is accepted"
+                );
+            } else if nackl.window_used + needed > nackl.daily_limit {
+                tracing::warn!(
+                    amount = amount.0,
+                    window_used = %nackl.window_used,
+                    daily_limit = %nackl.daily_limit,
+                    "the NACKL daily limit is nearly spent: this payout may be queued until the \
+                     limit has room"
+                );
+            }
+        } else if treasury < needed {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: {} but this withdrawal needs {needed} ({}). \
+                     withdrawByProof would revert WithdrawTreasuryShortfall. {}\n\x20 Note this \
+                     is a preflight, not a guarantee — the amount is shared, and it can be \
+                     drained again while this withdrawal waits for its anchor bundle.",
+                    held_label(token_id, treasury),
+                    requested_label(token_id, *amount),
+                    shortfall_advice(token_id),
+                ),
+                source: None,
+            });
         }
-    } else if treasury < needed {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "--bridge-address {bridge}: {} but this withdrawal needs {needed} ({}). \
-                 withdrawByProof would revert WithdrawTreasuryShortfall. {}\n\x20 Note this is a \
-                 preflight, not a guarantee — the amount is shared, and it can be drained again \
-                 while this withdrawal waits for its anchor bundle.",
-                held_label(token_id, treasury),
-                requested_label(token_id, *amount),
-                shortfall_advice(token_id),
-            ),
-            source: None,
-        });
     }
 
     // 6. Is it open? While `paused()` is true, `verifyBlock` and `withdrawByProof`
@@ -5526,6 +5567,7 @@ pub(crate) mod tests {
                 &UsdcAmount(1_000_000),
                 4,
                 expected,
+                false,
             )
             .await;
             match result {

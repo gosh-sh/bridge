@@ -38,8 +38,14 @@ assigns it when the release is tagged.
   directory of an `ackinacki-bridge withdraw` of the same release, rerun `finalize-params.sh` and set
   the new `PARAMS_MANIFEST_SHA256`.
 - `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
-  `submit.status` `already_paid` and `submit.nullifier`, not 13; found before proving, `proof` is
-  `null` in the JSON output.
+  `submit.status` `already_paid` and `submit.nullifier`, not 13. The proof is always built; the send
+  is where the payout is found.
+- `ackinacki-bridge`: `--token usdc|nackl` is required on `withdraw` and `deposit`;
+  `withdraw --token-id` and `deposit --token <address>` (`DEPOSIT_TOKEN`) are gone: add `--token usdc`
+  to scripts.
+- `ackinacki-bridge deposit --relayer-grace-s` is gone: the CLI builds the receipt proof once the block
+  is anchored; a deposit finalized by then (by a relayer, say) is not sent again and ends with exit 0
+  and `finalize: "already_finalized"`.
 
 ### New / Improvements
 
@@ -79,7 +85,15 @@ assigns it when the release is tagged.
   `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
 - `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` execute due NACKL payouts in
   `nextPayout` order and park a proof refused with `NacklMinterGone`.
-- `ackinacki-bridge withdraw --token-id 1` withdraws NACKL; a queued payout ends with
+- `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --burn-tx <AN tx>
+  --token …` proves any burn and sends `withdrawByProof` (JSON `submit` is `null` after `send`).
+- `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
+  `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
+  amount and recipient from the receipt.
+- `ackinacki-bridge deposit` JSON `finalize`: `sent` or `already_finalized` once credited.
+- `ackinacki-bridge withdraw` over a burn already on the wire no longer refuses on the payout cap or
+  the treasury before proving; the dry run before the send decides.
+- `ackinacki-bridge withdraw --token nackl` withdraws NACKL; a queued payout ends with
   `submit.status: "queued"`, `payout_id` and `ready_at`, and a re-run does not resend the proof.
 - `ackinacki-bridge deposit` of NACKL exits 38 (`CreditPending`) while the deposit is pending;
   `--resume` confirms it once paid.

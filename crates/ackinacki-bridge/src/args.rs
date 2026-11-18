@@ -94,46 +94,105 @@ pub struct Cli {
 /// The subcommands this binary ships, one per direction. There is no
 /// implicit default: a command line names the direction it moves money in.
 pub enum Command {
-    /// Withdraw USDC from an AN multisig to an EVM recipient.
-    Withdraw(WithdrawArgs),
-    /// Deposit USDC from an EVM wallet to an Acki Nacki account.
-    Deposit(crate::deposit::args::DepositArgs),
+    /// Withdraw USDC or NACKL from an Acki Nacki multisig to an EVM
+    /// recipient. With no subcommand: the burn, its proof and
+    /// `withdrawByProof` in one run.
+    Withdraw(WithdrawCmd),
+    /// Deposit USDC or NACKL from an EVM wallet to an Acki Nacki account.
+    /// With no subcommand: the deposit, its proof and `finalizeDeposit` in
+    /// one run.
+    Deposit(crate::deposit::args::DepositCmd),
 }
 
+/// The token a run moves, named: `--token usdc` or `--token nackl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Token {
+    /// USDC, ECC id 3 on Acki Nacki.
+    Usdc,
+    /// NACKL, ECC id 1 on Acki Nacki.
+    Nackl,
+}
+
+impl Token {
+    /// The token's ECC currency id on Acki Nacki.
+    pub fn ecc_id(self) -> u32 {
+        match self {
+            Token::Usdc => 3,
+            Token::Nackl => bridge_relayer_daemon::bridge::NACKL_TOKEN_ID,
+        }
+    }
+
+    /// The token's name, as `--token` takes it and the output prints it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Token::Usdc => "USDC",
+            Token::Nackl => "NACKL",
+        }
+    }
+
+    /// The token with ECC id `id`, if the bridge carries one.
+    pub fn from_ecc_id(id: u32) -> Option<Token> {
+        [Token::Usdc, Token::Nackl]
+            .into_iter()
+            .find(|t| t.ecc_id() == id)
+    }
+}
+
+/// `withdraw`: a subcommand for one step, or the flags of the whole run.
 #[derive(Debug, clap::Args)]
-/// Everything `withdraw` takes, before any of it is parsed into a
-/// typed form. Every field is raw here on purpose: the typed
-/// parsers below are where a refusal gets its wording, and they
-/// can only refuse what they were handed verbatim.
-pub struct WithdrawArgs {
-    /// ECC currency id registered for this token on AN and the destination
-    /// bridge.
-    #[arg(long, default_value_t = 3, value_parser = |raw: &str| match raw.parse::<u32>() {
-        Ok(id) if id == 1 || id >= 3 => Ok(id),
-        Ok(id) => Err(format!("ECC[{id}] is not bridged; use 1 (NACKL) or 3 (USDC)")),
-        Err(e) => Err(e.to_string()),
-    })]
-    pub token_id: u32,
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct WithdrawCmd {
+    #[command(subcommand)]
+    pub step: Option<WithdrawStep>,
+    /// The whole run's flags; empty when a subcommand is given.
+    #[command(flatten)]
+    pub run: WithdrawFlags,
+}
+
+/// The two steps of a withdrawal, each a run of its own.
+#[derive(Debug, Subcommand)]
+pub enum WithdrawStep {
+    /// Burn on Acki Nacki and capture the bridge's WithdrawalInitiated:
+    /// nothing is proven or sent to the EVM chain. Finish it with
+    /// `withdraw proof --burn-tx <the burn's AN transaction>`.
+    Send(WithdrawFlags),
+    /// Prove a burn already on Acki Nacki and send withdrawByProof. A burn
+    /// the bridge has paid out meanwhile (a relayer, say) ends in success,
+    /// `already_paid`.
+    Proof(WithdrawProofFlags),
+}
+
+/// The flags of `withdraw` and `withdraw send`, as clap parsed them.
+/// Every field is raw here on purpose: the typed parsers below are where a
+/// refusal gets its wording, and they can only refuse what they were handed
+/// verbatim. The fields clap requires are `Option` only so that a bare
+/// `withdraw` can carry none of them when a subcommand is given.
+#[derive(Debug, Clone, clap::Args)]
+pub struct WithdrawFlags {
+    /// The token to withdraw.
+    #[arg(long, value_enum, required = true)]
+    pub token: Option<Token>,
 
     /// Source multisig address in `dapp_id::account_id` form (both 64 hex,
     /// no `0x`, no workchain prefix). Must be an active, deployed
     /// single-custodian multisig.
-    #[arg(long, value_name = "dapp_id::account_id")]
-    pub from: String,
+    #[arg(long, value_name = "dapp_id::account_id", required = true)]
+    pub from: Option<String>,
 
     /// Path to the multisig owner's keys.json. Must be a regular file,
     /// owned by the current uid, mode exactly `0400` (read-only for the
     /// owner — the CLI never writes this file). Otherwise the CLI refuses
     /// with `chmod 400 <path>`.
-    #[arg(long, value_name = "PATH")]
-    pub from_keys: PathBuf,
+    #[arg(long, value_name = "PATH", required = true)]
+    pub from_keys: Option<PathBuf>,
 
     /// EVM recipient. Accepts:
     /// - `0x…` (20-byte hex); mixed-case must pass EIP-55 checksum
     /// - CAIP-10 form `eip155:<chain>:<0x…>` (chain redundantly encoded; must
     ///   match --to-chain if that is also supplied)
-    #[arg(long, value_name = "0x… | eip155:<chain>:<0x…>")]
-    pub to: String,
+    #[arg(long, value_name = "0x… | eip155:<chain>:<0x…>", required = true)]
+    pub to: Option<String>,
 
     /// Numeric EIP-155 chain id of the destination EVM network. Required
     /// unless --to is CAIP-10 (in which case it's inferred and re-validated
@@ -142,10 +201,11 @@ pub struct WithdrawArgs {
     #[arg(long, value_name = "u64")]
     pub to_chain: Option<u64>,
 
-    /// Decimal token amount; precision comes from the destination registry
-    /// for a non-USDC currency. Excess precision is refused without rounding.
-    #[arg(long, value_name = "USDC")]
-    pub amount: String,
+    /// Decimal token amount, at most as many fractional digits as the token
+    /// has decimals: 6 for USDC, 9 for NACKL. Excess precision is refused
+    /// without rounding.
+    #[arg(long, value_name = "AMOUNT", required = true)]
+    pub amount: Option<String>,
 
     /// Preflight only: nothing is broadcast on either side and no
     /// idempotency state is recorded.
@@ -167,6 +227,37 @@ pub struct WithdrawArgs {
     #[arg(long)]
     pub allow_retry: bool,
 
+    // -- Idempotency --
+    /// Directory holding per-withdrawal state files. Defaults to
+    /// `$HOME/.bridge-withdraw-state/` — per-user, survives tree moves.
+    /// Profile files typically override this to a per-deploy path.
+    #[arg(long, env = "BRIDGE_WITHDRAW_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub prove: ProveFlags,
+}
+
+/// The flags of `withdraw proof`, as clap parsed them.
+#[derive(Debug, Clone, clap::Args)]
+pub struct WithdrawProofFlags {
+    /// The burn: the hash of the multisig's transaction on Acki Nacki that
+    /// sent `initiateWithdrawal` to the bridge (64 hex, `0x` optional).
+    #[arg(long, value_name = "HASH")]
+    pub burn_tx: String,
+
+    /// The token the burn withdrew; a burn of another token is refused.
+    #[arg(long, value_enum)]
+    pub token: Token,
+
+    #[command(flatten)]
+    pub prove: ProveFlags,
+}
+
+/// The flags that capture a burn, prove it and send `withdrawByProof`:
+/// `withdraw`, `withdraw send` and `withdraw proof` share them.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ProveFlags {
     /// Accept a `--verifiers-dir` whose
     /// `BridgeWithdrawalAggregatorVerifier.bin` and `.sol` differ from the
     /// ones this build embeds. Correct only when you deployed your own bridge
@@ -193,17 +284,18 @@ pub struct WithdrawArgs {
         long,
         env = "BRIDGE_GQL_ENDPOINT",
         hide_env_values = true,
-        value_name = "URL"
+        value_name = "URL",
+        required = true
     )]
-    pub gql_endpoint: String,
+    pub gql_endpoint: Option<String>,
 
     /// On-chain USDCBridge account id (64 hex, no `0x`). No compiled
     /// default — supplied per network via `USDC_BRIDGE_ACCOUNT_ID` in
     /// the profile file (see `config/bridge_config.shellnet` for the
     /// shellnet palindromic `1a1a…1a1a`). The dapp_id is resolved live
     /// via GraphQL, so only the account id is needed here.
-    #[arg(long, env = "USDC_BRIDGE_ACCOUNT_ID")]
-    pub usdc_bridge_account: String,
+    #[arg(long, env = "USDC_BRIDGE_ACCOUNT_ID", required = true)]
+    pub usdc_bridge_account: Option<String>,
 
     /// Anchor layer selection passed through to the enricher. Use `auto`
     /// (default) on L1 deploys; `2` with `--i-know-the-wait` on L2.
@@ -223,12 +315,18 @@ pub struct WithdrawArgs {
 
     // -- ETH side (submit) --
     /// EVM JSON-RPC endpoint.
-    #[arg(long, env = "RPC_URL", hide_env_values = true, value_name = "URL")]
-    pub rpc_url: String,
+    #[arg(
+        long,
+        env = "RPC_URL",
+        hide_env_values = true,
+        value_name = "URL",
+        required = true
+    )]
+    pub rpc_url: Option<String>,
 
     /// Deployed AckiNackiBridge address on the destination chain.
-    #[arg(long, env = "BRIDGE_ADDRESS")]
-    pub bridge_address: Address,
+    #[arg(long, env = "BRIDGE_ADDRESS", required = true)]
+    pub bridge_address: Option<Address>,
 
     /// Block the bridge in `--bridge-address` was deployed in: where the
     /// `LayerAnchorAppended` scan that rebuilds the window heights
@@ -250,7 +348,7 @@ pub struct WithdrawArgs {
 
     /// Signer key for the EVM `withdrawByProof` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
-    /// gas wallet; the recipient of the USDC is `--to`, not this signer.
+    /// gas wallet; the recipient of the tokens is `--to`, not this signer.
     #[arg(
         long,
         env = "BURNER_PRIVATE_KEY",
@@ -276,16 +374,133 @@ pub struct WithdrawArgs {
     pub prover_timeout_s: u64,
     #[arg(long, env = "BRIDGE_WORK_DIR")]
     pub work_dir: Option<PathBuf>,
-
-    // -- Idempotency --
-    /// Directory holding per-withdrawal state files. Defaults to
-    /// `$HOME/.bridge-withdraw-state/` — per-user, survives tree moves.
-    /// Profile files typically override this to a per-deploy path.
-    #[arg(long, env = "BRIDGE_WITHDRAW_STATE_DIR")]
-    pub state_dir: Option<PathBuf>,
 }
 
-// -- Validated forms of raw args, produced by [`WithdrawArgs::validate`] --
+/// `withdraw`'s and `withdraw send`'s flags, past clap: the required
+/// ones are present. Still raw strings; the parsers below type them.
+#[derive(Debug, Clone)]
+pub struct WithdrawArgs {
+    /// The ECC currency id of `--token`.
+    pub token_id: u32,
+    pub from: String,
+    pub from_keys: PathBuf,
+    pub to: String,
+    pub to_chain: Option<u64>,
+    pub amount: String,
+    pub dry_run: bool,
+    pub allow_retry: bool,
+    pub state_dir: Option<PathBuf>,
+    pub prove: ProveArgs,
+}
+
+/// `withdraw proof`'s flags, past clap.
+#[derive(Debug, Clone)]
+pub struct WithdrawProofArgs {
+    /// The burn's Acki Nacki transaction, 64 lower-case hex digits.
+    pub burn_tx: String,
+    /// The ECC currency id of `--token`.
+    pub token_id: u32,
+    pub prove: ProveArgs,
+}
+
+/// [`ProveFlags`] past clap: the required ones are present.
+#[derive(Debug, Clone)]
+pub struct ProveArgs {
+    pub allow_verifier_drift: bool,
+    pub gql_endpoint: String,
+    pub usdc_bridge_account: String,
+    pub anchor_layer: String,
+    pub i_know_the_wait: bool,
+    pub rpc_url: String,
+    pub bridge_address: Address,
+    pub bridge_deploy_block: Option<u64>,
+    pub get_logs_chunk_blocks: Option<u64>,
+    pub get_logs_pause_ms: Option<u64>,
+    pub eth_private_key: Option<String>,
+    pub aggregator_dir: Option<PathBuf>,
+    pub verifiers_dir: Option<PathBuf>,
+    pub params_dir: Option<PathBuf>,
+    pub snark_dir: PathBuf,
+    pub pk_cache_dir: Option<PathBuf>,
+    pub prover_out_dir: Option<PathBuf>,
+    pub prover_timeout_s: u64,
+    pub work_dir: Option<PathBuf>,
+}
+
+/// A flag clap requires and did not deliver: only a bare `withdraw` given a
+/// subcommand has its required flags empty, and that group is never read.
+fn present<T>(value: Option<T>, flag: &str) -> CliResult<T> {
+    value.ok_or_else(|| CliError::Usage {
+        reason: format!("--{flag} is required"),
+    })
+}
+
+impl ProveFlags {
+    /// The flags past clap.
+    pub fn into_args(self) -> CliResult<ProveArgs> {
+        Ok(ProveArgs {
+            allow_verifier_drift: self.allow_verifier_drift,
+            gql_endpoint: present(self.gql_endpoint, "gql-endpoint")?,
+            usdc_bridge_account: present(self.usdc_bridge_account, "usdc-bridge-account")?,
+            anchor_layer: self.anchor_layer,
+            i_know_the_wait: self.i_know_the_wait,
+            rpc_url: present(self.rpc_url, "rpc-url")?,
+            bridge_address: present(self.bridge_address, "bridge-address")?,
+            bridge_deploy_block: self.bridge_deploy_block,
+            get_logs_chunk_blocks: self.get_logs_chunk_blocks,
+            get_logs_pause_ms: self.get_logs_pause_ms,
+            eth_private_key: self.eth_private_key,
+            aggregator_dir: self.aggregator_dir,
+            verifiers_dir: self.verifiers_dir,
+            params_dir: self.params_dir,
+            snark_dir: self.snark_dir,
+            pk_cache_dir: self.pk_cache_dir,
+            prover_out_dir: self.prover_out_dir,
+            prover_timeout_s: self.prover_timeout_s,
+            work_dir: self.work_dir,
+        })
+    }
+}
+
+impl WithdrawFlags {
+    /// The flags past clap.
+    pub fn into_args(self) -> CliResult<WithdrawArgs> {
+        Ok(WithdrawArgs {
+            token_id: present(self.token, "token")?.ecc_id(),
+            from: present(self.from, "from")?,
+            from_keys: present(self.from_keys, "from-keys")?,
+            to: present(self.to, "to")?,
+            to_chain: self.to_chain,
+            amount: present(self.amount, "amount")?,
+            dry_run: self.dry_run,
+            allow_retry: self.allow_retry,
+            state_dir: self.state_dir,
+            prove: self.prove.into_args()?,
+        })
+    }
+}
+
+impl WithdrawProofFlags {
+    /// The flags past clap; `--burn-tx` normalised to 64 lower-case hex.
+    pub fn into_args(self) -> CliResult<WithdrawProofArgs> {
+        let raw = self.burn_tx.trim();
+        let hex = raw.strip_prefix("0x").unwrap_or(raw);
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CliError::ArgInvalid {
+                flag: "burn-tx",
+                expected: "the burn's Acki Nacki transaction hash, 64 hex digits".into(),
+                got: redact(raw),
+            });
+        }
+        Ok(WithdrawProofArgs {
+            burn_tx: hex.to_ascii_lowercase(),
+            token_id: self.token.ecc_id(),
+            prove: self.prove.into_args()?,
+        })
+    }
+}
+
+// -- Validated forms of raw args, produced by the parsers below --
 
 /// Parsed & validated `--from`. Both halves are strict 64-char lowercase
 /// hex, no prefix, no workchain. For self-rooted multisigs `dapp_id ==
@@ -706,7 +921,7 @@ pub struct SubmitPlumbing {
     pub work_dir: PathBuf,
 }
 
-impl WithdrawArgs {
+impl ProveArgs {
     /// The `LayerAnchorAppended` scan settings for
     /// `EthBridgeClient::with_scan_config`: the three flags (or their
     /// environment); unset means the library default, and so does a span
@@ -1048,6 +1263,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "ackinacki-bridge",
             "withdraw",
+            "--token",
+            "usdc",
             "--from",
             &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
             "--from-keys",
@@ -1068,10 +1285,12 @@ mod tests {
             "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
         ])
         .expect("parse");
-        let Command::Withdraw(args) = cli.cmd else {
+        let Command::Withdraw(cmd) = cli.cmd else {
             panic!("expected withdraw")
         };
-        args
+        cmd.run
+            .into_args()
+            .expect("clap delivered the required flags")
     }
 
     #[test]
@@ -1084,6 +1303,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "ackinacki-bridge",
             "withdraw",
+            "--token",
+            "usdc",
             "--from",
             &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
             "--from-keys",
@@ -1106,19 +1327,24 @@ mod tests {
             "0x0F4F8b7EF2E40587ff1cC5d3393b9c1Fb8f02fc7",
         ])
         .expect("--dry-run must parse without --eth-private-key or the prover dirs");
-        let Command::Withdraw(args) = cli.cmd else {
+        let Command::Withdraw(cmd) = cli.cmd else {
             panic!("expected withdraw")
         };
+        let args = cmd
+            .run
+            .into_args()
+            .expect("clap delivered the required flags");
         assert!(args.dry_run);
-        assert!(args.eth_private_key.is_none());
-        assert!(args.params_dir.is_none());
-        assert!(args.work_dir.is_none());
+        assert!(args.prove.eth_private_key.is_none());
+        assert!(args.prove.params_dir.is_none());
+        assert!(args.prove.work_dir.is_none());
     }
 
     #[test]
     fn real_run_names_every_missing_submit_flag_at_once() {
         let args = submit_plumbing_fixture_all_absent();
         let err = args
+            .prove
             .require_submit_plumbing()
             .expect_err("a real run without plumbing must refuse");
         let msg = format!("{err}");
@@ -1145,6 +1371,8 @@ mod tests {
             "--yes",
             "--non-interactive",
             "withdraw",
+            "--token",
+            "usdc",
             "--from",
             &format!("{}::{}", "ab".repeat(32), "cd".repeat(32)),
             "--from-keys",

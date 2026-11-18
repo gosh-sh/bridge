@@ -330,6 +330,40 @@ The nightly is pinned in `rust-toolchain.toml` because `rustfmt.toml` uses night
 `make lint` runs clippy with `-D warnings`. When bumping it, land the resulting reformat in the same
 commit.
 
+### Self-review before every push
+
+Every push to `origin` comes after a self-review of the commits it carries. Commit locally, then
+run a fresh instance of the same agent from its CLI: no context of the work, the same model and the
+same reasoning effort as the session that wrote the change, read-only tools. Run `git fetch`
+first, start it from the repository root, and keep both the prompt and the output outside the
+repository. For Claude Code:
+
+```bash
+claude -p "$(cat <prompt>)" --model <the session's model> --effort <the session's effort> \
+  --tools "Read,Grep,Glob,Bash" --permission-mode dontAsk \
+  --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(grep:*)" \
+  --output-format text > <a file outside the repository>
+```
+
+`--allowedTools` alone only skips the prompts; `--tools` and `--permission-mode dontAsk` keep the
+reviewer to read-only commands (`git diff --output=<file>` would still write, which the `git status`
+check below catches). Another agent uses its own CLI the same way, with read-only enforced
+by the CLI rather than only asked for in the prompt.
+
+The prompt says what the change is meant to do and names the range to review (`git diff
+origin/main...HEAD`), and asks for findings, each with its severity,
+`file:line` and a scenario, ending with `CRITICAL: none` or `CRITICAL: <count>`. It does not hand
+the reviewer your conclusions.
+
+**Critical** is at least anything that can lead to funds being stolen or stuck in the bridge, on
+either chain: a mint without a deposit behind it, a mint or payout made twice, for the wrong amount
+or to the wrong recipient, a proof accepted for a state or event that did not happen, a leaked key
+that can move or freeze funds, a deposit or a burn that can never complete.
+
+Fix every critical finding, commit locally and review again. A critical finding is closed by a fix,
+not by running the review until it stays silent. Push only once a review reports `CRITICAL: none`,
+with `git status` clean and `HEAD` still the commit that was reviewed.
+
 ## Where to look next
 
 - [`DOCS.md`](DOCS.md) — the register of current documents.

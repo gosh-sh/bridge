@@ -1,9 +1,9 @@
 """Arbitrum Sepolia e2e: a fresh AckiNackiBridge on Arbitrum Sepolia, 2 USDC and 3 NACKL
 deposited through it to the local Acki Nacki network, and 2 USDC and 5 NACKL withdrawn, all
-paid by the relayers. `ackinacki-bridge deposit send` makes each deposit and stops once it is
-confirmed; the deposit relayer finalizes it. The USDC withdrawal is a burn on Acki Nacki as the
-wallet makes it, the NACKL one `ackinacki-bridge withdraw send`; daemon-live finds both, proves
-them and pays them out with withdrawByProof. Then the CLI proves each transfer again —
+paid by the relayers, every step of the CLI's own. `ackinacki-bridge deposit send` makes each
+deposit and stops once it is confirmed; the deposit relayer finalizes it.
+`ackinacki-bridge withdraw send` makes each burn; daemon-live finds both, proves them and pays
+them out with withdrawByProof. Then the CLI proves each transfer again —
 `deposit proof --tx-hash`, `withdraw proof --burn-tx` — and finds it finalized or paid when it
 sends: success, already_finalized and already_paid.
 
@@ -317,7 +317,7 @@ def test_42_withdrawal_multisig_funded(an, ctx):
     withdrawal runs alongside the deposit instead of after it: the bridge on Arbitrum Sepolia
     already holds the deposit's 2 USDC to pay it with."""
     got = an("msig-funded", AMOUNT)
-    ctx.update(wmsig=got["MSIG"], wmsig_keys_path=got["MSIG_KEYS"])
+    ctx.update(wmsig=got["MSIG"], wmsig_keys=an.cat(got["MSIG_KEYS"]))
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
 
 
@@ -351,23 +351,20 @@ def claim_reaches(run, ctx, amount, what, done, timeout):
                     timeout, log=show)
 
 
-def test_43_burn_on_acki_nacki(an, ctx):
-    """The multisig burns the 2 USDC on Acki Nacki to ARBITRUM_SEPOLIA_E2E_ADDRESS, as the wallet
-    does: sendTransaction to the bridge with initiateWithdrawal, and nothing after it."""
-    got = an("burn", ctx["wmsig"], ctx["wmsig_keys_path"], AMOUNT, ctx["address"])
-    assert int(got["ECC3_AFTER"]) == 0, "the multisig still holds the USDC it burned"
-    ctx.update(burn_tx=got["BURN_TX"])
-
-
-def test_43b_nackl_burn_by_withdraw_send(run, ctx):
-    """`withdraw send --token nackl` burns the 5 NACKL to ARBITRUM_SEPOLIA_E2E_ADDRESS and stops once
-    the bridge's WithdrawalInitiated is captured: nothing is proven or sent to Arbitrum Sepolia."""
-    run.job("cli-withdraw-send", stdin=ctx["nmsig_keys"].replace("\n", ""), TOKEN="nackl",
-            FROM=ctx["nmsig"], TO=ctx["address"], AMOUNT=str(NACKL_OUT // NACKL))
+def test_43_burns_by_withdraw_send(run, an, ctx):
+    """`withdraw send` burns the 2 USDC and the 5 NACKL on Acki Nacki to
+    ARBITRUM_SEPOLIA_E2E_ADDRESS, each from its multisig, and stops once the bridge's
+    WithdrawalInitiated is captured: nothing is proven or sent to Arbitrum Sepolia."""
+    sends = {"usdc": (ctx["wmsig"], ctx["wmsig_keys"], "2"),
+             "nackl": (ctx["nmsig"], ctx["nmsig_keys"], str(NACKL_OUT // NACKL))}
+    run.job("cli-withdraw-send", stdin="\n".join(keys.replace("\n", "") for _, keys, _ in sends.values()),
+            TO=ctx["address"], SENDS=" ".join(f"{t},{f},{a}" for t, (f, _, a) in sends.items()))
     run.finish("cli-withdraw-send", 900)
-    got = summary(run, "cli-withdraw-send", "burn")
-    assert got["burn"]["token_id"] == 1 and got["proof"] is None and got["submit"] is None, got
-    ctx.update(nackl_burn_tx=got["burn"]["an_tx"])
+    for token, ecc in (("usdc", 3), ("nackl", 1)):
+        got = summary(run, f"cli-withdraw-send-{token}", "burn")
+        assert got["burn"]["token_id"] == ecc and got["proof"] is None and got["submit"] is None, got
+        ctx[f"{token}_burn_tx"] = got["burn"]["an_tx"]
+    assert int(an("ecc", ctx["wmsig"])["ECC3"]) == 0, "the multisig still holds the USDC it burned"
 
 
 def test_44_withdrawal_found_by_the_relayer(run, ctx):
@@ -612,10 +609,10 @@ def test_72a_withdrawal_pulled_from_aave(arb, ctx):
 
 
 def test_73_withdraw_proofs_find_them_paid(run, ctx):
-    """`withdraw proof --burn-tx` of each burn — the wallet-style USDC burn and the NACKL burn of
-    `withdraw send` — once daemon-live paid both: the CLI builds the Circuit 4 proof, finds the
-    burn paid out when it sends and ends in success, submit.status already_paid."""
-    burns = {"usdc": ctx["burn_tx"], "nackl": ctx["nackl_burn_tx"]}
+    """`withdraw proof --burn-tx` of each burn `withdraw send` made, once daemon-live paid both:
+    the CLI builds the Circuit 4 proof, finds the burn paid out when it sends and ends in
+    success, submit.status already_paid."""
+    burns = {"usdc": ctx["usdc_burn_tx"], "nackl": ctx["nackl_burn_tx"]}
     run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
             BURNS=" ".join(f"{t}:{tx}" for t, tx in burns.items()))
     run.finish("cli-withdraw", 3600)

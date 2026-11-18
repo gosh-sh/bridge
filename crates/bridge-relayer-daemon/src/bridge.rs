@@ -1072,10 +1072,10 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     replaced_after: Duration,
     /// Held from a transaction's nonce plan to its receipt, so that the
     /// tasks sharing this client (daemon-live's `verifyBlock` and
-    /// `applyBkSetUpdate`, and its withdrawal claimer's `withdrawByProof`)
-    /// send one at a time: [`crate::nonce`] replaces whatever waits at the
-    /// account's next nonce, and two sends planned at once would take the
-    /// same one.
+    /// `applyBkSetUpdate`, its withdrawal claimer's `withdrawByProof`, and
+    /// its NACKL payout loop's `executeNacklPayout`) send one at a time:
+    /// [`crate::nonce`] replaces whatever waits at the account's next
+    /// nonce, and two sends planned at once would take the same one.
     send_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -1536,6 +1536,7 @@ where
 
     pub async fn execute_nackl_payout(&self, payout_id: U256) -> Result<B256, RelayerError> {
         let call = self.contract.executeNacklPayout(payout_id);
+        let _sending = self.send_lock.lock().await;
         let (call, nonce) = self
             .prepare_send(call)
             .await

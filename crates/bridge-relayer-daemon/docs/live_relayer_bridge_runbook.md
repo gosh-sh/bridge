@@ -48,8 +48,8 @@ leaves L2 (old set commitment) and L3 (new set commitment) — leaf positions 2
 and 3, unrelated to L2 anchoring — plus three SHA-256 siblings. The contract
 folds them up the 16-leaf tree and requires the result to equal the attested
 `blockId` ([EVM spec §7.3](../../../docs/EVM-contracts-spec.md#73-applybksetupdate--rotate-the-bk-set-commitment)).
-A rotation takes ~4–5 min to prove ([Proof times](#proof-times)). Shellnet rotates in bursts,
-about 5 rotations an hour.
+A rotation takes ~4–5 min to prove ([Proof times](#proof-times)). Shellnet rotates about 5 times
+an hour, at most 7.
 
 **Current and previous set.** The contract stores the current set
 (`storedBkSetCommitment`) and the previous one (`storedPrevBkSetCommitment`): a
@@ -621,14 +621,15 @@ the daemon set aside because it did not fit the prover state; it can be deleted.
 ### Proof times
 
 Shellnet's `daemon-live`, 2026-11-15 to 2026-11-18 (72 hours, 48-core host shared with the other
-bridge services), from its log lines `proof generated in`, `aggregate-proof subprocess … took`:
+bridge services), from its log lines `proof generated in`, `aggregate-proof subprocess … took` and
+`bundle wrap+aggregate … total`:
 
 | Step | Count | Median (range) |
 |---|---:|---|
-| Rotation: attestation proof (300 signers, K=20) | 359 | 141 s (134–212 s) |
+| Rotation: attestation proof (`MAX_SIGNERS` = 300, K=20) | 359 | 141 s (134–212 s) |
 | Rotation: `PrimaryAggregatorVerifier` aggregation | 359 | 102 s (95–149 s) |
 | **Rotation in all** | 359 | **252 s ≈ 4.2 min** (232–317 s) |
-| Bundle: attestation, Circuit 2, both aggregations | 47 | 141 + 99 + 258 s ≈ 8.3 min |
+| Bundle: attestation, Circuit 2, both aggregations | 47 | 141 + 99 + 258 s ≈ 8.3 min (sum of medians) |
 
 Rotations came about 5 an hour (at most 7), which kept `daemon-live` about 44% busy. At one rotation
 every 5 minutes it would be about 93% busy and fall behind in the slow hours. A withdrawal proof on

@@ -166,7 +166,7 @@ Stride and per-bundle wall time depend on `L`: **L1** = `W·P = 1024`
 seq_nos (~5.7 min chain-time, ~12 min prover); **L2** = `W² = 16384`
 seq_nos (~91 min chain-time, ~101 min prover — see
 [L2 timing model](#l2-timing-model) for the level=2 table). L1 fast-case
-table (warm PK cache, ~5 min for C4+submit):
+table (warm PK cache; C4+submit took ~5 min then, ~3 min on the CI prover host in 2026-11):
 
 | daemon lag at burn (bundles) | catch-up | +covering | +C4+submit | **total** |
 |---|---|---|---|---|
@@ -1253,8 +1253,8 @@ crates/bridge-prover-libraries/
 **Cleanup rules:**
 
 - `work_dir/`, `proofs/` — safe to prune between demos. Proof
-  regeneration is deterministic; only cost is CPU (~5 min per proof with
-  warm cache).
+  regeneration is deterministic; only cost is CPU (~3 min per proof with
+  warm cache on the CI prover host).
 - `python/contracts/USDCBridge.shellnet.keys.json` — **NEVER** commit
   changes upstream; keys are shellnet-operator state, not repo state.
 

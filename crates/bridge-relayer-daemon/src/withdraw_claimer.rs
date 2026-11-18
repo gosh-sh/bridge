@@ -23,10 +23,10 @@
 //!    another.
 //!
 //! A step that fails on an RPC or a GraphQL error is tried again on the next
-//! round. A burn the chain refuses for good (a proof rejected, an event that
-//! does not decode, a witness that cannot be built) is parked after
-//! [`PARK_AFTER`] such failures, with the reason in the file; a restart
-//! takes every parked burn up again once.
+//! round. A burn that fails otherwise (a proof the bridge rejects, a witness
+//! that cannot be built, a prover that dies) is tried again later and later
+//! ([`retry_delay`]: one minute, doubling, at most [`MAX_RETRY_DELAY`]), with
+//! the reason in the file: no burn is ever given up.
 
 use std::{
     collections::HashMap,
@@ -69,9 +69,24 @@ pub const CLAIMS_FILE: &str = "withdraw-claims.json";
 pub const WITHDRAWAL_EVENT_DST: &str =
     ":000000000000000000000000000000000000000000000000000000000000026a";
 
-/// Failures of one burn that the chain or the data, not the network, caused
-/// (see the module doc) before it is parked.
-pub const PARK_AFTER: u32 = 3;
+/// The longest a failing burn waits for its next try.
+pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(6 * 3600);
+
+/// How long a burn waits after its `failures`-th failure in a row: one
+/// minute, doubling, at most [`MAX_RETRY_DELAY`].
+pub fn retry_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    POLL_INTERVAL
+        .saturating_mul(1u32 << doublings)
+        .min(MAX_RETRY_DELAY)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// ExtOut messages read per GraphQL page, and pages read per round at most.
 const PAGE: u32 = 50;
@@ -106,8 +121,6 @@ pub enum ClaimState {
     /// else paid it, or an earlier send of this relayer whose receipt it
     /// did not see.
     AlreadyPaid,
-    /// Refused for good [`PARK_AFTER`] times; a restart tries it again.
-    Parked { reason: String },
 }
 
 /// One `WithdrawalInitiated` the claimer saw.
@@ -118,8 +131,7 @@ pub struct Claim {
     /// The block's `hash` (what `src_transaction.block_id` carries).
     pub block_hash: String,
     pub created_at: Option<u64>,
-    /// The event BOC while the burn is pending or parked; dropped once it is
-    /// paid or not ours.
+    /// The event BOC while the burn is pending; dropped once it is final.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boc: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,9 +146,12 @@ pub struct Claim {
     pub recipient: Option<String>,
     #[serde(flatten)]
     pub state: ClaimState,
-    /// Failures counted toward [`PARK_AFTER`].
+    /// Failures in a row that were not the network's ([`retry_delay`]).
     #[serde(default)]
     pub failures: u32,
+    /// Not tried again before this Unix time, after a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -152,10 +167,9 @@ pub struct ClaimsFile {
 
 impl ClaimsFile {
     /// The file under `state_dir`, or an empty one when there is none yet.
-    /// Parked burns come back pending: a restart takes them up again.
     pub fn load(state_dir: &Path) -> Result<Self> {
         let path = state_dir.join(CLAIMS_FILE);
-        let mut file: Self = match std::fs::read(&path) {
+        let file: Self = match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(file) => file,
                 // Moved aside, not fatal: the claimer reads the bridge's
@@ -183,20 +197,6 @@ impl ClaimsFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
-        for claim in &mut file.withdrawals {
-            if let ClaimState::Parked {
-                reason,
-            } = &claim.state
-            {
-                info!(
-                    message_id = %claim.message_id,
-                    %reason,
-                    "withdraw claimer: a parked withdrawal is taken up again after the restart",
-                );
-                claim.state = ClaimState::Pending;
-                claim.failures = 0;
-            }
-        }
         Ok(file)
     }
 
@@ -236,6 +236,7 @@ impl ClaimsFile {
                 recipient: None,
                 state: ClaimState::Pending,
                 failures: 0,
+                retry_at: None,
                 last_error: None,
             });
         }
@@ -268,11 +269,11 @@ pub struct ClaimerConfig {
     pub pk_cache_dir: PathBuf,
 }
 
-/// Why a step stopped: try again next round, or count toward parking.
+/// Why a step stopped: try again next round, or later ([`retry_delay`]).
 enum StepError {
     /// The network: an RPC or GraphQL call failed.
     Retry(anyhow::Error),
-    /// The chain or the data refused: counts toward [`PARK_AFTER`].
+    /// Anything else: the next try waits [`retry_delay`].
     Refused(String),
 }
 
@@ -368,7 +369,9 @@ where
             warn!(error = %format!("{e:#}"), "withdraw claimer: could not read new withdrawals");
         }
         for i in 0..self.file.withdrawals.len() {
-            if self.file.withdrawals[i].state != ClaimState::Pending {
+            let claim = &self.file.withdrawals[i];
+            if claim.state != ClaimState::Pending || claim.retry_at.is_some_and(|t| t > unix_now())
+            {
                 continue;
             }
             let before = self.file.withdrawals[i].clone();
@@ -379,6 +382,8 @@ where
                 Ok(Outcome::Final(state)) => {
                     claim.state = state;
                     claim.boc = None;
+                    claim.failures = 0;
+                    claim.retry_at = None;
                     claim.last_error = None;
                     self.proofs.remove(&id);
                     let _ = std::fs::remove_dir_all(self.work_dir_for(&id));
@@ -390,22 +395,17 @@ where
                 },
                 Err(StepError::Refused(reason)) => {
                     claim.failures += 1;
+                    let wait = retry_delay(claim.failures);
+                    claim.retry_at = Some(unix_now() + wait.as_secs());
                     self.proofs.remove(&id);
+                    let _ = std::fs::remove_dir_all(self.work_dir_for(&id));
                     warn!(
                         message_id = %id,
                         failures = claim.failures,
-                        park_after = PARK_AFTER,
+                        retry_in_s = wait.as_secs(),
                         %reason,
-                        "withdraw claimer: refused",
+                        "withdraw claimer: failed; will try again",
                     );
-                    if claim.failures >= PARK_AFTER {
-                        warn!(message_id = %id, %reason, "withdraw claimer: parked; a restart tries it again");
-                        // The BOC stays: a restart takes the burn up again.
-                        claim.state = ClaimState::Parked {
-                            reason: reason.clone(),
-                        };
-                        let _ = std::fs::remove_dir_all(self.work_dir_for(&id));
-                    }
                     claim.last_error = Some(reason);
                 },
             }
@@ -708,7 +708,7 @@ where
 
 /// A revert of the dry run or the send. A spent nullifier ends the claim. A
 /// revert intrinsic to the proof ([`classify_withdraw_revert`]), and an anchor
-/// the bridge no longer holds, count toward parking and drop the proof. A
+/// the bridge no longer holds, drop the proof and back off. A
 /// state of the bridge that passes (paused, the treasury short while AAVE
 /// pays back), and anything that does not decode, is tried again next round
 /// with the same proof.
@@ -841,31 +841,32 @@ mod tests {
     }
 
     #[test]
-    fn the_file_round_trips_and_a_restart_takes_parked_burns_up_again() {
+    fn the_file_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let mut file = ClaimsFile::default();
         file.take_page(vec![
             ("c1".into(), msg("a", WITHDRAWAL_EVENT_DST, Some("h1"))),
             ("c2".into(), msg("b", WITHDRAWAL_EVENT_DST, Some("h2"))),
-            ("c3".into(), msg("c", WITHDRAWAL_EVENT_DST, Some("h3"))),
         ]);
         file.withdrawals[0].state = ClaimState::Paid {
             tx_hash: "0x01".into(),
         };
-        file.withdrawals[1].state = ClaimState::Parked {
-            reason: "x".into(),
-        };
-        file.withdrawals[1].failures = PARK_AFTER;
+        file.withdrawals[1].failures = 2;
+        file.withdrawals[1].retry_at = Some(7);
         file.save(dir.path()).unwrap();
         let back = ClaimsFile::load(dir.path()).unwrap();
-        assert_eq!(back.cursor.as_deref(), Some("c3"));
-        assert_eq!(back.withdrawals[0].state, ClaimState::Paid {
-            tx_hash: "0x01".into()
-        });
-        assert_eq!(back.withdrawals[1].state, ClaimState::Pending);
-        assert_eq!(back.withdrawals[1].failures, 0);
-        assert_eq!(back.withdrawals[1].boc.as_deref(), Some("boc-b"));
-        assert_eq!(back.withdrawals[2].state, ClaimState::Pending);
+        assert_eq!(back.cursor, file.cursor);
+        assert_eq!(back.withdrawals, file.withdrawals);
+    }
+
+    #[test]
+    fn a_failing_burn_waits_longer_each_time_up_to_six_hours() {
+        assert_eq!(retry_delay(1), Duration::from_secs(60));
+        assert_eq!(retry_delay(2), Duration::from_secs(120));
+        assert_eq!(retry_delay(5), Duration::from_secs(960));
+        assert_eq!(retry_delay(9), Duration::from_secs(15360));
+        assert_eq!(retry_delay(10), MAX_RETRY_DELAY);
+        assert_eq!(retry_delay(u32::MAX), MAX_RETRY_DELAY);
     }
 
     #[test]

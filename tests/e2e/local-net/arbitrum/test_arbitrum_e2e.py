@@ -291,17 +291,26 @@ def test_42_withdrawal_multisig_funded(an, ctx):
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
 
 
-ANSI = re.compile(r"\x1b\[[0-9;]*m")
+def the_claim(run, ctx):
+    """daemon-live's record of this run's burn (its withdraw-claims.json, kept in /out), or None
+    while it has not seen it. daemon-live must keep running."""
+    code = run.wait("relayer", 1)
+    assert code is None, f"daemon-live exited {code}\n" + tail(run.log("relayer", 200))
+    try:
+        claims = json.loads(run.get("withdraw-claims.json"))
+    except ValueError:
+        return None
+    for claim in claims.get("withdrawals", []):
+        if (claim.get("recipient") or "").lower() == ctx["address"].lower() and claim.get("amount") == str(AMOUNT):
+            return claim
+    return None
 
 
-def relayer_line(run, pattern, what, timeout):
-    """The first match of `pattern` in daemon-live's log, waited for; daemon-live must keep running."""
-    def check():
-        text = ANSI.sub("", run.log("relayer"))
-        code = run.wait("relayer", 1)
-        assert code is None, f"daemon-live exited {code} before: {what}\n" + tail(text)
-        return re.search(pattern, text)
-    return wait_for(what, check, timeout, log=lambda: ANSI.sub("", run.log("relayer", 200)))
+def claim_reaches(run, ctx, what, done, timeout):
+    """Waits until `done(claim)`; the failure shows the claim and the tail of daemon-live's log."""
+    def show():
+        return f"claim: {the_claim(run, ctx)}\n" + run.log("relayer", 200)
+    return wait_for(what, lambda: (lambda c: c if c and done(c) else None)(the_claim(run, ctx)), timeout, log=show)
 
 
 def test_43_burn_on_acki_nacki(an, ctx):
@@ -311,9 +320,12 @@ def test_43_burn_on_acki_nacki(an, ctx):
     assert int(got["ECC3_AFTER"]) == 0, "the multisig still holds the USDC it burned"
 
 
-def test_44_withdrawal_found_by_the_relayer(run):
-    """The bridge emits WithdrawalInitiated and daemon-live finds it on its next poll."""
-    relayer_line(run, r"withdraw claimer: found withdrawal", "daemon-live finds the burn", 600)
+def test_44_withdrawal_found_by_the_relayer(run, ctx):
+    """The bridge emits WithdrawalInitiated and daemon-live finds it on its next poll: the burn's
+    recipient and amount are in its record, waiting for coverage."""
+    claim = claim_reaches(run, ctx, "daemon-live finds the burn", lambda c: c.get("block_seq_no") is not None, 600)
+    assert claim["state"] == "pending", claim
+    ctx.update(burn_seq_no=claim["block_seq_no"])
 
 
 # ── 5 · the light client, while the deposit waits for its assertion ────────
@@ -453,27 +465,35 @@ def test_65_deposit_delivered(run, an, ctx):
 # ── 7 · the withdrawal lands ────────────────────────────────────────────────
 
 
-def test_70_burn_bundle_verified(run):
-    """daemon-live gets the bundle that holds the burn verified on Arbitrum Sepolia, and its
-    claimer starts proving the withdrawal."""
-    relayer_line(run, r"withdraw claimer: proving the withdrawal", "verifyBlock covers the burn's bundle",
-                 COVERAGE_SECS)
+def test_70_burn_bundle_verified(arb, ctx):
+    """daemon-live gets the bundle that covers the burn verified on Arbitrum Sepolia: the next
+    16384 boundary past the burn's block."""
+    covering = (ctx["burn_seq_no"] // 16384 + 1) * 16384
+    wait_for(f"verifyBlock reaches {covering}",
+             lambda: arb.call(ctx["bridge"], "storedLastSeenBlockSeqNo()") >= covering, COVERAGE_SECS)
 
 
-def test_71_withdrawal_proof_generated(run):
-    """Circuit 4 and its SHPLONK aggregation prove the withdrawal in daemon-live."""
-    relayer_line(run, r"withdraw claimer: proof built", "the withdrawal proof is generated", 3600)
+def test_71_withdrawal_paid_by_the_relayer(run, ctx):
+    """daemon-live proves the withdrawal (Circuit 4 and its SHPLONK aggregation) and pays it out
+    with withdrawByProof: its record says paid, with the transaction."""
+    claim = claim_reaches(run, ctx, "daemon-live pays the withdrawal out", lambda c: c["state"] != "pending", 5400)
+    assert claim["state"] == "paid", f"the burn ended {claim['state']}, not paid by daemon-live: {claim}"
+    ctx.update(withdraw_tx=claim["tx_hash"])
+    print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{claim['tx_hash']}")
 
 
-def test_72_withdrawal_paid(run, arb, ctx):
-    """daemon-live sends withdrawByProof from its own key and it is confirmed on Arbitrum Sepolia."""
-    m = relayer_line(run, r"withdraw claimer: withdrawByProof paid out tx=(0x[0-9a-fA-F]+)",
-                     "withdrawByProof is confirmed", 1800)
-    print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
+WITHDRAWAL_PAID = "0x" + keccak256(b"WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)").hex()
+
+
+def test_72_withdrawal_sent_from_the_relayer(run, arb, ctx):
+    """The payout went to ARBITRUM_SEPOLIA_E2E_ADDRESS in a transaction the relayer's key sent
+    and paid the gas for."""
+    receipt = arb.receipt(ctx["withdraw_tx"])
     relayer = kv(run.get("fund.env"))["RELAYER_ADDRESS"].lower()
-    sender = arb.receipt(m.group(1))["from"].lower()
-    assert sender == relayer, f"withdrawByProof came from {sender}, not the relayer {relayer}"
-    ctx.update(withdraw_tx=m.group(1))
+    assert receipt["from"].lower() == relayer, f"withdrawByProof came from {receipt['from']}, not the relayer {relayer}"
+    paid = [l for l in receipt["logs"] if l["address"].lower() == ctx["bridge"].lower() and l["topics"][0] == WITHDRAWAL_PAID]
+    assert paid, "no WithdrawalByProofExecuted in the payout"
+    assert int(paid[0]["topics"][2], 16) == int(ctx["address"], 16), f"paid to {paid[0]['topics'][2]}"
 
 
 WITHDRAWN_FROM_AAVE = "0x" + keccak256(b"WithdrawnFromAave(uint256,uint256)").hex()

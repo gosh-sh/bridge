@@ -23,22 +23,21 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `daemon-live`'s container refuses to start without Circuit 4's keys in `params/relayer/`:
-  `event_pk.bin`, `event_vk.bin`, `event_config_params.json`, `event_manifest.json`
-  (`verify-params.sh`, `finalize-params.sh`). Copy them from a params directory where
-  `ackinacki-bridge withdraw` of the same release generated them, rerun
-  `docker/relayer/finalize-params.sh` and put the new `PARAMS_MANIFEST_SHA256` into `daemon-live.env`.
+- `daemon-live`'s container refuses to start without the Circuit 4 keys `event_pk.bin`, `event_vk.bin`,
+  `event_config_params.json` and `event_manifest.json` in `params/relayer/`: copy them from the params
+  directory of an `ackinacki-bridge withdraw` of the same release, rerun `finalize-params.sh` and set
+  the new `PARAMS_MANIFEST_SHA256`.
+- `ackinacki-bridge withdraw` can find its burn paid by a relayer first: it then exits 13 with
+  `NullifierAlreadyUsed` ("already been paid out") and the USDC is on the recipient.
 
 ### New / Improvements
 
-- `relayer daemon-live` pays out withdrawals: once a minute it reads the `WithdrawalInitiated` events of
-  the Acki Nacki bridge (`--an-token-bridge`, `AN_TOKEN_BRIDGE`, default
-  `0000…0000::1a1a…1a`), proves every burn whose `dstChainId` and `dstBridge` are its own bridge and
-  sends `withdrawByProof` from `RELAYER_PRIVATE_KEY`, which pays the gas: keep it funded. A burn
-  already paid (by `ackinacki-bridge withdraw`, say) is skipped by its nullifier.
-- Its record is `withdraw-claims.json` in `BRIDGE_STATE_DIR`; a burn refused three times is parked
-  there with the reason and taken up again at the next restart. Bundles and withdrawals are proven
-  one at a time.
+- `relayer daemon-live` pays out every burn on the Acki Nacki bridge (`--an-token-bridge`,
+  `AN_TOKEN_BRIDGE`) whose `dstChainId` and `dstBridge` are its own, with `withdrawByProof` from
+  `RELAYER_PRIVATE_KEY`, which pays the gas: keep that account funded.
+- `daemon-live` keeps each burn in `withdraw-claims.json` in `BRIDGE_STATE_DIR`, with its state, payout
+  transaction or last error; a failing burn is retried after a minute, then twice as late each time, up
+  to six hours.
 
 ## [0.9.0]
 

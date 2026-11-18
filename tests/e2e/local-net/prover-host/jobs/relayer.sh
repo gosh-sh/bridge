@@ -14,7 +14,9 @@ export BRIDGE_PARAMS_DIR=/params BRIDGE_PK_CACHE_DIR=/params/pk_cache
 # The three directories (bridge-audit#132): relayer-state.json sits in the state directory
 # with the prover state; the work directory holds the proof in flight; the log directory
 # the daemon's own log beside this one.
-export BRIDGE_STATE_DIR=$WORK/relayer-state BRIDGE_WORK_DIR=$WORK/relayer-work BRIDGE_LOG_DIR=/logs/relayer
+# The state directory is /out itself, so that the runner reads the withdrawal claimer's record
+# (withdraw-claims.json) with `ci-entry get`.
+export BRIDGE_STATE_DIR=$OUT BRIDGE_WORK_DIR=$WORK/relayer-work BRIDGE_LOG_DIR=/logs/relayer
 # The image's aggregate-proof when running from it, /bin-ci's otherwise.
 export BRIDGE_AGGREGATE_PROOF_BIN; BRIDGE_AGGREGATE_PROOF_BIN=$(command -v aggregate-proof)
 export BRIDGE_VERIFIERS_DIR=/src/contracts/ethereum/verifiers

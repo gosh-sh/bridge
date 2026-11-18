@@ -232,8 +232,8 @@ fn deposit_summary(s: &crate::deposit::DepositSuccess) -> String {
         _ => String::new(),
     };
     out.push_str(&format!(
-        "{deposit}{anchor}\x20 credited:     confirmDeposit {} delivery {}\n\x20 balance:      {} \
-         -> {} (diagnostic only)\n",
+        "{deposit}{anchor}\x20 credited:     mint transaction {} delivery {}\n\x20 balance:      \
+         {} -> {} (diagnostic only)\n",
         field(&s.confirmation, "confirm_tx"),
         field(&s.confirmation, "delivery_tx"),
         field(&s.balance, "before"),

@@ -458,7 +458,6 @@ async fn finalize_one(
     let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
     let witness: DepositWitness = serde_json::from_slice(&raw)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
-    check_gas_credit(&witness)?;
     info!(
         chain_id = witness.chain_id,
         block_number = witness.block_number,
@@ -466,7 +465,7 @@ async fn finalize_one(
         tx_index = witness.tx_index,
         log_index = witness.log_index,
         payload_len = witness.payload_len(),
-        "submitting finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex) to AN",
+        "checking deposit status on AN before submission",
     );
 
     let keys_json = std::fs::read_to_string(&an_keys_path)?;
@@ -491,20 +490,20 @@ async fn finalize_one(
         } => {
             info!(
                 tx = tx_hash.map(hex::encode).unwrap_or_default(),
-                "finalizeDeposit ACCEPTED — deposit finalised on AN",
+                "deposit minted on AN",
             );
             Ok(())
         },
         SubmitOutcome::AlreadyFinalized => {
-            info!("deposit already finalised on AN (its voucher exists)");
+            info!("bridge reports deposit already minted");
             Ok(())
         },
         SubmitOutcome::Rejected {
             reason,
-        } => anyhow::bail!("finalizeDeposit rejected by AN: {reason}"),
+        } => anyhow::bail!("deposit submission rejected by AN: {reason}"),
         SubmitOutcome::Pending {
             reason,
-        } => anyhow::bail!("finalizeDeposit still pending on AN: {reason}"),
+        } => anyhow::bail!("deposit still pending on AN: {reason}"),
     }
 }
 
@@ -743,8 +742,7 @@ async fn run_daemon(
         })
         .map_err(|e| anyhow::anyhow!("connect tvm_client: {e}"))?;
         let submit_cfg = an_cfg.to_submit_config();
-        let submitter =
-            AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg).with_voucher_check(bridge_abi())?;
+        let submitter = AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg);
         run_daemon_loop(
             state_path,
             start_deposit_id,

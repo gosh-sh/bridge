@@ -4,8 +4,9 @@
 //! address of
 //! `StateInit { code: _depositVoucherCode, data: { _depositHash } }`, where
 //! `_depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId,
-//! chainId))` and `dappId` is pinned to 0. An active account at that address
-//! means the voucher constructor ran, i.e. the deposit was finalized.
+//! chainId))` and `dappId` is pinned to 0. An active account shows the
+//! constructor ran. The bridge records the mint separately in
+//! `getDepositStatus`.
 
 use std::sync::Arc;
 

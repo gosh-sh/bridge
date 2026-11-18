@@ -63,7 +63,9 @@ header, the receipt-trie path to the deposit transaction's receipt and the log's
 hashes the header with the VM's keccak, requires the hash to be a block hash accepted for that chain
 id (anchored by the owner, the Ethereum light client or the Arbitrum block verifier), proves the
 receipt against the header's receipts root, and reads every deposit field out of the log, which must
-be a `Deposit` event emitted by a trusted EVM bridge. Then it mints.
+be a `Deposit` event emitted by a trusted EVM bridge. The bridge records the proven payout
+and deploys a voucher to request the mint. If confirmation fails, the CLI or relayer calls
+`retryDeposit` with the deposit identity until the credit completes or its wait times out.
 Each transfer is capped at 50 USDC, and the outstanding principal at 10,000 USDC
 per L1 chain.
 

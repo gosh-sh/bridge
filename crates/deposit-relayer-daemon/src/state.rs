@@ -1,8 +1,8 @@
 //! On-disk relayer state for crash-recovery.
 //!
 //! The authoritative "was this deposit finalized?" record lives on the AN
-//! side as the deposit's `DepositVoucher`; the local state is a *cache* plus a
-//! *retry log* so the relayer can resume near where it left off without
+//! bridge and is read with `getDepositStatus`; the local state is a *cache*
+//! plus a *retry log* so the relayer can resume near where it left off without
 //! resubmitting everything from `depositId = 0`:
 //!
 //! - `last_processed_deposit_id` is the high-water mark of deposits that are

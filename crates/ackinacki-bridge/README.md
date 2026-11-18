@@ -226,7 +226,7 @@ command itself:
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and state dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(address,uint256,bytes32)`
-   on EVM and `eccBridge` 1.17.0 on AN.
+   on EVM and `eccBridge` 1.18.0 on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -1183,10 +1183,10 @@ under `--json`:
 | 3 | approve | Skipped when the bridge's allowance already covers the amount. Otherwise `approve(bridge, amount)` for exactly the amount, after resetting a smaller non-zero allowance to 0. The allowance is read back afterwards: if the wallet let you lower the spending limit, the run stops with exit 21 before the deposit is requested. The read-back and the deposit's gas estimate are made at the block that holds the approve — looked up again by its receipt, so that an approve a reorg moved is followed, or, for an approve from the QR code, the block where the new allowance was seen — and the nonce the deposit is expected at counts the approve: an RPC node that has not caught up with that block is asked again, not taken for a lowered limit or a deposit that would revert. |
 | 4 | deposit request | The CLI checks again that the EVM bridge is not paused, estimates gas, and asks the wallet for `deposit(token, amount, account)` as a type-2 transaction without an access list, gas 1.25 × the estimate. The request is written to the operation record before the wallet sees it. |
 | 5 | EVM confirmation | The receipt, read again once it is `--confirmations` blocks deep. A negative verdict — reverted, not the deposit that was requested, a deposit the Acki Nacki bridge cannot finalize — is only taken once the block is finalized. The bridge finalizes a successful receipt whose `Deposit` log has the bridge's exact shape (three topics, four data words), at a transaction index and a log index within the receipt that both fit in `uint16` (up to 65535). Any transaction type and any calldata length are fine. The wallet session is closed after this step. |
-| 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not finalized again from here. A reorg sends the run back to step 5. Every poll, once the receipt is read and before the anchor and the pause, it also looks whether the deposit is finalized already — by the operator's relayer, say, while this run was stopped: then it goes straight to step 9, even while the bridge is paused or the anchor is gone. The voucher shows it while the bridge keeps the voucher code; after a code change, or when the voucher cannot be read, the bridge's `DepositFinalized` events do. Only when nothing could be read is it not known, and the wait goes on. |
+| 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not finalized again from here. A reorg sends the run back to step 5. After checking the EVM receipt, the CLI also reads `getDepositStatus`. A pending or minted deposit goes straight to step 9, even while the bridge is paused or the anchor is gone. |
 | 7 | proof | The **receipt proof**, built in seconds from the RPC: the block header and every receipt of the deposit's block (`eth_getBlockReceipts`). The CLI checks that the header hashes to the anchored block hash, that the receipts rebuild the header's `receiptsRoot`, and that the log is the bridge's `Deposit`, then writes it to `<work-dir>/<op-id>/receipt_proof.json`. The Acki Nacki bridge checks the same against the anchored block itself. A receipt proof already on disk for the same block and log — after a 224, or on a resume — is sent again. An RPC failure, or receipts that do not match the header, is exit 32 and is retried by `--resume`. A proof the Acki Nacki bridge could not check within the 500 000 gas an external message may spend before the bridge accepts it — about 65 to 88 or more other events before the `Deposit` in its transaction, depending on the size of its block — is exit 35, not retried. The CLI sends `deposit` as a transaction of its own, which never comes near that. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
-| 9 | credit | Confirmed only by the deposit's identity `(chainId, EVM bridge, depositId)`: the voucher's deployment, its `confirmDeposit`, the bridge transaction that sends ECC[3] to the recipient and emits `DepositFinalized`, and that transfer's delivery. The recipient's balance before and after is printed as a diagnostic and decides nothing: another deposit or a spend moves it too. |
+| 9 | credit | If the deposit is pending, the CLI sends `retryDeposit(depositId, contractAddr, chainId)`. It follows the voucher callback or the bridge's matching `DepositFinalized` event to the transfer and checks delivery of the expected currency and amount to the proven recipient. |
 
 Preflight, in order:
 
@@ -1523,15 +1523,19 @@ without them it is refused with exit 2.
 | 33 | The Acki Nacki bridge refused `finalizeDeposit` | in the EVM bridge | 222: `--resume <op-id>` once the owner restores the allowlist; 244, 300–305, 307, 308: the bridge does not accept this receipt or its log — keep the work directory (`receipt_proof.json`) and report it; other codes: report them |
 | 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt; or a `--resume` could not open the state directory or read the operation's record | unknown | `--resume <op-id>`; never make a new deposit instead |
 | **35** | **The deposit is on chain but the Acki Nacki bridge cannot finalize it from its receipt, or it is not the deposit that was requested** | **in the EVM bridge** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
-| **37** | **The voucher exists and the bridge transaction that should have minted the credit aborted** | **in the EVM bridge, beyond a retry; only the operator can pay it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 
-`--resume <op-id>` continues 30–34. 22, 35 and 37 close the operation for
+`--resume <op-id>` continues 30–34. 22 and 35 close the operation for
 good, and it blocks no new deposit. The withdrawal codes 10–13 never come from
 `deposit`.
 
+If the bridge accepted the deposit but its first confirmation aborted, the CLI
+calls `retryDeposit` with the deposit ID, EVM bridge address and source chain ID.
+The bridge uses the recipient and amount from the accepted receipt. When the
+credit wait times out, resume the same operation with `--resume <op-id>`.
+
 ### Handing a deposit to the operator
 
-Exit 35 and exit 37 are final: the CLI cannot move the USDC any further. It
+Exit 35 is final: the CLI cannot move the USDC any further. It
 prints what the operator needs, and `--resume <op-id>` prints it again from the
 record.
 
@@ -1549,16 +1553,9 @@ record.
   through its own contract. The CLI does not finalize a deposit you did not
   ask for. The operator or the operator's relayer can finalize it to the
   recipient in its call data.
-- **Exit 37** — the voucher is spent, so the deposit cannot be finalized again.
-  The operator pays it out (`mintAndSendBridged`) once, for this deposit's
-  recipient, amount and source `chainId`. That call credits bridged inventory the way
-  `confirmDeposit` would have; ordinary `mintAndSend` does not. The call
-  is not bound to the deposit id, so a second recovery (or a mistyped
-  amount) invents headroom the Ethereum treasury does not hold.
 
-Give the operator the deposit's transaction hash, its `depositId`, the amount
-and recipient actually deposited, the EVM bridge address and the operation id;
-for exit 37 also the Acki Nacki bridge transaction the message names. The
+Give the operator the deposit transaction hash, deposit ID, amount and recipient
+actually deposited, EVM bridge address and operation ID. The
 record holds all of it, though not all in the same place:
 
 ```bash
@@ -1570,15 +1567,9 @@ jq '{op_id, bridge: .params.bridge, tx: .tx.tx_hash,
 - `detail` is the message the run ended with. After exit 35 its `Give the
   bridge operator:` line carries the transaction, what it deposited — every
   `depositId` with its amount and recipient, as `deposited: depositId …, …
-  USDC units to account …` — the bridge and the operation; after exit 37 it
-  names the `depositId`, amount, recipient, EVM bridge, chain, operation
-  and the Acki Nacki bridge transaction that aborted.
-- `deposit_id` is set only after exit 37. After exit 35 it is `null`: the
-  operation was closed before the deposit was recorded, so take the
-  `depositId` from `detail`.
+  USDC units to account …` — the bridge and the operation.
+- When `deposit_id` is still null, take the deposit ID from `detail`.
 - `requested_units` (micro-USDC) and `requested_to` are what was asked for.
-  For exit 37 and for a deposit the bridge cannot finalize that is also what
-  was deposited.
   When the amount, recipient or sender differs from the request, the `Give
   the bridge operator:` line has what was deposited, and the sentence before
   it has both: `… units to account … from … were deposited, … were
@@ -1626,10 +1617,9 @@ version is the build constant `MIN_BRIDGE_VERSION`
 (`src/deposit/an_preflight.rs`). Preflight reads the bridge's `getVersion()`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
-already. The minimum is `1.17.0`, the first bridge that finalizes a deposit
-from its receipt proof; an older one expects a Halo2 proof this CLI no longer
-makes. A bridge newer than the newest this build was checked against
-(`1.17.0`) is refused by a released CLI too, since its `finalizeDeposit` may
+already. The minimum is `1.18.0`, the first bridge with `getDepositStatus` and
+`retryDeposit`. A bridge newer than the newest this build was checked against
+(`1.18.0`) is refused by a released CLI too, since its `finalizeDeposit` may
 take other arguments. A source build with `--features dev-unfixed-bridge`
 turns the refusal of a newer bridge into a warning.
 

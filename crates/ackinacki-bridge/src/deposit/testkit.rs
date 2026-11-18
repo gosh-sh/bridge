@@ -1347,6 +1347,8 @@ pub struct FakeAn {
     pub sent: Mutex<u32>,
     /// The arguments of every `send_finalize`, in order.
     pub sent_witnesses: Mutex<Vec<DepositWitness>>,
+    /// Identity arguments of each retryDeposit.
+    pub retries: Mutex<Vec<serde_json::Value>>,
     /// How long each send takes before it answers.
     pub send_delay: Mutex<std::time::Duration>,
     /// External messages that appear once a send was made: `(account,
@@ -1579,6 +1581,22 @@ impl AnSend for FakeAn {
     async fn send_finalize(&self, _: [u8; 32], _: [u8; 32], w: &DepositWitness) -> FinalizeSend {
         *self.sent.lock().unwrap() += 1;
         self.sent_witnesses.lock().unwrap().push(w.clone());
+        self.after_deposit_send().await
+    }
+
+    async fn send_retry(
+        &self,
+        _: [u8; 32],
+        _: [u8; 32],
+        id: &crate::deposit::credit::Identity,
+    ) -> FinalizeSend {
+        self.retries.lock().unwrap().push(id.key_params());
+        self.after_deposit_send().await
+    }
+}
+
+impl FakeAn {
+    async fn after_deposit_send(&self) -> FinalizeSend {
         for (acc, m) in self.on_send_ext_out.lock().unwrap().drain(..) {
             self.ext_out
                 .lock()
@@ -1728,7 +1746,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.17.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.18.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1781,7 +1799,7 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
             serde_json::json!({"listed": true, "tokenId": "3", "depositsEnabled": true,
@@ -1914,7 +1932,7 @@ impl World {
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),

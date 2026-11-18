@@ -45,8 +45,11 @@ impl AnSubmitter for AnchorGate {
         Ok(self.accepted.load(Ordering::Relaxed))
     }
 
-    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
-        self.inner.is_finalized(event).await
+    async fn resume_deposit(
+        &self,
+        event: &DepositEvent,
+    ) -> Result<Option<SubmitOutcome>, RelayerError> {
+        self.inner.resume_deposit(event).await
     }
 
     async fn submit(

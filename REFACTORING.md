@@ -100,12 +100,9 @@ The bridge itself cannot run out: `ensureBalance()` mints vmshell when its
 balance falls below `MIN_BALANCE` (`eccBridge.sol:406-409`). The voucher has
 no such floor — it executes on the 2 vmshell it was deployed with.
 
-These numbers do not adapt. A deposit whose mint leg runs out of gas leaves the
-voucher deployed and the credit unmade, which is the state behind CLI exit 37:
-the anti-replay slot is spent, so resending the same proof is a no-op, and the
-EVM side has no refund path. Today that state is reached through a release
-mistake (see `.onboarding/decisions.md`, 2026-10-20); a change in network gas
-pricing could reach it without anyone touching this repository.
+If the initial callback runs out of gas, the deposit stays pending and the CLI
+or relayer calls `retryDeposit`. Undersizing the voucher still adds a failed
+transaction and delays the recipient's credit.
 
 **Shape of the change:** establish what these numbers need to cover and whether
 they still do, then either widen them with the reasoning written down, or derive
@@ -133,9 +130,7 @@ reachable from a pipeline or a `Makefile` target, and fails when one is not.
 **Where:** `contracts/an/exchange/eccBridge.sol` — `mintAndSend` and
 `mintAndSendBridged` (added in #119).
 
-Both let the owner key create eccUSDC with nothing behind it. They exist to
-repair a deposit stuck in the state described in entry 4, which is a real need
-while the code is still changing.
+Both let the owner key create eccUSDC with nothing behind it. These admin calls predate the deposit-bound retry in entry 4.
 
 **This is a recorded decision, not an oversight** (`.onboarding/decisions.md`,
 2026-10-20): the lever stays, and is revisited **when the bridge enters its

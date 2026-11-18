@@ -205,6 +205,53 @@ pub struct DepositWitness {
 }
 
 impl DepositWitness {
+    /// Emitting contract and deposit id at this witness's transaction and log.
+    /// Used when resuming a saved witness without reconnecting to Ethereum.
+    pub fn deposit_identity(&self) -> Result<(Address, B256), String> {
+        use alloy::{
+            rlp::{decode_exact, Header as RlpHeader},
+            trie::{nodes::LeafNode, proof::verify_proof},
+        };
+        if keccak256(&self.header) != self.block_hash {
+            return Err("witness header does not match its block hash".into());
+        }
+        let header: alloy::consensus::Header =
+            decode_exact(&self.header).map_err(|e| e.to_string())?;
+        let node = self.receipt_proof.last().ok_or("missing receipt leaf")?;
+        let leaf: LeafNode = decode_exact(node).map_err(|e| e.to_string())?;
+        verify_proof(
+            header.receipts_root,
+            Nibbles::unpack(alloy::rlp::encode(self.tx_index)),
+            Some(leaf.value.clone()),
+            &self.receipt_proof,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // An EIP-2718 type byte precedes the RLP list except on legacy
+        // receipts. OP Stack receipt extensions follow the normal four fields.
+        let mut value = leaf.value.as_slice();
+        if value.first().is_some_and(|b| *b < 0x80) {
+            value = &value[1..];
+        }
+        let mut fields = RlpHeader::decode_bytes(&mut value, true).map_err(|e| e.to_string())?;
+        let receipt = Receipt::<Log>::rlp_decode_fields_with_bloom(&mut fields)
+            .map_err(|e| e.to_string())?
+            .receipt;
+        if receipt.status.as_eip658() != Some(true) {
+            return Err("deposit receipt did not succeed".into());
+        }
+        let log = receipt
+            .logs
+            .get(usize::from(self.log_index))
+            .ok_or("missing deposit log")?;
+        let rpc_log = RpcLog {
+            address: log.address,
+            topics: log.topics().to_vec(),
+            data: log.data.data.clone(),
+        };
+        Ok((log.address, check_deposit_log(&rpc_log, log.address)?))
+    }
+
     /// The `finalizeDeposit` call input, in the JSON form the TVM ABI encoder
     /// takes.
     pub fn finalize_params(&self) -> serde_json::Value {

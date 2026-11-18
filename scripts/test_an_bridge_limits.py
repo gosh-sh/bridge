@@ -77,9 +77,12 @@ class BridgeLimits(unittest.TestCase):
         source = re.sub(r"emit (?:DepositFinalized|WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         hooks = """
-    function testLegacyUpgrade() public {
+    function testLegacyUpgrade(bool withRegistry) public {
         tvm.accept();
         TvmCell userCell;
+        if (withRegistry) {
+            userCell = abi.encode(_depositVoucherCode, _bridgeTokens, _bridgeTokenIds);
+        }
         TvmCell data = abi.encode(_ownerPubkey, _usdcWallet, _totalMinted, _mintNonce,
             _mintAccumulatorNonce, _totalMintedBridgeByToken, _totalBurnedBridgeByToken,
             _depositVoucherCode, userCell, _outstandingByChain, _messages);
@@ -234,12 +237,21 @@ class BridgeLimits(unittest.TestCase):
     def deployed(self, result, deposit, chain=1):
         self.assertEqual([m["destination"] for m in result["messages"]], [self.voucher(deposit, chain)])
 
-    def confirm(self, deposit=0, amount=TRANSFER, chain=1, source=None, expect=0):
+    def confirm(self, deposit=0, amount=TRANSFER, chain=1, source=None, expect=0, recipient=43):
         voucher = self.call("testVoucher", {"depositId": str(deposit), "chainId": str(chain)})[
             "response"]["voucher"]
         return self.call("confirmDeposit", {"depositId": str(deposit), "contractAddr": "42",
                          "dappId": "0", "chainId": str(chain), "amount": str(amount),
-                         "anAccount": "43"}, source=source or voucher, expect=expect)
+                         "anAccount": str(recipient)}, source=source or voucher, expect=expect)
+
+    def deposit_identity(self, deposit, chain=1):
+        return {"depositId": str(deposit), "contractAddr": "42", "chainId": str(chain)}
+
+    def deposit_status(self, deposit, chain=1):
+        return int(self.call("getDepositStatus", self.deposit_identity(deposit, chain))["response"]["status"])
+
+    def retry(self, deposit, chain=1, expect=0):
+        return self.call("retryDeposit", self.deposit_identity(deposit, chain), expect=expect)
 
     def withdraw(self, amount, chain=1, shell=1_000_000_000):
         return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
@@ -288,13 +300,13 @@ class BridgeLimits(unittest.TestCase):
             self.set_bridge_token(token, token_id, 100, 1000, expect=242)
             self.assertFalse(self.token_limits(token_id)["listed"])
         self.finalize(token=SECOND_TOKEN, expect=241)
-        self.confirm_token(expect=241)
+        self.confirm_token(expect=246)
         self.assertTrue(self.token_limits(3)["listed"])
 
     def test_unregistered_proven_token_cannot_mint_usdc(self):
         before = self.call("getTotalBridged", {"tokenId": 3})["response"]
         self.finalize(token=SECOND_TOKEN, expect=241)
-        self.confirm_token(expect=241)
+        self.confirm_token(expect=246)
         self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"], before)
 
     def test_second_token_has_independent_mint_burn_and_chain_accounting(self):
@@ -380,8 +392,9 @@ class BridgeLimits(unittest.TestCase):
 
     def test_lowering_or_closing_deposits_does_not_strand_a_prior_payout(self):
         self.register(SECOND_TOKEN, 4, 10**18, 10**19)
-        self.confirm_token()
+        self.finalize(deposit=100, token=SECOND_TOKEN, amount=10**18)
         self.register(SECOND_TOKEN, 4, 1, 10**19, enabled=False)
+        self.confirm_token()
         config = self.token_limits()
         self.assertEqual(int(config["outstanding"]), 10**18)
         self.assertEqual(int(config["maxWithdrawal"]), 10**18)
@@ -391,6 +404,7 @@ class BridgeLimits(unittest.TestCase):
 
     def test_second_token_cannot_spend_another_chain_inventory(self):
         for chain in (1, 2): self.register(SECOND_TOKEN, 4, 10**18, 10**19, chain=chain)
+        self.finalize(deposit=100, token=SECOND_TOKEN, amount=10**18, chain=1)
         self.confirm_token(chain=1)
         result = self.withdraw_token(10**18, chain=2)
         self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 236)
@@ -401,6 +415,7 @@ class BridgeLimits(unittest.TestCase):
 
     def test_registry_survives_upgrade_with_per_token_principal(self):
         self.register(SECOND_TOKEN, 4, 10**18, 10**19)
+        self.finalize(deposit=100, token=SECOND_TOKEN, amount=10**18)
         self.confirm_token()
         self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
         config = self.token_limits()
@@ -414,12 +429,23 @@ class BridgeLimits(unittest.TestCase):
     def test_legacy_upgrade_prefix_keeps_usdc_balances_and_rejects_unknown_assets(self):
         before = self.limits()["outstanding"]
         self.register(SECOND_TOKEN, 4, 100, 1000)
-        self.call("testLegacyUpgrade")
+        self.call("testLegacyUpgrade", {"withRegistry": False})
         self.assertEqual(self.limits()["outstanding"], before)
         self.assertFalse(self.token_limits()["listed"])
         self.bind(1)
         self.withdraw(TRANSFER)
         self.assertEqual(int(self.limits()["outstanding"]), int(before) - TRANSFER)
+
+    def test_pre_retry_registry_upgrade_keeps_tokens_and_accepts_new_deposits(self):
+        self.register(SECOND_TOKEN, 4, 100, 1000)
+        self.call("testLegacyUpgrade", {"withRegistry": True})
+        self.assertTrue(self.token_limits()["listed"])
+        self.assertEqual(self.deposit_status(100), 0)
+        self.call("testTrust", {"chainId": "1", "l1Bridge": "42"})
+        self.deployed(self.finalize(deposit=100, amount=100, token=SECOND_TOKEN), 100)
+        self.retry(100)
+        self.assertEqual(self.deposit_status(100), 2)
+        self.assertEqual(int(self.token_limits()["outstanding"]), 100)
 
     def test_registering_legacy_usdc_with_a_lower_deposit_cap_preserves_payouts(self):
         self.call("setOutstandingByChain", {"chainId": "3", "amount": str(TRANSFER)}, signed=True)
@@ -435,6 +461,7 @@ class BridgeLimits(unittest.TestCase):
     def test_tvl_reduction_cannot_invalidate_an_accepted_deposit(self):
         amount = 10**18
         self.register(SECOND_TOKEN, 4, amount, amount * 10)
+        self.finalize(deposit=100, token=SECOND_TOKEN, amount=amount)
         self.confirm_token(deposit=100)
         self.finalize(deposit=101, amount=amount, token=SECOND_TOKEN)
         self.register(SECOND_TOKEN, 4, amount, amount, expect=242)
@@ -478,13 +505,57 @@ class BridgeLimits(unittest.TestCase):
         self.seed(TVL)
         self.finalize(amount=1, expect=235)
 
-    def test_confirmation_enforces_cap_and_sender(self):
-        self.confirm(source=SENDER, expect=207)
-        self.confirm(amount=TRANSFER + 1, expect=234)
-        self.confirm()
+    def test_confirmations_competing_for_capacity_leave_the_second_deposit_retryable(self):
+        self.assertEqual(self.deposit_status(0), 0)
+        self.retry(0, expect=246)
+        self.finalize(deposit=0)
+        self.finalize(deposit=1)
+        self.assertEqual(self.deposit_status(0, chain=2), 0)
+        self.call("retryDeposit", dict(self.deposit_identity(1), contractAddr="43"), expect=246)
+        self.assertEqual(self.deposit_status(0), 1)
+        self.assertEqual(self.deposit_status(1), 1)
+        self.confirm(deposit=0, source=SENDER, expect=207)
+        self.confirm(deposit=0, amount=TRANSFER - 1, expect=219)
+        self.confirm(deposit=0, recipient=44, expect=219)
+        self.confirm_token(deposit=0, amount=TRANSFER, token=SECOND_TOKEN, expect=219)
+        self.assertEqual(self.deposit_status(0), 1)
+        self.confirm(deposit=0)
+        self.assertEqual(self.deposit_status(0), 2)
+        self.confirm(deposit=1, expect=235)
+        self.retry(1, expect=235)
+        self.assertEqual(self.deposit_status(1), 1)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
-        self.confirm(deposit=1, amount=1, expect=235)
+        self.withdraw(TRANSFER)
+        payout = self.retry(1)["messages"]
+        self.assertEqual([m["destination"] for m in payout], ["0:" + format(43, "064x")])
+        transfer = json.loads(command(["tvm-cli", "-j", "decode", "msg", payout[0]["boc"],
+                                       "--abi", str(self.abi)]))["Header"]
+        self.assertEqual(int(transfer["value"]["other"]["3"]), TRANSFER)
+        self.assertEqual(self.deposit_status(1), 2)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
+        minted = self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"]
+        for deposit in (0, 1):
+            self.retry(deposit, expect=246)
+            self.confirm(deposit=deposit, expect=246)
+        self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"], minted)
+
+    def test_pending_and_paid_deposits_survive_voucher_code_rotation(self):
+        self.finalize(deposit=7, amount=1)
+        self.finalize(deposit=8, amount=2)
+        self.finalize(deposit=9, amount=3)
+        self.retry(9)
+        old_voucher = self.voucher(7)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": self.bridge_code}, signed=True)
+        self.assertNotEqual(self.voucher(7), old_voucher)
+        self.confirm(deposit=7, amount=1, expect=207)
+        self.confirm(deposit=7, amount=1, source=old_voucher)
+        self.retry(8)
+        self.retry(9, expect=246)
+        self.call("testTrust", {"chainId": "1", "l1Bridge": "42"})
+        self.finalize(deposit=9, amount=3, expect=245)
+        for deposit in (7, 8, 9):
+            self.assertEqual(self.deposit_status(deposit), 2)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER + 6)
 
     def test_each_network_has_its_own_balance(self):
         self.seed(TVL, TVL)
@@ -698,9 +769,11 @@ class BridgeLimits(unittest.TestCase):
         self.submit(v, chain=1, log_index=0, expect=224)
         self.deployed(self.submit(v, chain=2, log_index=0), 44, chain=2)
 
-    def test_a_repeated_deposit_id_reaches_the_same_voucher(self):
+    def test_a_repeated_deposit_id_preserves_the_original_payout(self):
         self.deployed(self.finalize(deposit=45, amount=1), 45)
-        self.deployed(self.finalize(deposit=45, amount=2, number=9_000_001), 45)
+        self.finalize(deposit=45, amount=2, number=9_000_001, expect=245)
+        self.retry(45)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER + 1)
 
     def test_a_tampered_block_receipt_or_proof_is_refused(self):
         v = vectors.synthetic(vectors.receipt([TRANSFER_LOG, vectors.deposit_log(42, 46, 1, 43, USDC_TOKEN)]))

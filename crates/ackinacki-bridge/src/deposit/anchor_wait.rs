@@ -978,6 +978,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_pending_deposit_skips_an_expired_anchor_without_a_voucher() {
+        let (evm, b) = final_deposit();
+        let an = FakeAn::default();
+        an.getter(BRIDGE, "getDepositStatus", vec![json!({"status":"1"})]);
+        assert_eq!(
+            wait(
+                &evm,
+                &an,
+                &ctx(&b, OWNER, Some(300)),
+                &RecordingUi::new(true)
+            )
+            .await
+            .unwrap(),
+            WaitExit::Finalized {
+                via_events: false
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_deposit_finalized_during_a_pause_ends_the_wait_without_it_being_lifted() {
         // Anchored and paused for good; the voucher shows up on the third
         // poll, once the bridge names the recorded code again.

@@ -19,6 +19,16 @@ assigns it when the release is tagged.
 ### Fixes
 -->
 
+## [Unreleased]
+
+### Breaking Changes
+
+- Deploy `eccBridge` 1.18.0 (code hash `4a9712b7…`) with a fresh testnet EVM bridge and upgrade `ackinacki-bridge` and `deposit-relayer` together. Earlier testnet deposits are outside this migration.
+
+### Fixes
+
+- The CLI and `deposit-relayer` use `getDepositStatus` and `retryDeposit` to finish a pending AN credit once capacity is available. Resume a timed-out CLI operation with `deposit --resume <op-id>`.
+
 ## [0.9.0]
 
 ### Breaking Changes

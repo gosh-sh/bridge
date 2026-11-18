@@ -2583,9 +2583,13 @@ async fn run_daemon_live(
         request_timeout_secs = rpc_request_timeout_from_env()?.as_secs(),
         "daemon-live: Ethereum RPC",
     );
+    // `executeNacklPayout` must not wait for a receipt without a bound, or
+    // the client's send lock would hold `verifyBlock` back with it.
     let bridge_probe = {
         let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan).with_sender(sender)
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
+            .with_sender(sender)
+            .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT)
     };
     let chain_full = bridge_probe
         .read_full_state()

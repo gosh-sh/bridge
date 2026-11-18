@@ -332,7 +332,7 @@ commit.
 
 ### Before every commit and push
 
-Before the local commit, review the relevant docs.
+Before the local commit, review and update the relevant docs.
 After the local commit and before every push, review the unpushed commits with a fresh run of the
 same agent from its CLI: no context of the work, the same model and reasoning effort, read-only.
 Push only when it finds nothing critical, that is, at least nothing that can lead to funds being

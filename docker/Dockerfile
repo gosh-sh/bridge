@@ -146,7 +146,7 @@ LABEL org.opencontainers.image.source="https://github.com/gosh-sh/bridge" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}"
 RUN printf '%s\n' "${SOURCE_COMMIT}" >/opt/bridge/SOURCE_COMMIT && chmod 0444 /opt/bridge/SOURCE_COMMIT
 
-# relayer daemon-live: the withdraw relayer, with its preflight.
+# relayer daemon-live and relayer daemon-withdraw-live (RELAYER_ROLE), with their preflight.
 FROM runtime-base AS bridge-relayer
 LABEL org.opencontainers.image.title="GOSH bridge: Acki Nacki -> EVM relayer (daemon-live)"
 COPY --from=build-prover-libs /out/relayer /out/compute_bridge_anchors /opt/bridge/bin/

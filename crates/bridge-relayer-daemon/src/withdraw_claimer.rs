@@ -1,6 +1,8 @@
-//! daemon-live's withdrawal claimer: every burn on the Acki Nacki bridge that
-//! names this relayer's EVM bridge is paid out on the EVM chain, with the
-//! relayer's own key paying the gas.
+//! The withdrawal claimer `relayer daemon-withdraw-live` runs: every burn on
+//! the Acki Nacki bridge that names this EVM bridge is paid out on the EVM
+//! chain, with the daemon's own key paying the gas. A process of its own,
+//! apart from `daemon-live`, so that neither waits for the other's proofs or
+//! stops with it.
 //!
 //! Once a minute ([`POLL_INTERVAL`]) the claimer reads the bridge account's
 //! ExtOut messages after the last one it saw, keeps every
@@ -16,11 +18,8 @@
 //!    contract ([`BridgeState::from_contract`]), and the nullifier it proves is
 //!    looked up: a burn somebody paid already (the CLI, another relayer) is not
 //!    proven again;
-//! 4. Circuit 4 and its aggregation, under the prove gate daemon-live shares
-//!    with its bundle prover, so the two never prove at once;
-//! 5. a dry run, then `withdrawByProof` from the relayer's account, through the
-//!    client daemon-live sends `verifyBlock` with: its sends wait for one
-//!    another.
+//! 4. Circuit 4 and its aggregation, one burn at a time;
+//! 5. a dry run, then `withdrawByProof` from the daemon's account.
 //!
 //! A step that fails on an RPC or a GraphQL error is tried again on the next
 //! round. A burn that fails otherwise (a proof the bridge rejects, a witness
@@ -62,7 +61,7 @@ use crate::{
 /// How often the claimer looks for new burns and moves the pending ones on.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 
-/// The claimer's record, in daemon-live's state directory.
+/// The claimer's record, in its state directory.
 pub const CLAIMS_FILE: &str = "withdraw-claims.json";
 
 /// The `dst` of a `WithdrawalInitiated` ExtOut: `makeAddrExtern(618)`.
@@ -253,21 +252,20 @@ impl ClaimsFile {
     }
 }
 
-/// What the claimer needs besides the bridge client and the gate.
+/// What the claimer needs besides the bridge client.
 #[derive(Clone, Debug)]
 pub struct ClaimerConfig {
     /// The Acki Nacki bridge account, `dapp_id` and `account_id` in hex.
     pub an_bridge_dapp_id_hex: String,
     pub an_bridge_account_id_hex: String,
-    /// The first GraphQL endpoint daemon-live uses; the prover's helpers
-    /// take one.
+    /// The first GraphQL endpoint; the prover's helpers take one.
     pub gql_endpoint: String,
     /// The EVM chain the bridge is on, from the RPC.
     pub chain_id: u64,
-    /// The anchoring daemon-live proves at.
+    /// The bridge's anchoring: its `bundleStride` and the level it means.
     pub anchor_level: u8,
     pub stride: u64,
-    /// Where [`CLAIMS_FILE`] lives: daemon-live's state directory.
+    /// Where [`CLAIMS_FILE`] lives.
     pub state_dir: PathBuf,
     /// Scratch for the witness and the intermediate proof files, one
     /// subdirectory per burn.
@@ -299,7 +297,7 @@ enum Outcome {
     Final(ClaimState),
 }
 
-/// The claimer: [`Self::run`] until daemon-live stops it.
+/// The claimer: [`Self::run`] until the process stops.
 pub struct WithdrawClaimer<P, N>
 where
     P: Provider<N> + Clone,
@@ -308,7 +306,6 @@ where
     cfg: ClaimerConfig,
     gql: GqlClient,
     bridge: Arc<EthBridgeClient<P, N>>,
-    prove_gate: Arc<tokio::sync::Mutex<()>>,
     file: ClaimsFile,
     /// Proofs built but not yet paid, so that a send that failed is not
     /// proven again.
@@ -327,7 +324,6 @@ where
         cfg: ClaimerConfig,
         gql: GqlClient,
         bridge: Arc<EthBridgeClient<P, N>>,
-        prove_gate: Arc<tokio::sync::Mutex<()>>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&cfg.state_dir)
             .with_context(|| format!("state directory {}", cfg.state_dir.display()))?;
@@ -351,7 +347,6 @@ where
             cfg,
             gql,
             bridge,
-            prove_gate,
             file,
             proofs: HashMap::new(),
             round_state: None,
@@ -616,12 +611,9 @@ where
                     recipient = claim.recipient.as_deref().unwrap_or("?"),
                     "withdraw claimer: proving the withdrawal",
                 );
-                let summary = {
-                    let _proving = self.prove_gate.lock().await;
-                    prove_enriched(&e2e_cfg, captured, enriched)
-                        .await
-                        .map_err(|e| StepError::Refused(format!("the proof: {e:#}")))?
-                };
+                let summary = prove_enriched(&e2e_cfg, captured, enriched)
+                    .await
+                    .map_err(|e| StepError::Refused(format!("the proof: {e:#}")))?;
                 info!(message_id = %claim.message_id, "withdraw claimer: proof built");
                 self.proofs
                     .insert(claim.message_id.clone(), summary.proof.clone());

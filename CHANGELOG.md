@@ -33,10 +33,9 @@ assigns it when the release is tagged.
 - `ackinacki-bridge` accepts `eccBridge` up to 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`).
 - `contracts/ethereum` needs `@openzeppelin/contracts` 5.4.0: run `npm install` before `forge
   build`.
-- `daemon-live`'s container refuses to start without the Circuit 4 keys `event_pk.bin`, `event_vk.bin`,
-  `event_config_params.json` and `event_manifest.json` in `params/relayer/`: copy them from the params
-  directory of an `ackinacki-bridge withdraw` of the same release, rerun `finalize-params.sh` and set
-  the new `PARAMS_MANIFEST_SHA256`.
+- `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
+  its directories and the Circuit 4 keys in `params/relayer/`, rerun `finalize-params.sh` and set the new
+  `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).
 - `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
   `submit.status` `already_paid` and `submit.nullifier`, not 13. The proof is always built; the send
   is where the payout is found.
@@ -104,14 +103,11 @@ assigns it when the release is tagged.
 - `deposit-relayer` retries a deposit refused with 236.
 - `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
   sends nothing.
-- `relayer daemon-live` pays out every burn on the Acki Nacki bridge (`--an-token-bridge`,
-  `AN_TOKEN_BRIDGE`) whose `dstChainId` and `dstBridge` are its own, with `withdrawByProof` from
-  `RELAYER_PRIVATE_KEY`, which pays the gas: keep that account funded.
-- `daemon-live` keeps each burn in `withdraw-claims.json` in `BRIDGE_STATE_DIR`, with its state, payout
-  transaction or last error; a failing burn is retried after a minute, then twice as late each time, up
-  to six hours.
-- `daemon-live` ends a NACKL burn whose payout the bridge queued in the `withdraw-claims.json` state
+- `daemon-withdraw-live` ends a NACKL burn whose payout the bridge queued in the `withdraw-claims.json` state
   `queued`, with `tx_hash`, `payout_id` and `ready_at`; the NACKL payout loop mints it once due.
+- `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
+  `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
+  each in `withdraw-claims.json`.
 
 ## [0.9.0]
 

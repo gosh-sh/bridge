@@ -1062,25 +1062,6 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
         });
     };
     let store = Store::open(&p.state_dir)?;
-    // One operation per deposit: a second would prove and send it again.
-    if let Some(r) = store
-        .list()?
-        .into_iter()
-        .find(|r| r.tx.is_some_and(|t| t.tx_hash == tx_hash) && r.stage != OpStage::Failed)
-    {
-        return Err(CliError::deposit(
-            ExitCode::DuplicateRefused,
-            Stage::Preflight,
-            Some(&r.op_id),
-            format!(
-                "operation {} in {} already holds the deposit {tx_hash:#x}: continue it with \
-                 `deposit --resume {}` (nothing was sent)",
-                r.op_id,
-                p.state_dir.display(),
-                r.op_id
-            ),
-        ));
-    }
 
     // Step 1: the deposit, as its receipt says, and the checks it still needs.
     board.start(StepId::Preflight, "");
@@ -1101,18 +1082,25 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
     if !receipt.status {
         return Err(refused("the transaction reverted".into()));
     }
-    let ev = receipt
+    // The bridge finalizes a transaction with one Deposit of its own; a
+    // batch of several (a Safe multiSend, an ERC-4337 bundle) is the deposit
+    // relayer's (`finalize-one`), not this run's.
+    let ours: Vec<_> = receipt
         .logs
         .iter()
         .filter(|l| l.address == bridge)
-        .find_map(crate::deposit::evm::parse_deposit_log)
-        .ok_or_else(|| refused(format!("it emitted no Deposit of bridge {bridge}")))?;
-    let token = receipt
-        .logs
-        .iter()
-        .filter(|l| l.address == bridge)
-        .find_map(crate::deposit::evm::deposit_log_token)
-        .ok_or_else(|| refused(format!("its Deposit of bridge {bridge} names no token")))?;
+        .filter_map(|l| {
+            crate::deposit::evm::parse_deposit_log(l).zip(crate::deposit::evm::deposit_log_token(l))
+        })
+        .collect();
+    let [(ev, token)] = ours.as_slice() else {
+        return Err(refused(format!(
+            "it emitted {} Deposit events of bridge {bridge}; this CLI proves a transaction with \
+             one, and `deposit-relayer finalize-one` finalizes the others",
+            ours.len()
+        )));
+    };
+    let (ev, token) = (ev.clone(), *token);
     let amount = u64::try_from(ev.amount)
         .map_err(|_| refused(format!("its amount {} does not fit 64 bits", ev.amount)))?;
     let seen = preflight::DepositSeen {
@@ -1127,6 +1115,40 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
         StepId::Preflight,
         &format!("bridge {}, deposit {}", checked.an.version, ev.deposit_id),
     );
+
+    // One operation per deposit, checked and created under the directory
+    // lock: a second would prove and send it again. A hash a wallet answered
+    // to another operation, not bound to it yet, counts too.
+    let Some(dir_lock) = DirLock::try_take(&p.state_dir)? else {
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            None,
+            format!(
+                "another deposit run on this machine holds {}: retry once it is past the \
+                 confirmation of its deposit (nothing was sent)",
+                p.state_dir.display()
+            ),
+        ));
+    };
+    if let Some(r) = store.list()?.into_iter().find(|r| {
+        r.stage != OpStage::Failed
+            && (r.tx.is_some_and(|t| t.tx_hash == tx_hash)
+                || r.request.as_ref().and_then(|q| q.wallet_hash) == Some(tx_hash))
+    }) {
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            Some(&r.op_id),
+            format!(
+                "operation {} in {} already holds the deposit {tx_hash:#x}: continue it with \
+                 `deposit --resume {}` (nothing was sent)",
+                r.op_id,
+                p.state_dir.display(),
+                r.op_id
+            ),
+        ));
+    }
 
     // The operation that finishes it.
     let mut rec = OpRecord::new(
@@ -1153,6 +1175,9 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
     rec.work_dir = Some(work_dir.join(&op));
     rec.an_bridge_dapp = Some(hex::encode(checked.an.bridge_dapp));
     store.write(&mut rec).map_err(nothing_sent)?;
+    // The operation is on disk and holds the transaction: the next run's
+    // check finds it.
+    drop(dir_lock);
     ui.op_id(&op);
     *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
     let cx = RunCx {

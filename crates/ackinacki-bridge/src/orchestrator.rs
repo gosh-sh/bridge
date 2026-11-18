@@ -151,8 +151,8 @@ pub enum SubmitStatus {
     /// The bridge has accepted a proof of this withdrawal, and not by a
     /// receipt this run saw: the relayer daemon, an earlier run, another
     /// operator, or a transaction of this run whose receipt never came. USDC
-    /// is on the recipient; NACKL is minted, or queued until `executeNacklPayout`
-    /// mints it. A success, like `Confirmed`.
+    /// is on the recipient; NACKL is minted, or queued until
+    /// `executeNacklPayout` mints it. A success, like `Confirmed`.
     AlreadyPaid,
 }
 

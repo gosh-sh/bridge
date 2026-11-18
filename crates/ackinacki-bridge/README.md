@@ -20,7 +20,8 @@ proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "a
 `finalize: "already_finalized"`. For NACKL, `already_paid` means the bridge accepted a proof of the
 burn: the payout may still be queued, and the relayer mints it once due.
 `deposit proof` takes a deposit made through a contract wallet too: the `Deposit` event decides, not
-the transaction's calldata. One operation holds one deposit: a second `deposit proof` of the same
+the transaction's calldata. A transaction with several deposits to the bridge is refused (the
+deposit relayer's `finalize-one` takes it). One operation holds one deposit: a second `deposit proof` of the same
 transaction is refused with exit 3 and the operation to `--resume`.
 
 End-user CLI for the Acki Nacki ↔ EVM bridge, one subcommand per direction:

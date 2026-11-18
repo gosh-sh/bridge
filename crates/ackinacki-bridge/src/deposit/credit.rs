@@ -557,21 +557,29 @@ pub async fn confirm(
                 },
                 _,
             ) => {
-                return Err(CliError::deposit(
-                    ExitCode::CreditPending,
-                    Stage::Credit,
-                    Some(op_id),
-                    format!(
-                        "the deposit is proven, but the Acki Nacki bridge holds less NACKL locked \
-                         for chain {} than {} base units, so it recorded the deposit as pending \
-                         (transaction {bridge_tx}) and paid nothing yet. Nothing is lost: the \
-                         next NACKL withdrawals to that chain pay it once they lock enough, \
-                         oldest first, and anyone can pay it then with \
-                         releasePendingDeposit({deposit_hash}). getPendingDeposit({deposit_hash}) \
-                         shows it while it waits; --resume confirms the credit once it is paid.",
-                        id.chain_id, id.amount,
-                    ),
-                ));
+                let unpaid = matches!(
+                    tokio::time::timeout_at(deadline, finalized_event(an, bridge, id, not_before))
+                        .await,
+                    Ok(Ok(None))
+                );
+                if unpaid {
+                    return Err(CliError::deposit(
+                        ExitCode::CreditPending,
+                        Stage::Credit,
+                        Some(op_id),
+                        format!(
+                            "the deposit is proven, but the Acki Nacki bridge holds less NACKL \
+                             locked for chain {} than {} base units, so it recorded the deposit \
+                             as pending (transaction {bridge_tx}) and paid nothing yet. Nothing \
+                             is lost: the next NACKL withdrawals to that chain pay it once they \
+                             lock enough, oldest first, and anyone can pay it then with \
+                             releasePendingDeposit({deposit_hash}). \
+                             getPendingDeposit({deposit_hash}) shows it while it waits; --resume \
+                             confirms the credit once it is paid.",
+                            id.chain_id, id.amount,
+                        ),
+                    ));
+                }
             },
             _ => {},
         }
@@ -1061,6 +1069,17 @@ mod tests {
             .entry(BRIDGE)
             .or_default()
             .push(event);
+        let delivered = an.messages.lock().unwrap()["xfer"].clone();
+        let mut in_transit = delivered.clone();
+        in_transit.dst_tx = None;
+        an.messages
+            .lock()
+            .unwrap()
+            .insert("xfer".into(), in_transit);
+        let err = wait(&ui).await.unwrap_err();
+        assert_eq!(err.exit_code(), ExitCode::CreditUnconfirmed, "{err}");
+
+        an.messages.lock().unwrap().insert("xfer".into(), delivered);
         let c = wait(&ui).await.unwrap();
         assert_eq!(
             (c.confirm_tx.as_str(), c.delivery_tx.as_str(), c.via_events),

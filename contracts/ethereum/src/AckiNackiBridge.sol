@@ -1115,9 +1115,9 @@ contract AckiNackiBridge {
         return _tokens[tokenId].liabilities;
     }
 
-    /// @dev The constructor lists USDC through this and nothing else calls it:
-    ///      a token Acki Nacki cannot credit would take deposits that never
-    ///      finalize, so no owner call adds one.
+    /// @dev The constructor lists USDC through this and `listNackl` lists NACKL;
+    ///      nothing else calls it: a token Acki Nacki cannot credit would take
+    ///      deposits that never finalize, so no other owner call adds one.
     function _listToken(
         uint32 tokenId,
         address token,

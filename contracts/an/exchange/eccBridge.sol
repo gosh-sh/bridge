@@ -717,7 +717,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _paused = paused;
     }
 
-    /// @notice Register USDC for a source chain once, then update its deposit limits.
+    /// @notice Register USDC (id 3) or NACKL (id 1) for a source chain once, then update its deposit limits.
     ///         The token/id association is immutable; TVL can only increase.
     ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
     function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
@@ -1241,7 +1241,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///                  mapping(uint32 => mapping(uint256 => bool)) messages)
     ///         `depositVoucherCode` supplies the zerostate voucher code.
     ///         A non-empty `userCell` contains abi.encode(voucherCode,
-    ///         bridgeTokens, bridgeTokenIds). For an upgrade from 1.15.0,
+    ///         bridgeTokens, bridgeTokenIds) and, from 1.18.0, a further
+    ///         reference with the NACKL locks and the pending-deposit queue.
+    ///         For an upgrade from 1.15.0,
     ///         construct it with BridgeZerostateData.getTokenUpgradeData;
     ///         subsequent updateCode calls construct it automatically.
     ///

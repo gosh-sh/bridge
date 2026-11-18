@@ -27,7 +27,7 @@ logs go to stderr.
   burn <dapp::account> <keys> <amount> <0x recipient>
                             the multisig burns <amount> base units of USDC to <recipient> on
                             421614: sendTransaction to the bridge with initiateWithdrawal, as the
-                            wallet does, and nothing after it (daemon-live pays it out). Waits
+                            wallet does, and nothing after it (daemon-withdraw-live pays it out). Waits
                             until the multisig holds no USDC: ECC3_AFTER
   accepted <chain> <hash>   ACCEPTED=true|false
   ecc <dapp::account>       ECC3=<base units of USDC on the account>

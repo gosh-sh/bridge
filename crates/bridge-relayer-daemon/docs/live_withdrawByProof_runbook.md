@@ -6,6 +6,9 @@
 > is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
 > the script describe bridges already deployed and no longer apply to a new one.
 
+For paying every withdrawal as it comes, run `relayer daemon-withdraw-live` (compose
+service `withdraw-live`, [`docker/README.md`](../../../docker/README.md)).
+
 Operational guide for driving a full AN→ETH withdrawal E2E through the
 in-process `relayer withdraw-e2e` orchestrator against a deployed
 `AckiNackiBridge` on Sepolia. Covers first-time end-to-end demo from a

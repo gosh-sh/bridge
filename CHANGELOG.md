@@ -23,22 +23,25 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `daemon-live`'s container refuses to start without the Circuit 4 keys `event_pk.bin`, `event_vk.bin`,
-  `event_config_params.json` and `event_manifest.json` in `params/relayer/`: copy them from the params
-  directory of an `ackinacki-bridge withdraw` of the same release, rerun `finalize-params.sh` and set
-  the new `PARAMS_MANIFEST_SHA256`.
+- `docker compose up` starts the new `withdraw-live` (below): before it, give it a funded EOA of its own,
+  `env/withdraw-live.env`, its `state/`, `work/` and `logs/` directories, and the Circuit 4 keys
+  `event_pk.bin`, `event_vk.bin`, `event_config_params.json`, `event_manifest.json` in `params/relayer/`,
+  copied from an `ackinacki-bridge withdraw` of the same release (`docker/README.md`); then rerun
+  `finalize-params.sh` and set the new `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and
+  `withdraw-live.env`.
 - `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
   `submit.status` `already_paid` and `submit.nullifier`, not 13; found before proving, `proof` is
   `null` in the JSON output.
 
 ### New / Improvements
 
-- `relayer daemon-live` pays out every burn on the Acki Nacki bridge (`--an-token-bridge`,
-  `AN_TOKEN_BRIDGE`) whose `dstChainId` and `dstBridge` are its own, with `withdrawByProof` from
-  `RELAYER_PRIVATE_KEY`, which pays the gas: keep that account funded.
-- `daemon-live` keeps each burn in `withdraw-claims.json` in `BRIDGE_STATE_DIR`, with its state, payout
-  transaction or last error; a failing burn is retried after a minute, then twice as late each time, up
-  to six hours.
+- `relayer daemon-withdraw-live`, compose service `withdraw-live` (`env/withdraw-live.env.example`), pays
+  out every burn on the Acki Nacki bridge (`--an-token-bridge`, `AN_TOKEN_BRIDGE`) whose `dstChainId` and
+  `dstBridge` are its own, with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, never
+  `daemon-live`'s, which pays the gas: keep that account funded.
+- `daemon-withdraw-live` keeps each burn in `withdraw-claims.json` in its `BRIDGE_STATE_DIR`, with its
+  state, payout transaction or last error; a failing burn is retried after a minute, then twice as late
+  each time, up to six hours.
 
 ## [0.9.0]
 

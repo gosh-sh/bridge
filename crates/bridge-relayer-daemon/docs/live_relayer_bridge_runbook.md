@@ -8,8 +8,10 @@
 
 How to deploy, run and recover `relayer daemon-live`, the AN→ETH relayer that
 proves Acki Nacki shellnet state and posts it to an `AckiNackiBridge` on
-Sepolia. Withdrawals (`withdrawByProof`, Circuit 4) are covered by the
-withdraw runbook. For a long-running server use the
+Sepolia. Withdrawals (`withdrawByProof`, Circuit 4) are paid by `relayer
+daemon-withdraw-live`, a process of its own with its own key (compose service
+`withdraw-live`), and covered by the withdraw runbook. For a long-running
+server use the
 [Docker Compose kit](../../../docker/README.md); the commands below are
 the direct-CLI equivalent, for development and recovery.
 

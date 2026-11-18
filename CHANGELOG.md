@@ -104,7 +104,8 @@ assigns it when the release is tagged.
 - `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
   sends nothing.
 - `daemon-withdraw-live` ends a NACKL burn whose payout the bridge queued in the `withdraw-claims.json` state
-  `queued`, with `tx_hash`, `payout_id` and `ready_at`; the NACKL payout loop mints it once due.
+  `queued`, with `tx_hash`, `payout_id` and `ready_at`; `daemon-live`'s NACKL payout loop mints it
+  once due, so run both.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.

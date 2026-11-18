@@ -1186,7 +1186,7 @@ under `--json`:
 | 6 | block anchor on Acki Nacki | `isAcceptedBlockHash(chainId, blockHash)` every 30 s. The status line says whom it waits for and, for the bridge owner, the exact call to make. It moves on only when the block is anchored, finalized on the EVM side with the same receipt, and the Acki Nacki bridge is not paused. Then it leaves the deposit to the operator's relayer for `--relayer-grace-s`: a deposit finalized in that time is not finalized again from here. A reorg sends the run back to step 5. After checking the EVM receipt, the CLI also reads `getDepositStatus`. A pending or minted deposit goes straight to step 9, even while the bridge is paused or the anchor is gone. |
 | 7 | proof | The **receipt proof**, built in seconds from the RPC: the block header and every receipt of the deposit's block (`eth_getBlockReceipts`). The CLI checks that the header hashes to the anchored block hash, that the receipts rebuild the header's `receiptsRoot`, and that the log is the bridge's `Deposit`, then writes it to `<work-dir>/<op-id>/receipt_proof.json`. The Acki Nacki bridge checks the same against the anchored block itself. A receipt proof already on disk for the same block and log — after a 224, or on a resume — is sent again. An RPC failure, or receipts that do not match the header, is exit 32 and is retried by `--resume`. A proof the Acki Nacki bridge could not check within the 500 000 gas an external message may spend before the bridge accepts it — about 65 to 88 or more other events before the `Deposit` in its transaction, depending on the size of its block — is exit 35, not retried. The CLI sends `deposit` as a transaction of its own, which never comes near that. |
 | 8 | `finalizeDeposit` | Before every send the CLI checks that the deposit is not finalized already and that the bridge is not paused, and waits while it is. A refusal with code 231 (paused) is waited out too; 224 (the anchor is gone) goes back to step 6. |
-| 9 | credit | If the deposit is pending, the CLI sends `retryDeposit(depositId, contractAddr, chainId)`. It follows the voucher callback or the bridge's matching `DepositFinalized` event to the transfer and checks delivery of the expected currency and amount to the proven recipient. |
+| 9 | credit | If the deposit is still pending on the next poll, the CLI sends `retryDeposit(depositId, contractAddr, chainId)`. It follows the voucher callback or the bridge's matching `DepositFinalized` event to the transfer and checks delivery of the expected currency and amount to the proven recipient. |
 
 Preflight, in order:
 
@@ -1528,8 +1528,9 @@ without them it is refused with exit 2.
 good, and it blocks no new deposit. The withdrawal codes 10–13 never come from
 `deposit`.
 
-If the bridge accepted the deposit but its first confirmation aborted, the CLI
-calls `retryDeposit` with the deposit ID, EVM bridge address and source chain ID.
+On the first pending status, the CLI gives the voucher callback one polling interval
+(10 seconds) to mint. If the next status check still reports pending, the CLI calls
+`retryDeposit` with the deposit ID, EVM bridge address and source chain ID.
 The bridge uses the recipient and amount from the accepted receipt. When the
 credit wait times out, resume the same operation with `--resume <op-id>`.
 

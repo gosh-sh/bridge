@@ -427,11 +427,19 @@ async fn recover_pending(
     waiting_for_capacity: &mut bool,
 ) {
     let mut attempts = 0u32;
+    let mut seen_pending = false;
     loop {
         *waiting_for_capacity = false;
         let reason = match tokio::time::timeout(ONE_READ, deposit_status(an, bridge, id)).await {
             Ok(Ok(DepositStatus::Minted)) => return,
             Ok(Ok(DepositStatus::Absent)) => {
+                seen_pending = false;
+                tokio::time::sleep(poll).await;
+                continue;
+            },
+            Ok(Ok(DepositStatus::Pending)) if !seen_pending => {
+                seen_pending = true;
+                ui.status("deposit proof accepted; waiting for the voucher callback");
                 tokio::time::sleep(poll).await;
                 continue;
             },
@@ -828,6 +836,7 @@ mod tests {
         an.on_send_ext_out.lock().unwrap().push((BRIDGE, event));
         an.getter(BRIDGE, "getDepositStatus", vec![
             json!({"status": "1"}),
+            json!({"status": "1"}),
             json!({"status": "2"}),
         ]);
         let credit = confirm(
@@ -883,7 +892,7 @@ mod tests {
                 true,
                 0,
                 timeout,
-                timeout,
+                Duration::from_secs(3),
                 "OP",
                 &ui,
             )
@@ -912,6 +921,7 @@ mod tests {
         for next_status in [1, 2] {
             let an = FakeAn::default();
             an.getter(BRIDGE, "getDepositStatus", vec![
+                json!({"status": 1}),
                 json!({"status": 1}),
                 json!({"status": next_status}),
             ]);
@@ -954,6 +964,7 @@ mod tests {
         let an = FakeAn::default();
         an.getter(BRIDGE, "getDepositStatus", vec![
             json!({"status": 1}),
+            json!({"status": 1}),
             json!(null),
         ]);
         an.sends.lock().unwrap().push_back(FinalizeSend::Rejected {
@@ -983,6 +994,35 @@ mod tests {
         assert_eq!(err.exit_code(), ExitCode::CreditUnconfirmed);
         assert!(!err.to_string().contains("TVL"), "{err}");
         assert!(err.to_string().contains("--resume OP"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voucher_mint_on_the_next_poll_needs_no_retry() {
+        let an = FakeAn::default();
+        an.getter(BRIDGE, "getDepositStatus", vec![
+            json!({"status": 1}),
+            json!({"status": 2}),
+        ]);
+        let err = confirm(
+            &an,
+            BRIDGE,
+            BRIDGE,
+            VOUCHER,
+            &id(7),
+            false,
+            0,
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            "OP",
+            &crate::deposit::ui::RecordingUi::new(true),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.exit_code(), ExitCode::CreditUnconfirmed);
+        assert!(
+            an.retries.lock().unwrap().is_empty(),
+            "retried before the voucher could mint"
+        );
     }
 
     #[tokio::test(start_paused = true)]

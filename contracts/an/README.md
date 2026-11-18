@@ -58,6 +58,14 @@ anchor expires. The first successful confirmation or retry records the mint in
 the payout transaction. Duplicate proofs return 245 and a retry for an unknown
 or paid deposit returns 246.
 
+For a proven, pending USDC deposit, only the TVL check (235) can still fail
+among the token and amount checks at payout. Other deposits can mint first
+and use the remaining capacity. Exit 234 is unreachable because the admitted
+amount is at most `MAX_TRANSFER_AMOUNT`, while `maxWithdrawal` starts at least
+that high and can only increase. Exit 241 is unreachable because the bridge
+provides no way to unregister a token or change its token ID. Disabling new
+deposits preserves the registration. [Token configuration and payout checks](exchange/eccBridge.sol#L693-L730).
+
 An external message may spend 500 000 gas before it is accepted: a
 typical deposit takes 110 000 to 210 000, one with 60 ERC-20 transfers before
 the `Deposit` in its receipt 360 000 to 450 000. A deposit whose proof takes

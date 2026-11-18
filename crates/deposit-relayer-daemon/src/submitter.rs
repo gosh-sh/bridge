@@ -309,7 +309,7 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         };
         let sent = match self.client.call_contract(call).await {
             Ok(hash) => hash,
-            Err(e) => return Ok(classify_call_error(function, &e.to_string())),
+            Err(e) => return Ok(classify_call_error(id, function, &e.to_string())),
         };
         let receipt = match self
             .client
@@ -318,15 +318,17 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         {
             Ok(receipt) => receipt,
             Err(e) if function == RETRY_DEPOSIT => {
-                return Ok(SubmitOutcome::Pending {
-                    reason: format!("{function} {} confirmation failed: {e}", hex::encode(sent)),
-                })
+                return Ok(pending_retry_error(
+                    id,
+                    format!("{function} {} confirmation failed: {e}", hex::encode(sent)),
+                ))
             },
             Err(e) => return Err(e.into()),
         };
         match receipt.status {
             TransactionStatus::Reverted | TransactionStatus::Failed => {
                 return Ok(classify_reverted(
+                    id,
                     function,
                     receipt.exit_code,
                     &format!("{function} {:?}", receipt.status),
@@ -515,29 +517,46 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
     }
 }
 
-fn classify_reverted(function: &str, exit_code: Option<i32>, detail: &str) -> SubmitOutcome {
+fn pending_retry_error(id: DepositIdentity, reason: String) -> SubmitOutcome {
+    tracing::warn!(
+        deposit_id = %id.deposit_id,
+        chain_id = %id.chain_id,
+        %reason,
+        "retryDeposit error without a VM exit code"
+    );
+    SubmitOutcome::Pending {
+        reason,
+    }
+}
+
+fn classify_reverted(
+    id: DepositIdentity,
+    function: &str,
+    exit_code: Option<i32>,
+    detail: &str,
+) -> SubmitOutcome {
     match exit_code {
         Some(code) => classify_exit(code, "deposit call reverted", detail),
-        None if function == RETRY_DEPOSIT => SubmitOutcome::Pending {
-            reason: format!("{detail} without an exit code; checking getDepositStatus on retry"),
-        },
+        None if function == RETRY_DEPOSIT => pending_retry_error(
+            id,
+            format!("{detail} without an exit code; checking getDepositStatus on retry"),
+        ),
         None => SubmitOutcome::Rejected {
             reason: format!("deposit tx status = {detail}"),
         },
     }
 }
 
-fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
+fn classify_call_error(id: DepositIdentity, function: &str, msg: &str) -> SubmitOutcome {
     // Prefer acki_nacki_interface parser when the tvm-sdk feature is on; fall
     // back to a local regex-free scan so this module still builds without it.
     match parse_exit_code_loose(msg) {
         Some(code) => classify_exit(code, "deposit call failed", msg),
         // process_message wraps transport errors in TransactionFailed too.
-        None if function == RETRY_DEPOSIT => SubmitOutcome::Pending {
-            reason: format!(
-                "{function} returned no exit code; checking getDepositStatus on retry: {msg}"
-            ),
-        },
+        None if function == RETRY_DEPOSIT => pending_retry_error(
+            id,
+            format!("{function} returned no exit code; checking getDepositStatus on retry: {msg}"),
+        ),
         None => SubmitOutcome::Rejected {
             reason: format!("deposit call failed: {msg}"),
         },
@@ -791,9 +810,14 @@ mod tests {
 
     #[test]
     fn paused_bridge_is_pending_not_rejected() {
+        let id = (&event(6)).into();
         for outcome in [
-            classify_call_error("finalizeDeposit", "contract call aborted (exit_code=231)"),
-            classify_reverted("finalizeDeposit", Some(231), "Reverted"),
+            classify_call_error(
+                id,
+                "finalizeDeposit",
+                "contract call aborted (exit_code=231)",
+            ),
+            classify_reverted(id, "finalizeDeposit", Some(231), "Reverted"),
         ] {
             match outcome {
                 SubmitOutcome::Pending {
@@ -806,6 +830,13 @@ mod tests {
 
     #[tokio::test]
     async fn unclassified_retry_submission_failure_keeps_the_deposit_pending() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.reopen().unwrap())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
         let client = Arc::new(MockAckiNacki::new());
         let sub = live_submitter(client.clone());
         let ev = event(6);
@@ -817,6 +848,14 @@ mod tests {
             matches!(outcome, Some(SubmitOutcome::Pending { .. })),
             "{outcome:?}"
         );
+        let warning = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("retryDeposit")
+                && warning.contains("deposit_id=6")
+                && warning.contains("Mock failure mode enabled"),
+            "{warning}"
+        );
         assert!(matches!(
             sub.submit(&ev, &witness(&ev)).await.unwrap(),
             SubmitOutcome::Rejected { .. }
@@ -825,21 +864,23 @@ mod tests {
 
     #[test]
     fn a_retry_abort_needs_an_exit_code_to_reject_the_deposit() {
+        let id = (&event(6)).into();
         let abort = "Transaction failed: contract call aborted (exit_code=None, aborted=true)";
         assert!(matches!(
-            classify_reverted("retryDeposit", None, "retryDeposit Reverted"),
+            classify_reverted(id, "retryDeposit", None, "retryDeposit Reverted"),
             SubmitOutcome::Pending { .. }
         ));
         assert!(matches!(
-            classify_reverted("finalizeDeposit", None, "finalizeDeposit Reverted"),
+            classify_reverted(id, "finalizeDeposit", None, "finalizeDeposit Reverted"),
             SubmitOutcome::Rejected { .. }
         ));
         assert!(matches!(
-            classify_call_error("retryDeposit", abort),
+            classify_call_error(id, "retryDeposit", abort),
             SubmitOutcome::Pending { .. }
         ));
         assert!(matches!(
             classify_call_error(
+                id,
                 "retryDeposit",
                 "contract call aborted (exit_code=Some(234))"
             ),
@@ -849,21 +890,24 @@ mod tests {
 
     #[test]
     fn duplicate_constructor_needs_a_status_check() {
+        let id = (&event(6)).into();
         assert!(matches!(
             classify_call_error(
+                id,
                 "finalizeDeposit",
                 "contract call aborted (exit_code=Some(51))"
             ),
             SubmitOutcome::Pending { .. }
         ));
         assert!(matches!(
-            classify_reverted("finalizeDeposit", Some(51), "Reverted"),
+            classify_reverted(id, "finalizeDeposit", Some(51), "Reverted"),
             SubmitOutcome::Pending { .. }
         ));
     }
 
     #[test]
     fn receipt_proof_reverts_are_rejected_with_a_hint() {
+        let id = (&event(6)).into();
         for (code, name) in [
             (244, "ERR_NOT_DEPOSIT_LOG"),
             (300, "ERR_SHORT"),
@@ -877,10 +921,11 @@ mod tests {
         ] {
             for outcome in [
                 classify_call_error(
+                    id,
                     "finalizeDeposit",
                     &format!("contract call aborted (exit_code={code})"),
                 ),
-                classify_reverted("finalizeDeposit", Some(code), "Reverted"),
+                classify_reverted(id, "finalizeDeposit", Some(code), "Reverted"),
             ] {
                 match outcome {
                     SubmitOutcome::Rejected {
@@ -903,10 +948,11 @@ mod tests {
 
     #[test]
     fn capacity_and_message_retries_do_not_park_a_deposit() {
+        let id = (&event(6)).into();
         for code in [235, 241, 243, 245, 246, 400, 402] {
             for result in [
-                classify_reverted("finalizeDeposit", Some(code), "Reverted"),
-                classify_call_error("finalizeDeposit", &format!("exit_code={code}")),
+                classify_reverted(id, "finalizeDeposit", Some(code), "Reverted"),
+                classify_call_error(id, "finalizeDeposit", &format!("exit_code={code}")),
             ] {
                 assert!(
                     matches!(result, SubmitOutcome::Pending { .. }),
@@ -915,7 +961,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            classify_reverted("finalizeDeposit", Some(234), "Reverted"),
+            classify_reverted(id, "finalizeDeposit", Some(234), "Reverted"),
             SubmitOutcome::Rejected { .. }
         ));
     }
@@ -925,16 +971,18 @@ mod tests {
     /// tell an unconfigured bridge from a rejected deposit.
     #[test]
     fn config_reverts_name_the_setter_that_fixes_them() {
+        let id = (&event(6)).into();
         for (code, err_name, setter) in [
             (222, "ERR_UNSUPPORTED_SRC_CHAIN", "setTrustedL1Bridge"),
             (224, "ERR_UNKNOWN_BLOCK", "setAcceptedBlockHash"),
         ] {
             for outcome in [
                 classify_call_error(
+                    id,
                     "finalizeDeposit",
                     &format!("contract call aborted (exit_code={code})"),
                 ),
-                classify_reverted("finalizeDeposit", Some(code), "Reverted"),
+                classify_reverted(id, "finalizeDeposit", Some(code), "Reverted"),
             ] {
                 match outcome {
                     SubmitOutcome::Rejected {

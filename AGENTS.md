@@ -330,8 +330,9 @@ The nightly is pinned in `rust-toolchain.toml` because `rustfmt.toml` uses night
 `make lint` runs clippy with `-D warnings`. When bumping it, land the resulting reformat in the same
 commit.
 
-### Self-review before every push
+### Before every commit and push
 
+Before the local commit, bring every README, document and runbook the change affects up to date.
 After the local commit and before every push, review the unpushed commits with a fresh run of the
 same agent from its CLI: no context of the work, the same model and reasoning effort, read-only.
 Push only when it finds nothing critical, that is, at least nothing that can lead to funds being

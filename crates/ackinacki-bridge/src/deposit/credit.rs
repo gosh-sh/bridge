@@ -428,10 +428,10 @@ async fn recover_pending(
 ) {
     let mut attempts = 0u32;
     loop {
+        *waiting_for_capacity = false;
         let reason = match tokio::time::timeout(ONE_READ, deposit_status(an, bridge, id)).await {
-            Ok(Ok(DepositStatus::Minted)) => break,
+            Ok(Ok(DepositStatus::Minted)) => return,
             Ok(Ok(DepositStatus::Absent)) => {
-                *waiting_for_capacity = false;
                 tokio::time::sleep(poll).await;
                 continue;
             },
@@ -442,7 +442,7 @@ async fn recover_pending(
                         aborted: false,
                         exit_code: None | Some(0),
                         ..
-                    }) => break,
+                    }) => return,
                     Ok(outcome) if react(&outcome) == Reaction::WaitCapacity => {
                         *waiting_for_capacity = true;
                         RETRY_TVL_CAP.into()
@@ -462,7 +462,6 @@ async fn recover_pending(
         ui.retry("checking the deposit before retry", attempts, &reason);
         tokio::time::sleep(delay.max(poll)).await;
     }
-    *waiting_for_capacity = false;
 }
 
 /// Step 9. Pending deposits are retried while the voucher and event paths
@@ -946,6 +945,44 @@ mod tests {
             assert!(!error.to_string().contains("TVL"), "{error}");
             assert!(error.to_string().contains("--resume OP"), "{error}");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unreadable_status_after_a_tvl_refusal_clears_the_capacity_hint() {
+        use crate::deposit::ui::{RecordingUi, UiEvent};
+
+        let an = FakeAn::default();
+        an.getter(BRIDGE, "getDepositStatus", vec![
+            json!({"status": 1}),
+            json!(null),
+        ]);
+        an.sends.lock().unwrap().push_back(FinalizeSend::Rejected {
+            exit_code: Some(235),
+            message: "TVL cap".into(),
+        });
+        let ui = RecordingUi::new(true);
+        let err = confirm(
+            &an,
+            BRIDGE,
+            BRIDGE,
+            VOUCHER,
+            &id(7),
+            false,
+            0,
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+            "OP",
+            &ui,
+        )
+        .await
+        .unwrap_err();
+        assert!(ui
+            .events()
+            .iter()
+            .any(|e| matches!(e, UiEvent::Retry(_, _, reason) if reason.contains("235"))));
+        assert_eq!(err.exit_code(), ExitCode::CreditUnconfirmed);
+        assert!(!err.to_string().contains("TVL"), "{err}");
+        assert!(err.to_string().contains("--resume OP"));
     }
 
     #[tokio::test(start_paused = true)]

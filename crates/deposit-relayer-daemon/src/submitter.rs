@@ -66,7 +66,7 @@ pub trait AnSubmitter: Send + Sync {
     /// proof.
     async fn resume_deposit(
         &self,
-        event: &DepositEvent,
+        id: DepositIdentity,
     ) -> Result<Option<SubmitOutcome>, RelayerError>;
 
     /// Send `finalizeDeposit` with `witness` and finalise the deposit.
@@ -92,7 +92,7 @@ pub struct MockAnSubmitter {
 }
 
 struct MockInner {
-    nullifiers: HashSet<u64>,
+    nullifiers: HashSet<U256>,
     finalized_log: Vec<u64>,
 }
 
@@ -116,7 +116,7 @@ impl MockAnSubmitter {
     /// processed it).
     pub fn seed_finalized(&self, deposit_id: u64) {
         let mut inner = self.inner.lock().expect("poisoned lock");
-        inner.nullifiers.insert(deposit_id);
+        inner.nullifiers.insert(U256::from(deposit_id));
     }
 
     pub fn finalized_count(&self) -> usize {
@@ -144,14 +144,14 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn resume_deposit(
         &self,
-        event: &DepositEvent,
+        id: DepositIdentity,
     ) -> Result<Option<SubmitOutcome>, RelayerError> {
         Ok(self
             .inner
             .lock()
             .expect("poisoned lock")
             .nullifiers
-            .contains(&event.deposit_id)
+            .contains(&id.deposit_id)
             .then_some(SubmitOutcome::AlreadyFinalized))
     }
 
@@ -164,7 +164,7 @@ impl AnSubmitter for MockAnSubmitter {
         check_gas_credit(witness)?;
 
         let mut inner = self.inner.lock().expect("poisoned lock");
-        if inner.nullifiers.contains(&event.deposit_id) {
+        if inner.nullifiers.contains(&U256::from(event.deposit_id)) {
             return Ok(SubmitOutcome::AlreadyFinalized);
         }
         if !(self.verifier)(witness) {
@@ -172,7 +172,7 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "the mock bridge refused the receipt proof".to_string(),
             });
         }
-        inner.nullifiers.insert(event.deposit_id);
+        inner.nullifiers.insert(U256::from(event.deposit_id));
         inner.finalized_log.push(event.deposit_id);
         Ok(SubmitOutcome::Finalized {
             tx_hash: None,
@@ -206,15 +206,27 @@ pub enum DepositStatus {
 
 impl From<&DepositEvent> for DepositIdentity {
     fn from(event: &DepositEvent) -> Self {
-        Self {
-            deposit_id: U256::from(event.deposit_id),
-            contract_addr: U256::from_be_slice(event.source_contract.as_slice()),
-            chain_id: U256::from(event.source_chain_id),
-        }
+        Self::new(
+            event.deposit_id,
+            event.source_contract,
+            event.source_chain_id,
+        )
     }
 }
 
 impl DepositIdentity {
+    pub(crate) fn new(
+        deposit_id: u64,
+        contract: alloy::primitives::Address,
+        chain_id: u64,
+    ) -> Self {
+        Self {
+            deposit_id: U256::from(deposit_id),
+            contract_addr: U256::from_be_slice(contract.as_slice()),
+            chain_id: U256::from(chain_id),
+        }
+    }
+
     fn params(self) -> serde_json::Value {
         json!({
             "depositId": self.deposit_id.to_string(),
@@ -576,9 +588,9 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
 
     async fn resume_deposit(
         &self,
-        event: &DepositEvent,
+        id: DepositIdentity,
     ) -> Result<Option<SubmitOutcome>, RelayerError> {
-        self.resume(event.into()).await
+        self.resume(id).await
     }
 
     async fn submit(
@@ -665,13 +677,13 @@ mod tests {
         let ev = event(1);
         let b = witness(&ev);
 
-        assert!(sub.resume_deposit(&ev).await.unwrap().is_none());
+        assert!(sub.resume_deposit((&ev).into()).await.unwrap().is_none());
         assert!(matches!(
             sub.submit(&ev, &b).await.unwrap(),
             SubmitOutcome::Finalized { .. }
         ));
         assert!(matches!(
-            sub.resume_deposit(&ev).await.unwrap(),
+            sub.resume_deposit((&ev).into()).await.unwrap(),
             Some(SubmitOutcome::AlreadyFinalized)
         ));
         assert!(matches!(
@@ -748,22 +760,22 @@ mod tests {
         let client = Arc::new(MockAckiNacki::new());
         let sub = live_submitter(client.clone());
         let ev = event(5);
-        assert!(sub.resume_deposit(&ev).await.is_err());
+        assert!(sub.resume_deposit((&ev).into()).await.is_err());
         for output in [json!({}), json!({"status":3}), json!({"status":false})] {
             client.set_getter_response(output);
-            assert!(sub.resume_deposit(&ev).await.is_err());
+            assert!(sub.resume_deposit((&ev).into()).await.is_err());
         }
         client.set_getter_response(json!({"status":0}));
-        assert!(sub.resume_deposit(&ev).await.unwrap().is_none());
+        assert!(sub.resume_deposit((&ev).into()).await.unwrap().is_none());
         client.set_getter_response(json!({"status":"2"}));
         assert!(matches!(
-            sub.resume_deposit(&ev).await.unwrap(),
+            sub.resume_deposit((&ev).into()).await.unwrap(),
             Some(SubmitOutcome::AlreadyFinalized)
         ));
         assert_eq!(client.transaction_count(), 0);
         client.set_getter_response(json!({"status":"1"}));
         assert!(matches!(
-            sub.resume_deposit(&ev).await.unwrap(),
+            sub.resume_deposit((&ev).into()).await.unwrap(),
             Some(SubmitOutcome::Pending { .. })
         ));
         assert_eq!(client.transaction_count(), 1);

@@ -33,6 +33,7 @@ use crate::{
     source::{advance_scan_cursor, DepositSource},
     state::{unix_now_secs, DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
+    voucher::DepositIdentity,
     witness::{check_gas_credit, WitnessBuilder},
 };
 
@@ -274,6 +275,20 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     async fn tick_target(&mut self, target: u64) -> Result<TickOutcome, RelayerError> {
         self.publish_state_gauges(target);
 
+        // A saved id belongs to the deployment checked at startup. AN can
+        // settle it even if Ethereum has pruned the original receipt.
+        let saved_identity = self
+            .state
+            .outstanding(target)
+            .and(self.state.deployment.as_ref())
+            .map(|d| DepositIdentity::new(target, d.bridge_address, d.chain_id));
+        if let Some(id) = saved_identity {
+            if let Some(outcome) = self.resume_on_an(id).await? {
+                self.state.clear_anchor_wait(target);
+                return self.record_submission(target, None, outcome);
+            }
+        }
+
         // 1. Fetch the confirmed deposit event. Outstanding ids load from the stored tx
         //    / block so the shared scan cursor can keep moving.
         debug!(deposit_id = target, "fetching deposit event");
@@ -314,14 +329,12 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
             });
         }
 
-        // Keep the existing metric label. Pending deposits use only the
-        // identity recorded by the bridge, even after a daemon restart.
-        let timer = StageTimer::start("is_finalized");
-        let resumed = self.submitter.resume_deposit(&event).await;
-        timer.finish();
-        if let Some(outcome) = resumed? {
-            self.state.clear_anchor_wait(target);
-            return self.record_submission(&event, outcome);
+        let event_identity = DepositIdentity::from(&event);
+        if saved_identity != Some(event_identity) {
+            if let Some(outcome) = self.resume_on_an(event_identity).await? {
+                self.state.clear_anchor_wait(target);
+                return self.record_submission(target, Some(&event), outcome);
+            }
         }
 
         // Ethereum confirmation depth is not AN anchor readiness: the light
@@ -440,27 +453,41 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
         let timer = StageTimer::start("submit");
         let submitted = self.submitter.submit(&event, &witness).await;
         timer.finish();
-        self.record_submission(&event, submitted?)
+        self.record_submission(target, Some(&event), submitted?)
+    }
+
+    async fn resume_on_an(
+        &self,
+        id: DepositIdentity,
+    ) -> Result<Option<SubmitOutcome>, RelayerError> {
+        let timer = StageTimer::start("is_finalized");
+        let outcome = self.submitter.resume_deposit(id).await;
+        timer.finish();
+        outcome
     }
 
     fn record_submission(
         &mut self,
-        event: &crate::types::DepositEvent,
+        target: u64,
+        event: Option<&crate::types::DepositEvent>,
         outcome: SubmitOutcome,
     ) -> Result<TickOutcome, RelayerError> {
-        let target = event.deposit_id;
+        let block_number = event
+            .map(|e| e.block_number)
+            .or_else(|| self.state.outstanding(target)?.block_number);
         match outcome {
             SubmitOutcome::Finalized {
                 tx_hash,
             } => {
-                self.mark_finalized_block(event.block_number);
+                self.mark_finalized_block(block_number);
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
                     deposit_id = target,
-                    amount = ?event.amount,
-                    sender = %event.sender,
-                    "finalized on AN",
+                    block_number,
+                    amount = event.map(|e| tracing::field::debug(e.amount)),
+                    sender = event.map(|e| tracing::field::display(e.sender)),
+                    "finalized on AN"
                 );
                 Ok(TickOutcome::Finalized {
                     deposit_id: target,
@@ -468,7 +495,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                 })
             },
             SubmitOutcome::AlreadyFinalized => {
-                self.mark_finalized_block(event.block_number);
+                self.mark_finalized_block(block_number);
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -483,7 +510,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                 reason,
             } => {
                 if let Some(outcome) =
-                    self.record_failure(target, &format!("AN rejected: {reason}"), Some(event))?
+                    self.record_failure(target, &format!("AN rejected: {reason}"), event)?
                 {
                     return Ok(outcome);
                 }
@@ -505,7 +532,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                     target,
                     unix_now_secs(),
                     self.config.outstanding_backoff_secs,
-                    Some(deposit_log_ref(event)),
+                    event.map(deposit_log_ref),
                 );
                 self.persist_state()?;
                 info!(
@@ -577,10 +604,11 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     /// Remember that the deposit at `block_number` is done. The next log
     /// scan still includes that block: a later `depositId` can share it.
     /// Outstanding retries do not use this cursor: they load the stored tx.
-    fn mark_finalized_block(&self, block_number: u64) {
-        if let (Some(cursor), Some(through)) =
-            (&self.config.scan_cursor, block_number.checked_sub(1))
-        {
+    fn mark_finalized_block(&self, block_number: Option<u64>) {
+        if let (Some(cursor), Some(through)) = (
+            &self.config.scan_cursor,
+            block_number.and_then(|n| n.checked_sub(1)),
+        ) {
             advance_scan_cursor(cursor, through);
         }
     }
@@ -691,9 +719,9 @@ mod tests {
 
         async fn resume_deposit(
             &self,
-            event: &DepositEvent,
+            id: DepositIdentity,
         ) -> Result<Option<SubmitOutcome>, RelayerError> {
-            self.inner.resume_deposit(event).await
+            self.inner.resume_deposit(id).await
         }
 
         async fn submit(
@@ -713,6 +741,10 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let config = RelayerConfig {
+            deployment: Some(DeploymentIdentity::new(
+                deposit(0).source_chain_id,
+                deposit(0).source_contract,
+            )),
             outstanding_backoff_secs: 0,
             skip_after_attempts: Some(1),
             ..RelayerConfig::new(dir.path().join("state.json"))
@@ -747,8 +779,18 @@ mod tests {
         assert_eq!(daemon.state().outstanding(0).unwrap().attempts, 0);
         drop(daemon);
 
+        // The Ethereum node no longer serves this receipt after the restart.
+        let pruned_source = Arc::new(InMemoryDepositSource::new());
+        let mut daemon = Relayer::new(config, pruned_source, builder.clone(), submitter).unwrap();
+        assert!(matches!(
+            daemon.tick().await.unwrap(),
+            TickOutcome::AnPending {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert_eq!(daemon.state().outstanding(0).unwrap().attempts, 0);
         client.set_getter_response(serde_json::json!({"status": 2}));
-        let mut daemon = Relayer::new(config, source, builder.clone(), submitter).unwrap();
         assert!(matches!(
             daemon.tick().await.unwrap(),
             TickOutcome::AlreadyFinalized {
@@ -1663,7 +1705,7 @@ mod tests {
 
         async fn resume_deposit(
             &self,
-            _: &DepositEvent,
+            _: DepositIdentity,
         ) -> Result<Option<SubmitOutcome>, RelayerError> {
             Ok(None)
         }

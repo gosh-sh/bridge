@@ -27,8 +27,9 @@ assigns it when the release is tagged.
   `event_config_params.json` and `event_manifest.json` in `params/relayer/`: copy them from the params
   directory of an `ackinacki-bridge withdraw` of the same release, rerun `finalize-params.sh` and set
   the new `PARAMS_MANIFEST_SHA256`.
-- `ackinacki-bridge withdraw` can find its burn paid by a relayer first: it then exits 13 with
-  `NullifierAlreadyUsed` ("already been paid out") and the USDC is on the recipient.
+- `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
+  `submit.status` `already_paid` and `submit.nullifier`, not 13; found before proving, `proof` is
+  `null` in the JSON output.
 
 ### New / Improvements
 

@@ -17,12 +17,14 @@
 //! 4b. **Resurrect + coverage-wait** — see [`crate::resurrect`].
 //!
 //! 5. **Prove** — reuses
-//!    [`bridge_relayer_daemon::withdraw_e2e::run_once_with_state`] with the
-//!    just-captured event and the resurrected `BridgeState`. Exit 12 on prover
-//!    failure.
+//!    [`bridge_relayer_daemon::withdraw_e2e::enrich_captured`] and
+//!    [`bridge_relayer_daemon::withdraw_e2e::prove_enriched`] with the
+//!    just-captured event and the resurrected `BridgeState`; a withdrawal the
+//!    bridge has already paid out is not proven. Exit 12 on prover failure.
 //! 6. **Submit** — reuses [`bridge_relayer_daemon::bridge::EthBridgeClient`]
 //!    `dry_run_withdraw` (always) and `submit_withdraw` (unless `--dry-run`).
-//!    Exit 13 on revert.
+//!    Exit 13 on revert, unless the bridge has paid the withdrawal out
+//!    meanwhile (the relayer daemon, say): that is success, `already_paid`.
 //!
 //! Every stage transition updates the idempotency record so a mid-flight
 //! crash leaves a resumable trace. v1 doesn't implement `--resume`, but
@@ -36,8 +38,9 @@ use std::{
 use alloy::{network::EthereumWallet, providers::ProviderBuilder, signers::Signer};
 use bridge_event_witness::AnchorLayerMode;
 use bridge_relayer_daemon::{
-    bridge::{DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome},
-    withdraw_e2e::{run_once_with_state, WithdrawE2EConfig},
+    bridge::{decode_withdraw_revert, DryRunOutcome, EthBridgeClient, WithdrawSubmitOutcome},
+    withdraw_claimer::nullifier_of,
+    withdraw_e2e::{enrich_captured, prove_enriched, WithdrawE2EConfig},
 };
 use tracing::{info, warn};
 
@@ -77,7 +80,9 @@ const COVERAGE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 pub struct WithdrawSuccess {
     pub burn: BurnSummary,
     pub capture: CaptureSummary,
-    pub proof: ProofSummary,
+    /// `None` when the bridge had paid the withdrawal out before this run
+    /// proved it: there was nothing left to prove.
+    pub proof: Option<ProofSummary>,
     pub submit: SubmitSummary,
 }
 
@@ -115,6 +120,10 @@ pub struct SubmitSummary {
     /// `None` for `--dry-run` success; `Some(tx_hash)` for real submits.
     pub eth_tx: Option<String>,
     pub status: SubmitStatus,
+    /// The withdrawal's nullifier, on `already_paid` only: the payout is the
+    /// bridge's `WithdrawalByProofExecuted` with this first topic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullifier: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -124,6 +133,11 @@ pub struct SubmitSummary {
 pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
+    /// The bridge has paid this withdrawal out, and not by a receipt this
+    /// run saw: the relayer daemon, an earlier run, another operator, or a
+    /// transaction of this run whose receipt never came. The USDC is on the
+    /// recipient; a success, like `Confirmed`.
+    AlreadyPaid,
 }
 
 /// `LockHold`'s `impl Drop` is what keeps the withdrawal lock borrowed to
@@ -811,14 +825,15 @@ pub async fn run(
                 block_id: "<dry-run>".into(),
                 envelope_hash: "<dry-run>".into(),
             },
-            proof: ProofSummary {
+            proof: Some(ProofSummary {
                 self_verified: false,
                 calldata_bytes: 0,
                 pi_count: 0,
-            },
+            }),
             submit: SubmitSummary {
                 eth_tx: None,
                 status: SubmitStatus::DryRunOk,
+                nullifier: None,
             },
         });
     }
@@ -987,8 +1002,8 @@ pub async fn run(
     info!("stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)");
 
     // `prover_state_path` and `window_size` are ignored by
-    // `run_once_with_state`, but the config struct still has the fields
-    // (the daemon binary uses them on the file path). Fill in stubs
+    // `enrich_captured` and `prove_enriched`, but the config struct still has the
+    // fields (the daemon binary uses them on the file path). Fill in stubs
     // that make the intent clear if anything ever accidentally reads
     // them.
     let mut e2e_cfg = WithdrawE2EConfig {
@@ -1058,6 +1073,47 @@ pub async fn run(
     } else {
         bridge_state
     };
+    // Paid already? The relayer daemon pays every burn to its bridge and
+    // usually gets there first; the proof would then be minutes of work
+    // for a submit the bridge refuses. The nullifier follows from the
+    // enriched witness without proving. A failed read proves anyway: the
+    // dry run below asks again.
+    let enriched = enrich_captured(&e2e_cfg, &bridge_state, &captured)
+        .await
+        .map_err(|e| {
+            proof_failed_after_burn(format!("enrich the witness: {e:#}"), Some(e), &resume)
+        })?;
+    let nullifier = nullifier_of(&enriched.witness).map_err(|e| {
+        proof_failed_after_burn(
+            format!("the withdrawal's nullifier: {e:#}"),
+            Some(e),
+            &resume,
+        )
+    })?;
+    match ro_bridge_for_wait.is_nullifier_used(nullifier).await {
+        Ok(true) => {
+            info!(%nullifier, "the bridge has already paid this withdrawal out; nothing to prove");
+            mark_already_paid(&state_dir, record.as_mut(), &_lock_held_to_the_end)?;
+            return Ok(WithdrawSuccess {
+                burn: BurnSummary {
+                    token_id: args.token_id,
+                    an_tx: an_tx_hash,
+                    bounce,
+                    amount: amount.display_with_decimals(decimals),
+                },
+                capture: CaptureSummary {
+                    withdrawal_msg_id: captured.message_id,
+                    block_seq_no: captured.block_seq_no,
+                    block_id: captured.block_id_hex,
+                    envelope_hash: captured.envelope_hash_hex,
+                },
+                proof: None,
+                submit: already_paid(nullifier),
+            });
+        },
+        Ok(false) => {},
+        Err(e) => warn!(error = %e, "isNullifierUsed failed; proving anyway"),
+    }
     // Right before the proof reads the key. Stage 1 verified it; the burn,
     // the anchor wait and the wait for the prove lock — which has no bound
     // — sit between then and now, and nothing else re-checks:
@@ -1091,7 +1147,7 @@ pub async fn run(
     // this run holds the lock on; what an earlier proof left there goes.
     let slot_report = crate::aggregator_slot::fresh_report(&args.snark_dir);
     e2e_cfg.slot_report = slot_report.clone();
-    let e2e = run_once_with_state(e2e_cfg, bridge_state, captured)
+    let e2e = prove_enriched(&e2e_cfg, captured, enriched)
         .await
         .map_err(|e| {
             proof_failed_after_burn(
@@ -1222,12 +1278,36 @@ pub async fn run(
             DryRunOutcome::WouldRevert {
                 reason,
             } => {
-                return Err(CliError::EthSubmitFailed {
-                    reason: format!(
-                        "withdrawByProof dry-run reverted: {}",
-                        crate::submit_revert::explain(&reason)
-                    ),
-                    source: None,
+                if !paid_out_after_all(&ro_bridge, nullifier, &reason).await {
+                    return Err(CliError::EthSubmitFailed {
+                        reason: format!(
+                            "withdrawByProof dry-run reverted: {}",
+                            crate::submit_revert::explain(&reason)
+                        ),
+                        source: None,
+                    });
+                }
+                info!(%nullifier, "eth dry-run: the bridge has already paid this withdrawal out");
+                mark_already_paid(&state_dir, record.as_mut(), &_lock_held_to_the_end)?;
+                return Ok(WithdrawSuccess {
+                    burn: BurnSummary {
+                        token_id: args.token_id,
+                        an_tx: an_tx_hash,
+                        bounce,
+                        amount: amount.display_with_decimals(decimals),
+                    },
+                    capture: CaptureSummary {
+                        withdrawal_msg_id: e2e.captured.message_id,
+                        block_seq_no: e2e.captured.block_seq_no,
+                        block_id: e2e.captured.block_id_hex,
+                        envelope_hash: e2e.captured.envelope_hash_hex,
+                    },
+                    proof: Some(ProofSummary {
+                        self_verified: e2e.proof.self_verified,
+                        calldata_bytes,
+                        pi_count,
+                    }),
+                    submit: already_paid(nullifier),
                 });
             },
         }
@@ -1314,7 +1394,17 @@ pub async fn run(
             SubmitSummary {
                 eth_tx: Some(tx),
                 status: SubmitStatus::Confirmed,
+                nullifier: None,
             }
+        },
+        // Paid between the dry run and this submit, by someone else — the
+        // two transactions in one block, say.
+        WithdrawSubmitOutcome::Reverted {
+            reason,
+            permanent: _,
+        } if paid_out_after_all(&ro_bridge_for_wait, nullifier, &reason).await => {
+            info!(%nullifier, "withdrawByProof: the bridge had already paid this withdrawal out");
+            already_paid(nullifier)
         },
         WithdrawSubmitOutcome::Reverted {
             reason,
@@ -1387,13 +1477,71 @@ pub async fn run(
             block_id: e2e.captured.block_id_hex,
             envelope_hash: e2e.captured.envelope_hash_hex,
         },
-        proof: ProofSummary {
+        proof: Some(ProofSummary {
             self_verified: e2e.proof.self_verified,
             calldata_bytes,
             pi_count,
-        },
+        }),
         submit,
     })
+}
+
+/// Stage 6's summary for a withdrawal the bridge had already paid out.
+fn already_paid(nullifier: alloy::primitives::U256) -> SubmitSummary {
+    SubmitSummary {
+        eth_tx: None,
+        status: SubmitStatus::AlreadyPaid,
+        nullifier: Some(format!("{nullifier:#066x}")),
+    }
+}
+
+/// Whether a `withdrawByProof` revert says the nullifier is spent: the
+/// withdrawal was paid out, by this run's predecessor or by anyone else.
+fn is_paid_already(reason: &str) -> bool {
+    decode_withdraw_revert(reason).is_some_and(|r| r.name == "NullifierAlreadyUsed")
+}
+
+/// Whether a withdrawal whose dry run or send failed was paid out after
+/// all: the revert names the spent nullifier, or the bridge says it is
+/// spent. The relayer daemon proves the same burn at the same time; when
+/// both transactions land in one block, this run's receipt carries no
+/// reason, and a check the bridge makes before the nullifier's (an anchor
+/// gone from the window, say) can revert first. A failed read is not a
+/// payout.
+async fn paid_out_after_all<P, N>(
+    bridge: &EthBridgeClient<P, N>,
+    nullifier: alloy::primitives::U256,
+    reason: &str,
+) -> bool
+where
+    P: alloy::providers::Provider<N> + Clone,
+    N: alloy::network::Network,
+{
+    if is_paid_already(reason) {
+        return true;
+    }
+    match bridge.is_nullifier_used(nullifier).await {
+        Ok(spent) => spent,
+        Err(e) => {
+            warn!(error = %e, "isNullifierUsed after the revert failed");
+            false
+        },
+    }
+}
+
+/// Closes the record of a withdrawal the bridge had already paid out: it is
+/// `Confirmed`, which no later run reopens.
+fn mark_already_paid(
+    state_dir: &Path,
+    record: Option<&mut idempotency::Record>,
+    held: &idempotency::LockHold<'_>,
+) -> CliResult<()> {
+    if let Some(r) = record {
+        r.status = Status::Confirmed;
+        idempotency::update(state_dir, r, held)
+            .map_err(|e| e.after_send("the bridge had already paid this withdrawal out"))?;
+    }
+    Ok(())
 }
 
 // ---- helpers ----
@@ -2627,6 +2775,40 @@ fn confirm_before_burn(
 mod tests {
     use super::*;
     use crate::source_guard::production_source;
+
+    /// A spent nullifier is a payout someone else made, and the run reports
+    /// it as one: `already_paid`, exit 0, the nullifier to look the payout
+    /// up by. Any other revert stays a failure.
+    #[test]
+    fn a_spent_nullifier_is_success_and_names_the_payout() {
+        let sel = |sig: &str| hex::encode(&alloy::primitives::keccak256(sig)[..4]);
+        let spent = format!(
+            "execution reverted, data: \"0x{}{}\"",
+            sel("NullifierAlreadyUsed(uint256)"),
+            "2f".repeat(32)
+        );
+        assert!(is_paid_already(&spent));
+        assert!(!is_paid_already(&format!(
+            "data: \"0x{}\"",
+            sel("BridgePaused()")
+        )));
+        assert!(!is_paid_already("connection refused"));
+
+        let summary = already_paid(alloy::primitives::U256::from(0x2fu8));
+        let v = serde_json::to_value(&summary).unwrap();
+        assert_eq!(v["status"], "already_paid");
+        assert_eq!(v["eth_tx"], serde_json::Value::Null);
+        assert_eq!(v["nullifier"], format!("0x{:064x}", 0x2f));
+
+        // The other outcomes keep the JSON they had.
+        let confirmed = SubmitSummary {
+            eth_tx: Some("0xab".into()),
+            status: SubmitStatus::Confirmed,
+            nullifier: None,
+        };
+        let v = serde_json::to_value(&confirmed).unwrap();
+        assert!(v.get("nullifier").is_none(), "{v}");
+    }
 
     /// A reserved record, with `an_tx_hash` as the only variable.
     fn reserved(an_tx_hash: Option<&str>) -> idempotency::Record {

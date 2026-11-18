@@ -643,7 +643,11 @@ where
             DryRunOutcome::WouldSucceed => {},
             DryRunOutcome::WouldRevert {
                 reason,
-            } => return refusal(&reason),
+            } => {
+                return self
+                    .after_revert(pub_inputs.nullifier, refusal(&reason))
+                    .await
+            },
         }
         match self
             .bridge
@@ -670,17 +674,53 @@ where
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: true,
-            } => refusal(&reason),
+            } => {
+                self.after_revert(pub_inputs.nullifier, refusal(&reason))
+                    .await
+            },
             // Mined and reverted after a dry run that passed: gas was spent,
             // so the next send waits longer each time, with a new proof.
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: false,
-            } if reason.contains("reverted on chain") => Err(StepError::Refused(reason)),
+            } if reason.contains("reverted on chain") => {
+                self.after_revert(pub_inputs.nullifier, Err(StepError::Refused(reason)))
+                    .await
+            },
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: false,
-            } => refusal(&reason),
+            } => {
+                self.after_revert(pub_inputs.nullifier, refusal(&reason))
+                    .await
+            },
+        }
+    }
+
+    /// What a revert of the dry run or the send means, asked of the bridge
+    /// once more: a spent nullifier is a payout, whatever the revert said.
+    /// Another submitter (`ackinacki-bridge withdraw`, a second relayer)
+    /// proves the same burn at the same time; when its transaction lands in
+    /// the same block as ours, our receipt carries no reason, and a check
+    /// the bridge makes before the nullifier's can revert first.
+    async fn after_revert(
+        &self,
+        nullifier: U256,
+        outcome: Result<Outcome, StepError>,
+    ) -> Result<Outcome, StepError> {
+        if matches!(outcome, Ok(Outcome::Final(_))) {
+            return outcome;
+        }
+        match self.bridge.is_nullifier_used(nullifier).await {
+            Ok(true) => {
+                info!(%nullifier, "withdraw claimer: paid already, by another submitter");
+                Ok(Outcome::Final(ClaimState::AlreadyPaid))
+            },
+            Ok(false) => outcome,
+            Err(e) => {
+                warn!(error = %e, "withdraw claimer: isNullifierUsed after a revert failed");
+                outcome
+            },
         }
     }
 

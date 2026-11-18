@@ -37,7 +37,7 @@ from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC,
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 GENESIS_SECS = 600          # the genesis at seq_no 0 reads only the BK set from the chain
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
-COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof; past the CLI's own 120 min
+COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
 # The local network's GraphQL behind nginx0, on this runner's end of the tunnels fixture.
 GRAPHQL = "http://127.0.0.1:18080/graphql"

@@ -671,10 +671,16 @@ where
                 reason,
                 permanent: true,
             } => refusal(&reason),
+            // Mined and reverted after a dry run that passed: gas was spent,
+            // so the next send waits longer each time, with a new proof.
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: false,
-            } => Err(StepError::Retry(anyhow::anyhow!(reason))),
+            } if reason.contains("reverted on chain") => Err(StepError::Refused(reason)),
+            WithdrawSubmitOutcome::Reverted {
+                reason,
+                permanent: false,
+            } => refusal(&reason),
         }
     }
 

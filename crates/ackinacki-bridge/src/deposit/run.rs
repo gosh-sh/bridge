@@ -46,7 +46,10 @@ use crate::{
         recovery::{self, SearchOutcome},
         retry::{once, transient, until, ONE_READ},
         signals,
-        store::{blocking_by_sender, DepositInfo, FailReason, OpRecord, OpStage, Store, TxClaim},
+        store::{
+            blocking_by_sender, DepositInfo, FailReason, OpRecord, OpStage, RequestInfo, Store,
+            TxClaim,
+        },
         ui::{self, StepId, StepState, Ui},
         wallet::{account_check, Wallet},
         witness, DepositSuccess,
@@ -1042,6 +1045,10 @@ impl Phase {
     }
 }
 
+/// How far before a `deposit proof` deposit's block a search for it after a
+/// reorg starts.
+const REORG_MARGIN_BLOCKS: u64 = 64;
+
 /// `deposit proof --tx-hash`: a deposit already on the EVM bridge, made by
 /// any wallet, proven and finalized by a new operation. The deposit is read
 /// from the transaction's receipt — its sender, amount, token and Acki
@@ -1160,6 +1167,15 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
     rec.token_decimals = Some(checked.evm.decimals);
     rec.from = Some(seen.from);
     rec.found_by_tx = true;
+    // What a request of this CLI would have recorded, read off the
+    // transaction: a resume after a reorg searches the sender's deposits
+    // from a few blocks before it.
+    rec.request = Some(RequestInfo {
+        nonce_before: seen.nonce,
+        from_block: receipt.block_number.saturating_sub(REORG_MARGIN_BLOCKS),
+        calldata: tx.input.clone(),
+        wallet_hash: Some(tx_hash),
+    });
     rec.tx = Some(TxClaim {
         tx_hash,
         tx_nonce: seen.nonce,
@@ -3259,6 +3275,30 @@ mod tests {
             "the receipt proof for the same block is reused"
         );
         assert_eq!(*w.an.sent.lock().unwrap(), 2);
+    }
+
+    /// `deposit proof --tx-hash` of a deposit the relayer finalized: an
+    /// operation is created from the receipt, the proof is built, nothing is
+    /// sent, and the run ends in success, `already_finalized`. A second run
+    /// for the same transaction is refused with the operation to resume.
+    #[tokio::test]
+    async fn deposit_proof_of_a_finalized_deposit_builds_the_proof_and_sends_none() {
+        let mut w = World::healthy();
+        let h = w.mined_deposit(7);
+        w.anchor_after(0);
+        w.credit_chain_for_mined_deposit();
+        w.voucher_deployed();
+        let (mut p, d) = on_the_real_clock(&w);
+        p.mode = RunMode::Proof {
+            tx_hash: h,
+        };
+        let s = run_proof(&p, &d, h).await.unwrap();
+        assert_eq!(s.finalize, Some("already_finalized"), "{s:?}");
+        assert!(s.confirmation.is_some());
+        assert_eq!(w.witness_builds(), 1);
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        let again = run_proof(&p, &d, h).await.unwrap_err();
+        assert_eq!(again.exit_code(), ExitCode::DuplicateRefused, "{again}");
     }
 
     #[tokio::test]

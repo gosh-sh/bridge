@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `a13d8126…`: upgrade a 1.17.0 bridge with `updateCode` and an empty
+- `eccBridge` 1.18.0, code hash `8911fbc1…`: upgrade a 1.17.0 bridge with `updateCode` and an empty
   `userCell`.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
 - `AckiNackiBridge` storage adds `_nackl` at slots 19–32; no earlier slot moves.
@@ -39,7 +39,8 @@ assigns it when the release is tagged.
 - `eccBridge`: `setBridgeToken` accepts NACKL (id `1`); the USDC limits and `maxTvl` do not apply to
   it.
 - `eccBridge`: a NACKL `initiateWithdrawal` locks the NACKL on the bridge
-  (`getNacklLockedTo(chainId, evmBridge)`), refunded only above the per-withdrawal cap (234).
+  (`getNacklLockedTo(chainId, evmBridge)`), refunded above the per-withdrawal cap (234) and for a
+  recipient that is not 20 bytes (246).
 - `eccBridge`: `finalizeDeposit` refuses a NACKL deposit above the chain's locked NACKL with 236.
 - `eccBridge`: a NACKL deposit the lock cannot pay is recorded as pending (`DepositPending`,
   `getPendingDeposit`) and paid oldest first by later NACKL withdrawals to that chain.
@@ -67,8 +68,8 @@ assigns it when the release is tagged.
   nothing queued; run it only after `setEvmBridge` to the successor and once `getNacklLockedTo` for
   the old bridge equals its `nacklState().accepted`.
 - `NacklToken`: OpenZeppelin ERC20 `NACKL`, nine decimals, deployed and optionally listed by
-  `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_LIST`,
-  `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
+  `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_INITIAL_HOLDER`,
+  `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
 - `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` execute due NACKL payouts in
   `nextPayout` order and park a proof refused with `NacklMinterGone`.
 - `ackinacki-bridge withdraw --token-id 1` withdraws NACKL; a queued payout ends with

@@ -159,7 +159,8 @@ bounds do not apply, and `maxTvl` only has to be at least `maxTransfer`.
 - A NACKL `initiateWithdrawal` keeps the NACKL on the bridge: the lock. It adds the amount to the
   chain's NACKL `outstanding` (`getTokenWithdrawalConfig(chainId, 1)`) and to
   `getNacklLockedTo(chainId, evmBridge)`, the total ever locked for the EVM bridge the withdrawal
-  is bound to. Only the per-withdrawal cap refunds it (234).
+  is bound to. It is refunded above the per-withdrawal cap (234) and when the recipient is not
+  20 bytes, the only form Circuit 4 proves (246).
 - A NACKL deposit unlocks: the bridge sends NACKL it holds from that chain's locks.
   `finalizeDeposit` refuses one above the lock with 236 before accepting it, so the voucher stays
   unspent and the deposit can be finalized later. One that still finds the lock short when it is
@@ -369,14 +370,15 @@ them once the principal has moved — the order is in `docs/aave-yield.md`,
 "Replacing a bridge on the same chain".
 
 On the EVM side `migrateTreasury` moves USDC. NACKL (id 1) is not held in custody:
-`migrateToken(1, successor)` hands the NACKL token's minter to the successor, and runs only once
-`getNacklLockedTo(chainId, oldBridge)` here equals the old bridge's `nacklState().accepted` and
-nothing is queued there (`docs/NACKL-bridge-extension.md`, NB-HO-3). Until then the successor
-queues NACKL payouts and executes none. For any other listed token `migrateToken(tokenId,
-successor)` moves its custody and liabilities together, with nothing minted here. All of them
-run on the paused old bridge, and the registry here does not change. The new bridge must list the token under the same id, with a withdrawal
-cap no lower than the old listing's (`FundedTokenMismatch`,
-`SuccessorWithdrawalCapTooLow`). A token left behind strands later burns:
+`migrateToken(1, successor)` hands the NACKL token's minter to the successor. The contract
+checks only that the old bridge has nothing queued and that the successor lists the same token;
+the operator calls it only once `getNacklLockedTo(chainId, oldBridge)` here equals the old
+bridge's `nacklState().accepted` (`docs/NACKL-bridge-extension.md`, NB-HO-3). Until then the
+successor queues NACKL payouts and executes none. For any other listed token
+`migrateToken(tokenId, successor)` moves its custody and liabilities together, with nothing
+minted here, and the new bridge must list the token under the same id, with a withdrawal cap no
+lower than the old listing's (`FundedTokenMismatch`, `SuccessorWithdrawalCapTooLow`). All of them
+run on the paused old bridge, and the registry here does not change. A token left behind strands later burns:
 `setEvmBridge` binds every currency on a chain to one address, so the old bridge
 refuses them with `WrongDstBridge`, and the new one with
 `WithdrawTreasuryShortfall` if its liabilities fall short, with the ECC already

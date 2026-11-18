@@ -453,6 +453,11 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(amount > 0, ERR_ZERO_AMOUNT);
         require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
         bool nackl = tokenId == NACKL_ECC_ID;
+        if (nackl && recipient.length != 20) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                              ERR_RECIPIENT_NOT_EVM);
+            return;
+        }
         if (!nackl) {
             uint128 minted = _totalMintedBridgeByToken[tokenId];
             uint128 burned = _totalBurnedBridgeByToken[tokenId];

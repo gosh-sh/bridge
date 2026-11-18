@@ -345,9 +345,9 @@ class BridgeLimits(unittest.TestCase):
     def nackl(self, max_transfer=100 * NACKL, max_tvl=1000 * NACKL, chain=1, expect=0):
         return self.set_bridge_token(NACKL_TOKEN, 1, max_transfer, max_tvl, chain, expect=expect)
 
-    def lock(self, amount, chain=1):
+    def lock(self, amount, chain=1, recipient="11" * 20):
         self.credit(amount)
-        result = self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
+        result = self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": recipient},
                            source=SENDER, ecc={"1": str(amount)})
         if int(self.call("testLastRefusal")["response"]["reason"]) and \
                 any(m["destination"] == SENDER for m in result["messages"]):
@@ -421,6 +421,18 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 234)
         self.assertEqual(len(result["messages"]), 1)
         self.assertEqual(self.locked(), 10 * NACKL)
+
+    def test_nb_an_lock_needs_an_evm_recipient(self):
+        self.nackl()
+        for recipient in ["11" * 21, "11" * 19, "11" * 64]:
+            result = self.lock(NACKL, recipient=recipient)
+            self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 246)
+            self.assertEqual(len(result["messages"]), 1)
+            self.assertEqual(result["messages"][0]["destination"], SENDER)
+            self.assertEqual(self.locked(), 0)
+            self.assertEqual(self.locked_to(), 0)
+        self.assertTrue(self.lock(NACKL)["vm_success"])
+        self.assertEqual(self.locked_to(), NACKL)
 
     def test_nb_an_unlock_pays_from_the_lock(self):
         self.nackl()

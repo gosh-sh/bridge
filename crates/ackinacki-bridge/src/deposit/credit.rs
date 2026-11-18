@@ -568,12 +568,13 @@ pub async fn confirm(
                         Stage::Credit,
                         Some(op_id),
                         format!(
-                            "the deposit is proven, but the Acki Nacki bridge holds less NACKL \
-                             locked for chain {} than {} base units, so it recorded the deposit \
-                             as pending (transaction {bridge_tx}) and paid nothing yet. Nothing \
-                             is lost: the next NACKL withdrawals to that chain pay it once they \
-                             lock enough, oldest first, and anyone can pay it then with \
-                             releasePendingDeposit({deposit_hash}). \
+                            "the deposit is proven, but the Acki Nacki bridge recorded it as \
+                             pending (transaction {bridge_tx}) and paid nothing yet: it held less \
+                             NACKL locked for chain {} than {} base units, or earlier NACKL \
+                             deposits from that chain were still pending. Nothing is lost: the \
+                             next NACKL withdrawals to that chain pay the pending deposits oldest \
+                             first once they lock enough, and anyone can pay this one with \
+                             releasePendingDeposit({deposit_hash}) as soon as the lock covers it. \
                              getPendingDeposit({deposit_hash}) shows it while it waits; --resume \
                              confirms the credit once it is paid.",
                             id.chain_id, id.amount,

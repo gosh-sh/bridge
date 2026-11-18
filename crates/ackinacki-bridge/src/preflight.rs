@@ -2769,8 +2769,9 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 
 /// Preflight the destination *deploy*: something is there, its withdrawal
 /// verifier stack is real and is the one this build proves against, its
-/// pinned AN-side identity is ours, its treasury visibly covers this
-/// amount, and it is not paused.
+/// pinned AN-side identity is ours, it pays this token under the id Acki
+/// Nacki assigns, and it is not paused. Its payout cap and treasury are
+/// not read: the Acki Nacki bridge's limits decide how much may leave.
 ///
 /// Key-free, so `--dry-run` exercises all of it.
 ///
@@ -2778,13 +2779,6 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 /// `--bridge-address` is far more common than a mis-deployed verifier, and
 /// the operator should see the useful message, not a decode failure three
 /// calls deeper.
-///
-/// The treasury check is a **preflight, not a promise** — the same rule the
-/// ticket sets for the multisig's ECC[3] balance. Between this call and
-/// `withdrawByProof` (up to ~101 min later) other withdrawals can drain the
-/// treasury and operators can top it up; the chain has the last word. Its
-/// job is to refuse now when it is already visible that the payout cannot
-/// happen, not to guarantee that it will.
 ///
 /// The identity and verifier checks carry no such caveat: both read
 /// `immutable` storage, so what this function sees is what
@@ -2809,7 +2803,6 @@ pub async fn check_bridge_deploy(
         amount,
         3,
         None,
-        false,
     )
     .await
 }
@@ -2824,7 +2817,6 @@ pub async fn check_bridge_deploy_for_token(
     amount: &UsdcAmount,
     token_id: u32,
     expected_token: Option<Address>,
-    burn_on_wire: bool,
 ) -> CliResult<()> {
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
@@ -3009,43 +3001,11 @@ pub async fn check_bridge_deploy_for_token(
         });
     }
 
-    let (max_transfer, treasury) = if token_id == 3 {
-        if let Some(expected_token) = expected_token {
-            let info =
-                client
-                    .token_payout_info(token_id)
-                    .await
-                    .map_err(|e| CliError::Preflight {
-                        reason: format!("cannot read registered USDC token: {e}"),
-                        source: None,
-                    })?;
-            if info.token != expected_token {
-                return Err(CliError::Preflight {
-                    reason: "EVM and AN assign ECC[3] to different tokens".into(),
-                    source: None,
-                });
-            }
-        }
-        (
-            client
-                .usdc_payout_cap()
-                .await
-                .map_err(|e| CliError::Preflight {
-                    reason: format!(
-                        "--bridge-address {bridge}: cannot read the USDC payout cap \
-                         (usdcTokenId()/maxWithdrawalAmount()): {e}"
-                    ),
-                    source: None,
-                })?,
-            client
-                .treasury_balance()
-                .await
-                .map_err(|e| CliError::Preflight {
-                    reason: format!("--bridge-address {bridge}: treasuryBalance() failed: {e}"),
-                    source: None,
-                })?,
-        )
-    } else {
+    // The token the EVM bridge pays this id in is the one Acki Nacki
+    // assigns to it. How much may be withdrawn is the Acki Nacki bridge's
+    // answer (`getTotalBridged`, the chain's limits), checked before the
+    // burn; the EVM bridge's payout cap and treasury are not read.
+    if let Some(expected_token) = expected_token {
         let info = client
             .token_payout_info(token_id)
             .await
@@ -3053,83 +3013,63 @@ pub async fn check_bridge_deploy_for_token(
                 reason: format!("cannot read payout registry for ECC[{token_id}]: {e}"),
                 source: None,
             })?;
-        if let Some(expected_token) = expected_token {
-            if info.token != expected_token {
-                return Err(CliError::Preflight {
-                    reason: format!("EVM and AN assign ECC[{token_id}] to different tokens"),
-                    source: None,
-                });
-            }
+        if info.token != expected_token {
+            return Err(CliError::Preflight {
+                reason: format!("EVM and AN assign ECC[{token_id}] to different tokens"),
+                source: None,
+            });
         }
-        (info.max_withdrawal, info.liabilities)
-    };
-    // Once the burn is on the wire, the payout cap and the treasury guard
-    // nothing: the burn cannot be taken back, and the dry run before the
-    // send reads what the bridge says then, a payout by someone else
-    // included.
-    if !burn_on_wire {
-        if U256::from(amount.0) > max_transfer {
+    }
+    // The EVM bridge's USDC is ECC id 3, as on Acki Nacki.
+    if token_id == 3 {
+        client
+            .usdc_payout_cap()
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: cannot confirm it pays USDC under ECC id 3 \
+                     (usdcTokenId()): {e}"
+                ),
+                source: None,
+            })?;
+    }
+    if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
+        let nackl = client
+            .nackl_state()
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: nacklState() failed: {e}. The bridge does not \
+                     carry NACKL; nothing was burnt."
+                ),
+                source: None,
+            })?;
+        if nackl.handed_over {
             return Err(CliError::Preflight {
                 reason: format!(
-                    "withdrawal exceeds the bridge's current payout cap for {}; reduce the amount \
-                     before burning ECC",
-                    payout_cap_label(token_id, max_transfer),
+                    "--bridge-address {bridge} has handed NACKL minting to its successor \
+                     (nacklState().handedOver): withdrawByProof would revert NacklMinterGone. \
+                     Nothing was burnt."
                 ),
                 source: None,
             });
         }
-
         let needed = U256::from(amount.0);
-        if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
-            let nackl = client
-                .nackl_state()
-                .await
-                .map_err(|e| CliError::Preflight {
-                    reason: format!(
-                        "--bridge-address {bridge}: nacklState() failed: {e}. The bridge does not \
-                         carry NACKL; nothing was burnt."
-                    ),
-                    source: None,
-                })?;
-            if nackl.handed_over {
-                return Err(CliError::Preflight {
-                    reason: format!(
-                        "--bridge-address {bridge} has handed NACKL minting to its successor \
-                         (nacklState().handedOver): withdrawByProof would revert NacklMinterGone. \
-                         Nothing was burnt."
-                    ),
-                    source: None,
-                });
-            }
-            if needed > nackl.delay_threshold {
-                tracing::warn!(
-                    amount = amount.0,
-                    threshold = %nackl.delay_threshold,
-                    "this NACKL payout is above the delay threshold: it is queued and minted no \
-                     earlier than 24 hours after its proof is accepted"
-                );
-            } else if nackl.window_used + needed > nackl.daily_limit {
-                tracing::warn!(
-                    amount = amount.0,
-                    window_used = %nackl.window_used,
-                    daily_limit = %nackl.daily_limit,
-                    "the NACKL daily limit is nearly spent: this payout may be queued until the \
-                     limit has room"
-                );
-            }
-        } else if treasury < needed {
-            return Err(CliError::Preflight {
-                reason: format!(
-                    "--bridge-address {bridge}: {} but this withdrawal needs {needed} ({}). \
-                     withdrawByProof would revert WithdrawTreasuryShortfall. {}\n\x20 Note this \
-                     is a preflight, not a guarantee — the amount is shared, and it can be \
-                     drained again while this withdrawal waits for its anchor bundle.",
-                    held_label(token_id, treasury),
-                    requested_label(token_id, *amount),
-                    shortfall_advice(token_id),
-                ),
-                source: None,
-            });
+        if needed > nackl.delay_threshold {
+            tracing::warn!(
+                amount = amount.0,
+                threshold = %nackl.delay_threshold,
+                "this NACKL payout is above the delay threshold: it is queued and minted no \
+                 earlier than 24 hours after its proof is accepted"
+            );
+        } else if nackl.window_used + needed > nackl.daily_limit {
+            tracing::warn!(
+                amount = amount.0,
+                window_used = %nackl.window_used,
+                daily_limit = %nackl.daily_limit,
+                "the NACKL daily limit is nearly spent: this payout may be queued until the \
+                 limit has room"
+            );
         }
     }
 
@@ -5432,95 +5372,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_treasury_shortfall_is_refused_before_the_burn() {
-        // `treasuryBalance` is a new ABI binding no test called. Its check
-        // is the last of the five, so this also proves the four before it
-        // are reachable in sequence.
-        let short = format!("0x{:0>64x}", 999_999u64); // one µUSDC short
-        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_TREASURY, short)])).await;
-        let err = check_bridge_deploy(
-            &url,
-            Address::repeat_byte(1),
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(1_000_000),
-        )
-        .await
-        .expect_err("withdrawByProof would revert WithdrawTreasuryShortfall");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("WithdrawTreasuryShortfall"),
-            "must name the revert: {msg}"
-        );
-        assert!(msg.contains("999999"), "must show what is there: {msg}");
-        assert!(msg.contains("1000000"), "must show what is needed: {msg}");
-        assert!(
-            msg.contains("not a guarantee"),
-            "must not promise the treasury will still be there: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn exactly_enough_treasury_is_not_a_shortfall() {
-        // The boundary the `<` sits on. `<=` here would refuse every
-        // withdrawal that drains the treasury exactly.
-        let exact = format!("0x{:0>64x}", 1_000_000u64);
-        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_TREASURY, exact)])).await;
-        check_bridge_deploy(
-            &url,
-            Address::repeat_byte(1),
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(1_000_000),
-        )
-        .await
-        .expect("a treasury holding exactly the withdrawal amount is enough");
-    }
-
-    #[tokio::test]
-    async fn withdrawal_transfer_ceiling_is_checked_before_burning() {
-        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
-        let bridge = Address::repeat_byte(1);
-        check_bridge_deploy(
-            &url,
-            bridge,
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(50_000_000),
-        )
-        .await
-        .unwrap();
-        let err = check_bridge_deploy(
-            &url,
-            bridge,
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(50_000_001),
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("payout cap"), "{err}");
-        let broken = mock_rpc_code_for(
-            &full_walk_code(),
-            full_walk(&[(SEL_PAYOUT_CAP, "0x".to_string())]),
-        )
-        .await;
-        let err = check_bridge_deploy(
-            &broken,
-            bridge,
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(1),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("cannot read the USDC payout cap"),
-            "a bridge that cannot answer the listing is not one to burn ECC against: {err}"
-        );
-    }
-
-    #[tokio::test]
     async fn a_lowered_deposit_cap_does_not_block_a_valid_payout() {
         let url = mock_rpc_code_for(
             &full_walk_code(),
@@ -5567,7 +5418,6 @@ pub(crate) mod tests {
                 &UsdcAmount(1_000_000),
                 4,
                 expected,
-                false,
             )
             .await;
             match result {

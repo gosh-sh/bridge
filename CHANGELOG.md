@@ -91,8 +91,8 @@ assigns it when the release is tagged.
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
   amount and recipient from the receipt.
 - `ackinacki-bridge deposit` JSON `finalize`: `sent` or `already_finalized` once credited.
-- `ackinacki-bridge withdraw` over a burn already on the wire no longer refuses on the payout cap or
-  the treasury before proving; the dry run before the send decides.
+- `ackinacki-bridge withdraw` no longer reads the EVM bridge's payout cap and treasury before burning;
+  the Acki Nacki bridge's `getTotalBridged` and the chain's limits decide.
 - `ackinacki-bridge withdraw --token nackl` withdraws NACKL; a queued payout ends with
   `submit.status: "queued"`, `payout_id` and `ready_at`, and a re-run does not resend the proof.
 - `ackinacki-bridge deposit` of NACKL exits 38 (`CreditPending`) while the deposit is pending;

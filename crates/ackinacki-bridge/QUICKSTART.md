@@ -116,8 +116,8 @@ echo "exit=$?"
 Exit 0 means nothing about either chain is misconfigured: the multisig is
 active and single-custodian, the key file is readable and matches the
 on-chain custodian, ECC[3] covers the amount, the RPC answers on the right
-chain id, the bridge is deployed with a complete verifier stack, and its
-treasury can pay you.
+chain id, and the bridge is deployed with a complete verifier stack. The
+EVM bridge's treasury is not read: the Acki Nacki bridge's limits decide.
 
 It does **not** mean a real run will succeed — a dry run has no prover
 plumbing, so it never checks the verifier files, the ceremony or the key

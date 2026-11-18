@@ -71,12 +71,14 @@ pipeline:
    must hold code, the withdrawal verifier stack must walk (adapter →
    `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
    pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
-   `treasuryBalance` must already cover the amount, and the window-heights
+   and the window-heights
    read stage 4b will need must succeed now (one `LayerAnchorAppended` scan
    back from the head, plus one probe `eth_getLogs` over the configured
    span). **So a dry run can
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
-   half-wired deploy, a drained treasury — not only AN-side ones.**
+   half-wired deploy — not only AN-side ones.** How much may be withdrawn
+   is the Acki Nacki bridge's answer (`getTotalBridged`, the chain's
+   limits); the EVM bridge's payout cap and treasury are not read.
 
    *Real runs only*, because these need the submit-only flags: the burner
    key parses, the KZG ceremony resolves at k=20 **and** k=21, the
@@ -525,8 +527,7 @@ code and the same remedy. See "Exit codes" for the four it can produce.
 single-custodian check, USDCBridge resolution and the balance check all
 run — and so does the whole EVM side, which needs no signing key:
 `eth_chainId` against `--to-chain`, code at `--bridge-address`, the
-verifier-stack walk, the pinned-identity comparison and the treasury
-check. A dry run that fails may be telling you about your RPC or your
+verifier-stack walk and the pinned-identity comparison. A dry run that fails may be telling you about your RPC or your
 bridge deploy, not about your multisig.
 
 What it does **not** do: compose or sign the burn, capture, prove, or run

@@ -212,7 +212,7 @@ pub struct WithdrawFlags {
     ///
     /// Runs every check that needs no submit-only flag — the Acki Nacki
     /// account, multisig and key checks, and the EVM side (chain id,
-    /// bridge deploy, verifier stack, pinned identity, treasury).
+    /// bridge deploy, verifier stack, pinned identity).
     ///
     /// Does NOT compose or sign the burn message, and does NOT check the
     /// prover artifacts (`--params-dir`, `--verifiers-dir`,

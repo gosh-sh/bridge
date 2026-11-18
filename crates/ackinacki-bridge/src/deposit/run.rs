@@ -1325,8 +1325,6 @@ async fn walk(
                 .map_or(0, |(_, v)| *v)
         });
     let mut anchor_waited = None;
-    // Since when `deposit proof`'s transaction has not been shown.
-    let mut lost_since: Option<Instant> = None;
     let mut block_seen = None;
     loop {
         phase = match phase {
@@ -1383,36 +1381,18 @@ async fn walk(
                         Phase::anchor(p)
                     },
                     Outcome::Final(n) => return Err(negative(d, store, rec, n).await),
-                    // `deposit proof` binds the one transaction it was given: a
-                    // contract wallet's deposit has no sender's nonce slot to
-                    // search, so the same hash is read again.
-                    // Within --recovery-window-s: a lagging RPC shows it again; a
-                    // reorg that dropped it does not.
+                    // `deposit proof` binds the one transaction it was given:
+                    // when the node does not show it, that is the answer.
                     Outcome::Lost if rec.found_by_tx => {
-                        let since = *lost_since.get_or_insert_with(Instant::now);
-                        if since.elapsed() >= p.recovery_window {
-                            return Err(err(
-                                ExitCode::DepositOutcomeUnknown,
-                                Stage::Deposit,
-                                &op,
-                                format!(
-                                    "the node has not shown the deposit transaction {:#x} for {} \
-                                     s: a reorg dropped it, or the RPC lags. Continue with \
-                                     `deposit --resume {op}`; if the deposit went in under \
-                                     another transaction, release this operation with `deposit \
-                                     --abandon {op}` and run `deposit proof --tx-hash` with that \
-                                     one",
-                                    claim.tx_hash,
-                                    since.elapsed().as_secs()
-                                ),
-                            ));
-                        }
-                        ui.warn(
-                            "the node does not show the deposit transaction now; reading it again \
-                             (deposit proof binds no other transaction)",
-                        );
-                        tokio::time::sleep(d.polls.evm).await;
-                        Phase::Confirm
+                        return Err(err(
+                            ExitCode::DepositOutcomeUnknown,
+                            Stage::Deposit,
+                            &op,
+                            format!(
+                                "the node does not show the deposit transaction {:#x}",
+                                claim.tx_hash
+                            ),
+                        ));
                     },
                     Outcome::Lost => {
                         ui.warn(

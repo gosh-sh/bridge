@@ -1138,18 +1138,31 @@ pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<
             ),
         ));
     };
+    // An operation of the same wallet whose outcome is unknown binds any
+    // deposit in its nonce slot by its own rules, as `--resume --tx-hash`
+    // also refuses.
+    let in_its_slot = |r: &OpRecord| {
+        r.is_unresolved()
+            && r.from == Some(tx.from)
+            && r.tx.is_none()
+            && !r.abandoned_ever
+            && r.request
+                .as_ref()
+                .is_some_and(|q| q.nonce_before == tx.nonce)
+    };
     if let Some(r) = store.list()?.into_iter().find(|r| {
         r.stage != OpStage::Failed
             && (r.tx.is_some_and(|t| t.tx_hash == tx_hash)
-                || r.request.as_ref().and_then(|q| q.wallet_hash) == Some(tx_hash))
+                || r.request.as_ref().and_then(|q| q.wallet_hash) == Some(tx_hash)
+                || in_its_slot(r))
     }) {
         return Err(CliError::deposit(
             ExitCode::DuplicateRefused,
             Stage::Preflight,
             Some(&r.op_id),
             format!(
-                "operation {} in {} already holds the deposit {tx_hash:#x}: continue it with \
-                 `deposit --resume {}` (nothing was sent)",
+                "operation {} in {} holds, or may hold, the deposit {tx_hash:#x}: continue it \
+                 with `deposit --resume {} --tx-hash {tx_hash:#x}` (nothing was sent)",
                 r.op_id,
                 p.state_dir.display(),
                 r.op_id
@@ -1352,6 +1365,17 @@ async fn walk(
                         Phase::anchor(p)
                     },
                     Outcome::Final(n) => return Err(negative(d, store, rec, n).await),
+                    // `deposit proof` binds the one transaction it was given: a
+                    // contract wallet's deposit has no sender's nonce slot to
+                    // search, so the same hash is read again.
+                    Outcome::Lost if rec.found_by_tx => {
+                        ui.warn(
+                            "the node does not show the deposit transaction now; reading it again \
+                             (deposit proof binds no other transaction)",
+                        );
+                        tokio::time::sleep(d.polls.evm).await;
+                        Phase::Confirm
+                    },
                     Outcome::Lost => {
                         ui.warn(
                             "the deposit transaction left the chain (a reorg or a replacement); \

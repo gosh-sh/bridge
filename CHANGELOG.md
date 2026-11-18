@@ -23,11 +23,14 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- Deploy `eccBridge` 1.18.0 (code hash `4a9712b7…`) with a fresh testnet EVM bridge and upgrade `ackinacki-bridge` and `deposit-relayer` together. Earlier testnet deposits are outside this migration.
+- Deploy `eccBridge` 1.18.0 (code hash `4a9712b7…`) with a fresh testnet EVM bridge and upgrade `ackinacki-bridge` and `deposit-relayer` together. Start the relayer with a fresh `--state-dir` for the new EVM bridge. Earlier testnet deposits are outside this migration.
+- `ackinacki-bridge deposit` raises its minimum supported bridge version (`MIN_BRIDGE_VERSION`) to 1.18.0. Update scripts that handled exit 37 to resume with `deposit --resume <op-id>` on exit 34.
 
 ### Fixes
 
-- The CLI and `deposit-relayer` use `getDepositStatus` and `retryDeposit` to finish a pending AN credit once capacity is available. Resume a timed-out CLI operation with `deposit --resume <op-id>`.
+- `finalizeDeposit` returns 245 for an already recorded deposit, and `retryDeposit` returns 246 for an unknown or already minted deposit. Read `getDepositStatus` to distinguish pending (1) from minted (2).
+- Keep `deposit-relayer-state.json` when restarting against the same deployment. The relayer retries pending credits even after Ethereum prunes the receipt. A retry without a VM exit code stays queued for another attempt.
+- The CLI retries pending credits automatically and reports the source chain's TVL cap (235) while waiting for withdrawals to free capacity.
 
 ## [0.9.0]
 

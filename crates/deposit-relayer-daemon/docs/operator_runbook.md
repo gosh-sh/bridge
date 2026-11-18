@@ -49,7 +49,7 @@ takes a few RPC calls and no noticeable memory.
 | `DEPOSIT_RELAYER_STATE_DIR`, `DEPOSIT_RELAYER_LOG_DIR` | two absolute directories on persistent disk (`--state-dir`, `--log-dir`; bridge-audit#132) | The state directory holds `deposit-relayer-state.json`, its lock and the temporary file of its atomic write; the log directory the daemon's own log (a file per day, beside stdout). Nothing goes to the system temp directory or `$HOME`. `--work-dir` / `DEPOSIT_RELAYER_WORK_DIR` are gone with the prover; remove them from the command line. |
 | State file backup | copy it every few minutes, with the keys | The file is replaced atomically (temp file, `fsync`, `rename`, in `RelayerState::save`), so a plain `cp` always reads a complete file. The copy is what keeps `parked_deposit_ids` if the host dies. |
 | bridge ABI | built into the binary (`crates/ackinacki-bridge/abi/USDCBridge.abi.json` at build time) | No ABI file is read (bridge-audit#132); a daemon built from a commit whose ABI lacks a getter the contract has is upgraded, not reconfigured. |
-| `RPC_URL` | an endpoint that serves `eth_getLogs`, `eth_getTransactionReceipt`, `eth_getBlockByHash` and **`eth_getBlockReceipts`** for at least the last 7 days, 30 preferred, and `eth_getLogs` back to `FROM_BLOCK` while `state.json` has no cursor | The scan finds a deposit with `eth_getLogs`; the receipt proof needs the receipt of every transaction in the deposit's block, read in one `eth_getBlockReceipts` call. A node without that method fails every deposit as `proof_failed`. A node that keeps ~10 000 blocks, as some public endpoints do, drops receipts after about a day on Ethereum and within an hour on Arbitrum; a deposit older than that cannot be finalized through it. The margin is what lets the relayer catch up after a stall. |
+| `RPC_URL` | an endpoint that serves `eth_getLogs`, `eth_getTransactionReceipt`, `eth_getBlockByHash` and **`eth_getBlockReceipts`** for at least the last 7 days, 30 preferred, and `eth_getLogs` back to `FROM_BLOCK` while `state.json` has no cursor | The scan finds a deposit with `eth_getLogs`; the receipt proof needs the receipt of every transaction in the deposit's block, read in one `eth_getBlockReceipts` call. A node without that method fails every deposit as `proof_failed`. A node that keeps ~10 000 blocks, as some public endpoints do, drops receipts after about a day on Ethereum and within an hour on Arbitrum; a deposit older than that needs an archival RPC for its initial proof. The daemon can retry an accepted deposit from its AN record. The margin is what lets the relayer catch up after a stall. |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
 | `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the bridge reports status 2, so it is not submitted again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
 | `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks: a broken deposit stays in `outstanding_deposits` and later ids still go through. That queue also contains normal anchor waits; monitor failed attempts and prolonged waits as described in §7. |
@@ -78,9 +78,11 @@ age starts at `anchor_wait_started_unix`. Thus an old uncovered block does
 not cause an anchor getter, deposit status lookup and state write on every daemon
 tick. `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. These deadlines
 survive restarts and do not delay fresh deposits behind older waits.
-A retry uses the cached event when available, otherwise the stored Deposit
-tx's receipt (or its block), so the log-scan cursor can keep moving with later
-deposits. An outstanding id that has no stored log — a `state.json`
+On a retry, the daemon checks `getDepositStatus` using the outstanding deposit ID
+and the EVM bridge address and chain ID in `state.json`'s deployment binding.
+Status 1 triggers `retryDeposit` even if the RPC has pruned the receipt. Status 2
+completes the queue entry. For status 0, the daemon still needs the cached event
+or its Ethereum receipt to build the initial proof. An outstanding id that has no stored log — a `state.json`
 written by an earlier relayer that only recorded `attempts_since_progress` — is
 scanned from the `scan_done_through_block` that file had on load, plus one,
 with a fallback to `--from-block` if that snapshot was already past the deposit.
@@ -90,8 +92,8 @@ A stuck deposit no longer holds every later user. What gets the stuck one moving
 1. **On its own**, a transient failure (RPC blip, a node missing the block's receipts) is
    retried with that
    per-id backoff on retry turns. A pending submit is retried at the base delay (it
-   does not count as an attempt). A retry with a stored tx uses the cached
-   event or receipt and makes no `eth_getLogs` walk from the shared cursor.
+   does not count as an attempt). A transport failure with no bridge exit code
+   during `retryDeposit` also leaves the ID outstanding.
 2. **With `--skip-after-attempts N`**, after N consecutive *failed* attempts (a
    receipt-proof failure or a rejection by AN) the deposit is **parked**. It is appended to
    `parked_deposit_ids`, dropped from outstanding, and the log shows `daemon: deposit

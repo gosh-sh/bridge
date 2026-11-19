@@ -84,17 +84,20 @@ function getCommitteeState() external view returns (uint256, uint256, uint64, bo
    `require(currentCommitteeCommitment == _currentCommittee)` — chain to trusted;
 3. `require(nextCommitteeCommitment != _currentCommittee)` (`ERR_SELF_ROTATION`,
    253) — a hand-off has to move the committee; the proof for `next == current`
-   exists at every period boundary and would only evict `_prevCommittee`;
+   exists at every period boundary and would file the committee in force as
+   the next period's;
 4. `require(attestedSlot / 8192 + 1 == period)` (`ERR_BAD_PUBLIC_INPUTS`, 240).
    There is no end-of-period window: a `/updates` best update is a valid
    hand-off;
 5. `tvm.accept()` then `require(gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof))`;
-6. keep the replaced commitment in `_prevCommittee` with the head it left in
-   `_prevCommitteeHeadSlot`, advance `_currentCommittee = next`, and store
-   `_committeePeriod = period`; emit `CommitteeRotated` with that period.
+6. record the head in `_prevCommitteeHeadSlot`, advance
+   `_currentCommittee = next`, store `_committeePeriod = period` and
+   `_committees[period] = next`, and drop the committees older than the
+   last seven periods; emit `CommitteeRotated` with that period.
 
-The replaced committee may still advance the head for the period it served
-(`attestedSlot / 8192 + 1 == _committeePeriod`).
+The replaced committees may still advance the head for the periods they
+served: a step is accepted from the committee held for its attested slot's
+period or the next one.
 
 The **trust-reduction switch** mirrors `USDCBridge`'s
 per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotationEnabled` the

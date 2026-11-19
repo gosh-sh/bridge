@@ -33,7 +33,8 @@ background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
 `--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
 and sends `submitRotate` when the bundle passes its checks against the
 contract (`docs/eth-light-client.md` §3.3) and no queued checkpoint is
-signed before period P, which the new committee would not take. `--no-rotate` turns it off;
+attested before period P−6, which the contract stops taking after the
+rotate (`EthBeaconLightClient` 1.8.0 holds seven committees). `--no-rotate` turns it off;
 `--owner-hop` is the fallback at the boundary when no rotate was sent.
 The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).
 

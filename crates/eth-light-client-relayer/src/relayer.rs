@@ -286,6 +286,9 @@ const MAX_ROTATE_SENDS: u32 = 5;
 
 /// Failed rotates of one period before it is not started again.
 const MAX_ROTATE_FAILURES: u32 = 3;
+/// Committees `EthBeaconLightClient` holds (`KEPT_COMMITTEES`, from 1.8.0):
+/// the one in force and the six it replaced last.
+const KEPT_COMMITTEES: u64 = 7;
 
 /// Wait after the first failed rotate of a period; doubled after each next.
 const ROTATE_RETRY_BACKOFF: Duration = Duration::from_secs(10 * 60);
@@ -782,12 +785,13 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         }
     }
 
-    /// After a rotate from `from` the contract takes steps signed in `from`
-    /// (by the committee it replaced) and in `from + 1`, and none older. A
-    /// queued checkpoint with an older signer could then never go on chain,
-    /// and the head would stand on it for good: a rotate sent while the head
-    /// was still a period behind left a whole period of checkpoints that way.
-    /// The proof waits until the head is past them.
+    /// After a rotate from `from` the contract holds the committees of
+    /// periods `from + 2 - KEPT_COMMITTEES` to `from + 1`, and takes a step
+    /// whose header is attested in one of them or in the period before the
+    /// oldest. A queued checkpoint attested earlier could then never go on
+    /// chain, and the head would stand on it for good: a rotate sent while the
+    /// head lagged behind left a whole period of checkpoints that way. The
+    /// proof waits until the head is past them.
     fn rotate_would_orphan(&self, from: u64) -> Option<String> {
         let recorded = self.state.last_finalized_slot;
         let taken = lock(&self.taken);
@@ -795,7 +799,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             .queue
             .iter()
             .find(|u| recorded.is_none_or(|r| u.finalized_slot > r))?;
-        (front.signing_period() < from).then(|| {
+        (front.signing_period() + KEPT_COMMITTEES < from + 1).then(|| {
             format!(
                 "the rotate from period {from} waits for checkpoint {} (signed in period {}): the \
                  committee after it would not take that checkpoint",
@@ -2411,43 +2415,60 @@ mod tests {
         assert_eq!(r.rotate_running(), None);
     }
 
-    /// A rotate proof that is ready while a checkpoint signed before its
-    /// period is still queued waits for that checkpoint: sent, it would leave
-    /// the checkpoint without a committee the contract takes.
+    /// A rotate proof that is ready while a queued checkpoint is attested
+    /// before the oldest period the contract holds after it waits for that
+    /// checkpoint: sent, it would leave the checkpoint without a committee the
+    /// contract takes.
     #[tokio::test]
-    async fn a_rotate_waits_for_the_checkpoints_its_committee_would_not_take() {
+    async fn a_rotate_waits_for_the_checkpoints_its_committees_would_not_take() {
         let p = SLOTS_PER_SYNC_PERIOD;
         let dir = tempdir().unwrap();
-        let mut rig = rotate_rig(
-            vec![
-                update(p - 60, p - 64),
-                update(p - 28, p - 32),
-                update(p + 70, p + 64),
-                update(p + 102, p + 96),
-            ],
-            false,
-            crate::rotate::MockRotateRunner::new([0xC0; 32]),
-            dir.path(),
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = true;
+        let source = InMemoryBeaconSource::new(vec![
+            update(p - 60, p - 64),
+            update(p - 28, p - 32),
+            update(8 * p + 70, 8 * p + 64),
+            update(8 * p + 102, 8 * p + 96),
+        ]);
+        for period in [7, 8] {
+            source.set_period_update(period, period_update(period * p + 100));
+        }
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        // The contract rotated to period 8 while the head was in period 0.
+        submitter.set_committee_period(8);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(source),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap()
+        .with_rotate(
+            Arc::new(crate::rotate::MockRotateRunner::new([0xC0; 32])),
+            dir.path().join("work"),
+            crate::rotate::MockRotateRunner::vk_pin(),
         );
-        let r = &mut rig.relayer;
         assert!(matches!(
             r.tick().await.unwrap(),
             TickOutcome::SubmittedUpdate { .. }
         ));
-        // The checkpoint signed in period 0 does not get through.
-        rig.submitter.set_gateway_error(true);
+        // The checkpoint attested in period 0 does not get through.
+        submitter.set_gateway_error(true);
         r.tick().await.unwrap();
         r.tick().await.unwrap();
-        assert_eq!(r.rotate_running(), Some(1));
+        assert_eq!(r.rotate_running(), Some(8));
         r.wait_for_rotate().await;
         r.tick().await.unwrap();
         assert_eq!(
-            rig.submitter.rotate_submits(),
+            submitter.rotate_submits(),
             0,
-            "the rotate from period 1 must wait for the checkpoint signed in period 0"
+            "after a rotate from period 8 the contract holds periods 3 to 9 and takes no step \
+             attested in period 0"
         );
 
-        rig.submitter.set_gateway_error(false);
+        submitter.set_gateway_error(false);
         let out = r.tick().await.unwrap();
         assert!(
             matches!(out, TickOutcome::SubmittedUpdate {
@@ -2456,10 +2477,39 @@ mod tests {
             } if finalized_slot == p - 32),
             "{out:?}"
         );
-        assert_eq!(rig.submitter.rotate_submits(), 0);
+        assert_eq!(submitter.rotate_submits(), 0);
         let out = r.tick().await.unwrap();
         assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
-        assert_eq!(rig.submitter.rotate_submits(), 1);
+        assert_eq!(submitter.rotate_submits(), 1);
+    }
+
+    /// Inside the window the rotate does not wait: a checkpoint attested six
+    /// periods before the rotate's is still taken after it.
+    #[test]
+    fn a_checkpoint_inside_the_held_window_does_not_hold_the_rotate() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.enable_rotate = false;
+        let r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![])),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        lock(&r.taken)
+            .queue
+            .push(update(2 * p + 70, 2 * p + 64))
+            .unwrap();
+        assert!(
+            r.rotate_would_orphan(8).is_none(),
+            "attested in 2, held after 8 -> 9"
+        );
+        assert!(
+            r.rotate_would_orphan(9).is_some(),
+            "attested in 2, gone after 9 -> 10"
+        );
     }
 
     /// A restart after a stage was cut short: the finished stages are not run

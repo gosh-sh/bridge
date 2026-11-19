@@ -67,3 +67,4 @@ steps:
       - python3 scripts/check_an_artefacts.py
       - python3 scripts/check_withdrawal_event_header.py
       - python3 scripts/test_an_bridge_limits.py
+      - python3 scripts/test_an_light_client_committees.py

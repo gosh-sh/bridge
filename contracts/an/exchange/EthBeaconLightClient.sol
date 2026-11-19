@@ -36,15 +36,17 @@ import "./eccBridge.sol";
 ///         outside it:
 ///           * that the signing committee is the *chain-anchored* one —
 ///             enforced by matching `committeeCommitment` to the commitment
-///             this contract holds: the one in force, or the one a rotation
-///             replaced, for the period that replaced committee served
-///             (`attestedSlot / 8192 + 1 == _committeePeriod`). The
-///             replaced committee may still move the head in that period,
-///             so an early `/updates` best-update hand-off does not freeze
-///             the remaining checkpoints of the old period. Bootstrapped
-///             from a weak-subjectivity checkpoint; advanced by
-///             `submitRotate`. After `disableOwnerRotation`, the owner
-///             hatch is `reAnchorCommittee`.
+///             this contract holds for the period the header was signed in.
+///             It holds the committees of the last `KEPT_COMMITTEES` periods
+///             (about 8 days), and takes committee `q` for headers attested
+///             in `q` or `q - 1`: the last header of a period is signed in
+///             the next one. A replaced committee may
+///             still move the head for its own period, so neither an early
+///             `/updates` best-update hand-off nor a rotation sent while a
+///             relayer lags behind strands the checkpoints of the periods
+///             before it. Bootstrapped from a weak-subjectivity checkpoint;
+///             advanced by `submitRotate`. After `disableOwnerRotation`, the
+///             owner hatch is `reAnchorCommittee`.
 ///
 ///             The rotate proof exposes the attested slot of that hand-off
 ///             and binds `period` to `attestedSlot / 8192 + 1`. There is no
@@ -54,9 +56,9 @@ import "./eccBridge.sol";
 ///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
 ///         hash (1/32). The head only moves forward, but a skipped checkpoint
 ///         can still be late-registered behind it, with its own proof and
-///         its own slot (`CheckpointBackfilled`), signed by the committee in
-///         force or by the one a rotation replaced, which is what rescues a
-///         skip at a period edge in the honest case.
+///         its own slot (`CheckpointBackfilled`), signed by any committee
+///         this contract still holds, which is what rescues a skip at a
+///         period edge, or a relayer that fell behind, in the honest case.
 ///         `submitAncestry` admits the blocks behind an already-proven one:
 ///         headers oldest first, 2 to 33 of them, the last one proven, each
 ///         hashed with `gosh.keccak256` and linked by RLP `parentHash`. Every
@@ -68,7 +70,7 @@ import "./eccBridge.sol";
 ///         older than that cannot `finalizeDeposit` against this oracle, and a
 ///         skipped checkpoint older than that cannot be late-registered.
 contract EthBeaconLightClient {
-    string constant version = "1.7.0";
+    string constant version = "1.8.0";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -79,6 +81,12 @@ contract EthBeaconLightClient {
     uint64 constant PROVEN_WINDOW_SLOTS = 100_800;
     // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
     uint64 constant SLOTS_PER_PERIOD = 8192;
+    // Committees held: the one in force and the six before it, about 8 days.
+    // A step signed by any of them for its own period is accepted, so a
+    // relayer that falls behind by less than that does not lose checkpoints
+    // to a rotation — which anyone may send, the proof being the
+    // authorization. Inside the 14-day proven window.
+    uint64 constant KEPT_COMMITTEES = 7;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
@@ -237,20 +245,19 @@ contract EthBeaconLightClient {
     uint256 _finalizedExecutionBlockHash;
     uint64  _updatesApplied;
 
-    // The trusted sync-committee Poseidon commitment for the current period.
-    // A step proof's committee_commitment (PI #5) must equal this, or the
-    // commitment this one replaced (`_prevCommittee`) for the period that
-    // committee served. That is the join that pins the aggregated signers to a
-    // chain-anchored committee.
+    // The trusted sync-committee Poseidon commitment for the current period,
+    // which a rotate proof's current_commitment must equal.
     // Fail-closed: 0 rejects all updates until bootstrapped.
     uint256 _currentCommittee;
-    // The commitment `_currentCommittee` replaced. A checkpoint skipped near
-    // the end of a period would otherwise be lost the moment the committee
-    // rotates: its proof carries the old commitment. Accepted for the period
-    // that committee served (`attestedSlot / 8192 + 1 == _committeePeriod`),
-    // including to move the head. 0 before the first rotation.
-    uint256 _prevCommittee;
-    // The finalized slot the head stood on when `_prevCommittee` left office.
+    // The trusted commitments by the period they serve: `_currentCommittee`
+    // at `_committeePeriod`, and the ones rotations replaced, down to
+    // `KEPT_COMMITTEES - 1` periods before it. A step proof's
+    // committee_commitment (PI #5) must equal the one of the period its
+    // header was signed in. That is the join that pins the aggregated signers
+    // to a chain-anchored committee. An owner path clears the older ones.
+    mapping(uint64 => uint256) _committees;
+    // The finalized slot the head stood on when the last rotation replaced
+    // the committee in force.
     // Nothing reads it; it is kept for the storage layout.
     uint64 _prevCommitteeHeadSlot;
 
@@ -324,8 +331,7 @@ contract EthBeaconLightClient {
                 ERR_WRONG_CODE_SALT);
         _ownerPubkey = pubkey;
         _l1ChainId = l1ChainId;
-        _currentCommittee = bootstrapCommittee;
-        _committeePeriod = bootstrapPeriod;
+        _setOnlyCommittee(bootstrapCommittee, bootstrapPeriod);
     }
 
     modifier accept() {
@@ -392,16 +398,10 @@ contract EthBeaconLightClient {
         if (late) {
             require(_withinWindow(pi.finalizedSlot), ERR_STALE_UPDATE);
         }
-        // The signer is the committee in force, or the one a rotation
-        // replaced, in the period that replaced committee served
-        // (`attestedSlot / 8192 + 1` equals `_committeePeriod`). That
-        // path may advance the head, so an early rotate does not freeze
-        // the rest of the old period.
-        bool currentSigner = pi.committeeCommitment == _currentCommittee;
-        bool prevSigner = _prevCommittee != 0
-            && pi.committeeCommitment == _prevCommittee
-            && pi.attestedSlot / SLOTS_PER_PERIOD + 1 == _committeePeriod;
-        require(currentSigner || prevSigner, ERR_WRONG_COMMITTEE);
+        // The signer is the committee of the period the header was signed
+        // in, one this contract still holds. Any of them may advance the
+        // head, so a rotation does not freeze the checkpoints behind it.
+        require(_signedByHeldCommittee(pi), ERR_WRONG_COMMITTEE);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -487,10 +487,9 @@ contract EthBeaconLightClient {
         // The hand-off must move the committee. The last header of a period
         // is signed in the next one, and its state's `next_sync_committee` is
         // still the signer, so a genuine proof with `next == current` exists
-        // for every boundary. Without this it would pass, change nothing
-        // visible, and overwrite `_prevCommittee` with `_currentCommittee` —
-        // silently stranding every checkpoint the replaced committee had not
-        // registered yet.
+        // for every boundary. Without this it would pass and file the
+        // committee in force as the next period's, which then refuses every
+        // step the real next committee signs, and every rotate from it.
         require(pi.nextCommitteeCommitment != _currentCommittee, ERR_SELF_ROTATION);
         // The circuit binds `period` to `attestedSlot / 8192 + 1`. Repeat that
         // equality here so a malformed instance is refused before accept.
@@ -506,14 +505,7 @@ contract EthBeaconLightClient {
 
         ensureBalance();
 
-        uint256 from = _currentCommittee;
-        _prevCommittee = from;
-        _prevCommitteeHeadSlot = _finalizedSlot;
-        _currentCommittee = pi.nextCommitteeCommitment;
-        // The period the installed committee serves: the attested slot's
-        // period plus one, proven by the circuit. Late registration of a
-        // skipped checkpoint by the replaced committee is this period.
-        _committeePeriod = pi.period;
+        uint256 from = _installRotated(pi.nextCommitteeCommitment, pi.period);
 
         address addrExtern = address.makeAddrExtern(CommitteeRotatedEmit, bitCntAddress);
         emit CommitteeRotated{dest: addrExtern}(
@@ -727,12 +719,10 @@ contract EthBeaconLightClient {
     {
         require(_ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
         ensureBalance();
-        // A correction, not a hand-off: the committee being replaced is the
-        // one the owner is rejecting, so it must not keep write access.
-        _prevCommittee = 0;
+        // A correction, not a hand-off: the committees being replaced are
+        // the ones the owner is rejecting, so they must not keep write access.
         _prevCommitteeHeadSlot = 0;
-        _currentCommittee = committeeCommitment;
-        _committeePeriod = period;
+        _setOnlyCommittee(committeeCommitment, period);
     }
 
     /// @notice Disables the routine owner committee path
@@ -799,10 +789,8 @@ contract EthBeaconLightClient {
         uint256 from = _currentCommittee;
         // Same reasoning as `setCommitteeCommitment`, and a re-anchor may jump
         // over several periods, so what it replaces is not the period before.
-        _prevCommittee = 0;
         _prevCommitteeHeadSlot = 0;
-        _currentCommittee = committeeCommitment;
-        _committeePeriod = period;
+        _setOnlyCommittee(committeeCommitment, period);
         _reAnchorsApplied += 1;
         address addrExtern = address.makeAddrExtern(CommitteeReAnchoredEmit, bitCntAddress);
         emit CommitteeReAnchored{dest: addrExtern}(period, from, committeeCommitment);
@@ -875,16 +863,14 @@ contract EthBeaconLightClient {
         _finalizedBeaconRoot = finalizedBeaconRoot;
         _finalizedExecutionBlockHash = finalizedExecutionBlockHash;
         _updatesApplied = updatesApplied;
-        _currentCommittee = currentCommittee;
-        // Not in the migration cell: the cell is built by the code being
-        // replaced, and the live 1.4.1 client knows nothing of this field.
-        // Adding it here would read 256 bits from where the period and the
-        // flags sit and corrupt the trust root. An upgraded client starts
-        // with no previous committee, which only means no catch-up across the
-        // rotation already behind it.
-        _prevCommittee = 0;
+        // The older committees are not in the migration cell: the cell is
+        // built by the code being replaced, and a 1.7.0 client sends no such
+        // field. Reading one here would take bits from where the period and
+        // the flags sit and corrupt the trust root. An upgraded client starts
+        // with the committee in force only, which only means no catch-up
+        // across the rotations already behind it.
         _prevCommitteeHeadSlot = 0;
-        _committeePeriod = committeePeriod;
+        _setOnlyCommittee(currentCommittee, committeePeriod);
         _ownerRotationEnabled = ownerRotationEnabled;
         _reAnchorsApplied = reAnchorsApplied;
         _provenEthSlot = provenEthSlot;
@@ -961,13 +947,20 @@ contract EthBeaconLightClient {
         bool    ownerRotationEnabled,
         uint64  reAnchorsApplied
     ) {
-        return (
-            _currentCommittee,
-            _prevCommittee,
-            _committeePeriod,
-            _ownerRotationEnabled,
-            _reAnchorsApplied
-        );
+        currentCommittee = _currentCommittee;
+        if (_committeePeriod > 0) {
+            optional(uint256) prev = _committees.fetch(_committeePeriod - 1);
+            if (prev.hasValue()) { prevCommittee = prev.get(); }
+        }
+        committeePeriod = _committeePeriod;
+        ownerRotationEnabled = _ownerRotationEnabled;
+        reAnchorsApplied = _reAnchorsApplied;
+    }
+
+    /// @notice The committees held, by the period each serves: the one in
+    ///         force and up to `KEPT_COMMITTEES - 1` before it.
+    function getCommittees() external view returns (mapping(uint64 => uint256) committees) {
+        return _committees;
     }
 
     /// @notice The Gloas fork slot proofs are checked against, and whether it is
@@ -978,6 +971,57 @@ contract EthBeaconLightClient {
 
     function getVersion() external pure returns (string, string) {
         return (version, "EthBeaconLightClient");
+    }
+
+    // ========================================================
+    // Committees
+    // ========================================================
+
+    /// The step's signer is the committee held for the attested slot's period
+    /// or the next one: the last header of a period is signed in the next.
+    function _signedByHeldCommittee(StepPI pi) private view returns (bool) {
+        uint64 attested = pi.attestedSlot / SLOTS_PER_PERIOD;
+        optional(uint256) same = _committees.fetch(attested);
+        if (same.hasValue() && same.get() == pi.committeeCommitment) { return true; }
+        optional(uint256) next = _committees.fetch(attested + 1);
+        return next.hasValue() && next.get() == pi.committeeCommitment;
+    }
+
+    /// A verified hand-off: `next` serves `period`, the attested slot's
+    /// period plus one, proven by the circuit. The replaced committees stay
+    /// for the periods they served, `KEPT_COMMITTEES` in all. Returns the
+    /// committee it replaced.
+    function _installRotated(uint256 next, uint64 period) private returns (uint256 from) {
+        from = _currentCommittee;
+        _prevCommitteeHeadSlot = _finalizedSlot;
+        _currentCommittee = next;
+        _committeePeriod = period;
+        _committees[period] = next;
+        _dropCommitteesBefore(period);
+    }
+
+    /// Keep the committees of `KEPT_COMMITTEES` periods ending at `period`.
+    function _dropCommitteesBefore(uint64 period) private {
+        if (period < KEPT_COMMITTEES) { return; }
+        uint64 oldest = period - (KEPT_COMMITTEES - 1);
+        while (true) {
+            optional(uint64, uint256) first = _committees.min();
+            if (!first.hasValue()) { break; }
+            (uint64 p, ) = first.get();
+            if (p >= oldest) { break; }
+            delete _committees[p];
+        }
+    }
+
+    /// The owner paths: one committee in force, none behind it. 0 leaves
+    /// the contract unbootstrapped.
+    function _setOnlyCommittee(uint256 committeeCommitment, uint64 period) private {
+        delete _committees;
+        _currentCommittee = committeeCommitment;
+        _committeePeriod = period;
+        if (committeeCommitment != 0) {
+            _committees[period] = committeeCommitment;
+        }
     }
 
     // ========================================================

@@ -182,9 +182,10 @@ already-proven hashes still revert. The owner hatches
 (`setCommitteeCommitment`, `reAnchorCommittee`) leave no window to the
 committee they replace.
 
-The replaced committee is accepted for the period it served
-(`attestedSlot / 8192 + 1 == _committeePeriod`), including to move the
-head. There is no end-of-period window: a beacon `/updates` best update
+The contract holds the committees of the last seven periods
+(`KEPT_COMMITTEES`, `_committees` by period, from 1.8.0) and accepts each
+for headers attested in its period or the one before, including to move
+the head. There is no end-of-period window: a beacon `/updates` best update
 is a valid hand-off. Signing still needs a supermajority of the retired
 committee's keys. `_prevCommitteeHeadSlot` is kept for the storage
 layout; nothing reads it.

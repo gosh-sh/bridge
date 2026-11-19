@@ -44,7 +44,7 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client lets the replaced committee advance the head for the period it served, so an early `/updates` hand-off does not freeze it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client holds the committees of the last seven periods and lets each advance the head for the period it served, so neither an early `/updates` hand-off nor a rotation sent while a relayer lags freezes the checkpoints behind it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the KZG accumulation decider of tvm-sdk PR #284, released in tvm-sdk tag `v3.1.0.an` (the tag `acki-nacki` `dev` pins). A node built against an older tvm-sdk accepts a rotate proof without checking the inner proofs it aggregates. |
 | `USDCBridge` | `contracts/an/exchange/eccBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers besides the owner's `setAcceptedBlockHash`: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`), and `acceptBlockHashFromL2Verifier` (`eccBridge.sol:943`) from the `ArbitrumBlockVerifier` deployed for an Arbitrum chain (`deployL2Verifier`), which admits a block only once its parent-chain block is accepted. `disableOwnerAnchorsOn(chainId)` refuses `setAcceptedBlockHash` for one chain that has a light client or an L2 verifier (`:801-809`); every other chain keeps the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
@@ -164,8 +164,9 @@ shellnet runs): the public inputs parse; at least 342 of 512 committee members s
 enforced in-circuit); a committee is anchored at all; the Gloas fork slot is set (`ERR_FORK_SLOT_UNSET`,
 256) and the proof was made for it (`ERR_WRONG_FORK_SLOT`, 255); the finalized slot moves the head
 forward, or back-fills a skipped checkpoint; then the proof's
-committee commitment equals the one in force, or the one a rotation replaced and only for a
-back-fill inside its slot window; then `tvm.accept()` and the opcode. The slot test comes before
+committee commitment equals one the contract holds for the attested slot's period or the next
+one (the last header of a period is signed in the next); then `tvm.accept()` and the opcode. The
+contract holds the committee in force and the six before it, `KEPT_COMMITTEES` (1.8.0). The slot test comes before
 the committee test, so a stale update from a wrong committee fails `ERR_STALE_UPDATE` (244), not
 `ERR_WRONG_COMMITTEE` (242).
 The contract pays for the verification itself, which is why it holds a balance and why a bad
@@ -226,8 +227,10 @@ flowchart TD
   is the one the current committee signed for, so the chain of committees becomes trustless.
   The attested header's period is bound to `attestedSlot / 8192 + 1`; a beacon
   `/updates` best update (start of the old period) is a valid hand-off. The
-  replaced committee can still advance the head for the period it served, so
-  an early rotate does not freeze the rest of that period. The daemon
+  replaced committees stay for seven periods and can still advance the head
+  for the periods they served, so an early rotate does not freeze the rest
+  of a period, and one sent by anyone while the relayer lags less than about
+  8 days does not strand its queue. The daemon
   starts the rotate of period P as soon as the contract holds P and the
   beacon serves `/updates?start_period=P`: it fetches that update and the
   one of P−1 (whose next committee is the current one), and runs the three
@@ -238,8 +241,8 @@ flowchart TD
   verification key is not the pinned one
   (`eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256`)
   or whose current committee is not the contract's is refused and logged,
-  not sent. A bundle from P also waits while a queued checkpoint is signed by a committee older
-  than P's: after the rotate the contract takes steps signed in P and P+1 only, so sending it
+  not sent. A bundle from P also waits while a queued checkpoint is attested before period
+  P−6: after the rotate the contract holds the committees of P−5 to P+1 only, so sending it
   would leave that checkpoint without a committee for good. It needs the decider of tvm-sdk PR
   #284 in the node VM; on a
   network without it `submitRotate` proves less than it claims (§2), and
@@ -583,7 +586,8 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   `executionBlockHash`, `committeeCommitment`, `updatesApplied`; `getCommitteeState()`
   returns the committee, **`prevCommittee`**, period, `ownerRotationEnabled`, `reAnchorsApplied` —
   five values, with `prevCommittee` second, so read them by name and not by position. The period
-  is the last rotate proof's, which the circuit binds to its attested slot.
+  is the last rotate proof's, which the circuit binds to its attested slot. `getCommittees()`
+  (1.8.0) returns every committee held, by the period it serves.
 - Roots come back in the contract's encoding: `(hi << 128) | lo` over little-endian 16-byte
   halves. For `executionBlockHash` that is the *stored* key, not the word `finalizeDeposit`
   looks up: the bridge holds the Ethereum-order hash (§3.4). Byte-reverse each half of a `getHead` root to get the

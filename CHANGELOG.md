@@ -23,6 +23,14 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `EthBeaconLightClient` 1.8.0 (code hash `fe342e32…`) holds the committees of the last seven
+  periods (`getCommittees`) and takes a step from any of them for its own period; `eccBridge`, which
+  builds the client's data from its layout, is rebuilt (still 1.17.0, code hash `7c8f12f4…`).
+  An existing light client takes the new code with its own `updateCode` and keeps only its
+  committee in force; before any new `deployLightClient`, run `eccBridge.updateCode` and
+  `setLightClientCode` with the new code.
+- `eth-lc-relayer daemon` expects `EthBeaconLightClient` 1.8.0: it holds a finished `submitRotate`
+  from period P only while a queued checkpoint is attested before P−6.
 - `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
   its directories and the Circuit 4 keys in `params/relayer/`, rerun `finalize-params.sh` and set the new
   `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).
@@ -35,14 +43,16 @@ assigns it when the release is tagged.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.
+- `eth-lc-relayer arbitrum-anchors` reads the bridge's `depositCounter` each tick and its `Deposit`
+  logs only when the counter moved; `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
+  `eth_getProof` alone, so `ARBITRUM_RPC_URL` can be a public node. Set the proof URL to the node
+  that keeps minutes of state (Alchemy) and `ARBITRUM_RPC_URL` to a public one.
 
 ### Fixes
 
 - `eth-lc-relayer daemon` no longer resends a checkpoint that is already on chain for ever: after a
   `submitUpdate` that does not come back accepted it reads `getHead` and `isProvenExecutionBlockHash`
   and records the checkpoint. Upgrade `eth-lc-relayer`; its state file needs no edit.
-- `eth-lc-relayer daemon` holds a finished `submitRotate` from period P while a queued checkpoint is
-  signed before P, which the contract stops accepting once the committee moves on.
 - Errors of a message the Acki Nacki node refused now carry the contract's `exit_code=N`
   (`eth-lc-relayer`, `deposit-relayer`): `deposit-relayer` waits out `ERR_PAUSED`, `ERR_TVL_CAP` and
   the token gates instead of counting them as failed attempts.

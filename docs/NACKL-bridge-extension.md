@@ -36,7 +36,7 @@ invariant, a fuzz test or a scenario test.
 | **Unlock** | A NACKL deposit paid on Acki Nacki: the AN bridge sends NACKL it holds from earlier locks. |
 | **Locked amount** | Per destination chain: NACKL the AN bridge holds from locks to that chain and has not unlocked. The registry field `outstanding` of that chain's NACKL entry. |
 | **Locked to a bridge** | Per destination chain and EVM bridge: the total NACKL ever locked by withdrawals bound to that EVM bridge (never decreases). |
-| **Pending deposit** | A proven NACKL deposit the AN bridge could not pay because the locked amount was short. It waits on the AN bridge and is paid by `releasePendingDeposit`. |
+| **Refused deposit** | A proven deposit the AN bridge cannot pay when its voucher confirms it (for NACKL: the locked amount is short). The bridge pays nothing and releases the voucher, so the deposit can be finalized again. |
 | **Payout** | The NACKL a proven withdrawal owes on the EVM chain. |
 | **Queued payout** | A payout the EVM bridge did not mint at once. It is minted later by `executeNacklPayout`. |
 | **Daily limit** | `L`: the most NACKL the EVM bridge mints in any 24 hours. |
@@ -53,11 +53,11 @@ invariant, a fuzz test or a scenario test.
 | NB-AN-3 | When `initiateWithdrawal` receives NACKL registered for the destination chain for a recipient of 20 bytes (the form Circuit 4 proves) and every check passes, the AN bridge shall keep the NACKL, add the amount to that chain's locked amount and to the amount locked to the chain's EVM bridge, and emit `WithdrawalInitiated` with the same fields as for USDC. |
 | NB-AN-4 | If a NACKL withdrawal is above the entry's per-withdrawal cap, then the AN bridge shall refund it with `ERR_TRANSFER_TOO_LARGE` (234). A NACKL withdrawal is not bounded by bridged inventory: `ERR_BURN_EXCEEDS_BRIDGED` (233) and `ERR_CHAIN_BALANCE_EXCEEDED` (236) do not apply to it. |
 | NB-AN-5 | When the AN bridge confirms a NACKL deposit and the source chain's locked amount covers it, the AN bridge shall send that amount of NACKL it holds to the recipient and subtract it from the locked amount. |
-| NB-AN-6 | If `finalizeDeposit` receives a NACKL deposit above the source chain's locked amount, then the AN bridge shall refuse it with `ERR_CHAIN_BALANCE_EXCEEDED` before accepting it, leaving the voucher unspent. If the AN bridge confirms a NACKL deposit that the locked amount no longer covers, then it shall record a pending deposit, emit `DepositPending`, and send nothing; the voucher stays spent, so the deposit cannot be finalized twice. |
-| NB-AN-7 | When a lock raises a chain's locked amount, the AN bridge shall pay that chain's pending deposits oldest first, at most four per lock, while the locked amount covers them. When a NACKL deposit is confirmed while deposits from its chain are pending, the AN bridge shall first pay them in the same way, and pay the new deposit only if none is left pending; otherwise it shall become pending behind them. When anyone calls `releasePendingDeposit` for a pending deposit that the locked amount covers, the AN bridge shall pay it. Either payment sends as in NB-AN-5, deletes the pending deposit and emits `DepositFinalized` with the deposit's fields. If the locked amount does not cover it, then `releasePendingDeposit` shall fail with `ERR_CHAIN_BALANCE_EXCEEDED`, and with `ERR_NO_PENDING_DEPOSIT` for no such deposit. |
-| NB-AN-8 | The AN bridge shall send locked NACKL only by NB-AN-5 or NB-AN-7. `mintAndSendTokenBridged` with currency id 1 shall be refused with `ERR_TOKEN_CONFIG`. |
+| NB-AN-6 | If `finalizeDeposit` receives a NACKL deposit above the source chain's locked amount, then the AN bridge shall refuse it with `ERR_CHAIN_BALANCE_EXCEEDED` before accepting it, leaving the voucher unspent. If the voucher confirms a NACKL deposit that the locked amount no longer covers, then the AN bridge shall send nothing, emit `DepositRefused` with `ERR_CHAIN_BALANCE_EXCEEDED`, and call the voucher's `release`, which deletes the voucher, so the same deposit can be finalized again. |
+| NB-AN-7 | The voucher shall send its confirmation with `bounce: false`, and shall delete itself on `release` only when the AN bridge sends it. A deposit that has been paid keeps its voucher, so finalizing it again pays nothing. |
+| NB-AN-8 | The AN bridge shall send locked NACKL only by NB-AN-5. `mintAndSendTokenBridged` with currency id 1 shall be refused with `ERR_TOKEN_CONFIG`. |
 | NB-AN-9 | A NACKL deposit shall pass `finalizeDeposit` under the entry's per-deposit cap and switch; the entry's `maxTvl` shall not bound it. |
-| NB-AN-10 | When `updateCode` runs, the AN bridge shall carry the locked amounts, the amounts locked to each EVM bridge and the pending deposits to the new code. An upgrade from 1.17.0 shall start with none of them. |
+| NB-AN-10 | When `updateCode` runs, the AN bridge shall carry the locked amounts and the amounts locked to each EVM bridge to the new code. An upgrade from 1.17.0 shall start with none of them. |
 | NB-AN-11 | `getTotalBridged(1)` shall return `(0, 0)`: NACKL never enters the minted/burned inventory. |
 
 The owner key of the AN bridge can replace its code with `updateCode` (`eccBridge.sol:1093`), and
@@ -131,7 +131,7 @@ bound to it; the handover precondition is checked by comparing two counters.
 | NB-AN-3, NB-HO-1 | TC-NB-AN-LOCK | `scripts/test_an_bridge_limits.py` (including `test_nb_an_lock_needs_an_evm_recipient`) |
 | NB-AN-4 | TC-NB-AN-CAP | `scripts/test_an_bridge_limits.py`: `test_nb_an_lock_is_capped_per_withdrawal_only` |
 | NB-AN-5 | TC-NB-AN-UNLOCK | `scripts/test_an_bridge_limits.py` |
-| NB-AN-6, NB-AN-7 | TC-NB-AN-PENDING | `scripts/test_an_bridge_limits.py` |
+| NB-AN-6, NB-AN-7 | TC-NB-AN-REFUSED | `scripts/test_an_bridge_limits.py`: `test_nb_an_short_lock_refuses_the_confirmation_until_it_is_covered`, `test_nb_an_a_later_deposit_is_paid_while_an_earlier_one_is_refused`, `test_voucher_deletes_itself_only_when_the_bridge_releases_it` |
 | NB-AN-9 | TC-NB-AN-DEPOSIT-CAPS | `scripts/test_an_bridge_limits.py`: `test_nb_an_nackl_deposit_ignores_max_tvl` |
 | NB-AN-10 | TC-NB-AN-UPGRADE | `scripts/test_an_bridge_limits.py` |
 | NB-AN-11 | TC-NB-AN-INVENTORY | `scripts/test_an_bridge_limits.py`: `test_nb_an_lock_keeps_nackl_and_counts_it`, `test_nb_an_unlock_pays_from_the_lock` |
@@ -150,5 +150,5 @@ bound to it; the handover precondition is checked by comparing two counters.
 | NB-HO-3 | TC-NB-HO-PROCEDURE | `contracts/ethereum/test/NacklBridge.t.sol`: `test_NB_HO_3_procedureHandsOverOnlyWhenEverythingBoundIsPaid`, `test_NB_HO_3_earlyHandoverStrandsAWithdrawalOfTheOldBridge`, `test_NB_HO_3_aSuccessorQueuesPayoutsUntilItIsTheMinter` |
 | NB-P-6 | TC-NB-E2E | `tests/e2e/local-net/arbitrum/test_arbitrum_e2e.py`: `test_45_nackl_locked_on_acki_nacki`, `test_46_nackl_deposit_sent`, `test_66_nackl_deposit_delivered`, `test_74_nackl_minted`, `test_75_nackl_reconciles` |
 | NB-CR-1, NB-CR-2 | TC-NB-CR | the check `scripts/check_withdrawal_event_header.py`, and no change in the circuit crates |
-| NB-P-1, NB-P-2 | TC-NB-P-AN | `scripts/test_an_bridge_limits.py`: `test_nb_an_unlock_pays_from_the_lock`, `test_nb_an_lock_of_another_chain_does_not_pay`, `test_nb_an_finalize_refuses_a_deposit_above_the_lock`, `test_nb_an_pending_deposits_are_paid_oldest_first` |
+| NB-P-1, NB-P-2 | TC-NB-P-AN | `scripts/test_an_bridge_limits.py`: `test_nb_an_unlock_pays_from_the_lock`, `test_nb_an_lock_of_another_chain_does_not_pay`, `test_nb_an_finalize_refuses_a_deposit_above_the_lock` |
 | NB-P-3, NB-P-5 | TC-NB-P-SUPPLY | `NacklBridgeInvariant.t.sol`: `invariant_NB_P_3_supplyIsMintedAndAcceptedIsMintedPlusQueued`; `NacklBridge.t.sol`: `test_NB_P_SUPPLY_queuedNullifierIsSpent` |

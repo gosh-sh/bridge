@@ -231,6 +231,7 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | 401 | message header | expiry is at least five minutes ahead of block time | use the matching client and check clock synchronization; this build caps finalization expiry at 240 seconds |
 | 9 | voucher deploy | the bridge's `_depositVoucherCode` predates the voucher ABI (the 2026-07-02 outage) | recompile and redeploy the bridge and voucher as a pair |
 | 51 | voucher deploy | already finalized | none; reported as `already_finalized` |
+| `DepositRefused` | voucher confirmation | the bridge could not pay the deposit when its voucher confirmed it (235, 236, 234 or 241) and released the voucher | pending; `finalizeDeposit` is sent again on a later attempt |
 
 Settings 222 and 224 do not survive an AN bridge code upgrade. After every deploy or
 upgrade they must be set again before the first deposit can finalize.

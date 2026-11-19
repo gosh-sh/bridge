@@ -214,7 +214,9 @@ pub struct AnSubmitConfig {
 /// fails with exit 51, which [`settle_finalize`] reports as
 /// [`SubmitOutcome::AlreadyFinalized`]. A duplicate NACKL one above the NACKL
 /// now locked for its chain is refused with 236 instead and reads as
-/// [`SubmitOutcome::Pending`]; only the voucher check tells it is paid.
+/// [`SubmitOutcome::Pending`]; only the voucher check tells it is paid. A
+/// deposit the bridge cannot pay yet is released: the bridge tells its voucher
+/// to delete itself, and it reads as [`SubmitOutcome::Pending`].
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
@@ -619,9 +621,26 @@ async fn settle_finalize<C: IAckiNacki>(
     };
     match &confirm.outcome {
         None => Ok(None),
-        Some(c) if c.is_success() => Ok(Some(SubmitOutcome::Finalized {
-            tx_hash: Some(*root),
-        })),
+        Some(c) if c.is_success() => {
+            let released = client
+                .get_internal_children(&c.tx_hash)
+                .await?
+                .iter()
+                .any(|m| m.dst == voucher.dst);
+            if released {
+                return Ok(Some(SubmitOutcome::Pending {
+                    reason: format!(
+                        "the bridge cannot pay this deposit now (TVL cap, NACKL lock, payout cap \
+                         or token registration) and released voucher {}; finalizeDeposit is sent \
+                         again on a later attempt",
+                        voucher.dst
+                    ),
+                }));
+            }
+            Ok(Some(SubmitOutcome::Finalized {
+                tx_hash: Some(*root),
+            }))
+        },
         Some(c) => Ok(Some(SubmitOutcome::Rejected {
             reason: format!(
                 "confirmDeposit failed (exit_code={:?}, aborted={}) after voucher {} was \
@@ -907,6 +926,35 @@ mod tests {
                 reason,
             } => assert!(reason.contains("confirmDeposit failed"), "{reason}"),
             other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_released_voucher_leaves_the_deposit_pending() {
+        use acki_nacki_interface::MockAckiNacki;
+
+        let client = Arc::new(MockAckiNacki::new());
+        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![child(
+            "0:voucher",
+            Some((VOUCHER_TX, 0)),
+        )]);
+        client.set_children(VOUCHER_TX, vec![child("0:bridge", Some((CONFIRM_TX, 0)))]);
+        client.set_children(CONFIRM_TX, vec![child("0:voucher", None)]);
+        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let cfg = AnSubmitConfig {
+            from: format!(
+                "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            ),
+            token_bridge: format!("{dapp}::{dapp}"),
+            confirm_timeout_secs: 1,
+        };
+        let sub = AnInterfaceSubmitter::new(client, cfg);
+        let ev = event(3);
+        match sub.submit(&ev, &witness(&ev)).await.unwrap() {
+            SubmitOutcome::Pending {
+                reason,
+            } => assert!(reason.contains("released voucher 0:voucher"), "{reason}"),
+            other => panic!("expected Pending, got {other:?}"),
         }
     }
 

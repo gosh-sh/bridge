@@ -30,7 +30,7 @@ use crate::{
 pub const DEPOSIT_FINALIZED_DST: &str =
     ":000000000000000000000000000000000000000000000000000000000000026b";
 
-pub const DEPOSIT_PENDING_DST: &str =
+pub const DEPOSIT_REFUSED_DST: &str =
     ":000000000000000000000000000000000000000000000000000000000000026d";
 
 /// A deposit as the bridge's `confirmDeposit` and `DepositFinalized` name
@@ -70,12 +70,6 @@ impl Identity {
             && u256(&v["anAccount"]) == Some(U256::from_be_bytes(self.account))
             && u256(&v["dappId"]) == Some(U256::ZERO)
     }
-
-    pub fn matches_pending(&self, v: &Value) -> bool {
-        u256(&v["chainId"]) == Some(U256::from(self.chain_id))
-            && u256(&v["amount"]) == Some(U256::from(self.amount))
-            && u256(&v["anAccount"]) == Some(U256::from_be_bytes(self.account))
-    }
 }
 
 /// What one look at the chain says about the credit.
@@ -89,9 +83,9 @@ pub enum Credit {
         /// That transaction.
         bridge_tx: String,
     },
-    Pending {
+    Refused {
         bridge_tx: String,
-        deposit_hash: String,
+        reason: u16,
     },
     /// Not visible (yet): a message in transit, a lagging node, or nothing
     /// finalized this deposit.
@@ -130,22 +124,25 @@ pub async fn bridge_tx_verdict(
                 .and_then(|b| an.decode(BRIDGE_ABI, b, false))
                 .is_some_and(|(n, v)| n == "DepositFinalized" && id.matches(&v))
     });
-    let pending = (!event_ok)
+    let refused = (!event_ok)
         .then(|| {
             tx.out.iter().find_map(|m| {
-                if !m.dst.ends_with(DEPOSIT_PENDING_DST) {
+                if !m.dst.ends_with(DEPOSIT_REFUSED_DST) {
                     return None;
                 }
                 let (n, v) = an.decode(BRIDGE_ABI, m.body.as_deref()?, false)?;
-                (n == "DepositPending" && id.matches_pending(&v))
-                    .then(|| v["depositHash"].as_str().unwrap_or_default().to_owned())
+                (n == "DepositRefused" && id.matches(&v)).then(|| {
+                    u256(&v["reason"])
+                        .and_then(|r| u16::try_from(r).ok())
+                        .unwrap_or(0)
+                })
             })
         })
         .flatten();
-    if let Some(deposit_hash) = pending {
-        return Ok(Credit::Pending {
+    if let Some(reason) = refused {
+        return Ok(Credit::Refused {
             bridge_tx: tx.hash.clone(),
-            deposit_hash,
+            reason,
         });
     }
     if !event_ok {
@@ -215,18 +212,25 @@ pub async fn by_voucher(
     id: &Identity,
 ) -> anyhow::Result<Credit> {
     let mut after = None;
+    let mut last = None;
     let deploy = loop {
         let page = an.transactions(voucher, after.clone()).await?;
-        if let Some(t) = page.items.into_iter().find(|t| {
-            matches!(t.orig_status, AccStatus::NonExist | AccStatus::Uninit)
-                && t.end_status == AccStatus::Active
-                && !t.aborted
-        }) {
-            break t;
-        }
+        last = page
+            .items
+            .into_iter()
+            .filter(|t| {
+                matches!(t.orig_status, AccStatus::NonExist | AccStatus::Uninit)
+                    && t.end_status == AccStatus::Active
+                    && !t.aborted
+            })
+            .last()
+            .or(last);
         match page.cursor {
             Some(c) => after = Some(c),
-            None => return Ok(Credit::NotYet),
+            None => match last {
+                Some(t) => break t,
+                None => return Ok(Credit::NotYet),
+            },
         }
     };
     for m in &deploy.out_msgs {
@@ -551,9 +555,9 @@ pub async fn confirm(
                 ));
             },
             (
-                Credit::Pending {
+                Credit::Refused {
                     bridge_tx,
-                    deposit_hash,
+                    reason,
                 },
                 _,
             ) => {
@@ -564,19 +568,18 @@ pub async fn confirm(
                 );
                 if unpaid {
                     return Err(CliError::deposit(
-                        ExitCode::CreditPending,
+                        ExitCode::CreditRefused,
                         Stage::Credit,
                         Some(op_id),
                         format!(
-                            "the deposit is proven, but the Acki Nacki bridge recorded it as \
-                             pending (transaction {bridge_tx}) and paid nothing yet: it held less \
-                             NACKL locked for chain {} than {} base units, or earlier NACKL \
-                             deposits from that chain were still pending. Nothing is lost: the \
-                             next NACKL withdrawals to that chain pay the pending deposits oldest \
-                             first once they lock enough, and anyone can pay this one with \
-                             releasePendingDeposit({deposit_hash}) as soon as the lock covers it. \
-                             getPendingDeposit({deposit_hash}) shows it while it waits; --resume \
-                             confirms the credit once it is paid.",
+                            "the deposit is proven, but the Acki Nacki bridge cannot pay it now \
+                             (transaction {bridge_tx}, reason {reason}: 235 the chain's deposit \
+                             capacity is full, 236 it holds less NACKL locked for chain {} than \
+                             {} base units, 234 above the payout cap, 241 the token is not \
+                             registered). Nothing was paid and nothing is lost: the bridge told \
+                             the deposit voucher to delete itself, so the same deposit can be \
+                             finalized again. Continue with --resume {op_id} once the bridge has \
+                             room for it.",
                             id.chain_id, id.amount,
                         ),
                     ));
@@ -995,39 +998,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_pending_nackl_deposit_is_confirmed_by_the_transaction_that_pays_it() {
+    async fn a_refused_deposit_is_resumable_and_its_next_voucher_is_followed() {
         let mut i = id(0);
         i.token_id = 1;
         let an = FakeAn::default();
         chain(&an, &i, false, false);
-        let mut pending = msg(
-            "pend",
-            "ExtOut",
-            &format!("0:{}", hex::encode(BRIDGE)),
-            DEPOSIT_PENDING_DST,
-            Some("B-pending"),
-        );
-        pending.created_at = 3;
-        an.bodies.lock().unwrap().insert(
-            "B-pending".into(),
-            ("DepositPending".into(), json!({ "depositHash": "0x77", "chainId": i.chain_id.to_string(),
-                "amount": i.amount.to_string(), "anAccount": format!("0x{}", hex::encode(i.account)) })),
-        );
-        let paid_by = |hash: &str| an.transactions.lock().unwrap().get(hash).cloned().unwrap();
-        let mut payer = paid_by("btx");
-        payer.hash = "lock".into();
-        payer.now = 9;
-        let mut queued_next = pending.clone();
-        queued_next.hash = "pend-next".into();
-        queued_next.body = Some("B-pending-next".into());
-        an.bodies.lock().unwrap().insert(
-            "B-pending-next".into(),
-            ("DepositPending".into(), json!({ "depositHash": "0x88", "chainId": i.chain_id.to_string(),
-                "amount": i.amount.to_string(), "anAccount": format!("0x{}", hex::encode(i.account)) })),
-        );
-        payer.out.push(queued_next);
-        an.transactions.lock().unwrap().get_mut("btx").unwrap().out = vec![pending];
-        let finalized = an
+        let mut paid = an.transactions.lock().unwrap()["btx"].clone();
+        let mut paid_event = an
             .ext_out
             .lock()
             .unwrap()
@@ -1035,6 +1012,21 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap();
+        let mut refused = msg(
+            "refused",
+            "ExtOut",
+            &format!("0:{}", hex::encode(BRIDGE)),
+            DEPOSIT_REFUSED_DST,
+            Some("B-refused"),
+        );
+        refused.created_at = 3;
+        let mut why = fields(&i, "0");
+        why["reason"] = json!("236");
+        an.bodies
+            .lock()
+            .unwrap()
+            .insert("B-refused".into(), ("DepositRefused".into(), why));
+        an.transactions.lock().unwrap().get_mut("btx").unwrap().out = vec![refused];
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let wait = |ui| {
             confirm(
@@ -1051,41 +1043,50 @@ mod tests {
             )
         };
         let err = wait(&ui).await.unwrap_err();
-        assert_eq!(err.exit_code(), ExitCode::CreditPending);
-        assert!(
-            err.to_string().contains("releasePendingDeposit(0x77)"),
-            "{err}"
+        assert_eq!(err.exit_code(), ExitCode::CreditRefused);
+        assert!(err.to_string().contains("reason 236"), "{err}");
+        assert!(err.to_string().contains("--resume OP"), "{err}");
+
+        an.txs
+            .lock()
+            .unwrap()
+            .get_mut(&VOUCHER)
+            .unwrap()
+            .push(TxListItem {
+                hash: "deploy2".into(),
+                now: 5,
+                orig_status: AccStatus::NonExist,
+                end_status: AccStatus::Active,
+                aborted: false,
+                out_msgs: vec!["confirm2".into()],
+            });
+        let mut again = an.messages.lock().unwrap()["confirm"].clone();
+        again.hash = "confirm2".into();
+        again.dst_tx.as_mut().unwrap().hash = "btx2".into();
+        an.messages.lock().unwrap().insert("confirm2".into(), again);
+        paid.hash = "btx2".into();
+        paid.now = 6;
+        an.transactions.lock().unwrap().insert("btx2".into(), paid);
+        let c = wait(&ui).await.unwrap();
+        assert_eq!(
+            (c.confirm_tx.as_str(), c.delivery_tx.as_str(), c.via_events),
+            ("btx2", "rtx", false)
         );
 
-        an.transactions.lock().unwrap().insert("lock".into(), payer);
-        let mut event = finalized;
-        event.src_tx = Some("lock".into());
+        paid_event.src_tx = Some("btx2".into());
         an.messages
             .lock()
             .unwrap()
-            .insert("ev".into(), event.clone());
+            .insert("ev".into(), paid_event.clone());
         an.ext_out
             .lock()
             .unwrap()
             .entry(BRIDGE)
             .or_default()
-            .push(event);
-        let delivered = an.messages.lock().unwrap()["xfer"].clone();
-        let mut in_transit = delivered.clone();
-        in_transit.dst_tx = None;
-        an.messages
-            .lock()
-            .unwrap()
-            .insert("xfer".into(), in_transit);
-        let err = wait(&ui).await.unwrap_err();
-        assert_eq!(err.exit_code(), ExitCode::CreditUnconfirmed, "{err}");
-
-        an.messages.lock().unwrap().insert("xfer".into(), delivered);
+            .push(paid_event);
+        an.txs.lock().unwrap().remove(&VOUCHER);
         let c = wait(&ui).await.unwrap();
-        assert_eq!(
-            (c.confirm_tx.as_str(), c.delivery_tx.as_str(), c.via_events),
-            ("lock", "rtx", true)
-        );
+        assert_eq!((c.confirm_tx.as_str(), c.via_events), ("btx2", true));
     }
 
     #[tokio::test(start_paused = true)]

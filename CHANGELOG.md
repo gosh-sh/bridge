@@ -26,8 +26,9 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `ea45d7b9…`: upgrade a 1.17.0 bridge with `updateCode` and an empty
-  `userCell`.
+- `eccBridge` 1.18.0, code hash `0ede2d09…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
+  with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
+  finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
 - `AckiNackiBridge` storage adds `_nackl` at slots 19–32; no earlier slot moves.
 - `ackinacki-bridge` accepts `eccBridge` up to 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`).
@@ -54,10 +55,12 @@ assigns it when the release is tagged.
   (`getNacklLockedTo(chainId, evmBridge)`), refunded above the per-withdrawal cap (234) and for a
   recipient that is not 20 bytes (246).
 - `eccBridge`: `finalizeDeposit` refuses a NACKL deposit above the chain's locked NACKL with 236.
-- `eccBridge`: a NACKL deposit the lock cannot pay is recorded as pending (`DepositPending`,
-  `getPendingDeposit`) and paid oldest first by later NACKL withdrawals to that chain.
-- `eccBridge`: `releasePendingDeposit(depositHash)` lets anyone pay a pending NACKL deposit once the
-  lock covers it (236 while short, 245 when unknown).
+- `eccBridge`: a deposit the bridge cannot pay when its voucher confirms it (the TVL cap 235, the
+  NACKL lock 236, the payout cap 234, an unregistered token 241) is refused instead of aborting:
+  the bridge emits `DepositRefused` with the reason and calls the voucher's `release`, which
+  deletes the voucher. Nothing is paid, and the same deposit can be finalized again.
+- `DepositVoucher` 1.6.0: confirms with `bounce: false`; `release` (only from the bridge) deletes
+  it.
 - `eccBridge`: `mintAndSendTokenBridged` refuses id `1` with 242; `getTotalBridged(1)` stays `(0,
   0)`.
 - `AckiNackiBridge`: `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` lists the NACKL
@@ -94,8 +97,10 @@ assigns it when the release is tagged.
   the Acki Nacki bridge's `getTotalBridged` and the chain's limits decide.
 - `ackinacki-bridge withdraw --token nackl` withdraws NACKL; a queued payout ends with
   `submit.status: "queued"`, `payout_id` and `ready_at`, and a re-run does not resend the proof.
-- `ackinacki-bridge deposit` of NACKL exits 38 (`CreditPending`) while the deposit is pending;
-  `--resume` confirms it once paid.
+- `ackinacki-bridge deposit` exits 38 (`CreditRefused`) when the bridge refuses the deposit for now;
+  `--resume` sends `finalizeDeposit` again and confirms the credit.
+- `deposit-relayer` treats a deposit whose voucher the bridge released as pending and sends it
+  again on a later attempt.
 - `ackinacki-bridge deposit --amount` takes as many fractional digits as the token has decimals (9
   for NACKL).
 - `ackinacki-bridge deposit` summary shows the token's currency and decimals and its balance; the

@@ -163,15 +163,11 @@ bounds do not apply, and `maxTvl` only has to be at least `maxTransfer`.
   20 bytes, the only form Circuit 4 proves (246).
 - A NACKL deposit unlocks: the bridge sends NACKL it holds from that chain's locks.
   `finalizeDeposit` refuses one above the lock with 236 before accepting it, so the voucher stays
-  unspent and the deposit can be finalized later. One that still finds the lock short when it is
-  confirmed — another deposit took the lock first — is recorded as pending (`DepositPending`,
-  `getPendingDeposit(depositHash)`). The next NACKL withdrawals to that chain pay pending deposits
-  oldest first, at most four per withdrawal, while the lock covers them; anyone can also pay one with
-  `releasePendingDeposit(depositHash)`: 236 while the lock is short, 245 for no such deposit. Both
-  emit the deposit's `DepositFinalized`.
+  unspent and the deposit can be finalized later. One that still finds the lock short when its
+  voucher confirms it — another deposit took the lock first — is refused like any deposit the
+  bridge cannot pay at that moment (see below).
 - `mintAndSendTokenBridged` refuses id `1` with 242, and `getTotalBridged(1)` stays `(0, 0)`.
-- `updateCode` carries the locks, the amounts locked for each EVM bridge, the pending deposits and
-  their order.
+- `updateCode` carries the locks and the amounts locked for each EVM bridge.
   From 1.17.0 the bridge starts with none of them.
 
 The owner key can still replace the code with `updateCode`, and the bridge is a special account
@@ -316,6 +312,10 @@ AN keeps the same 10,000 USDC ceiling separately for every EIP-155 chain id.
 `getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and `outstanding` in
 base units. `confirmDeposit` increases that chain's outstanding amount;
 a successful `initiateWithdrawal` decreases the destination chain's amount.
+A deposit that no longer fits when its voucher confirms it (another deposit
+took the room first) is refused: the bridge emits `DepositRefused` with the
+reason (235, 236, 234 or 241) and calls the voucher's `release`, which deletes
+the voucher, so the same deposit can be finalized again once there is room.
 There are no deposit reservations or permanent voucher registry. A repeated
 finalization deploys the same voucher, whose consumed constructor prevents another
 confirmation. Trust only one funded L1 bridge per chain for this accounting.
@@ -572,12 +572,14 @@ going through.** The restriction ships in the upgraded code itself: a block
 cutoff, where deposits from blocks older than the upgrade are refused. What is
 rejected is the deposit, not the shape of its receipt.
 
-**The current contracts carry no such restriction, and none is needed here:**
-the voucher's code is not changed, it is installed by the zerostate, and
-`updateCode` is called with an empty `userCell` — the bridge keeps the code it
-has, voucher addresses stay put, and replay protection holds. The restriction
-arrives with the upgrade that first changes the voucher's code; no separate fix
-to the present version is required.
+**1.18.0 changes the voucher's code** (`DepositVoucher` 1.6.0 adds `release`),
+and a 1.17.0 voucher cannot be released: a deposit the bridge refuses would stay
+spent. An upgrade from 1.17.0 therefore passes the 1.6.0 voucher code in
+`userCell`, and every past deposit gets a new address. The restriction here is
+the source allowlist, which `updateCode` empties: after the upgrade trust only
+the new EVM bridge (`setTrustedL1Bridge`), whose deposits were never finalized
+under the old code, and never trust again an EVM bridge whose deposits were.
+Finish every deposit of the old EVM bridge before the upgrade.
 
 The voucher's code can also change by accident: rebuilding `DepositVoucher.tvc`
 with a different compiler yields a different code hash.

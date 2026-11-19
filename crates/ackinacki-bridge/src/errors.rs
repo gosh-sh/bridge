@@ -117,7 +117,7 @@ pub enum ExitCode {
     /// The deposit voucher exists and the bridge transaction that should
     /// have minted the credit aborted. Only the operator can pay it out.
     CreditAborted = 37,
-    CreditPending = 38,
+    CreditRefused = 38,
 }
 
 impl ExitCode {
@@ -537,7 +537,7 @@ impl CliError {
                     | ExitCode::CreditUnconfirmed
                     | ExitCode::DepositUnprovable
                     | ExitCode::CreditAborted
-                    | ExitCode::CreditPending
+                    | ExitCode::CreditRefused
             ),
             "{exit:?} is not a deposit outcome"
         );
@@ -730,7 +730,7 @@ mod tests {
             (ExitCode::CreditUnconfirmed, 34),
             (ExitCode::DepositUnprovable, 35),
             (ExitCode::CreditAborted, 37),
-            (ExitCode::CreditPending, 38),
+            (ExitCode::CreditRefused, 38),
         ];
         for (code, n) in table {
             assert_eq!(code.as_i32(), n, "{code:?}");

@@ -33,6 +33,9 @@ payout path to support the destination's recipient format.
 
 One Linear issue (or one GitHub issue) → one branch and one pull request → one assignee.
 
+Before a commit to `main`, bring the component diagrams up to date with it:
+[`docs/bridge-components.md`](docs/bridge-components.md) and its two SVGs.
+
 ## Changelog policy
 
 Every branch that is opened as a pull request into `main` must describe its diff

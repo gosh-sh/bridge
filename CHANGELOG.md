@@ -24,8 +24,9 @@ assigns it when the release is tagged.
 ### Breaking Changes
 
 - `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) holds the committees of the last seven
-  periods (`getCommittees`) and takes a step from any of them for its own period; `eccBridge`, which
-  builds the client's data from its layout, is rebuilt (still 1.17.0, code hash `7c8f12f4…`).
+  periods (`getCommittees`) and takes a step from any of them for its own period. `eccBridge`
+  1.18.0 (code hash `2c2296a5…`) is 1.17.0 rebuilt for that layout, from which it builds the
+  client's data in `deployLightClient`.
   An existing light client takes the new code with its own `updateCode` and keeps only its
   committee in force, so upgrade it while the relayer's queue holds no checkpoint signed in an
   earlier period; before any new `deployLightClient`, run `eccBridge.updateCode` and

@@ -77,16 +77,13 @@ class BridgeLimits(unittest.TestCase):
             "bytes recipient, uint32 tokenId, uint16 reason) private pure {",
             "bytes recipient, uint32 tokenId, uint16 reason) private {")
         finalized = re.compile(r"emit DepositFinalized\{dest: addrExtern\}\((.*?)\);", re.S)
-        assert len(finalized.findall(source)) == 2
+        assert len(finalized.findall(source)) == 1
         source = finalized.sub(r"_testRecordFinalized(\1);", source)
         source = re.sub(r"emit (?:WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
         held = "address(this).currencies[NACKL_ECC_ID]"
-        assert source.count(held) == 3
+        assert source.count(held) == 1
         source = source.replace(held, "_testNacklHeld()")
-        pending = re.compile(r"emit DepositPending\{dest: pendingExtern\}\((.*?)\);", re.S)
-        assert len(pending.findall(source)) == 1
-        source = pending.sub(r"_testRecordPending(\1);", source)
         hooks = """
     function testLegacyUpgrade() public {
         tvm.accept();
@@ -112,21 +109,12 @@ class BridgeLimits(unittest.TestCase):
     function testNacklBalance() public view returns (uint128 balance) {
         balance = uint128(_testNacklHeld());
     }
-    uint32 _testPendingEvents;
     mapping(uint256 => uint32) _testFinalizedCount;
     mapping(uint256 => TvmCell) _testFinalizedFields;
-    function _testRecordPending(uint256 depositHash, uint256 chainId, uint128 amount,
-                                uint256 anAccount) private {
-        depositHash; chainId; amount; anAccount;
-        _testPendingEvents += 1;
-    }
     function _testRecordFinalized(uint256 depositId, uint256 contractAddr, uint256 dappId,
                                   uint256 chainId, uint128 amount, uint256 anAccount) private {
         _testFinalizedCount[depositId] += 1;
         _testFinalizedFields[depositId] = abi.encode(contractAddr, dappId, chainId, amount, anAccount);
-    }
-    function testPendingEvents() public view returns (uint32 count) {
-        count = _testPendingEvents;
     }
     function testFinalized(uint256 depositId) public view returns (uint32 count, uint256 contractAddr,
         uint256 dappId, uint256 chainId, uint128 amount, uint256 anAccount) {
@@ -390,10 +378,6 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual((int(got["contractAddr"], 0), int(got["dappId"], 0), int(got["chainId"], 0),
                           int(got["amount"]), int(got["anAccount"], 0)), (42, 0, chain, amount, 43))
 
-    def pending(self, deposit, chain=1):
-        return self.call("getPendingDeposit", {"depositHash": self.deposit_hash(deposit, chain)})[
-            "response"]
-
     def paid(self, result, amount, recipient="0:" + "00" * 31 + "2b"):
         sent = []
         for m in result["messages"]:
@@ -465,123 +449,29 @@ class BridgeLimits(unittest.TestCase):
         self.nackl(chain=1)
         self.nackl(chain=2)
         self.lock(5 * NACKL, chain=2)
-        result = self.confirm_nackl(5 * NACKL, chain=1)
-        self.assertEqual(result["messages"], [])
+        self.confirm_nackl(5 * NACKL, chain=1, expect=236)
         self.assertEqual(self.locked(chain=2), 5 * NACKL)
-        self.assertEqual(int(self.pending(300, 1)["amount"]), 5 * NACKL)
+        self.assertEqual(self.locked(chain=1), 0)
 
-    def test_nb_an_short_lock_makes_a_pending_deposit(self):
+    def test_nb_an_short_lock_refuses_the_confirmation_until_it_is_covered(self):
         self.nackl()
-        result = self.confirm_nackl(5 * NACKL)
-        self.assertTrue(result["vm_success"])
-        self.assertEqual(result["messages"], [])
-        self.assertEqual(int(self.call("testPendingEvents")["response"]["count"]), 1)
-        key = self.deposit_hash(300)
-        self.assertEqual(int(self.pending(300)["amount"]), 5 * NACKL)
-        self.call("releasePendingDeposit", {"depositHash": key}, expect=236)
-        self.assertTrue(self.lock(3 * NACKL)["vm_success"])
-        self.assertEqual(int(self.pending(300)["amount"]), 5 * NACKL)
-        self.assertEqual(int(self.call("testFinalized", {"depositId": "300"})["response"]["count"]), 0)
-        self.paid(self.lock(2 * NACKL), 5 * NACKL)
-        self.finalized(300, 5 * NACKL)
-        self.assertEqual(self.locked(), 0)
-        self.assertEqual(int(self.pending(300)["amount"]), 0)
-        self.call("releasePendingDeposit", {"depositHash": key}, expect=245)
-        self.lock(NACKL)
-        self.finalized(300, 5 * NACKL)
-
-    def test_nb_an_pending_deposits_are_paid_oldest_first(self):
-        self.nackl()
-        self.confirm_nackl(2 * NACKL, deposit=301)
-        self.confirm_nackl(3 * NACKL, deposit=302)
-        self.confirm_nackl(1 * NACKL, deposit=303)
-        self.lock(1 * NACKL)
-        self.assertEqual(int(self.pending(301)["amount"]), 2 * NACKL)
-        self.paid(self.call("releasePendingDeposit", {"depositHash": self.deposit_hash(303)}),
-                  1 * NACKL)
-        result = self.lock(5 * NACKL)
-        self.assertEqual(int(self.pending(301)["amount"]), 0)
-        self.assertEqual(int(self.pending(302)["amount"]), 0)
-        self.assertEqual(self.locked(), 0)
-        recipients = [m for m in result["messages"] if m.get("destination", "").endswith("2b")]
-        self.assertEqual(len(recipients), 2)
-        self.credit(-5 * NACKL)
-        self.finalized(301, 2 * NACKL)
-        self.finalized(302, 3 * NACKL)
-        self.finalized(303, 1 * NACKL)
-
-    def test_nb_an_released_entries_do_not_use_up_the_lock_budget(self):
-        self.nackl()
-        for d in range(310, 319):
-            self.confirm_nackl(NACKL, deposit=d)
-        result = self.lock(9 * NACKL)
-        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 4)
-        self.credit(-4 * NACKL)
-        for d in range(314, 318):
-            self.paid(self.call("releasePendingDeposit", {"depositHash": self.deposit_hash(d)}), NACKL)
-        self.assertEqual(self.locked(), NACKL)
-        self.paid(self.lock(NACKL), NACKL)
-        self.finalized(318, NACKL)
-        self.assertEqual(self.locked(), NACKL)
-        for d in range(310, 319):
-            self.assertEqual(int(self.pending(d)["amount"]), 0)
-
-    def test_nb_an_a_later_deposit_does_not_overtake_a_pending_one(self):
-        self.nackl()
-        self.confirm_nackl(5 * NACKL, deposit=400)
         self.lock(3 * NACKL)
-        result = self.confirm_nackl(2 * NACKL, deposit=401)
-        self.assertTrue(result["vm_success"])
-        self.assertEqual(result["messages"], [])
-        self.assertEqual(int(self.pending(401)["amount"]), 2 * NACKL)
-        self.assertEqual(int(self.call("testFinalized", {"depositId": "401"})["response"]["count"]), 0)
+        self.confirm_nackl(5 * NACKL, expect=236)
         self.assertEqual(self.locked(), 3 * NACKL)
-        self.paid(self.lock(2 * NACKL), 5 * NACKL)
-        self.finalized(400, 5 * NACKL)
-        self.assertEqual(int(self.pending(401)["amount"]), 2 * NACKL)
-        self.paid(self.lock(2 * NACKL), 2 * NACKL)
+        self.assertEqual(self.nackl_balance(), 3 * NACKL)
+        self.assertEqual(int(self.call("testFinalized", {"depositId": "300"})["response"]["count"]), 0)
+        self.lock(2 * NACKL)
+        self.paid(self.confirm_nackl(5 * NACKL), 5 * NACKL)
+        self.finalized(300, 5 * NACKL)
+        self.assertEqual(self.locked(), 0)
+
+    def test_nb_an_a_later_deposit_is_paid_while_an_earlier_one_is_refused(self):
+        self.nackl()
+        self.lock(3 * NACKL)
+        self.confirm_nackl(5 * NACKL, deposit=400, expect=236)
+        self.paid(self.confirm_nackl(2 * NACKL, deposit=401), 2 * NACKL)
         self.finalized(401, 2 * NACKL)
-        self.assertEqual(self.locked(), 0)
-
-    def test_nb_an_a_new_deposit_first_pays_the_queue_it_joins(self):
-        self.nackl()
-        for d in range(410, 416):
-            self.confirm_nackl(NACKL, deposit=d)
-        result = self.lock(7 * NACKL)
-        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 4)
-        self.credit(-4 * NACKL)
-        self.assertEqual(self.locked(), 3 * NACKL)
-        result = self.confirm_nackl(NACKL, deposit=416)
-        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 3)
-        self.credit(-3 * NACKL)
-        for d in range(410, 417):
-            self.finalized(d, NACKL)
-            self.assertEqual(int(self.pending(d)["amount"]), 0)
-        self.assertEqual(self.locked(), 0)
-
-        for d in range(420, 426):
-            self.confirm_nackl(NACKL, deposit=d)
-        result = self.lock(6 * NACKL)
-        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 4)
-        self.credit(-4 * NACKL)
-        result = self.confirm_nackl(NACKL, deposit=426)
-        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 2)
-        self.credit(-2 * NACKL)
-        self.assertEqual(int(self.pending(426)["amount"]), NACKL)
-        self.assertEqual(int(self.call("testFinalized", {"depositId": "426"})["response"]["count"]), 0)
-        self.paid(self.lock(NACKL), NACKL)
-        self.finalized(426, NACKL)
-
-    def test_nb_an_manual_release_pays_once_the_lock_covers(self):
-        self.nackl()
-        self.confirm_nackl(4 * NACKL, deposit=304)
-        key = self.deposit_hash(304)
-        self.call("testSetLock", {"chainId": "1", "amount": str(4 * NACKL)})
-        self.credit(4 * NACKL)
-        self.paid(self.call("releasePendingDeposit", {"depositHash": key}), 4 * NACKL)
-        self.finalized(304, 4 * NACKL)
-        self.call("releasePendingDeposit", {"depositHash": key}, expect=245)
-        self.finalized(304, 4 * NACKL)
+        self.assertEqual(self.locked(), NACKL)
 
     def test_nb_an_owner_cannot_mint_or_take_nackl(self):
         self.nackl()
@@ -608,36 +498,16 @@ class BridgeLimits(unittest.TestCase):
         self.lock(NACKL)
         self.deployed(self.finalize(deposit=320, token=NACKL_TOKEN, amount=4 * NACKL), 320)
 
-    def test_nb_an_upgrade_carries_locks_and_pending(self):
+    def test_nb_an_upgrade_carries_the_locks(self):
         self.nackl()
         self.lock(4 * NACKL)
-        self.confirm_nackl(9 * NACKL)
         self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
         self.assertEqual(self.locked(), 4 * NACKL)
         self.assertEqual(self.locked_to(), 4 * NACKL)
-        self.assertEqual(int(self.pending(300)["amount"]), 9 * NACKL)
         self.bind(1)
-        self.paid(self.lock(5 * NACKL), 9 * NACKL)
-        self.finalized(300, 9 * NACKL)
-        self.assertEqual(int(self.pending(300)["amount"]), 0)
-
-    def test_nb_an_upgrade_carries_the_queue_order(self):
-        self.nackl()
-        for d in (320, 321, 322):
-            self.confirm_nackl(NACKL, deposit=d)
-        self.call("testSetLock", {"chainId": "1", "amount": str(NACKL)})
-        self.credit(NACKL)
-        self.paid(self.call("releasePendingDeposit", {"depositHash": self.deposit_hash(321)}), NACKL)
-        self.finalized(321, NACKL)
-        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
-        self.bind(1)
-        result = self.lock(2 * NACKL)
-        self.assertEqual(len([m for m in result["messages"] if m.get("destination", "").endswith("2b")]), 2)
-        self.credit(-2 * NACKL)
-        for d in (320, 322):
-            self.finalized(d, NACKL)
-        for d in (320, 321, 322):
-            self.assertEqual(int(self.pending(d)["amount"]), 0)
+        self.lock(4 * NACKL)
+        self.paid(self.confirm_nackl(8 * NACKL), 8 * NACKL)
+        self.finalized(300, 8 * NACKL)
 
     def test_nb_an_upgrade_from_1_17_reads_the_three_field_registry(self):
         self.nackl()

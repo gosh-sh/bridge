@@ -28,7 +28,6 @@ abstract contract eccBridgeModifiers is eccBridgeErrors {
     uint128 constant WithdrawalInitiatedEmit = 618;
     uint128 constant DepositFinalizedEmit    = 619;
     uint128 constant WithdrawalRefusedEmit   = 620;
-    uint128 constant DepositPendingEmit      = 621;
 
     modifier accept() {
         tvm.accept();

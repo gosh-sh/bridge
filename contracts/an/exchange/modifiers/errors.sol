@@ -36,6 +36,5 @@ abstract contract eccBridgeErrors {
     uint16 constant ERR_TOKEN_CONFIG = 242;
     uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 243;
     uint16 constant ERR_NOT_DEPOSIT_LOG = 244;
-    uint16 constant ERR_NO_PENDING_DEPOSIT = 245;
     uint16 constant ERR_RECIPIENT_NOT_EVM = 246;
 }

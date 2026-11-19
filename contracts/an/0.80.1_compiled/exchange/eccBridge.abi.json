@@ -377,14 +377,6 @@
 			]
 		},
 		{
-			"name": "releasePendingDeposit",
-			"inputs": [
-				{"name":"depositHash","type":"uint256"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "setPubkey",
 			"inputs": [
 				{"name":"pubkey","type":"uint256"}
@@ -465,17 +457,6 @@
 			]
 		},
 		{
-			"name": "getPendingDeposit",
-			"inputs": [
-				{"name":"depositHash","type":"uint256"}
-			],
-			"outputs": [
-				{"name":"chainId","type":"uint256"},
-				{"name":"amount","type":"uint128"},
-				{"name":"anAccount","type":"uint256"}
-			]
-		},
-		{
 			"name": "getDepositVoucherCodeHash",
 			"inputs": [
 			],
@@ -548,17 +529,6 @@
 			]
 		},
 		{
-			"name": "DepositPending",
-			"inputs": [
-				{"name":"depositHash","type":"uint256"},
-				{"name":"chainId","type":"uint256"},
-				{"name":"amount","type":"uint128"},
-				{"name":"anAccount","type":"uint256"}
-			],
-			"outputs": [
-			]
-		},
-		{
 			"name": "DepositFinalized",
 			"inputs": [
 				{"name":"depositId","type":"uint256"},
@@ -600,9 +570,6 @@
 		{"init":false,"name":"_l2Verifiers","type":"map(uint256,address)"},
 		{"init":false,"name":"_l2VerifierParent","type":"map(uint256,uint256)"},
 		{"init":false,"name":"_paused","type":"bool"},
-		{"init":false,"name":"_nacklLockedTo","type":"map(uint256,map(uint160,uint128))"},
-		{"components":[{"name":"depositId","type":"uint256"},{"name":"contractAddr","type":"uint256"},{"name":"dappId","type":"uint256"},{"name":"chainId","type":"uint256"},{"name":"amount","type":"uint128"},{"name":"anAccount","type":"uint256"},{"name":"prev","type":"uint256"},{"name":"next","type":"uint256"}],"init":false,"name":"_pendingDeposits","type":"map(uint256,tuple)"},
-		{"init":false,"name":"_pendingFirst","type":"map(uint256,uint256)"},
-		{"init":false,"name":"_pendingLast","type":"map(uint256,uint256)"}
+		{"init":false,"name":"_nacklLockedTo","type":"map(uint256,map(uint160,uint128))"}
 	]
 }

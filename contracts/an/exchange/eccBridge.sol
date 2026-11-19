@@ -77,12 +77,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         address sender,
         uint16 reason
     );
-    event DepositPending(
-        uint256 depositHash,
-        uint256 chainId,
-        uint128 amount,
-        uint256 anAccount
-    );
     event DepositFinalized(
         uint256 depositId,
         uint256 contractAddr,
@@ -219,20 +213,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     bool _paused;
 
     mapping(uint256 => mapping(uint160 => uint128)) _nacklLockedTo;
-
-    struct PendingDeposit {
-        uint256 depositId;
-        uint256 contractAddr;
-        uint256 dappId;
-        uint256 chainId;
-        uint128 amount;
-        uint256 anAccount;
-        uint256 prev;
-        uint256 next;
-    }
-    mapping(uint256 => PendingDeposit) _pendingDeposits;
-    mapping(uint256 => uint256) _pendingFirst;
-    mapping(uint256 => uint256) _pendingLast;
 
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
@@ -480,7 +460,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         if (nackl) {
             _bridgeTokens[dstChainId][tokenId].outstanding += amount;
             _nacklLockedTo[dstChainId][dstBridge] += amount;
-            _payPendingQueue(dstChainId);
         } else {
             gosh.burnecc(uint64(amount), tokenId);
             _totalBurnedBridgeByToken[tokenId] += amount;
@@ -818,7 +797,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         bound `outstanding + amount` by `MAX_BRIDGE_TVL`, so writing
     ///         more than that figure buys withdrawal room by refusing deposits
     ///         with `ERR_TVL_CAP`, and a deposit caught between finalization
-    ///         and confirmation aborts with its voucher already consumed.
+    ///         and confirmation aborts and can be finalized again.
     ///         Writing less is the safe direction: it only refuses
     ///         withdrawals, which return the ECC.
     ///
@@ -1042,8 +1021,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         must be the deterministic voucher address derived from the
     ///         deposit identity — replay attempts hit the existing voucher
     ///         account whose constructor was already consumed. If this call
-    ///         aborts after that constructor has run, the voucher is spent
-    ///         and the owner pays the recipient with the matching recovery mint.
+    ///         aborts, it bounces to the voucher, which deletes itself, so the
+    ///         same deposit can be finalized again.
     function confirmDeposit(
         uint256 depositId, uint256 contractAddr, uint256 dappId,
         uint256 chainId, uint128 amount, uint256 anAccount
@@ -1078,21 +1057,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         ensureBalance();
 
         if (tokenId == NACKL_ECC_ID) {
-            _payPendingQueue(chainId);
-            if (_pendingFirst[chainId] != 0 || !_unlockNackl(chainId, amount, anAccount)) {
-                uint256 last = _pendingLast[chainId];
-                _pendingDeposits[depositHash] = PendingDeposit(
-                    depositId, contractAddr, dappId, chainId, amount, anAccount, last, 0);
-                if (last == 0) {
-                    _pendingFirst[chainId] = depositHash;
-                } else {
-                    _pendingDeposits[last].next = depositHash;
-                }
-                _pendingLast[chainId] = depositHash;
-                address pendingExtern = address.makeAddrExtern(DepositPendingEmit, bitCntAddress);
-                emit DepositPending{dest: pendingExtern}(depositHash, chainId, amount, anAccount);
-                return;
-            }
+            require(_unlockNackl(chainId, amount, anAccount), ERR_CHAIN_BALANCE_EXCEEDED);
         } else {
             gosh.mintecc(uint64(amount), tokenId);
             _creditToken(chainId, tokenId, amount);
@@ -1102,54 +1067,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
         emit DepositFinalized{dest: addrExtern}(
             depositId, contractAddr, dappId, chainId, amount, anAccount
-        );
-    }
-
-    function releasePendingDeposit(uint256 depositHash) public {
-        require(!_paused, ERR_PAUSED);
-        PendingDeposit p = _pendingDeposits[depositHash];
-        require(p.amount != 0, ERR_NO_PENDING_DEPOSIT);
-        require(p.amount <= _bridgeTokens[p.chainId][NACKL_ECC_ID].outstanding
-                && varuint32(p.amount) <= address(this).currencies[NACKL_ECC_ID],
-                ERR_CHAIN_BALANCE_EXCEEDED);
-        tvm.accept();
-        ensureBalance();
-        _saveMsg();
-        tvm.commit();
-        _payPending(depositHash, p);
-    }
-
-    function _payPendingQueue(uint256 chainId) private {
-        for (uint8 n = 0; n < 4; n++) {
-            uint256 depositHash = _pendingFirst[chainId];
-            if (depositHash == 0) {
-                return;
-            }
-            PendingDeposit p = _pendingDeposits[depositHash];
-            if (p.amount > _bridgeTokens[chainId][NACKL_ECC_ID].outstanding
-                || varuint32(p.amount) > address(this).currencies[NACKL_ECC_ID]) {
-                return;
-            }
-            _payPending(depositHash, p);
-        }
-    }
-
-    function _payPending(uint256 depositHash, PendingDeposit p) private {
-        if (p.prev == 0) {
-            _pendingFirst[p.chainId] = p.next;
-        } else {
-            _pendingDeposits[p.prev].next = p.next;
-        }
-        if (p.next == 0) {
-            _pendingLast[p.chainId] = p.prev;
-        } else {
-            _pendingDeposits[p.next].prev = p.prev;
-        }
-        delete _pendingDeposits[depositHash];
-        _unlockNackl(p.chainId, p.amount, p.anAccount);
-        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
-        emit DepositFinalized{dest: addrExtern}(
-            p.depositId, p.contractAddr, p.dappId, p.chainId, p.amount, p.anAccount
         );
     }
 
@@ -1219,7 +1136,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         TvmCell registryState = abi.encode(
             userCell.toSlice().empty() ? _depositVoucherCode : userCell,
             _bridgeTokens, _bridgeTokenIds,
-            abi.encode(_nacklLockedTo, _pendingDeposits, _pendingFirst, _pendingLast));
+            abi.encode(_nacklLockedTo));
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
@@ -1248,7 +1165,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         `depositVoucherCode` supplies the zerostate voucher code.
     ///         A non-empty `userCell` contains abi.encode(voucherCode,
     ///         bridgeTokens, bridgeTokenIds) and, from 1.18.0, a further
-    ///         reference with the NACKL locks and the pending-deposit queue.
+    ///         reference with the NACKL locks.
     ///         For an upgrade from 1.15.0,
     ///         construct it with BridgeZerostateData.getTokenUpgradeData;
     ///         subsequent updateCode calls construct it automatically.
@@ -1293,11 +1210,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                 TvmCell, mapping(uint256 => mapping(uint32 => BridgeTokenConfig)),
                 mapping(uint256 => mapping(uint256 => uint32)));
             if (registry.refs() != 0) {
-                (_nacklLockedTo, _pendingDeposits, _pendingFirst, _pendingLast)
-                    = abi.decode(registry.load(TvmCell), (
-                    mapping(uint256 => mapping(uint160 => uint128)),
-                    mapping(uint256 => PendingDeposit),
-                    mapping(uint256 => uint256), mapping(uint256 => uint256)));
+                _nacklLockedTo = abi.decode(registry.load(TvmCell), (
+                    mapping(uint256 => mapping(uint160 => uint128))));
             }
         }
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
@@ -1347,13 +1261,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
     function getNacklLockedTo(uint256 chainId, uint160 evmBridge) external view returns (uint128) {
         return _nacklLockedTo[chainId][evmBridge];
-    }
-
-    function getPendingDeposit(uint256 depositHash) external view returns (
-        uint256 chainId, uint128 amount, uint256 anAccount
-    ) {
-        PendingDeposit p = _pendingDeposits[depositHash];
-        return (p.chainId, p.amount, p.anAccount);
     }
 
     /// @notice Returns the hash of the currently installed DepositVoucher code.

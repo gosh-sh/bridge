@@ -23,6 +23,16 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `eccBridge` 1.18.0 (code hash `e0a653cc…`) trusts an EVM bridge address under one chain only:
+  `setTrustedL1Bridge(chainId, l1Bridge, true)` exits with 228 while `l1Bridge` is trusted under
+  another `chainId`; revoke it there first. EVM bridges on different chains must therefore be
+  deployed at different addresses. The new getter `getTrustedL1BridgeChain(uint256 l1Bridge)`
+  returns the chain an address is trusted under, or null. Upgrade with `updateCode` and an empty
+  `userCell`, then re-trust each EVM bridge under its own chain; the ABI in
+  `contracts/an/0.80.1_compiled/exchange/eccBridge.abi.json` gains the getter.
+- `ackinacki-bridge` requires `eccBridge` 1.17.0 or 1.18.0.
+- `scripts/deposit_anchor_params.py --verify` does not check the node's `eth_chainId`: point `--rpc`
+  at a node of the anchor's chain.
 - `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
   its directories and the Circuit 4 keys in `params/relayer/`, rerun `finalize-params.sh` and set the new
   `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).

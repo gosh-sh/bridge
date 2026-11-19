@@ -214,7 +214,7 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 
 | Exit | Where | Cause | Fix |
 |---|---|---|---|
-| 222 `ERR_UNSUPPORTED_SRC_CHAIN` | `finalizeDeposit` | `(chainId, source contract)` not allowlisted | owner: `setTrustedL1Bridge(chainId, l1Bridge, true)` |
+| 222 `ERR_UNSUPPORTED_SRC_CHAIN` | `finalizeDeposit` | `(chainId, source contract)` not allowlisted | owner: `setTrustedL1Bridge(chainId, l1Bridge, true)`; 228 means `l1Bridge` is trusted under another chain (`getTrustedL1BridgeChain`) — revoke it there, or the deposit came from a bridge deployed at the same address on another chain |
 | 224 `ERR_UNKNOWN_BLOCK` | `finalizeDeposit` | the deposit's block hash is not an accepted anchor | confirm with `scripts/deposit_anchor_params.py --verify`, then the chain's anchor writer admits it: `setAcceptedBlockHash` while owner anchors are on for that chain, the light client for Ethereum, the Arbitrum block verifier (`eth-lc-relayer arbitrum-anchors`) for Arbitrum |
 | 204 / 230 | `finalizeDeposit` | zero amount / zero recipient was proven | genuinely bad deposit; leave it parked |
 | 214 `ERR_OVERFLOW` | `finalizeDeposit` | the proven amount does not fit a uint64 | genuinely bad deposit; leave it parked |

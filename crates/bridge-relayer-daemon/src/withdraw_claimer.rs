@@ -116,15 +116,6 @@ pub enum ClaimState {
     NotOurs { reason: String },
     /// This relayer's `withdrawByProof` paid it.
     Paid { tx_hash: String },
-    /// This relayer's `withdrawByProof` was accepted and the bridge queued
-    /// the NACKL payout (`NacklPayoutQueued`): the proof is spent, and
-    /// `executeNacklPayout(payout_id)` mints it once due, from `ready_at`
-    /// (unix seconds).
-    Queued {
-        tx_hash: String,
-        payout_id: String,
-        ready_at: u64,
-    },
     /// Its nullifier was spent before this relayer's send landed: somebody
     /// else paid it, or an earlier send of this relayer whose receipt it
     /// did not see.
@@ -670,24 +661,6 @@ where
                 );
                 Ok(Outcome::Final(ClaimState::Paid {
                     tx_hash,
-                }))
-            },
-            WithdrawSubmitOutcome::Queued {
-                tx_hash,
-                payout_id,
-                ready_at,
-            } => {
-                let tx_hash = format!("{tx_hash:#x}");
-                info!(
-                    message_id = %claim.message_id,
-                    nullifier = %pub_inputs.nullifier,
-                    "withdraw claimer: withdrawByProof accepted tx={tx_hash}, NACKL payout \
-                     {payout_id} queued until {ready_at}"
-                );
-                Ok(Outcome::Final(ClaimState::Queued {
-                    tx_hash,
-                    payout_id: payout_id.to_string(),
-                    ready_at,
                 }))
             },
             WithdrawSubmitOutcome::Reverted {

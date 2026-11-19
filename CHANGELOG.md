@@ -30,7 +30,7 @@ assigns it when the release is tagged.
   with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
   finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
-- `AckiNackiBridge` storage adds `_nackl` at slots 19–32; no earlier slot moves.
+- `AckiNackiBridge` storage adds `_nackl` at slots 19–23; no earlier slot moves.
 - `ackinacki-bridge` accepts `eccBridge` up to 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`).
 - `contracts/ethereum` needs `@openzeppelin/contracts` 5.4.0: run `npm install` before `forge
   build`.
@@ -39,9 +39,7 @@ assigns it when the release is tagged.
   `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).
 - `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
   `submit.status` `already_paid` and `submit.nullifier`, not 13. The proof is always built; the send
-  is where the payout is found. For NACKL, a payout found in the queue ends with `submit.status`
-  `queued`, `payout_id` and `ready_at`; a payout the CLI cannot read exits 13 and is marked nothing,
-  so `--resume` looks again.
+  is where the payout is found.
 - `ackinacki-bridge`: `--token usdc|nackl` is required on `withdraw` and `deposit`;
   `withdraw --token-id` and `deposit --token <address>` (`DEPOSIT_TOKEN`) are gone: add `--token usdc`
   to scripts.
@@ -69,30 +67,25 @@ assigns it when the release is tagged.
   it.
 - `eccBridge`: `mintAndSendTokenBridged` refuses id `1` with 242; `getTotalBridged(1)` stays `(0,
   0)`.
-- `AckiNackiBridge`: `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` lists the NACKL
-  token under id `1`; called again it sets the two limits.
+- `AckiNackiBridge`: `listNackl(token, maxTransfer, dailyLimit)` lists the NACKL token under id `1`;
+  called again it sets the daily limit.
 - `AckiNackiBridge`: a NACKL `deposit` burns with `burnFrom`, without a TVL cap.
-- `AckiNackiBridge`: a NACKL `withdrawByProof` mints at once within `dailyLimit` and
-  `delayThreshold` when nothing is due before it, otherwise queues the payout (`NacklPayoutQueued`),
-  24 hours above `delayThreshold`; a successor queues every payout until it is the minter.
-- `AckiNackiBridge`: `executeNacklPayout(payoutId)` (anyone, not while paused) mints only the payout
-  `nacklState().nextPayout` names, once it fits the limit; before the handover it reverts
-  `NacklNotMinter`.
-- `AckiNackiBridge`: `nacklState()` reports the limits, the window, `accepted`, `minted`, the queue
-  and `nextPayout`.
-- `AckiNackiBridge`: new errors `NacklMinterGone`, `NacklPayoutUnknown`,
-  `NacklPayoutAlreadyExecuted`, `NacklPayoutNotDue`, `NacklPayoutNotNext`, `NacklWindowFull`,
-  `NacklNotMinter`, `NacklBadDecimals`, `NacklLimitBelowWithdrawalCap`, `NacklPayoutsPending`,
-  `NacklSuccessorNotReady`; events `NacklListed`, `NacklLimitsSet`, `NacklPayoutExecuted`,
-  `NacklMinterHandedOver`.
-- `AckiNackiBridge`: `migrateToken(1, successor)` hands the NACKL minter over, paused and with
-  nothing queued; run it only after `setEvmBridge` to the successor and once `getNacklLockedTo` for
-  the old bridge equals its `nacklState().accepted`.
+- `AckiNackiBridge`: a NACKL `withdrawByProof` mints at once, or reverts without spending the
+  nullifier, so the same proof can be sent again: `NacklWindowFull` when the last 24 hours already
+  minted `dailyLimit`, `NacklNotMinter` on a successor before the handover, `NacklMinterGone` on
+  a bridge that handed the minter over. There is no payout queue.
+- `AckiNackiBridge`: `nacklState()` reports `dailyLimit`, `windowUsed`, `minted` and `handedOver`.
+- `AckiNackiBridge`: new errors `NacklMinterGone`, `NacklWindowFull`, `NacklNotMinter`,
+  `NacklBadDecimals`, `NacklLimitBelowWithdrawalCap`, `NacklSuccessorNotReady`; events
+  `NacklListed`, `NacklLimitsSet`, `NacklMinterHandedOver`.
+- `AckiNackiBridge`: `migrateToken(1, successor)` hands the NACKL minter over while paused; run it
+  only after `setEvmBridge` to the successor and once `getNacklLockedTo` for the old bridge equals
+  its `nacklState().minted`.
 - `NacklToken`: OpenZeppelin ERC20 `NACKL`, nine decimals, deployed and optionally listed by
   `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_INITIAL_HOLDER`,
-  `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
-- `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` execute due NACKL payouts in
-  `nextPayout` order and park a proof refused with `NacklMinterGone`.
+  `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`).
+- `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` retry a NACKL proof refused with
+  `NacklWindowFull` or `NacklNotMinter` later and park one refused with `NacklMinterGone`.
 - `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --tx-hash <AN tx>
   --token …` proves any burn and sends `withdrawByProof` (JSON `submit` is `null` after `send`).
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
@@ -102,8 +95,8 @@ assigns it when the release is tagged.
 - `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning; it refuses an
   amount above the EVM bridge's payout cap, and the Acki Nacki bridge's `getTotalBridged` and the
   chain's limits decide the rest.
-- `ackinacki-bridge withdraw --token nackl` withdraws NACKL; a queued payout ends with
-  `submit.status: "queued"`, `payout_id` and `ready_at`, and a re-run does not resend the proof.
+- `ackinacki-bridge withdraw --token nackl` withdraws NACKL; when the EVM bridge's daily NACKL limit
+  is full it exits 13 with nothing spent, and re-running with `--allow-retry` later sends the same proof.
 - `ackinacki-bridge deposit` exits 38 (`CreditRefused`) when the bridge refuses the deposit for now;
   `--resume` sends `finalizeDeposit` again and confirms the credit.
 - `deposit-relayer` treats a deposit whose voucher the bridge released as pending and sends it
@@ -115,9 +108,6 @@ assigns it when the release is tagged.
 - `deposit-relayer` retries a deposit refused with 236.
 - `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
   sends nothing.
-- `daemon-withdraw-live` ends a NACKL burn whose payout the bridge queued in the `withdraw-claims.json` state
-  `queued`, with `tx_hash`, `payout_id` and `ready_at`; `daemon-live`'s NACKL payout loop mints it
-  once due, so run both.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.

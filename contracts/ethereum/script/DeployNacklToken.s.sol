@@ -20,8 +20,7 @@ contract DeployNacklToken is Script {
                 .listNackl(
                     token,
                     vm.envUint("NACKL_MAX_TRANSFER"),
-                    vm.envUint("NACKL_DAILY_LIMIT"),
-                    vm.envUint("NACKL_DELAY_THRESHOLD")
+                    vm.envUint("NACKL_DAILY_LIMIT")
                 );
         }
         vm.stopBroadcast();

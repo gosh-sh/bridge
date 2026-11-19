@@ -218,7 +218,7 @@ relying on them for a storage-level migration.
 | 16 | 0 | `storedPrevBkSetCommitment` | `uint256` | 273 | `applyBkSetUpdate` |
 | 17 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 369 | `withdrawByProof` |
 | 18 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 388 | `_appendLayer` |
-| 19–32 | — | `_nackl` | `NacklMint.State` | 390 | `listNackl`, `deposit` and `withdrawByProof` (NACKL), `executeNacklPayout`, `migrateToken(1, …)` |
+| 19–23 | — | `_nackl` | `NacklMint.State` | 390 | `listNackl`, `deposit` and `withdrawByProof` (NACKL), `migrateToken(1, …)` |
 
 Regenerated from this tree with `forge inspect src/AckiNackiBridge.sol:AckiNackiBridge
 storageLayout`. **The token registry took slots 2–5**, so everything from
@@ -501,14 +501,14 @@ finalRoot, anchorLayer, dstBridge`.
 | 11 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1977-1981 | `LayerOutOfRange` |
 | 12 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1982-1984 | `UnknownAnchor` |
 | 13 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1990-1991 | `WithdrawalProofRejected` |
-| 14 | `pub.amount ≤ liabilitiesOf(tokenId)` (custody tokens only; NACKL is minted or queued instead, §7.3a) | 1994-1997 | `WithdrawTreasuryShortfall` |
+| 14 | `pub.amount ≤ liabilitiesOf(tokenId)` (custody tokens only; NACKL is minted instead, §7.3a) | 1994-1997 | `WithdrawTreasuryShortfall` |
 
 Read `maxWithdrawalAmount(usdcTokenId())` before burning ECC (`ackinacki-bridge` does through
 `BridgeClient::usdc_payout_cap`). The payout cap is stored in `TokenInfo.maxWithdrawal`; it is
 initialized on listing and can increase with `setTokenLimits`, but lowering deposit limits never
 reduces it. The existing six-value `tokenInfo` getter continues to report deposit limits.
 
-For NACKL, after check 13 the bridge marks the nullifier used and mints or queues the payout
+For NACKL, after check 13 the bridge marks the nullifier used and mints the payout
 (§7.3a); check 14 and the custody steps below do not apply.
 
 Effects then interactions for custody tokens (`:2007-2031`): mark the nullifier used, debit the token's book —
@@ -624,30 +624,23 @@ boundary at or below it — usually just that one bundle.
 NACKL (ECC id `1`) is minted, not paid from custody
 ([`NACKL-bridge-extension.md`](NACKL-bridge-extension.md)). The logic is the external library
 `src/NacklMint.sol`, linked at deployment and run by DELEGATECALL in the bridge's storage
-(`_nackl`, slots 19–32), so the bridge is the minter of `src/NacklToken.sol` and logs its events.
+(`_nackl`, slots 19–23), so the bridge is the minter of `src/NacklToken.sol` and logs its events.
 
-- `listNackl(token, maxTransfer, dailyLimit, delayThreshold)` (owner) lists the token under id `1`
-  with no TVL cap; its owner must be this bridge or, before a handover, `predecessor`. Called again
-  with the listed token it sets the two limits; `dailyLimit` may not be below `maxWithdrawal`.
+- `listNackl(token, maxTransfer, dailyLimit)` (owner) lists the token under id `1` with no TVL
+  cap; its owner must be this bridge or, before a handover, `predecessor`. Called again with the
+  listed token it sets `dailyLimit`, which may not be below `maxWithdrawal`.
 - `deposit` of NACKL burns it from the sender (`burnFrom`) and books no liabilities.
 - `withdrawByProof` of NACKL runs every check of §7.2 up to the proof, spends the nullifier and
-  then mints at once when the payout is at most `delayThreshold`, the NACKL minted in the
-  current hour and the 24 before it leaves room under `dailyLimit`, no queued payout is due and
-  the bridge is the token's minter.
-  Otherwise it queues the payout
-  (`NacklPayoutQueued(payoutId, recipient, amount, readyAt)`): due in 24 hours above
-  `delayThreshold`, at once otherwise. It emits `WithdrawalByProofExecuted` either way.
-- `executeNacklPayout(payoutId)` (anyone, `whenNotPaused`) mints a due payout that fits the window.
-  Due payouts go oldest first, by `readyAt` and then id: any other id reverts
-  `NacklPayoutNotNext(payoutId, next)`. `NacklMint` keeps two FIFO queues, one for payouts due at
-  once and one for the 24-hour ones, and `next` is the older due head of the two.
-  Until the bridge is the token's minter (a successor before `migrateToken(1, …)` on the old
-  bridge) it reverts `NacklNotMinter(token)`. Nothing cancels a queued payout.
-- `migrateToken(1, successor)` (owner, paused, nothing queued, `successor` lists the same token)
-  transfers the token's ownership to `successor` and closes NACKL deposits here; NACKL payouts here
-  then revert `NacklMinterGone`.
-- `nacklState()` returns `dailyLimit`, `delayThreshold`, `windowUsed`, `accepted`, `minted`,
-  `pendingCount`, `payoutCount`, `handedOver`, `nextPayout` (0 when no queued payout is due).
+  mints the payout in the same transaction. It reverts instead, leaving the nullifier unspent so
+  the same proof can be sent again: `NacklWindowFull(used, amount, dailyLimit)` when the NACKL
+  minted in the current hour and the 24 before it leaves no room for the payout,
+  `NacklNotMinter(token)` while the bridge is not the token's minter (a successor before
+  `migrateToken(1, …)` on the old bridge), `NacklMinterGone()` after this bridge handed the
+  minter over. There is no payout queue.
+- `migrateToken(1, successor)` (owner, paused, `successor` lists the same token) transfers the
+  token's ownership to `successor` and closes NACKL deposits here; NACKL payouts here then revert
+  `NacklMinterGone`.
+- `nacklState()` returns `dailyLimit`, `windowUsed`, `minted`, `handedOver`.
 
 ### 7.4 Read surface for AN state
 
@@ -782,7 +775,7 @@ principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1963`, `B − S` floor
 | `fundTreasury(amount)` | 1828 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
 | `migrateTreasury(successor)` | 1847 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
 | `fundToken(tokenId, token, amount)` | 2204 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Not for USDC (`CannotMigrateUsdc`). `token` must be what this bridge lists under `tokenId` (`FundedTokenMismatch`). Pulls exactly `amount` from the caller and adds it to the listing's liabilities, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `tvlCap`, which gates `deposit` only; allowed while paused. |
-| `migrateToken(tokenId, successor)` | 2224 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's `maxWithdrawalAmount(tokenId)` must not be below this listing's (`SuccessorWithdrawalCapTooLow`). The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. For NACKL (id 1) nothing is transferred: it closes NACKL deposits here and hands the token's minter to `successor` (`NacklMint.handOver`; `NacklPayoutsPending` while any payout is queued, `NacklSuccessorNotReady` unless `successor.tokenInfo(1)` names the same token) and emits only `NacklMinterHandedOver`. |
+| `migrateToken(tokenId, successor)` | 2224 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's `maxWithdrawalAmount(tokenId)` must not be below this listing's (`SuccessorWithdrawalCapTooLow`). The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. For NACKL (id 1) nothing is transferred: it closes NACKL deposits here and hands the token's minter to `successor` (`NacklMint.handOver`; `NacklSuccessorNotReady` unless `successor.tokenInfo(1)` names the same token) and emits only `NacklMinterHandedOver`. |
 | `transferOwnership(addr)` | 1922 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_pullFromAave(amount)` (`:2035`), called with `amount ≤ A` only, withdraws exactly `amount` and books it with `_bookPull` (`:2043`), which requires the

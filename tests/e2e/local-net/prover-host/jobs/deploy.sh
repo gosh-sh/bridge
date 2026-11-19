@@ -29,7 +29,7 @@ PY
 export NACKL_BRIDGE; NACKL_BRIDGE=$(sed -n 's/^BRIDGE_ADDRESS=//p' "$OUT/evm.env")
 export NACKL_INITIAL_HOLDER; NACKL_INITIAL_HOLDER=$(cast wallet address --private-key "$PRIVATE_KEY")
 export NACKL_INITIAL_SUPPLY=1000000000000 NACKL_LIST=true NACKL_MAX_TRANSFER=100000000000 \
-  NACKL_DAILY_LIMIT=1000000000000 NACKL_DELAY_THRESHOLD=50000000000
+  NACKL_DAILY_LIMIT=1000000000000
 forge script script/DeployNacklToken.s.sol:DeployNacklToken --rpc-url "$ARB_RPC" --broadcast --slow \
   | tee "$WORK/forge-nackl.out"
 nackl=$(sed -n 's/^ *NacklToken: \(0x[0-9a-fA-F]\{40\}\)$/\1/p' "$WORK/forge-nackl.out" | tail -n 1)

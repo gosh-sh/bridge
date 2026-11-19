@@ -12,10 +12,10 @@ contract NacklHandler is Test {
     uint256 internal immutable maxTransfer;
 
     uint256 public nextNullifier = 1_000;
-    uint256 public acceptedByProofs;
+    uint256 public paidByProofs;
+    uint256 public refusedButSpent;
     uint256[] public mintTimes;
     uint256[] public mintAmounts;
-    uint256 public jumpedTheQueue;
 
     constructor(
         AckiNackiBridge b,
@@ -36,9 +36,9 @@ contract NacklHandler is Test {
     function withdraw(uint256 amount) external {
         amount = bound(amount, 1, maxTransfer);
         uint256 before = nackl.totalSupply();
-        (,,,,,,,, uint256 waiting) = bridge.nacklState();
         uint256 a = uint256(uint160(address(0x1111111111111111111111111111111111111111)));
-        bridge.withdrawByProof(
+        uint256 nullifier = nextNullifier++;
+        try bridge.withdrawByProof(
             hex"00",
             IBridgeWithdrawalVerifier.WithdrawalPublicInputs({
                 tokenId: 1,
@@ -49,32 +49,20 @@ contract NacklHandler is Test {
                 senderAccFr: 1,
                 dappFr: dappFr,
                 accFr: accFr,
-                nullifier: nextNullifier++,
+                nullifier: nullifier,
                 finalRoot: anchor,
                 anchorLayer: 1,
                 dstBridge: uint256(uint160(address(bridge)))
             })
-        );
-        acceptedByProofs += amount;
-        if (waiting != 0 && nackl.totalSupply() != before) jumpedTheQueue += 1;
-        _record(before);
-    }
-
-    function executeNext() external {
-        (,,,,,,,, uint256 id) = bridge.nacklState();
-        if (id == 0) return;
-        uint256 before = nackl.totalSupply();
-        try bridge.executeNacklPayout(id) { } catch { }
-        _record(before);
-    }
-
-    function execute(uint256 id) external {
-        (,,,,,, uint256 count,,) = bridge.nacklState();
-        if (count == 0) return;
-        id = bound(id, 1, count);
-        uint256 before = nackl.totalSupply();
-        try bridge.executeNacklPayout(id) { } catch { }
-        _record(before);
+        ) {
+            paidByProofs += amount;
+            mintTimes.push(block.timestamp);
+            mintAmounts.push(nackl.totalSupply() - before);
+        } catch {
+            if (bridge.isNullifierUsed(nullifier) || nackl.totalSupply() != before) {
+                refusedButSpent += 1;
+            }
+        }
     }
 
     function wait(uint256 secondsAhead) external {
@@ -84,20 +72,10 @@ contract NacklHandler is Test {
     function mintCount() external view returns (uint256) {
         return mintTimes.length;
     }
-
-    function _record(uint256 before) private {
-        uint256 delta = nackl.totalSupply() - before;
-        if (delta != 0) {
-            mintTimes.push(block.timestamp);
-            mintAmounts.push(delta);
-        }
-    }
 }
 
 contract NacklBridgeInvariantTest is NacklBridgeFixture {
     NacklHandler internal handler;
-
-    uint256 internal constant NACKL_SLOT = 19;
 
     function setUp() public override {
         super.setUp();
@@ -105,41 +83,10 @@ contract NacklBridgeInvariantTest is NacklBridgeFixture {
         targetContract(address(handler));
     }
 
-    function invariant_NB_P_3_supplyIsMintedAndAcceptedIsMintedPlusQueued() public view {
-        (uint256 accepted, uint256 minted, uint256 pendingCount, uint256 payoutCount) = _state();
-        assertEq(nackl.totalSupply(), minted);
-        assertEq(accepted, handler.acceptedByProofs());
-        uint256 queued;
-        uint256 open;
-        for (uint256 id = 1; id <= payoutCount; id++) {
-            bytes32 base = keccak256(abi.encode(id, NACKL_SLOT + 4));
-            uint256 word = uint256(vm.load(address(bridge), base));
-            assertTrue(address(uint160(word)) != address(0), "a queued payout lost its record");
-            if ((word >> 224) & 1 == 0) {
-                queued += uint256(vm.load(address(bridge), bytes32(uint256(base) + 1)));
-                open += 1;
-            }
-        }
-        assertEq(accepted, minted + queued);
-        assertEq(open, pendingCount);
-    }
-
-    function invariant_NB_EVM_ORDER_nextIsTheOldestDuePayoutAndNothingJumpsIt() public view {
-        assertEq(handler.jumpedTheQueue(), 0);
-        (,,,,,, uint256 payoutCount,, uint256 next) = bridge.nacklState();
-        uint256 bestId;
-        uint64 bestAt;
-        for (uint256 id = 1; id <= payoutCount; id++) {
-            bytes32 base = keccak256(abi.encode(id, NACKL_SLOT + 4));
-            uint256 word = uint256(vm.load(address(bridge), base));
-            uint64 readyAt = uint64(word >> 160);
-            if ((word >> 224) & 1 == 1 || readyAt > block.timestamp) continue;
-            if (bestId == 0 || readyAt < bestAt) {
-                bestId = id;
-                bestAt = readyAt;
-            }
-        }
-        assertEq(next, bestId);
+    function invariant_NB_P_3_supplyIsWhatProofsPaid() public view {
+        assertEq(nackl.totalSupply(), _minted(bridge));
+        assertEq(_minted(bridge), handler.paidByProofs());
+        assertEq(handler.refusedButSpent(), 0);
     }
 
     function invariant_NB_P_4_any24HoursWithinTheLimit() public view {

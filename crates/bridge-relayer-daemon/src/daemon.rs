@@ -217,22 +217,6 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
     where
         F: Future<Output = ()>,
     {
-        self.run_until_shutdown_with(backoff, metrics, shutdown, || async {})
-            .await
-    }
-
-    pub async fn run_until_shutdown_with<F, H, HF>(
-        &mut self,
-        backoff: BackoffConfig,
-        metrics: Option<Arc<RelayerMetrics>>,
-        shutdown: F,
-        mut between_ticks: H,
-    ) -> Result<DaemonRunSummary, RelayerError>
-    where
-        F: Future<Output = ()>,
-        H: FnMut() -> HF,
-        HF: Future<Output = ()>,
-    {
         let mut summary = DaemonRunSummary::default();
         let mut current_delay = backoff.initial;
         if let Some(m) = &metrics {
@@ -365,14 +349,6 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                 },
             };
             summary.last_outcome = Some(last_tag);
-            tokio::select! {
-                biased;
-                _ = &mut shutdown => {
-                    info!(?summary, "daemon: shutdown signalled, exiting");
-                    return Ok(summary);
-                }
-                _ = between_ticks() => {}
-            }
 
             // 3. Backoff: success -> reset; failure -> grow.
             if success {
@@ -521,87 +497,6 @@ mod tests {
         let snap = metrics.snapshot();
         assert_eq!(snap.ticks, 1);
         assert_eq!(snap.not_yet_available, 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_between_ticks_hook_runs_after_every_tick() {
-        let dir = tempdir().unwrap();
-        let bridge = Arc::new(MockBridgeClient::with_genesis(
-            U256::from(BK),
-            U256::ZERO,
-            Arc::new(|_| true),
-        ));
-        let source = Arc::new(InMemoryBlockSource::new());
-        let mut anchor = U256::ZERO;
-        for seq in 1..=3 {
-            let b = block(seq, anchor);
-            anchor = b.next_anchor();
-            source.insert(b);
-        }
-        let mut relayer = make_relayer(source, bridge, dir.path().join("state.json"));
-        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let watch = Arc::clone(&calls);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                if watch.load(Ordering::Relaxed) >= 4 {
-                    let _ = shutdown_tx.send(());
-                    break;
-                }
-            }
-        });
-        let hook = Arc::clone(&calls);
-        let summary = relayer
-            .run_until_shutdown_with(
-                fast_backoff(),
-                None,
-                async {
-                    let _ = shutdown_rx.await;
-                },
-                || {
-                    let hook = Arc::clone(&hook);
-                    async move {
-                        hook.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), summary.ticks);
-        assert!(summary.verified >= 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_hook_that_never_returns_does_not_hold_off_shutdown() {
-        let dir = tempdir().unwrap();
-        let bridge = Arc::new(MockBridgeClient::with_genesis(
-            U256::from(BK),
-            U256::ZERO,
-            Arc::new(|_| true),
-        ));
-        let source = Arc::new(InMemoryBlockSource::new());
-        let mut relayer = make_relayer(source, bridge, dir.path().join("state.json"));
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let _ = shutdown_tx.send(());
-        });
-        let summary = tokio::time::timeout(
-            Duration::from_secs(60),
-            relayer.run_until_shutdown_with(
-                fast_backoff(),
-                None,
-                async {
-                    let _ = shutdown_rx.await;
-                },
-                || std::future::pending::<()>(),
-            ),
-        )
-        .await
-        .expect("shutdown is honoured while the hook waits")
-        .unwrap();
-        assert_eq!(summary.ticks, 1);
     }
 
     #[tokio::test(start_paused = true)]

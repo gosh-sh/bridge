@@ -959,36 +959,13 @@ mod sol_bindings {
             error AaveWithdrawFailed(uint256 requested, uint256 received);
             error WithdrawTransferFailed(address recipient, uint256 amount);
 
-            event WithdrawalByProofExecuted(
-                uint256 indexed nullifier,
-                address indexed recipient,
-                uint256 amount,
-                uint256 indexed tokenId,
-                address submitter
-            );
-            event NacklPayoutQueued(
-                uint256 indexed payoutId,
-                address indexed recipient,
-                uint256 amount,
-                uint64 readyAt
-            );
-            function executeNacklPayout(uint256 payoutId) external;
             function nacklState() external view returns (
                 uint256 dailyLimit,
-                uint256 delayThreshold,
                 uint256 windowUsed,
-                uint256 accepted,
                 uint256 minted,
-                uint256 pendingCount,
-                uint256 payoutCount,
-                bool handedOver,
-                uint256 nextPayout
+                bool handedOver
             );
             error NacklMinterGone();
-            error NacklPayoutUnknown(uint256 payoutId);
-            error NacklPayoutAlreadyExecuted(uint256 payoutId);
-            error NacklPayoutNotDue(uint256 payoutId, uint64 readyAt);
-            error NacklPayoutNotNext(uint256 payoutId, uint256 next);
             error NacklWindowFull(uint256 used, uint256 amount, uint256 dailyLimit);
             error NacklNotMinter(address token);
 
@@ -1078,11 +1055,11 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     receipt_poll_every: Duration,
     replaced_after: Duration,
     /// Held from a transaction's nonce plan to its receipt, so that the
-    /// tasks sharing this client (daemon-live's `verifyBlock`,
-    /// `applyBkSetUpdate` and its NACKL payout loop's `executeNacklPayout`)
-    /// send one at a time:
-    /// [`crate::nonce`] replaces whatever waits at the account's next
-    /// nonce, and two sends planned at once would take the same one.
+    /// tasks sharing this client (daemon-live's `verifyBlock` and
+    /// `applyBkSetUpdate`, and its withdrawal claimer's `withdrawByProof`)
+    /// send one at a time: [`crate::nonce`] replaces whatever waits at the
+    /// account's next nonce, and two sends planned at once would take the
+    /// same one.
     send_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -1286,75 +1263,6 @@ where
         }
     }
 
-    pub async fn withdrawal_payout(
-        &self,
-        nullifier: U256,
-    ) -> Result<Option<WithdrawSubmitOutcome>, RelayerError> {
-        let provider = self.contract.provider();
-        let head = provider
-            .get_block_number()
-            .await
-            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
-        let scan = self.scan.normalized();
-        let mut to = head;
-        loop {
-            let from = to
-                .saturating_sub(scan.chunk_blocks.saturating_sub(1))
-                .max(scan.deploy_block);
-            let filter = Filter::new()
-                .address(self.address)
-                .event_signature(AckiNackiBridge::WithdrawalByProofExecuted::SIGNATURE_HASH)
-                .topic1(B256::from(nullifier))
-                .from_block(from)
-                .to_block(to);
-            let logs = provider.get_logs(&filter).await.map_err(|e| {
-                RelayerError::other(format!(
-                    "WithdrawalByProofExecuted get_logs [{from},{to}]: {e}"
-                ))
-            })?;
-            if let Some(tx_hash) = logs.iter().find_map(|l| l.transaction_hash) {
-                let receipt = provider
-                    .get_transaction_receipt(tx_hash)
-                    .await
-                    .map_err(|e| RelayerError::other(format!("receipt of {tx_hash}: {e}")))?
-                    .ok_or_else(|| RelayerError::other(format!("no receipt for {tx_hash} yet")))?;
-                let logs = serde_json::to_value(&receipt)
-                    .ok()
-                    .and_then(|r| r.get("logs").cloned())
-                    .filter(serde_json::Value::is_array)
-                    .ok_or_else(|| {
-                        RelayerError::other(format!("receipt of {tx_hash} has no logs"))
-                    })?;
-                let outcome = queued_from_logs(
-                    WithdrawSubmitOutcome::Paid {
-                        tx_hash,
-                    },
-                    &logs,
-                    self.address,
-                );
-                let queued_topic =
-                    format!("{:#x}", AckiNackiBridge::NacklPayoutQueued::SIGNATURE_HASH);
-                let names_a_queue = logs.as_array().into_iter().flatten().any(|log| {
-                    log.get("topics")
-                        .and_then(|t| t.get(0))
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|t| t.eq_ignore_ascii_case(&queued_topic))
-                });
-                if names_a_queue && matches!(outcome, WithdrawSubmitOutcome::Paid { .. }) {
-                    return Err(RelayerError::other(format!(
-                        "receipt of {tx_hash} queues a NACKL payout that could not be read"
-                    )));
-                }
-                return Ok(Some(outcome));
-            }
-            if from <= scan.deploy_block {
-                return Ok(None);
-            }
-            to = from - 1;
-            tokio::time::sleep(scan.pause).await;
-        }
-    }
-
     async fn probe_log_span_once(&self) -> Result<usize, RelayerError> {
         let head = self
             .contract
@@ -1551,18 +1459,10 @@ where
                 .confirm(pending, nonce, self.withdraw_receipt_timeout)
                 .await
             {
-                Ok(receipt) => {
-                    let outcome =
-                        outcome_from_mined_withdraw(receipt.status(), receipt.transaction_hash());
-                    if pub_inputs.token_id != U256::from(NACKL_TOKEN_ID) {
-                        return Ok(outcome);
-                    }
-                    let logs = serde_json::to_value(&receipt)
-                        .ok()
-                        .and_then(|r| r.get("logs").cloned())
-                        .unwrap_or_default();
-                    Ok(queued_from_logs(outcome, &logs, *self.contract.address()))
-                },
+                Ok(receipt) => Ok(outcome_from_mined_withdraw(
+                    receipt.status(),
+                    receipt.transaction_hash(),
+                )),
                 Err(e) => {
                     // Post-send confirmation failures (RPC dropped, receipt
                     // wait timed out, transaction replaced) are transient by
@@ -1587,51 +1487,10 @@ where
             .map_err(|e| RelayerError::other(format!("nacklState: {e}")))?;
         Ok(NacklState {
             daily_limit: r.dailyLimit,
-            delay_threshold: r.delayThreshold,
             window_used: r.windowUsed,
-            accepted: r.accepted,
             minted: r.minted,
-            pending_count: r.pendingCount,
-            payout_count: r.payoutCount,
             handed_over: r.handedOver,
-            next_payout: r.nextPayout,
         })
-    }
-
-    pub async fn dry_run_execute_nackl_payout(
-        &self,
-        payout_id: U256,
-    ) -> Result<DryRunOutcome, RelayerError> {
-        match self.contract.executeNacklPayout(payout_id).call().await {
-            Ok(_) => Ok(DryRunOutcome::WouldSucceed),
-            Err(e) => Ok(DryRunOutcome::WouldRevert {
-                reason: format!("{e}"),
-            }),
-        }
-    }
-
-    pub async fn execute_nackl_payout(&self, payout_id: U256) -> Result<B256, RelayerError> {
-        let call = self.contract.executeNacklPayout(payout_id);
-        let _sending = self.send_lock.lock().await;
-        let (call, nonce) = self
-            .prepare_send(call)
-            .await
-            .map_err(|e| RelayerError::other(format!("executeNacklPayout send: {e}")))?;
-        let pending = call
-            .send()
-            .await
-            .map_err(|e| RelayerError::other(format!("executeNacklPayout send: {e}")))?;
-        let receipt = self
-            .confirm(pending, nonce, self.withdraw_receipt_timeout)
-            .await
-            .map_err(|e| RelayerError::other(format!("executeNacklPayout receipt: {e}")))?;
-        if !receipt.status() {
-            return Err(RelayerError::other(format!(
-                "executeNacklPayout({payout_id}) reverted on chain (tx {:#x})",
-                receipt.transaction_hash()
-            )));
-        }
-        Ok(receipt.transaction_hash())
     }
 
     /// Submit `applyBkSetUpdate` for a BK-set rotation bundle (`bkupd_*.json`).
@@ -2393,11 +2252,6 @@ pub enum WithdrawSubmitOutcome {
     Paid {
         tx_hash: B256,
     },
-    Queued {
-        tx_hash: B256,
-        payout_id: U256,
-        ready_at: u64,
-    },
     /// `withdrawByProof` reverted. `permanent = true` means the revert is
     /// intrinsic to the proof (e.g. `WithdrawalProofRejected` — includes
     /// the wrong-VK-digest path where the aggregator's inner-VK guard
@@ -2415,58 +2269,14 @@ pub enum WithdrawSubmitOutcome {
     },
 }
 
-pub fn queued_from_logs(
-    outcome: WithdrawSubmitOutcome,
-    logs: &serde_json::Value,
-    bridge: Address,
-) -> WithdrawSubmitOutcome {
-    use alloy::sol_types::SolEvent;
-    let WithdrawSubmitOutcome::Paid {
-        tx_hash,
-    } = outcome
-    else {
-        return outcome;
-    };
-    let word = |v: &serde_json::Value| v.as_str().and_then(|h| h.parse::<U256>().ok());
-    let queued = logs.as_array().into_iter().flatten().find_map(|log| {
-        let address: Address = log.get("address")?.as_str()?.parse().ok()?;
-        let topics = log.get("topics")?.as_array()?;
-        if address != bridge
-            || topics.len() != 3
-            || word(&topics[0])?
-                != U256::from_be_bytes(AckiNackiBridge::NacklPayoutQueued::SIGNATURE_HASH.0)
-        {
-            return None;
-        }
-        let data = hex::decode(log.get("data")?.as_str()?.trim_start_matches("0x")).ok()?;
-        let ready_at = U256::from_be_slice(data.get(32..64)?);
-        Some((word(&topics[1])?, u64::try_from(ready_at).ok()?))
-    });
-    match queued {
-        Some((payout_id, ready_at)) => WithdrawSubmitOutcome::Queued {
-            tx_hash,
-            payout_id,
-            ready_at,
-        },
-        None => WithdrawSubmitOutcome::Paid {
-            tx_hash,
-        },
-    }
-}
-
 pub const NACKL_TOKEN_ID: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NacklState {
     pub daily_limit: U256,
-    pub delay_threshold: U256,
     pub window_used: U256,
-    pub accepted: U256,
     pub minted: U256,
-    pub pending_count: U256,
-    pub payout_count: U256,
     pub handed_over: bool,
-    pub next_payout: U256,
 }
 
 /// The outcome of a `withdrawByProof` that was mined, from its receipt.
@@ -2639,19 +2449,6 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
             format!("recipient: {}, amount: {}", x.recipient, x.amount),
         ),
         E::NacklMinterGone(_) => ("NacklMinterGone", String::new()),
-        E::NacklPayoutUnknown(x) => ("NacklPayoutUnknown", format!("payoutId: {}", x.payoutId)),
-        E::NacklPayoutAlreadyExecuted(x) => (
-            "NacklPayoutAlreadyExecuted",
-            format!("payoutId: {}", x.payoutId),
-        ),
-        E::NacklPayoutNotDue(x) => (
-            "NacklPayoutNotDue",
-            format!("payoutId: {}, readyAt: {}", x.payoutId, x.readyAt),
-        ),
-        E::NacklPayoutNotNext(x) => (
-            "NacklPayoutNotNext",
-            format!("payoutId: {}, next: {}", x.payoutId, x.next),
-        ),
         E::NacklWindowFull(x) => (
             "NacklWindowFull",
             format!(
@@ -3035,41 +2832,6 @@ mod tests {
         Arc::new(|_| true)
     }
 
-    #[test]
-    fn a_receipt_with_nackl_payout_queued_is_queued_not_paid() {
-        use alloy::sol_types::SolEvent;
-        let bridge = Address::repeat_byte(0xb1);
-        let hash = B256::repeat_byte(0x42);
-        let topic0 = format!("{:#x}", AckiNackiBridge::NacklPayoutQueued::SIGNATURE_HASH);
-        let data = format!("0x{:064x}{:064x}", 5_000_000_000u64, 1_800_086_400u64);
-        let log = |address: Address, topic0: &str| {
-            serde_json::json!([{
-                "address": format!("{address:#x}"),
-                "topics": [topic0, format!("0x{:064x}", 3), format!("0x{:064x}", 0x11)],
-                "data": data,
-            }])
-        };
-        let paid = || WithdrawSubmitOutcome::Paid {
-            tx_hash: hash,
-        };
-        match queued_from_logs(paid(), &log(bridge, &topic0), bridge) {
-            WithdrawSubmitOutcome::Queued {
-                payout_id,
-                ready_at,
-                ..
-            } => {
-                assert_eq!(payout_id, U256::from(3));
-                assert_eq!(ready_at, 1_800_086_400);
-            },
-            other => panic!("expected Queued, got {other:?}"),
-        }
-        let other_bridge =
-            queued_from_logs(paid(), &log(Address::repeat_byte(0xb2), &topic0), bridge);
-        assert!(matches!(other_bridge, WithdrawSubmitOutcome::Paid { .. }));
-        let other_event = queued_from_logs(paid(), &log(bridge, &format!("0x{:064x}", 1)), bridge);
-        assert!(matches!(other_event, WithdrawSubmitOutcome::Paid { .. }));
-    }
-
     /// A mined `withdrawByProof` with status 0 must not read as paid: the
     /// user's eccUSDC are already burned, so `Paid` would park an unpaid
     /// withdrawal in `done` behind a `PAID` log line.
@@ -3091,9 +2853,6 @@ mod tests {
             WithdrawSubmitOutcome::Paid {
                 ..
             } => panic!("status 0 reported as Paid"),
-            WithdrawSubmitOutcome::Queued {
-                ..
-            } => panic!("status 0 reported as Queued"),
         }
         assert!(matches!(
             outcome_from_mined_withdraw(true, hash),
@@ -3362,6 +3121,60 @@ mod tests {
         assert_eq!(
             classify_withdraw_revert(&reason),
             WithdrawRevertKind::Transient,
+        );
+    }
+
+    #[test]
+    fn a_full_nackl_window_is_retried_and_names_the_limit() {
+        use alloy::sol_types::SolError;
+        let full = AckiNackiBridge::NacklWindowFull {
+            used: U256::from(900u64),
+            amount: U256::from(200u64),
+            dailyLimit: U256::from(1_000u64),
+        }
+        .abi_encode();
+        let reason = format!("execution reverted, data: \"0x{}\"", hex::encode(full));
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "NacklWindowFull(used: 900, amount: 200, dailyLimit: 1000)"
+        );
+    }
+
+    #[test]
+    fn a_successor_before_the_minter_handover_is_retried() {
+        use alloy::sol_types::SolError;
+        let not_minter = AckiNackiBridge::NacklNotMinter {
+            token: alloy::primitives::Address::repeat_byte(0x11),
+        }
+        .abi_encode();
+        let reason = format!("execution reverted: 0x{}", hex::encode(not_minter));
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().name,
+            "NacklNotMinter"
+        );
+    }
+
+    #[test]
+    fn a_bridge_that_handed_the_minter_over_parks_the_proof() {
+        let reason = format!(
+            "execution reverted: {}",
+            selector_hex_of::<AckiNackiBridge::NacklMinterGone>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "NacklMinterGone()"
         );
     }
 

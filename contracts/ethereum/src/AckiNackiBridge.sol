@@ -1840,7 +1840,7 @@ contract AckiNackiBridge {
     ///
     /// State updates (CEI):
     ///   - **Effects**: mark `nullifier` used; debit the listing's liabilities
-    ///     (and `treasuryBalance` for USDC), or for NACKL mint or queue the payout.
+    ///     (and `treasuryBalance` for USDC), or for NACKL mint the payout.
     ///   - **Interactions**: for a USDC payout whose liquid principal is short,
     ///     a pull from AAVE (`_refillFromAave`) — required for what the USDC on
     ///     hand cannot pay, best effort up to the target of the new book; then
@@ -2266,53 +2266,25 @@ contract AckiNackiBridge {
         emit TokenMigrated(successor, tokenId, amount);
     }
 
-    function listNackl(
-        NacklToken token,
-        uint256 maxTransfer,
-        uint256 dailyLimit,
-        uint256 delayThreshold
-    ) external onlyOwner {
+    function listNackl(NacklToken token, uint256 maxTransfer, uint256 dailyLimit)
+        external
+        onlyOwner
+    {
         if (address(token) == address(_nackl.token)) {
-            NacklMint.setLimits(
-                _nackl, dailyLimit, delayThreshold, _tokens[NACKL_TOKEN_ID].maxWithdrawal
-            );
+            NacklMint.setLimit(_nackl, dailyLimit, _tokens[NACKL_TOKEN_ID].maxWithdrawal);
             return;
         }
-        NacklMint.list(_nackl, token, dailyLimit, delayThreshold, maxTransfer, address(predecessor));
+        NacklMint.list(_nackl, token, dailyLimit, maxTransfer, address(predecessor));
         _listToken(NACKL_TOKEN_ID, address(token), 9, maxTransfer, type(uint256).max, true);
-    }
-
-    function executeNacklPayout(uint256 payoutId) external nonReentrant whenNotPaused {
-        NacklMint.execute(_nackl, payoutId);
     }
 
     function nacklState()
         external
         view
-        returns (
-            uint256 dailyLimit,
-            uint256 delayThreshold,
-            uint256 windowUsed,
-            uint256 accepted,
-            uint256 minted,
-            uint256 pendingCount,
-            uint256 payoutCount,
-            bool handedOver,
-            uint256 nextPayout
-        )
+        returns (uint256 dailyLimit, uint256 windowUsed, uint256 minted, bool handedOver)
     {
         NacklMint.State storage s = _nackl;
-        return (
-            s.dailyLimit,
-            s.delayThreshold,
-            NacklMint.windowUsed(s),
-            s.accepted,
-            s.minted,
-            s.pendingCount,
-            s.payoutCount,
-            s.handedOver,
-            NacklMint.next(s)
-        );
+        return (s.dailyLimit, NacklMint.windowUsed(s), s.minted, s.handedOver);
     }
 
     function _requirePausedForSuccessor(address successor) private view {

@@ -1939,21 +1939,6 @@ where
                 st.paid += 1;
                 st.done.insert(proof_path);
             },
-            WithdrawSubmitOutcome::Queued {
-                tx_hash,
-                payout_id,
-                ready_at,
-            } => {
-                info!(
-                    proof = %proof_path.display(),
-                    ?tx_hash,
-                    %payout_id,
-                    ready_at,
-                    "withdrawByProof accepted; NACKL payout QUEUED"
-                );
-                st.paid += 1;
-                st.done.insert(proof_path);
-            },
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: true,
@@ -2028,18 +2013,11 @@ async fn run_withdraw_daemon(
     );
 
     let mut st = WithdrawScanState::default();
-    let mut nackl_st = bridge_relayer_daemon::nackl_payouts::NacklPayoutScanState::default();
     let mut current_backoff = backoff.initial;
 
     loop {
-        let mut had_transient_failure =
+        let had_transient_failure =
             withdraw_scan_once(&bridge, &proofs_dir, dry_run, &mut st).await?;
-        had_transient_failure |= bridge_relayer_daemon::nackl_payouts::nackl_payout_scan_once(
-            &bridge,
-            dry_run,
-            &mut nackl_st,
-        )
-        .await;
 
         info!(
             paid = st.paid,
@@ -2122,7 +2100,6 @@ async fn run_bridge_daemon(
         .with_sender(sender)
         .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT);
     let mut wd_state = WithdrawScanState::default();
-    let mut nackl_state = bridge_relayer_daemon::nackl_payouts::NacklPayoutScanState::default();
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -2204,13 +2181,6 @@ async fn run_bridge_daemon(
             "daemon-bridge: withdraw scan complete"
         );
 
-        had_transient |= bridge_relayer_daemon::nackl_payouts::nackl_payout_scan_once(
-            &wd_bridge,
-            dry_run,
-            &mut nackl_state,
-        )
-        .await;
-
         // ── Shared backoff / poll sleep, interruptible by shutdown. ────
         let sleep_for = if had_transient {
             let d = current_backoff;
@@ -2281,16 +2251,6 @@ async fn submit_withdraw(
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => info!(?tx_hash, "withdrawByProof paid out"),
-        WithdrawSubmitOutcome::Queued {
-            tx_hash,
-            payout_id,
-            ready_at,
-        } => info!(
-            ?tx_hash,
-            %payout_id,
-            ready_at,
-            "withdrawByProof accepted; NACKL payout queued, executeNacklPayout once due"
-        ),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
@@ -2410,16 +2370,6 @@ async fn withdraw_e2e_cli(args: WithdrawE2ECliArgs) -> anyhow::Result<()> {
         WithdrawSubmitOutcome::Paid {
             tx_hash,
         } => info!(?tx_hash, "withdrawByProof paid out"),
-        WithdrawSubmitOutcome::Queued {
-            tx_hash,
-            payout_id,
-            ready_at,
-        } => info!(
-            ?tx_hash,
-            %payout_id,
-            ready_at,
-            "withdrawByProof accepted; NACKL payout queued, executeNacklPayout once due"
-        ),
         WithdrawSubmitOutcome::Reverted {
             reason,
             permanent,
@@ -2583,13 +2533,9 @@ async fn run_daemon_live(
         request_timeout_secs = rpc_request_timeout_from_env()?.as_secs(),
         "daemon-live: Ethereum RPC",
     );
-    // `executeNacklPayout` must not wait for a receipt without a bound, or
-    // the client's send lock would hold `verifyBlock` back with it.
     let bridge_probe = {
         let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
-            .with_sender(sender)
-            .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT)
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan).with_sender(sender)
     };
     let chain_full = bridge_probe
         .read_full_state()
@@ -2812,15 +2758,12 @@ async fn run_daemon_live(
         pk_cache_dir = %aggregation.pk_cache_dir.display(),
         "daemon-live: C1/C2 R15 SHPLONK aggregation",
     );
-    let payouts: Arc<dyn bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge> =
-        Arc::clone(&bridge) as _;
 
     spawn_and_run(
         cfg,
         Arc::clone(&aggregated),
         aggregated,
         bridge,
-        Some(payouts),
         backoff,
         &gql_endpoint,
         &params_dir,
@@ -2963,7 +2906,6 @@ async fn spawn_and_run<S, U, B, D>(
     source: Arc<S>,
     bk_update_source: Arc<U>,
     bridge: Arc<B>,
-    payouts: Option<Arc<dyn bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge>>,
     backoff: BackoffConfig,
     gql_endpoint: &str,
     params_dir: &Path,
@@ -3014,23 +2956,8 @@ where
         prover_state = %prover_state_dir.display(),
         "daemon-live starting"
     );
-    let nackl = Arc::new(tokio::sync::Mutex::new(
-        bridge_relayer_daemon::nackl_payouts::NacklPayoutScanState::default(),
-    ));
     let summary = relayer
-        .run_until_shutdown_with(backoff, Some(metrics.clone()), shutdown, || {
-            let payouts = payouts.clone();
-            let nackl = Arc::clone(&nackl);
-            async move {
-                if let Some(p) = payouts {
-                    let mut st = nackl.lock().await;
-                    bridge_relayer_daemon::nackl_payouts::nackl_payout_scan_once(
-                        &*p, false, &mut st,
-                    )
-                    .await;
-                }
-            }
-        })
+        .run_until_shutdown(backoff, Some(metrics.clone()), shutdown)
         .await?;
     info!(?summary, snapshot = ?metrics.snapshot(), "daemon-live stopped");
     Ok(())
@@ -3626,7 +3553,6 @@ mod daemon_live_startup_tests {
             Arc::clone(&source),
             Arc::new(EmptyBkUpdateSource),
             bridge,
-            None,
             BackoffConfig::default(),
             "http://gql.invalid",
             dir.path(),
@@ -3636,88 +3562,6 @@ mod daemon_live_startup_tests {
         .await
         .unwrap();
         source.fetches.load(Ordering::SeqCst)
-    }
-
-    #[derive(Default)]
-    struct StuckPayouts {
-        sent: std::sync::atomic::AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl bridge_relayer_daemon::nackl_payouts::NacklPayoutBridge for StuckPayouts {
-        async fn nackl_state(
-            &self,
-        ) -> Result<bridge_relayer_daemon::bridge::NacklState, RelayerError> {
-            let z = alloy::primitives::U256::ZERO;
-            Ok(bridge_relayer_daemon::bridge::NacklState {
-                daily_limit: z,
-                delay_threshold: z,
-                window_used: z,
-                accepted: z,
-                minted: z,
-                pending_count: alloy::primitives::U256::from(1u64),
-                payout_count: alloy::primitives::U256::from(1u64),
-                handed_over: false,
-                next_payout: alloy::primitives::U256::from(1u64),
-            })
-        }
-
-        async fn dry_run_execute_nackl_payout(
-            &self,
-            _: alloy::primitives::U256,
-        ) -> Result<bridge_relayer_daemon::bridge::DryRunOutcome, RelayerError> {
-            Ok(bridge_relayer_daemon::bridge::DryRunOutcome::WouldSucceed)
-        }
-
-        async fn execute_nackl_payout(
-            &self,
-            _: alloy::primitives::U256,
-        ) -> Result<alloy::primitives::B256, RelayerError> {
-            self.sent.store(true, Ordering::SeqCst);
-            std::future::pending().await
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn daemon_live_runs_the_nackl_payout_lane_and_stops_while_a_payout_waits() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = Arc::new(CountingSource::default());
-        let bridge = Arc::new(bridge_relayer_daemon::MockBridgeClient::with_genesis(
-            alloy::primitives::U256::from(1u64),
-            alloy::primitives::U256::ZERO,
-            Arc::new(|_| true),
-        ));
-        let payouts = Arc::new(StuckPayouts::default());
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            let _ = tx.send(());
-        });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            spawn_and_run(
-                RelayerConfig::new(
-                    dir.path().join(RELAYER_STATE_FILE_NAME),
-                    bridge_prover_lib::BUNDLE_STRIDE_L1,
-                ),
-                Arc::clone(&source),
-                Arc::new(EmptyBkUpdateSource),
-                bridge,
-                Some(Arc::clone(&payouts) as _),
-                BackoffConfig::default(),
-                "http://gql.invalid",
-                dir.path(),
-                dir.path(),
-                async {
-                    let _ = rx.await;
-                },
-            ),
-        )
-        .await
-        .expect("daemon-live stops while a payout waits for its receipt")
-        .unwrap();
-        assert!(payouts.sent.load(Ordering::SeqCst));
-        assert_eq!(source.fetches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

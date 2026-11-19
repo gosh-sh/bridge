@@ -17,7 +17,6 @@ pub mod error;
 pub mod eth_rpc;
 pub mod history_consistency;
 pub mod live_source;
-pub mod nackl_payouts;
 pub mod nonce;
 pub mod proof_validation;
 pub mod prover_bin;

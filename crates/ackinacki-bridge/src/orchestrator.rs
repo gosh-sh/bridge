@@ -130,10 +130,6 @@ pub struct SubmitSummary {
     /// `None` for `--dry-run` success; `Some(tx_hash)` for real submits.
     pub eth_tx: Option<String>,
     pub status: SubmitStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub payout_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ready_at: Option<u64>,
     /// The withdrawal's nullifier, on `already_paid` only: the payout is the
     /// bridge's `WithdrawalByProofExecuted` with this first topic.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,12 +143,10 @@ pub struct SubmitSummary {
 pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
-    Queued,
-    /// The bridge has accepted a proof of this withdrawal, and not by a
-    /// receipt this run saw: the relayer daemon, an earlier run, another
-    /// operator, or a transaction of this run whose receipt never came. USDC
-    /// is on the recipient; NACKL is minted, or queued until
-    /// `executeNacklPayout` mints it. A success, like `Confirmed`.
+    /// The bridge has paid this withdrawal out, and not by a receipt this
+    /// run saw: the relayer daemon, an earlier run, another operator, or a
+    /// transaction of this run whose receipt never came. The tokens are on
+    /// the recipient; a success, like `Confirmed`.
     AlreadyPaid,
 }
 
@@ -1019,8 +1013,6 @@ pub async fn run(args: WithdrawArgs, part: Part, skip_prompt: bool) -> CliResult
             submit: Some(SubmitSummary {
                 eth_tx: None,
                 status: SubmitStatus::DryRunOk,
-                payout_id: None,
-                ready_at: None,
                 nullifier: None,
             }),
         });
@@ -1444,45 +1436,6 @@ async fn prove_and_submit(
             reason: format!("PartnerWithdrawalProof::public_inputs: {e}"),
             source: Some(anyhow::Error::new(e)),
         })?;
-    let spent_already = |nullifier: alloy::primitives::U256| {
-        let bridge = &ro_bridge_for_wait;
-        let token_id = pub_inputs.token_id;
-        async move {
-            if token_id
-                == alloy::primitives::U256::from(bridge_relayer_daemon::bridge::NACKL_TOKEN_ID)
-            {
-                let unknown = |why: String| CliError::EthSubmitFailed {
-                    reason: format!(
-                        "the EVM bridge has already accepted this withdrawal (nullifier \
-                         {nullifier:#066x}), but its NACKL payout could not be read: {why}. \
-                         Nothing is marked paid; re-run with --resume once the RPC serves the \
-                         bridge's logs."
-                    ),
-                    source: None,
-                };
-                return match bridge.withdrawal_payout(nullifier).await {
-                    Ok(Some(WithdrawSubmitOutcome::Queued {
-                        tx_hash,
-                        payout_id,
-                        ready_at,
-                    })) => Ok(SubmitSummary {
-                        eth_tx: Some(format!("{tx_hash:?}")),
-                        status: SubmitStatus::Queued,
-                        payout_id: Some(payout_id.to_string()),
-                        ready_at: Some(ready_at),
-                        nullifier: Some(format!("{nullifier:#066x}")),
-                    }),
-                    Ok(Some(WithdrawSubmitOutcome::Paid {
-                        ..
-                    })) => Ok(already_paid(nullifier)),
-                    Ok(_) => Err(unknown("no WithdrawalByProofExecuted event for it".into())),
-                    Err(e) => Err(unknown(e.to_string())),
-                };
-            }
-            Ok(already_paid(nullifier))
-        }
-    };
-
     // Always dry-run first — catches on-chain-side issues (paused bridge,
     // treasury shortfall) before we spend gas.
     {
@@ -1564,21 +1517,8 @@ async fn prove_and_submit(
                         source: None,
                     });
                 }
-                info!(%nullifier, "eth dry-run: the bridge has already accepted this withdrawal");
-                let submit = spent_already(nullifier).await?;
-                if matches!(submit.status, SubmitStatus::Queued) {
-                    if let Some(r) = record.as_deref_mut() {
-                        r.status = Status::Queued;
-                        r.eth_tx_hash = submit.eth_tx.clone();
-                        r.nackl_payout_id = submit.payout_id.clone();
-                        r.nackl_ready_at = submit.ready_at;
-                        idempotency::update(state_dir, r, held).map_err(|e| {
-                            e.after_send("the withdrawal was accepted and its NACKL payout queued")
-                        })?;
-                    }
-                } else {
-                    mark_already_paid(state_dir, record.as_deref_mut(), held)?;
-                }
+                info!(%nullifier, "eth dry-run: the bridge has already paid this withdrawal out");
+                mark_already_paid(state_dir, record.as_deref_mut(), held)?;
                 return Ok(WithdrawSuccess {
                     burn: c.burn.clone(),
                     capture: CaptureSummary {
@@ -1592,7 +1532,7 @@ async fn prove_and_submit(
                         calldata_bytes,
                         pi_count,
                     }),
-                    submit: Some(submit),
+                    submit: Some(already_paid(nullifier)),
                 });
             },
         }
@@ -1680,33 +1620,6 @@ async fn prove_and_submit(
             SubmitSummary {
                 eth_tx: Some(tx),
                 status: SubmitStatus::Confirmed,
-                payout_id: None,
-                ready_at: None,
-                nullifier: None,
-            }
-        },
-        WithdrawSubmitOutcome::Queued {
-            tx_hash,
-            payout_id,
-            ready_at,
-        } => {
-            let tx = format!("{tx_hash:?}");
-            info!(tx = %tx, %payout_id, ready_at, "withdrawByProof accepted; NACKL payout queued");
-            if let Some(r) = record.as_deref_mut() {
-                r.status = Status::Submitted;
-                r.eth_tx_hash = Some(tx.clone());
-                idempotency::update(state_dir, r, held).map_err(|e| {
-                    e.after_send(&format!(
-                        "withdrawByProof was accepted on the EVM side as {tx} and its NACKL \
-                         payout {payout_id} queued — the proof is spent"
-                    ))
-                })?;
-            }
-            SubmitSummary {
-                eth_tx: Some(tx),
-                status: SubmitStatus::Queued,
-                payout_id: Some(payout_id.to_string()),
-                ready_at: Some(ready_at),
                 nullifier: None,
             }
         },
@@ -1716,8 +1629,8 @@ async fn prove_and_submit(
             reason,
             permanent: _,
         } if paid_out_after_all(&ro_bridge_for_wait, nullifier, &reason).await => {
-            info!(%nullifier, "withdrawByProof: the bridge had already accepted this withdrawal");
-            spent_already(nullifier).await?
+            info!(%nullifier, "withdrawByProof: the bridge had already paid this withdrawal out");
+            already_paid(nullifier)
         },
         WithdrawSubmitOutcome::Reverted {
             reason,
@@ -1770,22 +1683,11 @@ async fn prove_and_submit(
     };
 
     if let Some(r) = record {
+        r.status = Status::Confirmed;
         r.eth_tx_hash = submit.eth_tx.clone();
-        if matches!(submit.status, SubmitStatus::Queued) {
-            r.status = Status::Queued;
-            r.nackl_payout_id = submit.payout_id.clone();
-            r.nackl_ready_at = submit.ready_at;
-            idempotency::update(state_dir, r, held).map_err(|e| {
-                e.after_send("the withdrawal was accepted and its NACKL payout queued")
-            })?;
-        } else {
-            r.status = Status::Confirmed;
-            idempotency::update(state_dir, r, held).map_err(|e| {
-                e.after_send(
-                    "the withdrawal completed on both chains and its payout receipt was seen",
-                )
-            })?;
-        }
+        idempotency::update(state_dir, r, held).map_err(|e| {
+            e.after_send("the withdrawal completed on both chains and its payout receipt was seen")
+        })?;
     }
 
     Ok(WithdrawSuccess {
@@ -1810,8 +1712,6 @@ fn already_paid(nullifier: alloy::primitives::U256) -> SubmitSummary {
     SubmitSummary {
         eth_tx: None,
         status: SubmitStatus::AlreadyPaid,
-        payout_id: None,
-        ready_at: None,
         nullifier: Some(format!("{nullifier:#066x}")),
     }
 }
@@ -3154,8 +3054,6 @@ mod tests {
         let confirmed = SubmitSummary {
             eth_tx: Some("0xab".into()),
             status: SubmitStatus::Confirmed,
-            payout_id: None,
-            ready_at: None,
             nullifier: None,
         };
         let v = serde_json::to_value(&confirmed).unwrap();
@@ -3177,8 +3075,6 @@ mod tests {
             withdrawal_msg_id: None,
             block_seq_no: None,
             eth_tx_hash: None,
-            nackl_payout_id: None,
-            nackl_ready_at: None,
         }
     }
 

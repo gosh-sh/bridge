@@ -601,7 +601,7 @@ def test_71_withdrawal_paid_by_the_relayer(run, ctx):
 
 def test_71b_nackl_withdrawal_paid_by_the_relayer(run, ctx):
     """daemon-withdraw-live proves the NACKL withdrawal after the USDC one and pays it out: the
-    bridge mints the 5 NACKL at once, within the daily limit and below the delay threshold."""
+    bridge mints the 5 NACKL at once, within the daily limit."""
     claim = claim_reaches(run, ctx, NACKL_OUT, "daemon-withdraw-live pays the NACKL withdrawal out",
                           lambda c: c["state"] != "pending", 1800)
     assert claim["state"] == "paid", f"the NACKL burn ended {claim['state']}, not paid at once: {claim}"
@@ -663,10 +663,9 @@ def test_74_usdc_delivered(arb, an, ctx):
 
 
 def test_75_nackl_minted(arb, ctx):
-    """The bridge minted the 5 NACKL it accepted, and nothing waits in its queue."""
+    """The bridge minted the 5 NACKL its proofs paid."""
     state = arb.words(ctx["bridge"], "nacklState()")
-    accepted, minted, pending = state[3], state[4], state[5]
-    assert (accepted, minted, pending) == (NACKL_OUT, NACKL_OUT, 0), f"nacklState: {state}"
+    assert state[2] == NACKL_OUT, f"nacklState: {state}"
 
 
 def test_76_nackl_reconciles(arb, an, ctx):
@@ -674,7 +673,7 @@ def test_76_nackl_reconciles(arb, an, ctx):
     assert arb.call(ctx["nackl"], "totalSupply()") == NACKL_SUPPLY - NACKL_IN + NACKL_OUT
     got = an("nackl", ctx["bridge"])
     assert int(got["LOCKED"]) == NACKL_OUT - NACKL_IN, got
-    assert int(got["LOCKED_TO"]) == arb.words(ctx["bridge"], "nacklState()")[3], got
+    assert int(got["LOCKED_TO"]) == arb.words(ctx["bridge"], "nacklState()")[2], got
 # The timing lines daemon-live and daemon-withdraw-live log for each proof: the attestation
 # (Circuit 1A/1B), the layer-hashes proof (Circuit 2), a rotation's attestation, and every
 # aggregate-proof subprocess (Primary, LayerHashes, BridgeWithdrawal). A withdrawal's whole proof,

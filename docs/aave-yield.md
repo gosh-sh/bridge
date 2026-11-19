@@ -322,11 +322,9 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    `0x3FB082a905a895151224F6d93bD074E816338638`, verifies only proofs of the previous Circuit 4:
    prove those burns with the `ackinacki-bridge` release that bridge was deployed for. This step
    takes as long as anchoring and proving the last of those burns, and withdrawals to the chain stay
-   closed for all of it. For NACKL, `WithdrawalByProofExecuted` is emitted when a payout is only
-   queued: the old bridge has paid NACKL once `getNacklLockedTo(<chainId>, <old>)` on `eccBridge`
-   equals its `nacklState().accepted` and its `nacklState().pendingCount` is 0. A delayed payout
-   is due no earlier than 24 hours after it was queued, and a payout also waits for room in the
-   daily limit and for the payouts ahead of it, so there is no fixed upper bound
+   closed for all of it. For NACKL, the old bridge has paid once `getNacklLockedTo(<chainId>, <old>)`
+   on `eccBridge` equals its `nacklState().minted`. A NACKL proof that does not fit the daily limit
+   is refused (`NacklWindowFull`) and sent again later, so there is no fixed upper bound
    (`docs/NACKL-bridge-extension.md`, NB-HO-3).
 4. **Retire the old bridge and move the principal.** `pause()` it and pull its AAVE position back
    (`withdrawFromAave` or `emergencyWithdrawAll`) so its whole `treasuryBalance` is liquid USDC.
@@ -356,7 +354,7 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    When NACKL (id 1) is listed, call `migrateToken(1, <new bridge>)` too, whatever its liabilities
    (they are always 0): it hands the NACKL token's minter to the new bridge, which must already
    list the same token with `listNackl`. Check `owner()` of the NACKL token is the new bridge.
-   Without it the new bridge queues every NACKL payout and executes none (`NacklNotMinter`).
+   Without it the new bridge refuses every NACKL payout (`NacklNotMinter`).
 5. **Reopen withdrawals on the new bridge**: `setEvmBridge(<chainId>, <new>)` on `eccBridge`.
    Point `ackinacki-bridge withdraw --bridge-address` at the new bridge.
 6. **Stop trusting the old bridge** (`setTrustedL1Bridge(<chainId>, <old>, false)`) and stop its

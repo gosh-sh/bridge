@@ -38,9 +38,7 @@ invariant, a fuzz test or a scenario test.
 | **Locked to a bridge** | Per destination chain and EVM bridge: the total NACKL ever locked by withdrawals bound to that EVM bridge (never decreases). |
 | **Refused deposit** | A proven deposit the AN bridge cannot pay when its voucher confirms it (for NACKL: the locked amount is short). The bridge pays nothing and releases the voucher, so the deposit can be finalized again. |
 | **Payout** | The NACKL a proven withdrawal owes on the EVM chain. |
-| **Queued payout** | A payout the EVM bridge did not mint at once. It is minted later by `executeNacklPayout`. |
 | **Daily limit** | `L`: the most NACKL the EVM bridge mints in any 24 hours. |
-| **Delay threshold** | `T`: a payout above it is minted no earlier than 24 hours after its proof was accepted. |
 | **Mint window** | The NACKL minted in the current hour and the 24 hours before it (25 hourly buckets). Any 24-hour interval lies inside one such window, so keeping the window at or below `L` keeps every 24 hours at or below `L`. |
 | **Handover** | Moving the minter role from an EVM bridge to the successor that names it as `predecessor`. |
 
@@ -79,17 +77,17 @@ NB-AN-8 hold for the code in this repository.
 
 | ID | Requirement |
 |---|---|
-| NB-EVM-1 | When the owner calls `listNackl`, the EVM bridge shall list the NACKL token under currency id 1 with the given per-deposit cap, daily limit and delay threshold. It shall be refused unless the token is not yet listed, its minter is the EVM bridge or, before a handover, the bridge's `predecessor`, the token has nine decimals, and no other token holds id 1. |
+| NB-EVM-1 | When the owner calls `listNackl`, the EVM bridge shall list the NACKL token under currency id 1 with the given per-deposit cap and daily limit. It shall be refused unless the token is not yet listed, its minter is the EVM bridge or, before a handover, the bridge's `predecessor`, the token has nine decimals, and no other token holds id 1. |
 | NB-EVM-2 | When `deposit` receives NACKL, the EVM bridge shall burn it from the depositor with `burnFrom` and emit `Deposit` with the same fields as for USDC. The per-deposit cap and the deposit switch apply; the TVL cap does not. |
-| NB-EVM-3 | When `withdrawByProof` accepts a NACKL proof, the EVM bridge shall run every check it runs for USDC, record the nullifier, and then: mint the payout at once if it is at or below the delay threshold and fits the mint window; queue it due in 24 hours if it is above the delay threshold; queue it due at once otherwise. A payout at or below the delay threshold is not minted at once while any queued payout is due, nor while the bridge is not yet the token's minter (a successor before the handover). |
-| NB-EVM-4 | When anyone calls `executeNacklPayout` for the oldest due queued payout (earliest due time, then lowest id; `nacklState().nextPayout`) and it fits the mint window, the EVM bridge shall mint it to its recipient and mark it executed; while the bridge is not the token's minter it shall revert `NacklNotMinter`. |
-| NB-EVM-5 | If `executeNacklPayout` is called for a payout that is unknown, executed, not yet due, not the oldest due one (`NacklPayoutNotNext`), or does not fit the mint window, then the call shall revert. |
+| NB-EVM-3 | When `withdrawByProof` accepts a NACKL proof, the EVM bridge shall run every check it runs for USDC, record the nullifier and mint the payout to its recipient in the same transaction. |
+| NB-EVM-4 | If a NACKL payout does not fit the mint window, then `withdrawByProof` shall revert with `NacklWindowFull`; if the bridge is not the token's minter (a successor before the handover), it shall revert with `NacklNotMinter`. The nullifier stays unspent. |
+| NB-EVM-5 | When the same proof is sent again after such a revert and the payout fits, the EVM bridge shall pay it. There is no payout queue: a proof the bridge refused is retried by its sender or a relayer. |
 | NB-EVM-6 | The EVM bridge shall mint no more than the daily limit in any mint window. |
-| NB-EVM-7 | When the owner calls `listNackl` again with the listed token, the EVM bridge shall set the daily limit and the delay threshold for payouts evaluated after the call. It shall refuse a daily limit below the NACKL per-withdrawal cap, so that every payout can fit an empty window. A payout already queued keeps its due time. |
-| NB-EVM-8 | The EVM bridge shall have no way to cancel a queued payout. |
-| NB-EVM-9 | While the EVM bridge is paused, `deposit`, `withdrawByProof` and `executeNacklPayout` shall revert. |
-| NB-EVM-10 | When the owner calls `migrateToken(1, successor)`, the EVM bridge shall close NACKL deposits on itself and make `successor` the minter. It shall be refused unless this bridge is paused, `successor` names it as `predecessor` and lists the same NACKL token, and no queued payout is unexecuted. |
-| NB-EVM-11 | After a handover, a NACKL `withdrawByProof` or `executeNacklPayout` on the old EVM bridge shall revert with `NacklMinterGone`, and `deposit` of NACKL into it shall revert with `TokenDepositsDisabled`, whatever `setTokenDepositsEnabled` says. |
+| NB-EVM-7 | When the owner calls `listNackl` again with the listed token, the EVM bridge shall set the daily limit for payouts after the call. It shall refuse a daily limit below the NACKL per-withdrawal cap, so that every payout can fit an empty window. |
+| NB-EVM-8 | The EVM bridge shall keep no payout pending: every NACKL proof it accepts is minted in the same transaction. |
+| NB-EVM-9 | While the EVM bridge is paused, `deposit` and `withdrawByProof` shall revert. |
+| NB-EVM-10 | When the owner calls `migrateToken(1, successor)`, the EVM bridge shall close NACKL deposits on itself and make `successor` the minter. It shall be refused unless this bridge is paused, `successor` names it as `predecessor` and lists the same NACKL token. |
+| NB-EVM-11 | After a handover, a NACKL `withdrawByProof` on the old EVM bridge shall revert with `NacklMinterGone`, and `deposit` of NACKL into it shall revert with `TokenDepositsDisabled`, whatever `setTokenDepositsEnabled` says. |
 | NB-EVM-12 | The USDC paths shall be unchanged: a USDC deposit and a USDC withdrawal move the same balances and emit the same events as on `40090b6c`. |
 
 ## 6. Handover procedure (HO)
@@ -101,8 +99,8 @@ bound to it; the handover precondition is checked by comparing two counters.
 | ID | Requirement |
 |---|---|
 | NB-HO-1 | The AN bridge shall report, per chain and EVM bridge, the NACKL locked to that bridge (`getNacklLockedTo`). |
-| NB-HO-2 | The EVM bridge shall report the NACKL it has accepted for payment, minted and queued (`nacklState`). |
-| NB-HO-3 | The operator shall hand the minter over only when, for the old bridge, the NACKL locked to it on Acki Nacki equals the NACKL it has accepted for payment, and nothing is queued. The order is: `setEvmBridge` to the successor on Acki Nacki; let the old bridge pay out; pause it; `migrateToken(1, successor)`. |
+| NB-HO-2 | The EVM bridge shall report the NACKL it has minted (`nacklState`). |
+| NB-HO-3 | The operator shall hand the minter over only when, for the old bridge, the NACKL locked to it on Acki Nacki equals the NACKL it has minted (`nacklState().minted`). The order is: `setEvmBridge` to the successor on Acki Nacki; let the old bridge pay out; pause it; `migrateToken(1, successor)`. |
 
 ## 7. Unchanged parts (CR)
 
@@ -117,9 +115,9 @@ bound to it; the handover precondition is checked by comparing two counters.
 |---|---|
 | NB-P-1 | (AN) For every chain, the NACKL the AN bridge holds is at least the sum over chains of the locked amounts. |
 | NB-P-2 | (AN) Locked amounts change only by a lock (up) and an unlock (down); an unlock never takes one below zero. |
-| NB-P-3 | (EVM) The NACKL token supply minted by the EVM bridge never exceeds the NACKL it accepted in proofs; queued plus minted equals accepted. |
+| NB-P-3 | (EVM) The NACKL token supply minted by the EVM bridge equals the NACKL paid by proofs it accepted; a refused proof mints nothing and spends no nullifier. |
 | NB-P-4 | (EVM) In every mint window the minted amount is at most the daily limit. |
-| NB-P-5 | (EVM) A nullifier pays at most once, whether the payout was minted at once or queued. |
+| NB-P-5 | (EVM) A nullifier pays at most once. |
 | NB-P-6 | (end to end) NACKL on the EVM chain comes only from NACKL locked on Acki Nacki: deposits unlock no more than earlier withdrawals locked. |
 
 ## 9. Traceability
@@ -139,16 +137,16 @@ bound to it; the handover precondition is checked by comparing two counters.
 | NB-EVM-1 | TC-NB-EVM-LIST | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-2 | TC-NB-EVM-DEPOSIT | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-3 | TC-NB-EVM-WITHDRAW-* | `contracts/ethereum/test/NacklBridge.t.sol` |
-| NB-EVM-4, NB-EVM-5 | TC-NB-EVM-EXECUTE-*, TC-NB-EVM-ORDER-* | `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol` (the oldest due payout goes first and nothing is minted ahead of it) |
+| NB-EVM-4, NB-EVM-5 | TC-NB-EVM-WITHDRAW-* | `contracts/ethereum/test/NacklBridge.t.sol`: `test_NB_EVM_WITHDRAW_overTheLimitIsRefusedAndCanBeSentAgain`, `test_NB_HO_3_aSuccessorRefusesPayoutsUntilItIsTheMinter` |
 | NB-EVM-6, NB-P-4 | TC-NB-EVM-WINDOW, TC-NB-P-WINDOW | `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol`: `invariant_NB_P_4_any24HoursWithinTheLimit` |
 | NB-EVM-7 | TC-NB-EVM-LIMITS | `contracts/ethereum/test/NacklBridge.t.sol` |
-| NB-EVM-8 | TC-NB-EVM-NOCANCEL | `contracts/ethereum/test/NacklBridge.t.sol` |
+| NB-EVM-8 | TC-NB-EVM-WITHDRAW-* | `contracts/ethereum/test/NacklBridge.t.sol`: `test_NB_EVM_WITHDRAW_payoutIsMintedAtOnce` |
 | NB-EVM-9 | TC-NB-EVM-PAUSE | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-10, NB-EVM-11 | TC-NB-EVM-HANDOVER-* | `contracts/ethereum/test/NacklBridge.t.sol` |
 | NB-EVM-12 | the existing USDC suites | `contracts/ethereum/test/`, and `test_NB_EVM_12_usdcStillPaysFromCustody` |
 | NB-HO-2 | TC-NB-EVM-STATE | `contracts/ethereum/test/NacklBridge.t.sol` |
-| NB-HO-3 | TC-NB-HO-PROCEDURE | `contracts/ethereum/test/NacklBridge.t.sol`: `test_NB_HO_3_procedureHandsOverOnlyWhenEverythingBoundIsPaid`, `test_NB_HO_3_earlyHandoverStrandsAWithdrawalOfTheOldBridge`, `test_NB_HO_3_aSuccessorQueuesPayoutsUntilItIsTheMinter` |
+| NB-HO-3 | TC-NB-HO-PROCEDURE | `contracts/ethereum/test/NacklBridge.t.sol`: `test_NB_HO_3_procedureHandsOverOnlyWhenEverythingBoundIsPaid`, `test_NB_HO_3_earlyHandoverStrandsAWithdrawalOfTheOldBridge`, `test_NB_HO_3_aSuccessorRefusesPayoutsUntilItIsTheMinter` |
 | NB-P-6 | TC-NB-E2E | `tests/e2e/local-net/arbitrum/test_arbitrum_e2e.py`: `test_45_nackl_locked_on_acki_nacki`, `test_46_nackl_deposit_sent`, `test_66_nackl_deposit_delivered`, `test_74_nackl_minted`, `test_75_nackl_reconciles` |
 | NB-CR-1, NB-CR-2 | TC-NB-CR | the check `scripts/check_withdrawal_event_header.py`, and no change in the circuit crates |
 | NB-P-1, NB-P-2 | TC-NB-P-AN | `scripts/test_an_bridge_limits.py`: `test_nb_an_unlock_pays_from_the_lock`, `test_nb_an_lock_of_another_chain_does_not_pay`, `test_nb_an_finalize_refuses_a_deposit_above_the_lock` |
-| NB-P-3, NB-P-5 | TC-NB-P-SUPPLY | `NacklBridgeInvariant.t.sol`: `invariant_NB_P_3_supplyIsMintedAndAcceptedIsMintedPlusQueued`; `NacklBridge.t.sol`: `test_NB_P_SUPPLY_queuedNullifierIsSpent` |
+| NB-P-3, NB-P-5 | TC-NB-P-SUPPLY | `NacklBridgeInvariant.t.sol`: `invariant_NB_P_3_supplyIsWhatProofsPaid`; `NacklBridge.t.sol`: `test_NB_EVM_WITHDRAW_overTheLimitIsRefusedAndCanBeSentAgain` |

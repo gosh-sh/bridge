@@ -3092,20 +3092,14 @@ pub async fn check_bridge_deploy_for_token(
             });
         }
         let needed = U256::from(amount.0);
-        if needed > nackl.delay_threshold {
-            tracing::warn!(
-                amount = amount.0,
-                threshold = %nackl.delay_threshold,
-                "this NACKL payout is above the delay threshold: it is queued and minted no \
-                 earlier than 24 hours after its proof is accepted"
-            );
-        } else if nackl.window_used + needed > nackl.daily_limit {
+        if nackl.window_used + needed > nackl.daily_limit {
             tracing::warn!(
                 amount = amount.0,
                 window_used = %nackl.window_used,
                 daily_limit = %nackl.daily_limit,
-                "the NACKL daily limit is nearly spent: this payout may be queued until the \
-                 limit has room"
+                "the EVM bridge's daily NACKL limit is nearly spent: withdrawByProof reverts \
+                 NacklWindowFull until the rolling 24-hour window has room. The proof is not \
+                 spent by that revert; re-run with --allow-retry later to send it again"
             );
         }
     }

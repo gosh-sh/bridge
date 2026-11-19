@@ -81,7 +81,6 @@ pub enum Status {
     Submitted,
     /// `withdrawByProof` receipt received, mined.
     Confirmed,
-    Queued,
     /// Terminal failure at some stage; needs `--allow-retry` (v1) or
     /// `--resume` (v2) to re-attempt.
     Failed,
@@ -145,12 +144,6 @@ impl Status {
                  funds again, use a different (amount, recipient, chain) — the identity is what \
                  the record is keyed on.",
             ),
-            Status::Queued => Disposition::Terminal(
-                "This withdrawal was accepted and its NACKL payout queued: the proof is spent and \
-                 is not sent again, and `--allow-retry` does not reopen it. executeNacklPayout \
-                 mints the payout once it is due, after the payouts due before it, and within the \
-                 bridge's daily limit; the relayer sends it, and anyone may.",
-            ),
             // A broadcast EVM transaction whose receipt nobody has seen,
             // so re-broadcasting risks a double payout.
             Status::Submitted => Disposition::Terminal(
@@ -180,17 +173,11 @@ impl Status {
 /// named the one flag that changes nothing about a terminal record.
 #[must_use]
 fn terminal_refusal(record: &Record, remedy: &str) -> CliError {
-    let remedy = match (&record.nackl_payout_id, record.nackl_ready_at) {
-        (Some(id), Some(at)) => {
-            format!("{remedy} Payout {id}, due at unix {at}: executeNacklPayout({id}).")
-        },
-        _ => remedy.to_string(),
-    };
     CliError::DuplicateInFlight {
         prior_status: format!("{:?}", record.status).to_ascii_lowercase(),
         prior_tx: record.an_tx_hash.clone(),
         prior_msg_id: record.withdrawal_msg_id.clone(),
-        remedy,
+        remedy: remedy.to_string(),
     }
 }
 
@@ -222,10 +209,6 @@ pub struct Record {
     pub withdrawal_msg_id: Option<String>,
     pub block_seq_no: Option<u64>,
     pub eth_tx_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nackl_payout_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nackl_ready_at: Option<u64>,
 }
 
 /// Which side of the atomic publish this run came out on.
@@ -1848,8 +1831,6 @@ fn fresh_reserved_record(
         withdrawal_msg_id: None,
         block_seq_no: None,
         eth_tx_hash: None,
-        nackl_payout_id: None,
-        nackl_ready_at: None,
     }
 }
 
@@ -1904,7 +1885,6 @@ fn read_record(path: &Path) -> CliResult<Record> {
         | Status::Proved
         | Status::Submitted
         | Status::Confirmed
-        | Status::Queued
         | Status::Failed => true,
         // The one status written BEFORE anything is broadcast, so the
         // only one for which a missing hash is the normal case.
@@ -3299,7 +3279,7 @@ mod tests {
         // someone saying here what it is. The array below still has to be
         // extended by hand; the compile error is what sends them to it.
         let expected = |status: Status| match status {
-            Status::Confirmed | Status::Submitted | Status::Queued => Some(true),
+            Status::Confirmed | Status::Submitted => Some(true),
             Status::Failed => None,
             Status::Reserved | Status::Burned | Status::Captured | Status::Proved => Some(false),
         };
@@ -3311,7 +3291,6 @@ mod tests {
             Status::Failed,
             Status::Submitted,
             Status::Confirmed,
-            Status::Queued,
         ] {
             // `None` here is `Failed`, which is neither: it is the
             // third case of the partition and has its own arm in
@@ -3621,47 +3600,6 @@ mod tests {
             matches!(attempt, Err(CliError::DuplicateInFlight { .. })),
             "Confirmed is terminal — --allow-retry must not resurrect it, got {attempt:?}"
         );
-    }
-
-    #[test]
-    fn reserve_keeps_a_queued_nackl_payout_and_names_it() {
-        let dir = TempDir::new().unwrap();
-        let mut first = reserve_rec(
-            dir.path(),
-            &sample_from(),
-            &sample_to(),
-            &UsdcAmount(500_000),
-            false,
-        )
-        .unwrap();
-        first.status = Status::Queued;
-        first.an_tx_hash = Some("0xburned".into());
-        first.eth_tx_hash = Some("0xabc".into());
-        first.nackl_payout_id = Some("7".into());
-        first.nackl_ready_at = Some(1_800_086_400);
-        update(dir.path(), &first, &unheld().hold()).unwrap();
-
-        for retry in [false, true] {
-            match reserve_rec(
-                dir.path(),
-                &sample_from(),
-                &sample_to(),
-                &UsdcAmount(500_000),
-                retry,
-            ) {
-                Err(CliError::DuplicateInFlight {
-                    prior_status,
-                    remedy,
-                    ..
-                }) => {
-                    assert_eq!(prior_status, "queued");
-                    assert!(remedy.contains("not sent again"), "{remedy}");
-                    assert!(remedy.contains("executeNacklPayout(7)"), "{remedy}");
-                    assert!(remedy.contains("1800086400"), "{remedy}");
-                },
-                other => panic!("a queued payout must not be sent again, got {other:?}"),
-            }
-        }
     }
 
     #[test]

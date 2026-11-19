@@ -193,7 +193,7 @@ cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemo
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- --help
 # daemon-bridge runs both ETH legs in one process on one EOA: verifyBlock, falling forward through
 # proof_<N>.json, and withdrawByProof on proof_event_*.json. daemon-withdraw is the payout leg alone;
-# daemon-live proves in-process.
+# daemon-live proves in-process; daemon-withdraw-live finds every burn itself, proves and pays it.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --state-dir <state dir/> --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
 # daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();
@@ -329,6 +329,14 @@ with more than 16 live locals fails with `Stack too deep` there even though `for
 The nightly is pinned in `rust-toolchain.toml` because `rustfmt.toml` uses nightly-only options and
 `make lint` runs clippy with `-D warnings`. When bumping it, land the resulting reformat in the same
 commit.
+
+### Before every commit and push
+
+Before the local commit, review and update the relevant docs.
+After the local commit and before every push, review the unpushed commits with a fresh run of the
+same agent from its CLI: no context of the work, the same model and reasoning effort, read-only.
+Push only when it finds nothing critical, that is, at least nothing that can lead to funds being
+stolen or stuck in the bridge.
 
 ## Where to look next
 

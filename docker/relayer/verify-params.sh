@@ -14,7 +14,7 @@ env_file=${1:-}
 # administrator-owned and use the same simple KEY=value format.
 # shellcheck disable=SC1090
 source "$env_file"
-export -n RELAYER_PRIVATE_KEY 2>/dev/null || true
+export -n RELAYER_PRIVATE_KEY WITHDRAW_PRIVATE_KEY 2>/dev/null || true
 
 runtime_layout=${RELAYER_RUNTIME_LAYOUT:-host}
 case "$runtime_layout" in
@@ -56,10 +56,23 @@ required=(
   kzg_bn254_20.srs
   kzg_bn254_21.srs
   kzg_bn254_22.srs
-  primary_pk.bin primary_vk.bin primary_config_params.json
-  fallback_pk.bin fallback_vk.bin fallback_config_params.json
-  layer_pk.bin layer_vk.bin layer_config_params.json
 )
+# The keys each daemon proves with: daemon-live the bundle and rotation
+# circuits, daemon-withdraw-live Circuit 4. The params are mounted read-only,
+# so neither can generate its keys itself.
+case "${RELAYER_ROLE:-bundles}" in
+  bundles)
+    required+=(
+      primary_pk.bin primary_vk.bin primary_config_params.json
+      fallback_pk.bin fallback_vk.bin fallback_config_params.json
+      layer_pk.bin layer_vk.bin layer_config_params.json
+    )
+    ;;
+  withdrawals)
+    required+=(event_pk.bin event_vk.bin event_config_params.json event_manifest.json)
+    ;;
+  *) die "unknown RELAYER_ROLE: ${RELAYER_ROLE}" ;;
+esac
 for file_name in "${required[@]}"; do
   grep -Eq "^[0-9a-fA-F]{64}  ${file_name//./\\.}$" "$PARAMS_SHA256SUMS" ||
     die "params manifest does not pin $file_name"

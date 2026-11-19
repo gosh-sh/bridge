@@ -475,6 +475,71 @@ enum Cmd {
         #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
         get_logs_pause_ms: u64,
     },
+    /// Live withdrawal payer: once a minute, every `WithdrawalInitiated` on
+    /// the Acki Nacki bridge that names this EVM bridge is proven (Circuit 4)
+    /// and paid with `withdrawByProof` from `WITHDRAW_PRIVATE_KEY`, which pays
+    /// the gas. A process of its own, apart from `daemon-live`, with its own
+    /// key: the two never wait for each other's proofs or stop together.
+    ///
+    /// Requires the Circuit 4 keys under `--params-dir`. Its record,
+    /// `withdraw-claims.json`, lives in `--withdraw-state-dir`.
+    DaemonWithdrawLive {
+        #[arg(long, env = "RPC_URL", hide_env_values = true)]
+        rpc_url: String,
+        #[arg(long, env = "BRIDGE_ADDRESS")]
+        bridge_address: Address,
+        /// Its own key, never daemon-live's: two processes sending from one
+        /// account would take each other's nonces.
+        #[arg(long, env = "WITHDRAW_PRIVATE_KEY", hide_env_values = true)]
+        private_key: String,
+        #[arg(long, env = "BRIDGE_GQL_ENDPOINT", hide_env_values = true)]
+        gql_endpoint: String,
+        /// Comma-separated failover GraphQL endpoints, as for `daemon-live`.
+        #[arg(long, env = "BRIDGE_GQL_FAILOVER_ENDPOINTS", hide_env_values = true)]
+        gql_failover_endpoints: Option<String>,
+        /// Directory with the SRS and the Circuit 4 keys.
+        #[arg(long, env = "BRIDGE_PARAMS_DIR", default_value = "./params")]
+        params_dir: PathBuf,
+        /// Where `withdraw-claims.json` lives.
+        #[arg(
+            long = "withdraw-state-dir",
+            env = "BRIDGE_STATE_DIR",
+            default_value = "./state"
+        )]
+        withdraw_state_dir: PathBuf,
+        /// Scratch for a proof in flight, one subdirectory per burn. Created
+        /// when missing.
+        #[arg(long, env = "BRIDGE_WORK_DIR")]
+        work_dir: PathBuf,
+        /// Directory for the daemon's own log, one file per day beside
+        /// stdout. Created when missing.
+        #[arg(long, env = "BRIDGE_LOG_DIR")]
+        log_dir: PathBuf,
+        #[arg(long, env = "BRIDGE_AGGREGATE_PROOF_BIN")]
+        aggregate_proof_bin: PathBuf,
+        #[arg(long, env = "BRIDGE_VERIFIERS_DIR")]
+        verifiers_dir: PathBuf,
+        /// Defaults to `<params_dir>/pk_cache`.
+        #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
+        pk_cache_dir: Option<PathBuf>,
+        /// Where the `LayerAnchorAppended` scan of the bridge's windows stops,
+        /// as for `daemon-live`.
+        #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
+        bridge_deploy_block: Option<u64>,
+        #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS", default_value_t = GET_LOGS_CHUNK_BLOCKS)]
+        get_logs_chunk_blocks: u64,
+        #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
+        get_logs_pause_ms: u64,
+        /// The Acki Nacki bridge account, `dapp_id::account_id` in hex,
+        /// whose `WithdrawalInitiated` events are paid out on this bridge.
+        #[arg(
+            long,
+            env = "AN_TOKEN_BRIDGE",
+            hide_env_values = true,
+            default_value = DEFAULT_AN_TOKEN_BRIDGE
+        )]
+        an_token_bridge: String,
+    },
     /// Submit one Circuit 4 `withdrawByProof` from `proof_event_*.json`.
     SubmitWithdraw {
         #[arg(long)]
@@ -651,6 +716,9 @@ async fn main() -> anyhow::Result<()> {
     }
     let log_dir = match &args.cmd {
         Cmd::DaemonLive {
+            log_dir, ..
+        }
+        | Cmd::DaemonWithdrawLive {
             log_dir, ..
         } => Some(log_dir.clone()),
         _ => None,
@@ -998,6 +1066,60 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("Error: {e:?}");
                     std::process::exit(status);
                 }
+                e
+            })
+        },
+        Cmd::DaemonWithdrawLive {
+            rpc_url,
+            bridge_address,
+            private_key,
+            gql_endpoint,
+            gql_failover_endpoints,
+            params_dir,
+            withdraw_state_dir,
+            work_dir,
+            log_dir: _,
+            aggregate_proof_bin,
+            verifiers_dir,
+            pk_cache_dir,
+            bridge_deploy_block,
+            get_logs_chunk_blocks,
+            get_logs_pause_ms,
+            an_token_bridge,
+        } => {
+            let an_token_bridge = parse_an_address(&an_token_bridge)
+                .map_err(|e| anyhow::anyhow!("--an-token-bridge: {e}"))?;
+            let scan = LogScanConfig {
+                deploy_block: bridge_deploy_block.unwrap_or(0),
+                chunk_blocks: get_logs_chunk_blocks,
+                pause: Duration::from_millis(get_logs_pause_ms),
+            };
+            let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
+            let aggregation = C12AggregationCfg {
+                aggregate_proof_bin: require_executable(&aggregate_proof_bin, "aggregate-proof")?,
+                verifiers_dir,
+                pk_cache_dir,
+            };
+            let gql_failover_endpoints = gql_failover_endpoints
+                .as_deref()
+                .map(bridge_gql_fetcher::gql_client::parse_endpoint_list)
+                .unwrap_or_default();
+            run_daemon_withdraw_live(
+                rpc_url,
+                bridge_address,
+                private_key,
+                gql_endpoint,
+                gql_failover_endpoints,
+                params_dir,
+                withdraw_state_dir,
+                work_dir,
+                aggregation,
+                scan,
+                an_token_bridge,
+            )
+            .await
+            .map_err(|e| {
+                error!(?e, "daemon-withdraw-live failed");
                 e
             })
         },
@@ -2636,6 +2758,7 @@ async fn run_daemon_live(
         pk_cache_dir = %aggregation.pk_cache_dir.display(),
         "daemon-live: C1/C2 R15 SHPLONK aggregation",
     );
+
     spawn_and_run(
         cfg,
         Arc::clone(&aggregated),
@@ -2648,6 +2771,116 @@ async fn run_daemon_live(
         shutdown,
     )
     .await
+}
+
+/// `relayer daemon-withdraw-live`: the withdrawal claimer in a process of its
+/// own (bridge-audit#157). It shares nothing with `daemon-live` but the chain:
+/// its own key, state directory, work directory and proofs.
+#[allow(clippy::too_many_arguments)]
+async fn run_daemon_withdraw_live(
+    rpc_url: String,
+    bridge_address: Address,
+    private_key: String,
+    gql_endpoint: String,
+    gql_failover_endpoints: Vec<String>,
+    params_dir: PathBuf,
+    state_dir: PathBuf,
+    work_dir: PathBuf,
+    aggregation: C12AggregationCfg,
+    scan: LogScanConfig,
+    an_token_bridge: (String, String),
+) -> anyhow::Result<()> {
+    use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
+
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
+    let work_dir = work_dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("work directory {}: {e}", work_dir.display()))?;
+    let gql = create_client_with_failover(
+        &gql_endpoint,
+        &gql_failover_endpoints,
+        GqlClientConfig::from_env()
+            .map_err(|e| anyhow::anyhow!("GraphQL client configuration: {e}"))?,
+    )
+    .map_err(|e| anyhow::anyhow!("create GQL client: {e}"))?;
+    // `withdrawByProof` waits for its receipt at most this long, so that one
+    // lost transaction does not stop the claimer.
+    let bridge = {
+        let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
+        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
+            .with_sender(sender)
+            .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT)
+    };
+    // The bridge's own stride says which anchoring the proofs bind to.
+    let stride = bridge
+        .bundle_stride()
+        .await
+        .map_err(|e| anyhow::anyhow!("bridge {bridge_address}: bundleStride(): {e}"))?;
+    let anchor_mode = [1u8, 2]
+        .into_iter()
+        .filter_map(|level| bridge_prover_lib::AnchorMode::from_level(level).ok())
+        .find(|mode| mode.stride() == stride)
+        .ok_or_else(|| {
+            anyhow::anyhow!("bridge {bridge_address} has bundleStride={stride}, not L1 or L2")
+        })?;
+    let chain_id = bridge
+        .contract()
+        .provider()
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("eth_chainId: {e}"))?;
+    info!(
+        bridge = %bridge_address,
+        chain_id,
+        anchor_level = anchor_mode.level(),
+        work_dir = %work_dir.display(),
+        "daemon-withdraw-live: starting",
+    );
+    let claimer = bridge_relayer_daemon::withdraw_claimer::WithdrawClaimer::new(
+        bridge_relayer_daemon::withdraw_claimer::ClaimerConfig {
+            an_bridge_dapp_id_hex: an_token_bridge.0,
+            an_bridge_account_id_hex: an_token_bridge.1,
+            gql_endpoint,
+            chain_id,
+            anchor_level: anchor_mode.level(),
+            stride,
+            state_dir,
+            work_dir,
+            params_dir,
+            verifiers_dir: aggregation.verifiers_dir,
+            aggregate_proof_bin: aggregation.aggregate_proof_bin,
+            pk_cache_dir: aggregation.pk_cache_dir,
+        },
+        gql,
+        Arc::new(bridge),
+    )?;
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    tokio::select! {
+        () = claimer.run() => Err(anyhow::anyhow!("the withdrawal claimer returned")),
+        () = &mut shutdown => {
+            info!("daemon-withdraw-live: stopping");
+            Ok(())
+        },
+    }
+}
+
+/// The zerostate's token bridge: System dApp, account `1a…1a`.
+const DEFAULT_AN_TOKEN_BRIDGE: &str = "0000000000000000000000000000000000000000000000000000000000000000::1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a";
+
+/// `dapp_id::account_id`, each 64 hex digits, into lower-case halves.
+fn parse_an_address(raw: &str) -> anyhow::Result<(String, String)> {
+    let (dapp, account) = raw
+        .split_once("::")
+        .ok_or_else(|| anyhow::anyhow!("{raw:?} is not dapp_id::account_id"))?;
+    for half in [dapp, account] {
+        anyhow::ensure!(
+            half.len() == 64 && half.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{raw:?}: each half must be 64 hex digits"
+        );
+    }
+    Ok((dapp.to_ascii_lowercase(), account.to_ascii_lowercase()))
 }
 
 /// Whether `shutdown` has already resolved, without waiting for it. Once it

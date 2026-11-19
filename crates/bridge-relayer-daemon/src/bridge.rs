@@ -1044,6 +1044,13 @@ pub struct EthBridgeClient<P: Provider<N>, N: Network = alloy::network::Ethereum
     /// [`RECEIPT_POLL_INTERVAL`] and [`REPLACED_AFTER`] outside tests.
     receipt_poll_every: Duration,
     replaced_after: Duration,
+    /// Held from a transaction's nonce plan to its receipt, so that the
+    /// tasks sharing this client (daemon-live's `verifyBlock` and
+    /// `applyBkSetUpdate`, and its withdrawal claimer's `withdrawByProof`)
+    /// send one at a time: [`crate::nonce`] replaces whatever waits at the
+    /// account's next nonce, and two sends planned at once would take the
+    /// same one.
+    send_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<P, N> EthBridgeClient<P, N>
@@ -1071,6 +1078,7 @@ where
             withdraw_receipt_timeout: None,
             receipt_poll_every: RECEIPT_POLL_INTERVAL,
             replaced_after: REPLACED_AFTER,
+            send_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -1431,6 +1439,7 @@ where
                 permanent,
             }
         };
+        let _sending = self.send_lock.lock().await;
         let (call, nonce) = match self.prepare_send(call).await {
             Ok(prepared) => prepared,
             Err(e) => return Ok(send_failed(&e)),
@@ -1530,6 +1539,7 @@ where
             B256::from(update.sibling_h4_7),
             B256::from(update.sibling_h8_15),
         );
+        let _sending = self.send_lock.lock().await;
         let (call, nonce) = match self.prepare_send(call).await {
             Ok(prepared) => prepared,
             Err(e) => {
@@ -2606,6 +2616,7 @@ where
         // counts toward `max_attempts_abort` instead of hanging the daemon.
         const RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
 
+        let _sending = self.send_lock.lock().await;
         let (call, nonce) = match self.prepare_send(call).await {
             Ok(prepared) => prepared,
             Err(e) => {

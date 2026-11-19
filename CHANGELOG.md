@@ -23,8 +23,20 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
+  its directories and the Circuit 4 keys in `params/relayer/`, rerun `finalize-params.sh` and set the new
+  `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).
+- `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
+  `submit.status` `already_paid` and `submit.nullifier`, not 13; found before proving, `proof` is
+  `null` in the JSON output.
 - Deploy `eccBridge` 1.18.0 (code hash `4a9712b7…`) with a fresh testnet EVM bridge and upgrade `ackinacki-bridge` and `deposit-relayer` together. Start the relayer with a fresh `--state-dir` for the new EVM bridge. Earlier testnet deposits are outside this migration.
 - `ackinacki-bridge deposit` raises its minimum supported bridge version (`MIN_BRIDGE_VERSION`) to 1.18.0. Update scripts that handled exit 37 to resume with `deposit --resume <op-id>` on exit 34.
+
+### New / Improvements
+
+- `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
+  `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
+  each in `withdraw-claims.json`.
 
 ### Fixes
 

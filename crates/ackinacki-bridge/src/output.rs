@@ -20,8 +20,8 @@ use crate::{errors::CliError, orchestrator::WithdrawSuccess};
 /// What a successful run of either subcommand returns to `main`.
 #[derive(Debug)]
 pub enum RunSuccess {
-    /// A finished (or dry-run) withdrawal.
-    Withdraw(WithdrawSuccess),
+    /// A finished (or dry-run) withdrawal; boxed like the deposit.
+    Withdraw(Box<WithdrawSuccess>),
     /// A finished, dry-run or released deposit; boxed, as it is several
     /// times the size of a withdrawal's summary.
     Deposit(Box<crate::deposit::DepositSuccess>),
@@ -123,28 +123,39 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     let status = match s.status {
         crate::orchestrator::SubmitStatus::DryRunOk => "dry-run-ok",
         crate::orchestrator::SubmitStatus::Confirmed => "confirmed",
+        crate::orchestrator::SubmitStatus::AlreadyPaid => "already paid",
     };
     // Built whole, then written once. Sixteen separate `eprintln!`s were
     // sixteen chances to panic and sixteen chances to tear the summary in
     // half — the same reasoning that replaced the burn confirmation
     // prompt's discarded writes with one checked `write_all`.
-    let eth = match s.eth_tx.as_deref() {
-        Some(tx) => format!("  ETH tx:       {tx} ({status})\n"),
-        None => format!("  ETH tx:       (none) ({status})\n"),
+    let eth = match (s.eth_tx.as_deref(), s.nullifier.as_deref()) {
+        (Some(tx), _) => format!("  ETH tx:       {tx} ({status})\n"),
+        // Paid out, by another submitter or by a transaction of this run
+        // whose receipt never came: the payout is the event with this
+        // nullifier.
+        (None, Some(n)) => format!(
+            "  ETH tx:       (none) ({status}: see the bridge's WithdrawalByProofExecuted with \
+             nullifier {n})\n"
+        ),
+        (None, None) => format!("  ETH tx:       (none) ({status})\n"),
+    };
+    let proof = match &summary.proof {
+        Some(p) => format!(
+            "{} bytes, {} public inputs, self_verified={}",
+            p.calldata_bytes, p.pi_count, p.self_verified
+        ),
+        None => "(not built: already paid out)".to_string(),
     };
     emit(
         &format!(
             "\nwithdraw complete:\n\x20 amount:       {} USDC\n\x20 AN tx:        {}\n\x20 msg \
-             id:       {}\n\x20 block:        seq={} id={}\n\x20 proof:        {} bytes, {} \
-             public inputs, self_verified={}\n{eth}",
+             id:       {}\n\x20 block:        seq={} id={}\n\x20 proof:        {proof}\n{eth}",
             summary.burn.amount,
             summary.burn.an_tx,
             summary.capture.withdrawal_msg_id,
             summary.capture.block_seq_no,
             summary.capture.block_id,
-            summary.proof.calldata_bytes,
-            summary.proof.pi_count,
-            summary.proof.self_verified,
         ),
         false,
     );

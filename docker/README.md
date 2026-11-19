@@ -5,7 +5,7 @@
 > `docker/relayer/*.sh` use. Operations of each daemon are in its crate's runbook.
 
 Four images, one `Dockerfile`, one compose file. The images are built from the sources of
-one commit; the compose file runs the four services and the one-shot commands around them;
+one commit; the compose file runs the five services and the one-shot commands around them;
 every value a host has to know is in two files the operator fills in. Nothing in the image
 knows a host path, an address or a key.
 
@@ -13,7 +13,7 @@ knows a host path, an address or a key.
 
 | Image | Target | Holds | Runs |
 |---|---|---|---|
-| `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`; one-shot `preflight` |
+| `bridge-relayer` | `bridge-relayer` | `relayer`, `aggregate-proof`, `compute_bridge_anchors`, `cast`, the verifier bytecode and sources, the preflight scripts | `relayer daemon-live`, `relayer daemon-withdraw-live` (`withdraw-live`); one-shot `preflight` |
 | `bridge-deposit-relayer` | `bridge-deposit-relayer` | `deposit-relayer` | `deposit-relayer daemon` |
 | `bridge-eth-lc-relayer` | `bridge-eth-lc-relayer` | `eth-lc-relayer`, `export_step_vk_blob`, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `eth-lc-relayer daemon`, `eth-lc-relayer arbitrum-anchors`; one-shot `lc-keygen` |
 | `bridge-cli` | `bridge-cli` | `ackinacki-bridge`, `aggregate-proof`, `cast`, `forge`, the verifiers | `docker compose run --rm cli …` |
@@ -47,11 +47,12 @@ builds it with `ackinacki-bridge/dev-unfixed-bridge`).
 All the services of `compose.yaml` on one host need 256 GB of RAM; 128 GB is not enough. Their
 peaks, summed and not measured together: `eth-lc-relayer` about 100 GB (two step proofs of about
 25 GB each beside a rotate stage of about 50 GB, `docs/eth-light-client.md` §5), `daemon-live`
-about 14 GB for the block proofs and 12.6 GB for `aggregate-proof`, `deposit-relayer` about
-9.6 GB: about 135 GB. The attestation proof in `daemon-live` grows with the number of signers its
+about 14 GB for the block proofs and 12.6 GB for `aggregate-proof`, `withdraw-live` about 19 GB
+for a withdrawal (`crates/ackinacki-bridge/README.md`), `deposit-relayer` about 9.6 GB: about
+155 GB. The attestation proof in `daemon-live` grows with the number of signers its
 circuit is built for: about 38 GB at 1000 and 78 GB at 2000
 (`crates/bridge-circuits/attestation-bls-checker-circuit/PARALLEL_BENCHMARK_N14_REPORT.md`), up
-to about 200 GB in all. A memory limit on the `eth-lc-relayer` container has to sit above
+to about 220 GB in all. A memory limit on the `eth-lc-relayer` container has to sit above
 100 GB, or the kernel kills its rotate stage.
 
 ## Layout on the host
@@ -62,7 +63,8 @@ volume.
 
 ```text
 $BRIDGE_OPT/                         # e.g. /opt/bridge-shellnet, root:bridge
-  env/daemon-live.env                # 0640: the withdraw relayer's settings and EOA key
+  env/daemon-live.env                # 0640: daemon-live's settings and EOA key
+  env/withdraw-live.env              # 0640: the withdrawal payer's settings and its own EOA key
   env/deposit-relayer.env            # 0640
   env/eth-lc-relayer.env             # 0640
   env/arbitrum-anchors.env           # 0640
@@ -70,12 +72,14 @@ $BRIDGE_OPT/                         # e.g. /opt/bridge-shellnet, root:bridge
   keys/an-owner.keys.json            # bridge:bridge 0600: the light client's owner (eth-lc-relayer)
   keys/deposit-sender.keys.json      # bridge:bridge 0600: finalizeDeposit and proveBlock signer
   daemon-live/state/                 # relayer-state.json, prover_state.json, prover_bk_set.json
+  withdraw-live/state/               # withdraw-claims.json
   deposit-relayer/state/             # deposit-relayer-state.json, .lock
   eth-lc-relayer/state/              # eth-lc-relayer-state.json, .lock
   arbitrum-anchors/state/            # arbitrum-anchors-state.json, .lock
   cli/state/                         # the CLI's deposit and withdrawal records
 $BRIDGE_DATA/                        # e.g. /mnt/data/bridge-shellnet, bridge:bridge
   daemon-live/work/  daemon-live/logs/
+  withdraw-live/work/  withdraw-live/logs/
   deposit-relayer/logs/
   eth-lc-relayer/work/  eth-lc-relayer/logs/
   arbitrum-anchors/work/  arbitrum-anchors/logs/
@@ -106,7 +110,7 @@ retention rule of its own (logrotate, a cron `find -mtime`).
 
 Inside every container the same four paths: `/data/state`, `/data/work`, `/data/logs` and
 `/data/params` (read-only for the relayer except `pk_cache`, writable for the light-client
-prover, which generates keys; the deposit relayer has none). The withdraw relayer's env file is mounted at `/run/secrets/runtime-env` and
+prover, which generates keys; the deposit relayer has none). The env files of `daemon-live` and `withdraw-live` are mounted at `/run/secrets/runtime-env` and
 sourced by its entrypoint; the other services get theirs as container environment
 (`env_file`). Keys are mounted read-only at `/run/keys`.
 
@@ -116,6 +120,7 @@ sourced by its entrypoint; the other services get theirs as container environmen
 |---|---|---|
 | `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the three metrics ports |
 | `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, the deployed BK-set commitment |
+| `$BRIDGE_OPT/env/withdraw-live.env` | `env/withdraw-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, its own EOA and **private key** (`WITHDRAW_ADDRESS`, `WITHDRAW_PRIVATE_KEY`), the withdrawal `EXPECTED_*` pins, `PARAMS_MANIFEST_SHA256` |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
 | `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
 | `$BRIDGE_OPT/env/arbitrum-anchors.env` | `env/arbitrum-anchors.env.example` | `PARENT_RPC_URL`, `ARBITRUM_RPC_URL`, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE` |
@@ -133,9 +138,14 @@ next to it.
 ## Install
 
 1. Create the user and the layout above (`BRIDGE_UID`/`GID` in `.env` must be the user's).
-2. Params. Withdraw relayer: the SRS and inner keys into `params/relayer/`, then
+2. Params. `daemon-live` and `withdraw-live` share `params/relayer/`: the SRS and inner keys go
+   there, among them the Circuit 4 keys `withdraw-live` proves withdrawals with: `event_pk.bin`, `event_vk.bin`,
+   `event_config_params.json` and `event_manifest.json`. Copy them from the `params/` of an
+   `ackinacki-bridge withdraw` of the same release, which generates them on its first
+   withdrawal; the container reads `params/` only and cannot. Then
    `docker/relayer/finalize-params.sh $BRIDGE_DATA/params/relayer bridge` seals them and
-   writes `SHA256SUMS`; its sha256 goes into `daemon-live.env` as `PARAMS_MANIFEST_SHA256`.
+   writes `SHA256SUMS`; its sha256 goes into `daemon-live.env` and `withdraw-live.env` as
+   `PARAMS_MANIFEST_SHA256`.
    The deposit relayer needs no params. Light client: `kzg_bn254_19.srs` into
    `params/lc-prover/`; the first step proof of an image writes its key there, or ahead of it
    `docker compose --profile ops run --rm lc-keygen` (minutes, a few GB). The rotate needs the
@@ -152,9 +162,12 @@ next to it.
 
    The rotate keys are not an install step: the daemon writes them to `rotate-keys/` during
    its first rotate after an image upgrade, and writes them again when the image changes.
-3. Fill `.env` and the four env files from the templates; the keys into `keys/`.
-4. `docker compose --profile ops run --rm preflight`: the withdraw relayer's checks, no
-   transaction, no daemon.
+3. Fill `.env` and the five env files from the templates; the keys into `keys/`.
+   `withdraw-live` gets an EOA of its own, never `daemon-live`'s: two daemons sending from one
+   account take each other's nonces.
+4. `docker compose --profile ops run --rm preflight` checks `daemon-live`, and
+   `docker compose run --rm withdraw-live preflight` checks `withdraw-live`: no transaction, no
+   daemon. Both checks also run on every start of their container.
 5. `docker compose up -d`.
 
 The old Docker Compose kit under `crates/bridge-relayer-daemon/deploy/shellnet-l2` is this
@@ -174,11 +187,12 @@ daemon's state file and take its lock: stop `eth-lc-relayer` first, start it aga
 ## Upgrade
 
 Set `BRIDGE_IMAGE_TAG` to the new tag, `docker compose pull`, run `preflight`, then
-`docker compose up -d` service by service. The state directories carry over; the light
+`docker compose up -d` service by service. A release that adds a service needs its env file
+and directories first (`withdraw-live`: its own funded EOA too). The state directories carry over; the light
 client's step key is per image, replaced by the first proof of an image whose prover changed. To roll back, set
 the previous tag and `up -d` again.
 
 ## Status
 
 `docker/relayer/status.sh docker` (the directory with `compose.yaml` and `.env`) prints the
-withdraw relayer's container, chain cursor, EOA, Acki Nacki head, state files and metrics.
+container, chain cursor, EOA, Acki Nacki head, state files and metrics of `daemon-live`.

@@ -5,7 +5,8 @@
 > `d7a14b19` (PR 153); the AAVE V3 pool, aUSDC and the bridge's `approve` against `a61d1e75`
 > (PR 142); the `eth-lc-relayer arbitrum-anchors` rows and its `submitAncestry` against `0fd604ed`
 > (bridge-audit#154); the daemon's checkpoint queue and the step proving key against `b06de7a4`
-> (bridge-audit#154). Every connection and every state file below is drawn from the code that makes or names
+> (bridge-audit#154); the `relayer daemon-withdraw-live` rows against the commit that added them
+> (bridge-audit#157). Every connection and every state file below is drawn from the code that makes or names
 > it, not from prose; the tables give each one's `file:line` at that commit.
 >
 > **Deposits without a ZK proof (bridge-audit#139).** The rows for `deposit-receipt`, the
@@ -64,6 +65,9 @@ Paths are relative to the repository root.
 | `deposit-receipt` | Arbitrum RPC node | JSON-RPC: `eth_getTransactionReceipt`, `eth_getBlockByHash`, `eth_getBlockReceipts` | `crates/deposit-receipt/src/lib.rs:207`, `:219`, `:228`; through the caller's provider, so the same RPC node the CLI or the daemon uses |
 | `deposit-relayer daemon` | `eccBridge` | `finalizeDeposit` | `crates/acki-nacki-interface/src/tvm_client.rs:130` |
 | `deposit-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: `isAcceptedBlockHash`, voucher state, `finalizeDeposit` | `crates/deposit-relayer-daemon/src/submitter.rs:713`, `submitter.rs:725`; through `crates/acki-nacki-interface/src/tvm_client.rs:111` (`get_account`), `:159` (`process_message`) |
+| `relayer daemon-withdraw-live` | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1426`, called from `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:646` |
+| `relayer daemon-withdraw-live` | Block Manager | GraphQL: the bridge account's `messages`, `block`, `blockByHeight` | `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:420`, the witness through `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs:540`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2800` |
+| `relayer daemon-withdraw-live` | `aggregate-proof` | process | the binary handed over at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2852` |
 | `relayer daemon-live` | `AckiNackiBridge` | `verifyBlock` | `crates/bridge-relayer-daemon/src/bridge.rs:1350` |
 | `relayer daemon-live` | `AckiNackiBridge` | `applyBkSetUpdate` | `crates/bridge-relayer-daemon/src/bridge.rs:1490` |
 | `relayer daemon-live` | Block Manager | GraphQL: `blocks`, `blockByHeight`, `bkSetUpdates` | `crates/bridge-prover-libraries/bridge-prover-lib/src/live_driver/mod.rs:733`, `live_driver/bundle.rs:261`, `live_driver/bk_update.rs:47`, `crates/bridge-prover-libraries/bridge-gql-fetcher/src/bk_set_fetcher.rs:62`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2241` |

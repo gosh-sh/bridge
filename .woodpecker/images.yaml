@@ -163,7 +163,7 @@ steps:
       # The example settings against an empty host layout: env_file entries
       # must exist for `config`, their contents do not matter here.
       - mkdir -p /tmp/bridge/opt/env /tmp/bridge/opt/keys /tmp/bridge/data
-      - for f in daemon-live deposit-relayer eth-lc-relayer arbitrum-anchors; do touch /tmp/bridge/opt/env/$f.env; done
+      - for f in daemon-live withdraw-live deposit-relayer eth-lc-relayer arbitrum-anchors; do touch /tmp/bridge/opt/env/$f.env; done
       - cp docker/.env.example docker/.env
       - sed -i 's/^BRIDGE_IMAGE_TAG=.*/BRIDGE_IMAGE_TAG=ci/; s/^METRICS_LISTEN_ADDR=.*/METRICS_LISTEN_ADDR=127.0.0.1/; s#^BRIDGE_OPT=.*#BRIDGE_OPT=/tmp/bridge/opt#; s#^BRIDGE_DATA=.*#BRIDGE_DATA=/tmp/bridge/data#' docker/.env
       - docker compose -f docker/compose.yaml --project-directory docker --profile ops config --quiet

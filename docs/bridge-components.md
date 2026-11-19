@@ -83,11 +83,13 @@ Paths are relative to the repository root.
 | `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2056` |
 | `ArbitrumBlockVerifier` | `eccBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
 | `EthBeaconLightClient` | `eccBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
-| `DepositVoucher` | `eccBridge` | `confirmTokenDeposit` | `contracts/an/exchange/DepositVoucher.sol:53` |
+| `DepositVoucher` | `eccBridge` | `confirmTokenDeposit` | `contracts/an/exchange/DepositVoucher.sol:48` |
 
-Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
-a no-op, because the `DepositVoucher` address is derived from the deposit's identity
-(`contracts/an/exchange/eccBridge.sol:980`) and a voucher is deployed once.
+The CLI and `deposit-relayer daemon` can submit the same deposit. A duplicate
+`finalizeDeposit` aborts with exit code 245 once the bridge has recorded the identity
+(`contracts/an/exchange/eccBridge.sol:963`). The voucher callback and `retryDeposit`
+both pay from the pending record. After one pays, the other aborts with exit code 246
+(`contracts/an/exchange/eccBridge.sol:1038`, `:1047`).
 
 ## Executables and state files
 

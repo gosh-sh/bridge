@@ -171,6 +171,41 @@ fn only_the_bridges_six_field_deposit_passes_the_shape_check() {
 }
 
 #[test]
+fn a_saved_witness_recovers_the_identity_at_its_proven_transaction_and_log() {
+    let mut receipts: Vec<RpcReceipt> = serde_json::from_str(RECEIPTS).unwrap();
+    let emitter = Address::repeat_byte(0x55);
+    let deposit_id = B256::with_last_byte(42);
+    receipts[1].status = Some(U64::from(1));
+    receipts[1].logs.push(RpcLog {
+        address: emitter,
+        topics: vec![DEPOSIT_TOPIC0, deposit_id, B256::ZERO],
+        data: vec![0; DEPOSIT_DATA_LEN].into(),
+    });
+    let log_index = receipts[1].logs.len() as u16 - 1;
+    let values: Vec<_> = receipts.iter().map(RpcReceipt::trie_value).collect();
+    let (receipts_root, receipt_proof) = receipt_proof(&values, 1);
+    let header = alloy::rlp::encode(alloy::consensus::Header {
+        receipts_root,
+        ..Default::default()
+    });
+    let mut w = DepositWitness {
+        chain_id: 1,
+        block_number: 0,
+        block_hash: keccak256(&header),
+        header: header.into(),
+        tx_index: 1,
+        receipt_proof,
+        log_index,
+    };
+    assert_eq!(w.deposit_identity(), Ok((emitter, deposit_id)));
+    w.tx_index = 0;
+    assert!(w.deposit_identity().is_err());
+    w.tx_index = 1;
+    w.log_index += 1;
+    assert!(w.deposit_identity().is_err());
+}
+
+#[test]
 fn the_topic_is_the_events_signature() {
     assert_eq!(
         keccak256("Deposit(uint256,address,uint256,bytes32,uint256,address)"),

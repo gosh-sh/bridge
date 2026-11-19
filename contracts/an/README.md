@@ -1,12 +1,12 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.17.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.5.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
-  Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
-  `confirmDeposit`) once the deposit's block is in its anchor set, and burns
+  Ethereum deposit (`finalizeDeposit`, confirmed by the voucher through
+  `confirmTokenDeposit` or by a permissionless `retryDeposit`) once the deposit's block is in its anchor set, and burns
   USDC on `initiateWithdrawal`. A withdrawal without enough bridged or destination-chain inventory
   returns the attached ECC without a burn. ECC is fungible: owner-minted and TIP-3-minted ECC can still
   consume headroom that deposits created; the cap stops burned exceeding
@@ -19,12 +19,9 @@ The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
   `mintAndSendBridged`, `mintAndSendAccumulator`) and TIP-3 mint keep running.
   That switch is independent of `AckiNackiBridge.pause()` on Ethereum and
   of a Circle freeze of USDC — see *Two pause domains* below.
-- `DepositVoucher` — deployed once per finalized deposit at an address derived
-  from the deposit identity and from the voucher's own code; a second
-  finalization of the same deposit collides with it and does not mint again.
-  The bridge holds that code in `_depositVoucherCode`, and it is what makes the
-  collision happen — part of the replay protection rather than an
-  implementation detail. It can be changed, see *Upgrading the bridge* below.
+- `DepositVoucher` sends the first confirmation for an accepted deposit.
+  The bridge authenticates its address and records the outcome under the deposit
+  identity. Any caller can complete a pending deposit with `retryDeposit`.
 - `EthBeaconLightClient`, with the `EthKeccak` library — deployed by the bridge
   (`deployLightClient`) from the code the zerostate installs
   (`setLightClientCode`). It verifies Ethereum sync-committee step proofs and
@@ -53,10 +50,23 @@ bytes32 anAccount, uint256 timestamp, address token)`: three topics, four data
 words, nothing more (244 otherwise). Its emitter must be a trusted L1 bridge
 for `chainId` (`setTrustedL1Bridge`; the zerostate seeds one, see below; 222
 otherwise). The token and limit checks follow, and only then does the bridge
-accept the message, so a refused deposit costs it nothing. A deposit already
-finalized is not refused before accept: it passes every check, the bridge pays
-for that transaction, and it ends at its existing voucher without a second
-mint. An external message may spend 500 000 gas before it is accepted: a
+accept the message, so a refused deposit costs it nothing. Once the bridge accepts a deposit, it stores its proven payout fields.
+`getDepositStatus(depositId, contractAddr, chainId)` returns 0 for an unknown
+deposit, 1 for pending and 2 for minted. `retryDeposit` takes the same three
+arguments and completes a pending credit using the stored fields, even after the
+anchor expires. The first successful confirmation or retry records the mint in
+the payout transaction. Duplicate proofs return 245 and a retry for an unknown
+or paid deposit returns 246.
+
+For a proven, pending USDC deposit, only the TVL check (235) can still fail
+among the token and amount checks at payout. Other deposits can mint first
+and use the remaining capacity. Exit 234 is unreachable because the admitted
+amount is at most `MAX_TRANSFER_AMOUNT`, while `maxWithdrawal` starts at least
+that high and can only increase. Exit 241 is unreachable because the bridge
+provides no way to unregister a token or change its token ID. Disabling new
+deposits preserves the registration. [Token configuration and payout checks](exchange/eccBridge.sol#L693-L730).
+
+An external message may spend 500 000 gas before it is accepted: a
 typical deposit takes 110 000 to 210 000, one with 60 ERC-20 transfers before
 the `Deposit` in its receipt 360 000 to 450 000. A deposit whose proof takes
 more cannot be finalized, and the CLI and `deposit-relayer` refuse to send it
@@ -288,23 +298,17 @@ AN keeps the same 10,000 USDC ceiling separately for every EIP-155 chain id.
 `getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and `outstanding` in
 base units. `confirmDeposit` increases that chain's outstanding amount;
 a successful `initiateWithdrawal` decreases the destination chain's amount.
-There are no deposit reservations or permanent voucher registry. A repeated
-finalization deploys the same voucher, whose consumed constructor prevents another
-confirmation. Trust only one funded L1 bridge per chain for this accounting.
-For that pair,
+An accepted deposit does not reserve capacity. When two pending credits compete
+for the last room under the limit, the bridge pays the first that fits. The
+other stays pending and can be retried when a withdrawal frees room.
+For a single funded L1 bridge per chain, the accounting identity is
 `L1 treasuryBalance = AN outstanding + unconfirmed deposits + unpaid burns`.
-Thus confirming a valid pending deposit cannot exceed the L1 cap; simultaneous
-finalizations need no reservation. Pause deposits and drain pending transfers
-before rotating the trusted L1 contract. That identity, and the conclusion drawn
-from it, hold while `confirmDeposit` and `initiateWithdrawal` are the only
-writers of the counter. `setOutstandingByChain` writes it directly with no tie
-to L1, so an owner who writes a figure other than the measured L1 principal
-breaks both — see *Restoring a chain's outstanding amount* below.
+Pause new deposits and drain pending transfers before rotating the trusted L1
+contract. An owner adjustment through `setOutstandingByChain` must preserve
+this identity (see *Restoring a chain's outstanding amount* below).
 
 AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
-with 235; the latter is retryable after withdrawals. Both checks follow the
-receipt proof, since the amount and token come from it, so the bridge pays for
-the proof of a deposit it refuses; they are repeated on confirmation. A withdrawal to a chain with no
+with 235. A withdrawal to a chain with no
 EVM bridge set, or one that is oversized, that would burn more than bridged
 minted less bridged burned, or that exceeds its destination chain's outstanding
 amount returns the attached ECC without burning it and emits `WithdrawalRefused`
@@ -320,7 +324,7 @@ External messages use expiring message hashes instead of a shared increasing
 timestamp. `expire` must be in the future and less than five minutes ahead of
 block time (errors 402 and 401); an identical recorded message is rejected with
 400. Changing `time` cannot block another sender or the owner. These hashes
-expire; voucher identity remains the deposit double-mint protection. CLI and
+expire; the minted deposit record remains permanent. CLI and
 relayer finalizations cap expiry at 240 seconds; uncertain CLI sends reuse the
 same BOC while valid.
 
@@ -405,24 +409,18 @@ figure buys withdrawal room by closing the door on deposits, and the damage is
 not symmetrical:
 
 - a new deposit fails `finalizeDeposit` with 235, which is retryable;
-- a deposit already between finalization and confirmation aborts in
-  `confirmDeposit` with 235 **after** its voucher's constructor has run, so
-  finalizing it again deploys the same voucher and cannot confirm again. That USDC is
-  locked on L1 with nothing minted on AN until the owner lowers the counter;
-- `mintAndSendBridged`, the owner's recovery path for exactly that case, is
-  capped by the same check and throws 235 too.
+- an accepted deposit stays pending if its confirmation reaches the limit.
+  `retryDeposit` completes it when capacity is available again.
 
-Writing L1's balance while transfers are in flight is enough to cause this. With
-10,000 USDC on L1 of which 50 is a deposit not yet confirmed on AN, the counter
-belongs at 9,950; write 10,000 and that confirmation aborts with 235 and a spent
-voucher. So pause deposits, let the in-flight transfers on both sides settle,
+With 10,000 USDC on L1, including a pending deposit of 50 USDC, the correct
+counter is 9,950. Writing 10,000 delays that credit. Pause deposits, let the
+in-flight transfers on both sides settle,
 and only then measure and write — the same order this section's parent advises
 before rotating a trusted L1 contract.
 
 **If in doubt, write less rather than more.** An under-count only refuses
 withdrawals with 236, which return the ECC untouched and which the owner
-corrects by raising the counter. An over-count strands a depositor, and the
-depositor cannot correct it. For the same reason, raising the counter to the
+corrects by raising the counter. An over-count delays pending deposits until capacity is restored. For the same reason, raising the counter to the
 ceiling in order to release an inventory larger than the ceiling is not an
 operating procedure.
 
@@ -445,11 +443,9 @@ upgrade tuple adds chain balances and external-message hashes; the previous
 1.12.0 tuple cannot initialize it. `BridgeZerostateData` encodes the new tuple.
 Normal upgrades within this format retain balances and unexpired replay hashes.
 
-`mintAndSendBridged(recipient, value, nonce, chainId)` credits the aborted
-deposit's source chain as well as the global bridged total. It enforces the
-50 USDC transfer and 10,000 USDC chain limits. Match the deposit's recipient,
-amount and EIP-155 chain id exactly, once; this owner call has no deposit-id
-deduplication.
+The owner's `mintAndSendBridged` and `mintAndSendTokenBridged` calls are
+independent of deposit records. Use `retryDeposit` for pending credits. A
+separate owner mint leaves the deposit payable.
 
 Before replacing a funded pair, stop new deposits, finish every pending deposit
 and withdrawal, and verify the old books are empty. Pause every old L1 bridge
@@ -530,28 +526,12 @@ flip **both** owner switches. There is no single stop switch (QC-AN-J5).
 
 ## Upgrading the bridge
 
-The voucher's code can be changed. But replay protection rests on the voucher's
-address, and that address is derived from its code: the moment the code
-changes, every deposit finalized so far gets a new, unoccupied address. Anyone
-can finalize them again — the deposit event is still in its Ethereum block, and
-its receipt proof can be built afresh at any time.
-
-**So an upgrade that changes the voucher's code also makes past deposits stop
-going through.** The restriction ships in the upgraded code itself: a block
-cutoff, where deposits from blocks older than the upgrade are refused. What is
-rejected is the deposit, not the shape of its receipt.
-
-**The current contracts carry no such restriction, and none is needed here:**
-the voucher's code is not changed, it is installed by the zerostate, and
-`updateCode` is called with an empty `userCell` — the bridge keeps the code it
-has, voucher addresses stay put, and replay protection holds. The restriction
-arrives with the upgrade that first changes the voucher's code; no separate fix
-to the present version is required.
-
-The voucher's code can also change by accident: rebuilding `DepositVoucher.tvc`
-with a different compiler yields a different code hash.
-`getDepositVoucherCodeHash()` reports what the bridge currently holds — compare
-it against the tracked artefact before and after an upgrade.
+Start this version with a fresh testnet pair. Deposits from earlier test
+deployments have no record in the new bridge and are outside this migration.
+Pair it with a fresh EVM emitter so its accepted deposit history starts empty.
+For deposits accepted by this version, the bridge keeps pending and minted
+records across code upgrades. The deposit identity is independent of the voucher
+code hash. An upgraded bridge can still pay a pending deposit with `retryDeposit`.
 
 ## The zerostate module
 
@@ -574,8 +554,7 @@ network.
     python3 contracts/an/zerostate/test_zerostate_init.py
     scripts/check_zerostate_data_encoder.py
 
-AN `maxTvl` cannot decrease after registration: a lower ceiling could abort a confirmation
-whose voucher has already been consumed. To restrict new deposits, close them on EVM
+AN `maxTvl` cannot decrease after registration. To restrict new deposits, close them on EVM
 (`setTokenDepositsEnabled`) or lower the EVM TVL cap; earlier deposits stay payable.
 `finalizeDeposit` reads the AN deposit switch and `maxTransfer` when the receipt arrives,
 not when the deposit was made. Closing the switch or lowering `maxTransfer` therefore also

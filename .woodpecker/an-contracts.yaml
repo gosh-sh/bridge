@@ -56,6 +56,7 @@ steps:
     depends_on: [ ]
     commands:
       - python3 scripts/check_lc_relayer_abis.py
+      - scripts/check_bridge_abi_in_sync.sh
   tvm:
     # Debian: make for the Makefile, curl and sha256sum for the downloads.
     image: python:3

@@ -1,6 +1,6 @@
 //! The Acki Nacki side. Reads go through GraphQL and the SDK's local TVM;
-//! the one write is `finalizeDeposit`, an unsigned external message the
-//! SDK posts to the host's `/v2/messages`.
+//! the SDK posts unsigned `finalizeDeposit` and `retryDeposit` messages
+//! to the host's `/v2/messages`.
 //!
 //! Accounts are addressed as `<id>::<id>`: the node finds an account by
 //! its own id in the dapp role, whichever dapp it lives in. GraphQL
@@ -412,7 +412,7 @@ pub trait AnRead: Send + Sync {
     fn decode(&self, abi: &str, body: &str, internal: bool) -> Option<(String, Value)>;
 }
 
-/// The deposit's one write to Acki Nacki.
+/// The permissionless deposit calls on Acki Nacki.
 #[async_trait]
 pub trait AnSend: Send + Sync {
     /// Sends `finalizeDeposit(chainId, header, txIndex, receiptProof,
@@ -423,12 +423,21 @@ pub trait AnSend: Send + Sync {
         bridge_dapp: [u8; 32],
         witness: &DepositWitness,
     ) -> FinalizeSend;
+
+    /// Mint the deposit whose proof the bridge has already accepted.
+    async fn send_retry(
+        &self,
+        bridge: [u8; 32],
+        bridge_dapp: [u8; 32],
+        identity: &crate::deposit::credit::Identity,
+    ) -> FinalizeSend;
 }
 
 /// Identity of a prepared finalization; a BOC must never serve another
 /// deposit or destination.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct FinalizeRequest {
+    function: &'static str,
     /// Destination bridge account.
     bridge: [u8; 32],
     /// Destination DApp.
@@ -440,6 +449,7 @@ struct FinalizeRequest {
 impl FinalizeRequest {
     fn new(bridge: [u8; 32], dapp: [u8; 32], witness: &DepositWitness) -> Self {
         FinalizeRequest {
+            function: "finalizeDeposit",
             bridge,
             dapp,
             params: witness.finalize_params().to_string(),
@@ -728,23 +738,24 @@ const FAILED_BEFORE_POSTING: [u32; 3] = [
 fn send_error(e: &ClientError) -> FinalizeSend {
     if FAILED_BEFORE_POSTING.contains(&e.code()) {
         return FinalizeSend::NotSent {
-            message: format!("send finalizeDeposit: {}", e.message()),
+            message: e.message().to_string(),
         };
     }
     classify_send_error(e)
 }
 
-/// The `finalizeDeposit` external message to `bridge`, as a base64 BOC. A
+/// An unsigned external deposit message to `bridge`, as a base64 BOC. A
 /// failure here is local: nothing was sent, and sending again will not
 /// help.
-async fn encode_finalize(
+async fn encode_deposit_call(
     ctx: Arc<ClientContext>,
     abi: &str,
     bridge: [u8; 32],
+    function: &str,
     params: &str,
 ) -> Result<(String, u32), FinalizeSend> {
     let input: Value = serde_json::from_str(params).map_err(|e| FinalizeSend::NotSent {
-        message: format!("encode finalizeDeposit: {e}"),
+        message: format!("encode {function}: {e}"),
     })?;
     let config =
         tvm_client::client::config(ctx.clone()).map_err(|error| FinalizeSend::NotSent {
@@ -762,7 +773,7 @@ async fn encode_finalize(
         abi: Abi::Json(abi.to_string()),
         address: Some(format!("0:{}", hex::encode(bridge))),
         call_set: Some(CallSet {
-            function_name: "finalizeDeposit".into(),
+            function_name: function.into(),
             header: Some(FunctionHeader {
                 expire: Some(expires),
                 ..Default::default()
@@ -777,11 +788,21 @@ async fn encode_finalize(
     .await
     .map(|m| (m.message, expires))
     .map_err(|e| FinalizeSend::NotSent {
-        message: format!("encode finalizeDeposit: {}", e.message()),
+        message: format!("encode {function}: {}", e.message()),
     })
 }
 
 impl LiveAn {
+    async fn send_deposit_call(&self, request: &FinalizeRequest) -> FinalizeSend {
+        let message = match self.prepare_finalize(request).await {
+            Ok(message) => message,
+            Err(outcome) => return outcome,
+        };
+        let outcome = self.send_encoded_finalize(request, &message).await;
+        self.finish_finalize(request, &message, &outcome).await;
+        outcome
+    }
+
     /// Reuse the exact BOC while valid; only its header is rebuilt after
     /// expiry.
     async fn prepare_finalize(&self, request: &FinalizeRequest) -> Result<String, FinalizeSend> {
@@ -796,8 +817,14 @@ impl LiveAn {
             }
         }
         let abi = crate::deposit::identity::BRIDGE_ABI;
-        let (message, expires) =
-            encode_finalize(self.ctx.clone(), abi, request.bridge, &request.params).await?;
+        let (message, expires) = encode_deposit_call(
+            self.ctx.clone(),
+            abi,
+            request.bridge,
+            request.function,
+            &request.params,
+        )
+        .await?;
         pending.insert(request.clone(), PendingFinalize {
             message: message.clone(),
             expires,
@@ -907,14 +934,23 @@ impl AnSend for LiveAn {
         bridge_dapp: [u8; 32],
         witness: &DepositWitness,
     ) -> FinalizeSend {
-        let request = FinalizeRequest::new(bridge, bridge_dapp, witness);
-        let message = match self.prepare_finalize(&request).await {
-            Ok(message) => message,
-            Err(outcome) => return outcome,
-        };
-        let outcome = self.send_encoded_finalize(&request, &message).await;
-        self.finish_finalize(&request, &message, &outcome).await;
-        outcome
+        self.send_deposit_call(&FinalizeRequest::new(bridge, bridge_dapp, witness))
+            .await
+    }
+
+    async fn send_retry(
+        &self,
+        bridge: [u8; 32],
+        bridge_dapp: [u8; 32],
+        identity: &crate::deposit::credit::Identity,
+    ) -> FinalizeSend {
+        self.send_deposit_call(&FinalizeRequest {
+            function: "retryDeposit",
+            bridge,
+            dapp: bridge_dapp,
+            params: identity.key_params().to_string(),
+        })
+        .await
     }
 }
 
@@ -1287,10 +1323,11 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            let (message, expires) = encode_finalize(
+            let (message, expires) = encode_deposit_call(
                 ctx,
                 crate::deposit::identity::BRIDGE_ABI,
                 [1; 32],
+                "finalizeDeposit",
                 &params(),
             )
             .await
@@ -1312,10 +1349,11 @@ mod tests {
     async fn a_message_that_cannot_be_encoded_is_not_sent() {
         let ctx = crate::deposit::identity::offline_context();
         // An ABI without `finalizeDeposit`: nothing to send, nothing sent.
-        let broken = encode_finalize(
+        let broken = encode_deposit_call(
             ctx.clone(),
             crate::deposit::identity::VOUCHER_ABI,
             [1; 32],
+            "finalizeDeposit",
             &params(),
         )
         .await;
@@ -1323,10 +1361,11 @@ mod tests {
             matches!(broken, Err(FinalizeSend::NotSent { .. })),
             "{broken:?}"
         );
-        let ok = encode_finalize(
+        let ok = encode_deposit_call(
             ctx,
             crate::deposit::identity::BRIDGE_ABI,
             [1; 32],
+            "finalizeDeposit",
             &params(),
         )
         .await;

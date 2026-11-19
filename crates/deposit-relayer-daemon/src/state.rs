@@ -1,8 +1,8 @@
 //! On-disk relayer state for crash-recovery.
 //!
 //! The authoritative "was this deposit finalized?" record lives on the AN
-//! side as the deposit's `DepositVoucher`; the local state is a *cache* plus a
-//! *retry log* so the relayer can resume near where it left off without
+//! bridge and is read with `getDepositStatus`; the local state is a *cache*
+//! plus a *retry log* so the relayer can resume near where it left off without
 //! resubmitting everything from `depositId = 0`:
 //!
 //! - `last_processed_deposit_id` is the high-water mark of deposits that are
@@ -54,14 +54,14 @@ pub fn unix_now_secs() -> u64 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentIdentity {
     pub chain_id: u64,
-    pub bridge_address: String,
+    pub bridge_address: Address,
 }
 
 impl DeploymentIdentity {
     pub fn new(chain_id: u64, bridge_address: Address) -> Self {
         Self {
             chain_id,
-            bridge_address: format!("{bridge_address:#x}"),
+            bridge_address,
         }
     }
 }

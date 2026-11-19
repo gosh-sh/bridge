@@ -200,8 +200,7 @@ receipt proof itself takes seconds.
 
 **Once the deposit transaction is sent, the USDC is in the bridge.**
 Everything before it refuses instead of guessing. Everything after it can
-be resumed, except the two outcomes only the bridge operator can settle
-(exit 35 and 37, section 12).
+be resumed unless exit 35 requires operator review (section 12).
 
 ## 8. What you need for a deposit
 
@@ -238,8 +237,8 @@ chain. Limit reads must succeed before an approval, deposit or burn is requested
 `--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
 mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits
 35–75 minutes for its block to be anchored. The new EVM deployment must expose `deposit(address,uint256,bytes32)`
-and be paired with an AN bridge at version 1.17.0, which finalizes a deposit
-from its receipt proof. Older deployment addresses are incompatible. The RPC,
+and be paired with an AN bridge at version 1.18.0, which retries pending deposits
+by their on-chain identity. Older deployment addresses are incompatible. The RPC,
 Acki Nacki endpoint and state directory come from the profile. When reusing a
 profile, replace its old deployment values before running this build.
 
@@ -327,7 +326,7 @@ recipient's balance before and after.
 | 22 | the deposit transaction reverted | not taken; gas spent |
 | 30 | the deposit transaction has not been found yet | maybe sent |
 | 31–34 | the deposit is on chain; the Acki Nacki side has not finished (32: the receipt proof could not be built from the RPC) | in the bridge; resumable |
-| 35, 37 | the CLI cannot finalize this deposit | in the bridge; only the operator can help |
+| 35 | the CLI cannot finalize this deposit | in the bridge; only the operator can help |
 
 **2, 3, 20, 21 and 22: nothing is stuck.** Fix what the message names and
 run again.
@@ -338,13 +337,12 @@ run again.
 never sent it, `--abandon <op-id>` releases the operation. README.md, "After
 exit 30", has the details.
 
-**35 and 37: go to the operator.** The message says what to give them: the
-transaction hash, the `depositId`, the amount, the bridge address and the
-operation id. After exit 37 the operator pays it out once with
-`mintAndSendBridged`, matching this deposit's recipient, amount and source `chainId`; that
-call credits `getTotalBridged` the way `confirmDeposit` would have.
-Ordinary `mintAndSend` does not. A second recovery invents headroom the
-Ethereum treasury does not hold.
+If the AN bridge accepted the receipt but the credit is still pending, the CLI
+retries it automatically. When the chain's TVL limit is full, resume the same
+operation once a withdrawal frees capacity.
+
+**35. Contact the operator.** Give them the transaction hash, the deposit ID,
+the amount and recipient, the bridge address and the operation ID.
 
 ## 13. Which wallets work
 

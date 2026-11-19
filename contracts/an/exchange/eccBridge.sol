@@ -31,16 +31,13 @@ interface IShellAccumulator {
 ///            (`_mintNonce`, `_mintAccumulatorNonce`) against off-chain
 ///            replay of signed mint requests. `mintAndSend` and
 ///            `mintAndSendAccumulator` increment `_totalMinted` only.
-///            `mintAndSendBridged` matches `confirmDeposit`: it increments
-///            `_totalMintedBridgeByToken[USDC_ECC_ID]` and is the recovery
-///            mint after a voucher-consumed `confirmDeposit` abort (CLI
-///            exit 37). Do not use it for ordinary owner mint.
+///            `mintAndSendBridged` credits bridged inventory and is independent
+///            of the deposit records.
 ///
 ///         3. Cross-chain bridge — registered ERC-20 / ECC currency pairs
 ///            `initiateWithdrawal` (burn ECC + emit `WithdrawalInitiated`) and
-///            `finalizeDeposit` / `confirmDeposit` (prove the deposit receipt
-///            under an accepted block, deploy deterministic `DepositVoucher`
-///            for anti-replay, mint ECC).
+///            `finalizeDeposit` (prove the receipt under an accepted block and
+///            record the payout). The voucher callback or `retryDeposit` pays it once.
 ///            The destination chain of a withdrawal is opaque; the SOURCE of a
 ///            deposit is the chain whose accepted block holds the receipt and
 ///            the contract that emitted the log, gated by the owner-managed
@@ -54,7 +51,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.17.0";
+    string constant version = "1.18.0";
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
@@ -133,7 +130,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     mapping(uint256 => mapping(uint32 => BridgeTokenConfig)) _bridgeTokens;
     mapping(uint256 => mapping(uint256 => uint32)) _bridgeTokenIds;
 
-    // Code of DepositVoucher contract — deployed per inbound deposit for replay protection
+    // Code of the voucher that requests the first payout attempt.
     TvmCell _depositVoucherCode;
 
     // Source-chain allowlist: L1 chainId -> SET of bridge contracts on that
@@ -212,6 +209,20 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // anyway until the owner re-seeds them.
     bool _paused;
 
+    struct PendingDeposit {
+        uint128 amount;
+        uint256 anAccount;
+        uint256 evmToken;
+        address voucher;
+    }
+
+    // Both dictionaries use the proof-bound identity, independent of voucher code.
+    // Once paid, only the replay marker needs to be kept.
+    mapping(uint256 => PendingDeposit) _pendingDeposits;
+    mapping(uint256 => bool) _mintedDeposits;
+    uint16 constant ERR_DEPOSIT_EXISTS = 245;
+    uint16 constant ERR_DEPOSIT_NOT_PENDING = 246;
+
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
     ///       in the only deploy path that matters (zerostate premine stub +
@@ -274,10 +285,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
     /// @notice Mints ECC[3] USDC and sends it to the specified recipient address.
     ///         Only callable by the owner (by public key). Increments
-    ///         `_totalMinted` only — not bridged inventory. After CLI exit 37
-    ///         (voucher spent, `confirmDeposit` aborted) use
-    ///         `mintAndSendBridged` instead, or the USDC already in the
-    ///         Ethereum treasury never becomes withdrawable headroom.
+    ///         `_totalMinted` only.
     /// @param recipient — address to receive the minted ECC[3] USDC
     /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
     function mintAndSend(address recipient, uint128 value, uint64 nonce) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
@@ -302,22 +310,13 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // Owner recovery mint that credits bridged inventory
     // ========================================================
 
-    /// @notice Owner recovery mint matching `confirmDeposit` accounting:
-    ///         `gosh.mintecc` plus `_totalMintedBridgeByToken[USDC_ECC_ID]`.
-    ///         Call this after CLI exit 37: the deposit voucher is spent so
-    ///         `finalizeDeposit` cannot mint again, Ethereum already holds
-    ///         the USDC, and ordinary `mintAndSend` would leave
-    ///         `getTotalBridged` short — last withdrawers then hit 233.
-    ///         Shares `_mintNonce` with `mintAndSend`. The call is not bound
-    ///         to a deposit id: paying twice, or typing the wrong `value`,
-    ///         still credits bridged inventory the Ethereum treasury does
-    ///         not hold, and last withdrawers then lose the difference.
-    ///         Match the aborted deposit's recipient and amount, once.
-    ///         Do not use it for ordinary owner mint.
+    /// @notice Owner mint crediting bridged USDC inventory on the named chain.
+    ///         Shares `_mintNonce` with `mintAndSend`. This independent admin
+    ///         operation does not settle a deposit. Use `retryDeposit` for a pending payout.
     /// @param recipient — address to receive the minted ECC[3] USDC
     /// @param value — amount of ECC[3] USDC to mint and send (in micro-USDC)
     /// @param nonce — next `_mintNonce` (shared with `mintAndSend`)
-    /// @param chainId — EIP-155 source chain whose aborted deposit is being paid
+    /// @param chainId — EIP-155 source chain whose bridged inventory is being credited
     function mintAndSendBridged(address recipient, uint128 value, uint64 nonce, uint256 chainId) public onlyOwnerPubkey(_ownerPubkey) accept saveMsg {
         ensureBalance();
         require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
@@ -339,8 +338,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         emit UsdcMinted{dest: addrExtern}(recipient, value);
     }
 
-    /// @notice Owner recovery for an aborted registered-token deposit.
-    ///         Match the source receipt, currency, recipient and amount exactly once.
+    /// @notice Owner mint crediting bridged inventory for a registered token.
+    ///         Use `retryDeposit` to settle a proven deposit.
     function mintAndSendTokenBridged(address recipient, uint128 value, uint64 nonce,
                                      uint256 chainId, uint32 tokenId)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
@@ -677,7 +676,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         `finalizeDeposit` and `initiateWithdrawal` throw
     ///         `ERR_PAUSED` (231) before doing any work. Reversible, and
     ///         deliberately narrow — the TIP-3 inbound callback, the owner
-    ///         mints, `confirmDeposit` and every anchor and allowlist call stay
+    ///         mints, pending deposit payouts and every anchor and allowlist call stay
     ///         available, so a deposit already proven can still be paid out and
     ///         the owner can keep the bridge's configuration current while it
     ///         is stopped.
@@ -780,7 +779,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         bound `outstanding + amount` by `MAX_BRIDGE_TVL`, so writing
     ///         more than that figure buys withdrawal room by refusing deposits
     ///         with `ERR_TVL_CAP`, and a deposit caught between finalization
-    ///         and confirmation aborts with its voucher already consumed.
+    ///         and confirmation stays pending until there is room for its payout.
     ///         Writing less is the safe direction: it only refuses
     ///         withdrawals, which return the ECC.
     ///
@@ -937,9 +936,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         (`_acceptedBlockHash`); the receipt is proven against the
     ///         header's receipts root, and every deposit field is read out of
     ///         the proven log, so nothing but the choice of log is caller-set.
-    ///         Permissionless. A deterministic `DepositVoucher` keyed on the
-    ///         deposit identity gives replay protection; it calls back
-    ///         `confirmTokenDeposit` to mint and pay.
+    ///         Records the payout once per deposit identity. The voucher calls
+    ///         `confirmTokenDeposit` to pay it; anyone can also call `retryDeposit`.
     /// @param chainId       — source chain id; picks the accepted blocks and
     ///                         the trusted bridges the deposit is checked against.
     /// @param header        — RLP of the block header.
@@ -949,13 +947,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     /// @param logIndex      — index of the `Deposit` log within that receipt.
     function finalizeDeposit(uint256 chainId, bytes header, uint16 txIndex,
                              bytes[] receiptProof, uint16 logIndex) public {
-        // Every check runs before accept, within the external message's gas
-        // credit, so a refused deposit costs the bridge nothing. A deposit
-        // already finalized is not refused here: it passes every check, is
-        // accepted and paid for by the bridge, and ends at its existing
-        // voucher without a second mint. A deposit whose proof walk exceeds
-        // the credit cannot be finalized; the CLI and deposit-relayer refuse
-        // to send one.
+        // Refuse invalid or previously recorded deposits before charging the bridge.
         require(!_paused, ERR_PAUSED);
         uint256 blockHash = gosh.keccak256(header);
         require(_acceptedBlockHash[chainId][blockHash], ERR_UNKNOWN_BLOCK);
@@ -967,6 +959,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
                 ERR_UNSUPPORTED_SRC_CHAIN);
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
+        uint256 depositHash = _depositHash(f.depositId, f.contractAddr, f.dappId, f.chainId);
+        require(!_pendingDeposits.exists(depositHash) && !_mintedDeposits[depositHash], ERR_DEPOSIT_EXISTS);
         _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
 
         tvm.accept();
@@ -974,20 +968,15 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         tvm.commit();
         ensureBalance();
 
-        // Anti-replay anchor = (deposit_id, emitting contract, source chain);
-        // the dapp component is pinned to 0. chainId is IN the key: two
-        // different chains may legitimately emit the same (deposit_id,
-        // contract) pair. amount/recipient are NOT in the key — the emitter
-        // fixes them per deposit_id, so a replay can never re-route or
-        // re-mint: same key ⇒ same voucher ⇒ no-op.
-        uint256 depositHash = tvm.hash(abi.encode(f.depositId, f.contractAddr, f.dappId, f.chainId));
-
         TvmCell stateInit = abi.encodeStateInit({
             contr: DepositVoucher,
             varInit: { _depositHash: depositHash },
             code: _depositVoucherCode
         });
 
+        _pendingDeposits[depositHash] = PendingDeposit(
+            f.amount, f.anAccount, f.evmToken, address.makeAddrStd(0, tvm.hash(stateInit))
+        );
         new DepositVoucher{
             stateInit: stateInit,
             value: 2 vmshell,
@@ -995,13 +984,28 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         }(f.depositId, f.contractAddr, f.dappId, f.chainId, f.amount, f.anAccount, f.evmToken);
     }
 
-    /// @notice Internal callback from a freshly deployed `DepositVoucher`. Mints
-    ///         registered ECC and sends it to the proof-bound AN recipient. The caller
-    ///         must be the deterministic voucher address derived from the
-    ///         deposit identity — replay attempts hit the existing voucher
-    ///         account whose constructor was already consumed. If this call
-    ///         aborts after that constructor has run, the voucher is spent
-    ///         and the owner pays the recipient with the matching recovery mint.
+    function _depositHash(uint256 depositId, uint256 contractAddr, uint256 dappId,
+                          uint256 chainId) private pure returns (uint256) {
+        return tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId));
+    }
+
+    /// @notice Returns 0 for unknown, 1 for proven and pending, or 2 for minted.
+    function getDepositStatus(uint256 depositId, uint256 contractAddr, uint256 chainId)
+        external view returns (uint8 status)
+    {
+        uint256 key = _depositHash(depositId, contractAddr, 0, chainId);
+        if (_mintedDeposits[key]) { return 2; }
+        return _pendingDeposits.exists(key) ? 1 : 0;
+    }
+
+    /// @notice Pays a pending deposit to its proven recipient using current TVL headroom.
+    function retryDeposit(uint256 depositId, uint256 contractAddr, uint256 chainId) public {
+        uint256 key = _depositHash(depositId, contractAddr, 0, chainId);
+        PendingDeposit deposit = _requirePending(key);
+        _payDeposit(key, depositId, contractAddr, chainId, deposit);
+    }
+
+    /// @notice USDC voucher callback. The voucher and payout must match the pending record.
     function confirmDeposit(
         uint256 depositId, uint256 contractAddr, uint256 dappId,
         uint256 chainId, uint128 amount, uint256 anAccount
@@ -1021,26 +1025,33 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint256 depositId, uint256 contractAddr, uint256 dappId,
         uint256 chainId, uint128 amount, uint256 anAccount, uint256 evmToken
     ) private {
-        uint256 depositHash = tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId));
-        TvmCell stateInit = abi.encodeStateInit({
-            contr: DepositVoucher,
-            varInit: { _depositHash: depositHash },
-            code: _depositVoucherCode
-        });
-        require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
-        require(anAccount != 0, ERR_ZERO_RECIPIENT);
-        require(amount > 0, ERR_ZERO_AMOUNT);
-        uint32 tokenId = _requireDepositToken(chainId, evmToken, amount, false);
+        uint256 key = _depositHash(depositId, contractAddr, dappId, chainId);
+        PendingDeposit deposit = _requirePending(key);
+        require(msg.sender == deposit.voucher, ERR_INVALID_SENDER);
+        require(deposit.amount == amount && deposit.anAccount == anAccount && deposit.evmToken == evmToken,
+                ERR_HASH_MISMATCH);
+        _payDeposit(key, depositId, contractAddr, chainId, deposit);
+    }
 
+    function _requirePending(uint256 key) private view returns (PendingDeposit) {
+        optional(PendingDeposit) deposit = _pendingDeposits.fetch(key);
+        require(deposit.hasValue(), ERR_DEPOSIT_NOT_PENDING);
+        return deposit.get();
+    }
+
+    function _payDeposit(uint256 key, uint256 depositId, uint256 contractAddr, uint256 chainId,
+                         PendingDeposit deposit) private {
+        uint32 tokenId = _requireDepositToken(chainId, deposit.evmToken, deposit.amount, false);
         tvm.accept();
         ensureBalance();
-
-        gosh.mintecc(uint64(amount), tokenId);
-        _creditToken(chainId, tokenId, amount);
+        delete _pendingDeposits[key];
+        _mintedDeposits[key] = true;
+        gosh.mintecc(uint64(deposit.amount), tokenId);
+        _creditToken(chainId, tokenId, deposit.amount);
 
         mapping(uint32 => varuint32) ecc;
-        ecc[tokenId] = varuint32(amount);
-        address.makeAddrStd(0, anAccount).transfer({
+        ecc[tokenId] = varuint32(deposit.amount);
+        address.makeAddrStd(0, deposit.anAccount).transfer({
             value: 1 vmshell,
             bounce: false,
             flag: 1,
@@ -1049,15 +1060,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
         address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
         emit DepositFinalized{dest: addrExtern}(
-            depositId, contractAddr, dappId, chainId, amount, anAccount
+            depositId, contractAddr, 0, chainId, deposit.amount, deposit.anAccount
         );
     }
-
-    // DepositVoucher code rotation is intentionally not exposed as a
-    // standalone setter. The only way to change `_depositVoucherCode` is via
-    // a full `updateCode` upgrade of eccBridge (the new code+layout pass
-    // through `onCodeUpgrade`). This removes the "owner can swap voucher
-    // logic in one tx and free-mint" backdoor flagged in PR2112 review (B2).
 
     // ========================================================
     // Admin
@@ -1099,7 +1104,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
-            registryState, _outstandingByChain, _messages
+            abi.encode(registryState, abi.encode(_pendingDeposits, _mintedDeposits)),
+            _outstandingByChain, _messages
         );
         tvm.commit();
         tvm.setcode(newcode);
@@ -1122,10 +1128,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///                  mapping(uint256 => uint128) outstandingByChain,
     ///                  mapping(uint32 => mapping(uint256 => bool)) messages)
     ///         `depositVoucherCode` supplies the zerostate voucher code.
-    ///         A non-empty `userCell` contains abi.encode(voucherCode,
-    ///         bridgeTokens, bridgeTokenIds). For an upgrade from 1.15.0,
-    ///         construct it with BridgeZerostateData.getTokenUpgradeData;
-    ///         subsequent updateCode calls construct it automatically.
+    ///         Before 1.18.0 a non-empty `userCell` held the registry tuple
+    ///         (voucherCode, bridgeTokens, bridgeTokenIds). From 1.18.0 it holds
+    ///         two cell references: that same registry tuple and the deposit dictionaries.
     ///
     ///         `_trustedL1Bridge` is deliberately absent from the tuple. After
     ///         an upgrade the allowlist starts empty (deposits fail closed)
@@ -1162,6 +1167,14 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _messages = messages;
         _depositVoucherCode = depositVoucherCode;
         if (!userCell.toSlice().empty()) {
+            // The pre-1.18 registry tuple contains two HashmapE presence bits.
+            // The new envelope has exactly two references and no data bits.
+            TvmSlice state = userCell.toSlice();
+            if (state.bits() == 0 && state.refs() == 2) {
+                userCell = state.loadRef();
+                (_pendingDeposits, _mintedDeposits) = abi.decode(state.loadRef(), (
+                    mapping(uint256 => PendingDeposit), mapping(uint256 => bool)));
+            }
             (_depositVoucherCode, _bridgeTokens, _bridgeTokenIds) = abi.decode(userCell, (
                 TvmCell, mapping(uint256 => mapping(uint32 => BridgeTokenConfig)),
                 mapping(uint256 => mapping(uint256 => uint32))));
@@ -1263,7 +1276,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         (f.evmToken, log) = EthTrie._uint(log, 32);
         // Deposits into AN always land in dapp 0. The workchain concept is
         // retired on AN, so the recipient always lives in workchain 0 (see
-        // `_confirmTokenDeposit`'s makeAddrStd).
+        // `_payDeposit`'s makeAddrStd).
         f.dappId = 0;
     }
 

@@ -168,26 +168,8 @@ pub fn pi_form(h: [u8; 32]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{address, U256};
-    use serde_json::json;
-    use tvm_client::{
-        abi::{encode_internal_message, Abi, CallSet, ParamsOfEncodeInternalMessage},
-        tvm::{run_executor, AccountForExecutor, ParamsOfRunExecutor},
-    };
 
     use super::*;
-
-    const ERR_INVALID_SENDER: i64 = 207;
-
-    /// A deposit whose id differs from the zero dapp id beside it in
-    /// `_depositHash`, so a hash with the two slots swapped or the id left
-    /// out is another voucher address.
-    fn deposit_7() -> DepositIdentity {
-        DepositIdentity {
-            deposit_id: U256::from(7),
-            contract: address!("cdfd6cef70f68d0849310cd970f8ef8f8e4b4fdb"),
-            chain_id: 11_155_111,
-        }
-    }
 
     #[test]
     fn the_bundled_voucher_is_the_one_the_bridge_deploys() {
@@ -209,89 +191,19 @@ mod tests {
         assert_eq!(pi_form(p), h);
     }
 
-    /// Runs the current compiled bridge's `confirmDeposit` with its matching
-    /// voucher code configured in storage. Its first check is `msg.sender ==
-    /// makeAddrStd(0, hash(stateInit(voucher code, _depositHash)))`, so the
-    /// bridge itself says whether the address computed here is the
-    /// voucher's.
-    fn confirm_deposit_exit_code(src_account: [u8; 32]) -> i64 {
-        let ctx = offline_context();
-        let id = deposit_7();
-        use tvm_block::{Account, Deserializable, Serializable};
-        let (bridge_account, boc) =
-            futures::executor::block_on(crate::test_chain::deployed_usdc_bridge(false));
-        let mut account = Account::construct_from_base64(&boc).unwrap();
-        let contract = tvm_abi::Contract::load(BRIDGE_ABI.as_bytes()).unwrap();
-        let data = tvm_types::SliceData::load_cell(account.get_data().unwrap()).unwrap();
-        let mut fields = contract.decode_storage_fields(data, false).unwrap();
-        let code = tvm_types::read_single_root_boc(
-            tvm_types::base64_decode(&voucher_code(&ctx).unwrap()).unwrap(),
-        )
-        .unwrap();
-        let field = fields
-            .iter_mut()
-            .find(|field| field.name == "_depositVoucherCode")
-            .unwrap();
-        field.value = tvm_abi::TokenValue::Cell(code);
-        let data = tvm_abi::TokenValue::pack_values_into_chain(
-            &fields,
-            Vec::new(),
-            &tvm_abi::contract::ABI_VERSION_2_4,
-        )
-        .unwrap()
-        .into_cell()
-        .unwrap();
-        assert!(account.set_data(data));
-        let boc = tvm_types::base64_encode(account.write_to_bytes().unwrap());
-        // The executor checks the deployed account's address as well as the body.
-        let message = encode_internal_message(ctx.clone(), ParamsOfEncodeInternalMessage {
-            abi: Some(Abi::Json(BRIDGE_ABI.to_string())),
-            address: Some(format!("0:{bridge_account}")),
-            src_address: Some(format!("0:{}", hex::encode(src_account))),
-            call_set: Some(CallSet {
-                function_name: "confirmDeposit".into(),
-                header: None,
-                input: Some(json!({"depositId": id.deposit_id.to_string(),
-                    "contractAddr": U256::from_be_slice(id.contract.as_slice()).to_string(),
-                    "dappId": "0", "chainId": id.chain_id.to_string(), "amount": "1000000",
-                    "anAccount": "43"})),
-            }),
-            value: "2000000000".into(),
-            bounce: Some(false),
-            enable_ihr: None,
-            deploy_set: None,
-        })
-        .unwrap()
-        .message;
-        let res = futures::executor::block_on(run_executor(ctx, ParamsOfRunExecutor {
-            message,
-            account: AccountForExecutor::Account {
-                boc,
-                unlimited_balance: Some(true),
-            },
-            skip_transaction_check: Some(true),
-            ..Default::default()
-        }))
-        .unwrap();
-        // A skipped compute phase has no exit code: that is no answer.
-        res.transaction["compute"]["exit_code"]
-            .as_i64()
-            .expect("the compute phase ran")
-    }
-
+    // Destination of the voucher deployment emitted by finalizeDeposit in
+    // tvm-debugger with this identity and the tracked DepositVoucher code.
     #[test]
-    fn the_bridge_accepts_the_computed_voucher_as_sender() {
-        let ctx = offline_context();
-        let voucher = voucher_account_id(&ctx, &deposit_7()).unwrap();
-        assert_ne!(confirm_deposit_exit_code(voucher), ERR_INVALID_SENDER);
-    }
-
-    #[test]
-    fn the_bridge_refuses_any_other_sender() {
-        let ctx = offline_context();
-        let mut other = voucher_account_id(&ctx, &deposit_7()).unwrap();
-        other[31] ^= 1;
-        assert_eq!(confirm_deposit_exit_code(other), ERR_INVALID_SENDER);
+    fn computes_the_voucher_address_used_by_the_bridge() {
+        let id = DepositIdentity {
+            deposit_id: U256::from(7),
+            contract: address!("000000000000000000000000000000000000002a"),
+            chain_id: 1,
+        };
+        assert_eq!(
+            voucher_account_id(&offline_context(), &id).unwrap(),
+            hex!("3d8ed73a4b4f2dd1a6b6d016dfd23acab2d7ed298da6fe274575fcdf82fdcf3d")
+        );
     }
 
     #[test]
@@ -311,6 +223,8 @@ mod tests {
         };
         for f in [
             "finalizeDeposit",
+            "retryDeposit",
+            "getDepositStatus",
             "confirmDeposit",
             "isPaused",
             "getAnchorConfig",

@@ -8,9 +8,9 @@ use std::sync::{
 
 use alloy::primitives::{Address, B256, U256};
 use deposit_relayer_daemon::{
-    state::unix_now_secs, AnSubmitter, DepositEvent, DepositWitness, InMemoryDepositSource,
-    MockAnSubmitter, MockWitnessBuilder, Relayer, RelayerConfig, RelayerError, RelayerState,
-    SubmitOutcome, TickOutcome, WitnessBuilder,
+    state::unix_now_secs, voucher::DepositIdentity, AnSubmitter, DepositEvent, DepositWitness,
+    InMemoryDepositSource, MockAnSubmitter, MockWitnessBuilder, Relayer, RelayerConfig,
+    RelayerError, RelayerState, SubmitOutcome, TickOutcome, WitnessBuilder,
 };
 use tempfile::tempdir;
 
@@ -45,8 +45,11 @@ impl AnSubmitter for AnchorGate {
         Ok(self.accepted.load(Ordering::Relaxed))
     }
 
-    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
-        self.inner.is_finalized(event).await
+    async fn resume_deposit(
+        &self,
+        id: DepositIdentity,
+    ) -> Result<Option<SubmitOutcome>, RelayerError> {
+        self.inner.resume_deposit(id).await
     }
 
     async fn submit(

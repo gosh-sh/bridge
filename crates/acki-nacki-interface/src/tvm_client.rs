@@ -125,7 +125,7 @@ impl IAckiNacki for TvmAckiNacki {
 
     async fn call_contract(&self, call: ContractCallRequest) -> Result<TxHash> {
         let mut call_set = CallSet::some_with_function_and_input(&call.function, call.params);
-        if call.function == "finalizeDeposit" {
+        if matches!(call.function.as_str(), "finalizeDeposit" | "retryDeposit") {
             let config = tvm_client::client::config(self.context.clone())
                 .map_err(format_tvm_client_error)?;
             let lifetime = (config.abi.message_expiration_timeout / 1000).clamp(1, 240);

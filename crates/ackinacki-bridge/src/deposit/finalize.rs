@@ -18,10 +18,10 @@ use serde_json::json;
 use crate::{
     deposit::{
         an::{AccStatus, AccountInfo, AnRead, AnSend},
-        credit::{finalized_event, Identity},
+        credit::{deposit_status, finalized_event, DepositStatus, Identity},
         identity::BRIDGE_ABI,
         refusals::{react, Reaction},
-        retry::{base_delay, jittered, until},
+        retry::{base_delay, jittered, once, until},
         store::{FinalizeInfo, OpRecord, OpStage, Store},
         ui::Ui,
     },
@@ -246,6 +246,14 @@ async fn attempts(
     let mut retries = 0u32;
     let mut warned = false;
     loop {
+        if matches!(
+            once(deadline, deposit_status(an, cx.bridge, &cx.identity)).await,
+            Some(DepositStatus::Pending | DepositStatus::Minted)
+        ) {
+            return Ok(FinalizeExit::ToCredit {
+                via_events: false,
+            });
+        }
         let bridge_code = until(
             ui,
             "reading the bridge's voucher code hash",

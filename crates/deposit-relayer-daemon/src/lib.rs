@@ -27,7 +27,7 @@
 //! ┌────────────────────────┐   ┌──────────────────────────┐   ┌────────────────────────┐
 //! │ DepositSource          │──▶│ Relayer::tick()          │──▶│ AnSubmitter            │
 //! │  - EthLogSource (alloy)│   │ 1. fetch deposit event   │   │  - AnInterfaceSubmitter│
-//! │  - InMemoryDepositSrc  │   │ 2. voucher pre-check     │   │  - MockAnSubmitter     │
+//! │  - InMemoryDepositSrc  │   │ 2. check mint or retry  │   │  - MockAnSubmitter     │
 //! └────────────────────────┘   │ 3. block accepted on AN? │   └────────────────────────┘
 //!                              │ 4. build receipt proof   │
 //!                              │ 5. submit + persist      │
@@ -38,8 +38,8 @@
 //! └────────────────────────┘   └──────────────────────────┘
 //! ```
 //!
-//! A second `finalizeDeposit` for the same deposit fails in the voucher
-//! constructor (exit 51), so re-submission is safe.
+//! A registered deposit can be retried with `retryDeposit`. Completion
+//! is observed by reading `getDepositStatus` on the bridge.
 
 pub mod an_config;
 pub mod daemon;

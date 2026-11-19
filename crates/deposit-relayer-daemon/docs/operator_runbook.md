@@ -24,16 +24,13 @@ builds the Merkle proof of the deposit transaction's receipt, and calls
 `finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex)` on the AN-side
 bridge (`witness::ReceiptWitnessBuilder`, `deposit_receipt::fetch`). The bridge checks
 the header against its accepted blocks, walks the proof, reads the `Deposit` log out of
-the receipt itself and deploys the deposit's `DepositVoucher`. The voucher mints the
-USDC to the recipient through `confirmDeposit`. There is no prover: building the proof
+the receipt itself and deploys the deposit's `DepositVoucher`. The voucher asks the bridge to pay the proven recipient through
+`confirmTokenDeposit`. There is no prover: building the proof
 takes a few RPC calls and no noticeable memory.
 
-- **Source of truth: the `DepositVoucher` on AN.** A deposit is finalized exactly when
-  its voucher exists. The voucher's address is derived from `(depositId, source
-  contract, chainId)` and the voucher code the bridge carries
-  (`voucher::voucher_account_id`). A second `finalizeDeposit` for the
-  same deposit fails in the voucher constructor with exit 51, so no deposit can be minted
-  twice, whoever submits it (`submitter::classify_exit`).
+- **On-chain status.** The relayer reads `getDepositStatus(depositId, contractAddr, chainId)`
+  from `eccBridge`. Status 0 requires a receipt proof, status 1 allows the relayer
+  to call `retryDeposit` without the proof or anchor, and status 2 confirms the mint.
 - **`state.json` is a cache plus a to-do list** (`state::RelayerState`). It holds the
   high-water mark (`last_processed_deposit_id`), unfinished ids waiting for
   anchors, pending submissions or retries (`outstanding_deposits`), and the
@@ -48,13 +45,13 @@ takes a few RPC calls and no noticeable memory.
 
 | Setting | Value | Why |
 |---|---|---|
-| Daemons per AN bridge | **exactly one** | `StateLock` (an advisory `flock` on `<state>.lock`) only stops a second daemon on the *same host and file*. Two hosts with the same keys would both submit every deposit. The vouchers keep that safe, but the bridge pays gas twice and the two senders compete. |
+| Daemons per AN bridge | **exactly one** | `StateLock` (an advisory `flock` on `<state>.lock`) only stops a second daemon on the *same host and file*. Two hosts can submit the same deposit concurrently. The bridge rejects duplicate submissions and credits each deposit once. |
 | `DEPOSIT_RELAYER_STATE_DIR`, `DEPOSIT_RELAYER_LOG_DIR` | two absolute directories on persistent disk (`--state-dir`, `--log-dir`; bridge-audit#132) | The state directory holds `deposit-relayer-state.json`, its lock and the temporary file of its atomic write; the log directory the daemon's own log (a file per day, beside stdout). Nothing goes to the system temp directory or `$HOME`. `--work-dir` / `DEPOSIT_RELAYER_WORK_DIR` are gone with the prover; remove them from the command line. |
 | State file backup | copy it every few minutes, with the keys | The file is replaced atomically (temp file, `fsync`, `rename`, in `RelayerState::save`), so a plain `cp` always reads a complete file. The copy is what keeps `parked_deposit_ids` if the host dies. |
 | bridge ABI | built into the binary (`crates/ackinacki-bridge/abi/USDCBridge.abi.json` at build time) | No ABI file is read (bridge-audit#132); a daemon built from a commit whose ABI lacks a getter the contract has is upgraded, not reconfigured. |
-| `RPC_URL` | an endpoint that serves `eth_getLogs`, `eth_getTransactionReceipt`, `eth_getBlockByHash` and **`eth_getBlockReceipts`** for at least the last 7 days, 30 preferred, and `eth_getLogs` back to `FROM_BLOCK` while `state.json` has no cursor | The scan finds a deposit with `eth_getLogs`; the receipt proof needs the receipt of every transaction in the deposit's block, read in one `eth_getBlockReceipts` call. A node without that method fails every deposit as `proof_failed`. A node that keeps ~10 000 blocks, as some public endpoints do, drops receipts after about a day on Ethereum and within an hour on Arbitrum; a deposit older than that cannot be finalized through it. The margin is what lets the relayer catch up after a stall. |
+| `RPC_URL` | an endpoint that serves `eth_getLogs`, `eth_getTransactionReceipt`, `eth_getBlockByHash` and **`eth_getBlockReceipts`** for at least the last 7 days, 30 preferred, and `eth_getLogs` back to `FROM_BLOCK` while `state.json` has no cursor | The scan finds a deposit with `eth_getLogs`; the receipt proof needs the receipt of every transaction in the deposit's block, read in one `eth_getBlockReceipts` call. A node without that method fails every deposit as `proof_failed`. A node that keeps ~10 000 blocks, as some public endpoints do, drops receipts after about a day on Ethereum and within an hour on Arbitrum; a deposit older than that needs an archival RPC for its initial proof. For an ID already in the saved outstanding queue, the daemon can retry a pending AN credit using the deployment binding in the state file. The margin is what lets the relayer catch up after a stall. |
 | `FROM_BLOCK` / `BRIDGE_DEPLOY_BLOCK` | at or just below the oldest deposit still to deliver | The log scan starts here until `state.json` has a cursor. If it is above an undelivered deposit, every tick fails, naming the blocks it scanned (`EthLogSource::fetch`). |
-| `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the voucher is active, so it is not submitted again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
+| `START_DEPOSIT_ID` | first deposit not yet finalized on the current AN bridge | Used only while `state.json` has no progress. A too-low id is only a cheap re-check when `FROM_BLOCK` still covers that deposit (the bridge reports status 2, so it is not submitted again). If `FROM_BLOCK` is above it — the row above, "just below the oldest still to deliver" — `fetch` finds no log and every tick fails; raise `START_DEPOSIT_ID` or lower `FROM_BLOCK`. |
 | `SKIP_AFTER_ATTEMPTS` | **recommendation:** a value that takes a few hours of backoff to reach (for example 64) | 0 (the default) never parks: a broken deposit stays in `outstanding_deposits` and later ids still go through. That queue also contains normal anchor waits; monitor failed attempts and prolonged waits as described in §7. |
 | `--backoff-initial-secs` / `-max-secs` / `-multiplier` | defaults 5 / 120 / 2 | A zero initial delay or a multiplier of 0 is rejected at start-up (`BackoffConfig::validate`); either would busy-loop. |
 | `DEPOSIT_RELAYER_METRICS_ADDR` | loopback or a monitoring-only interface | Prometheus `GET /metrics`; alerts in §7. |
@@ -78,12 +75,14 @@ rejection.
 Anchor waits also increase their per-id delay with age: the larger of the
 existing failure backoff and `min(wait_age_seconds / 4, 60)` seconds, where
 age starts at `anchor_wait_started_unix`. Thus an old uncovered block does
-not cause an anchor getter, voucher lookup and state write on every daemon
+not cause an anchor getter, deposit status lookup and state write on every daemon
 tick. `OUTSTANDING_BACKOFF_SECS=0` disables per-id delays. These deadlines
 survive restarts and do not delay fresh deposits behind older waits.
-A retry uses the cached event when available, otherwise the stored Deposit
-tx's receipt (or its block), so the log-scan cursor can keep moving with later
-deposits. An outstanding id that has no stored log — a `state.json`
+On a retry, the daemon checks `getDepositStatus` using the outstanding deposit ID
+and the EVM bridge address and chain ID in `state.json`'s deployment binding.
+Status 1 triggers `retryDeposit` even if the RPC has pruned the receipt. Status 2
+completes the queue entry. For status 0, the daemon still needs the cached event
+or its Ethereum receipt to build the initial proof. An outstanding id that has no stored log — a `state.json`
 written by an earlier relayer that only recorded `attempts_since_progress` — is
 scanned from the `scan_done_through_block` that file had on load, plus one,
 with a fallback to `--from-block` if that snapshot was already past the deposit.
@@ -93,8 +92,9 @@ A stuck deposit no longer holds every later user. What gets the stuck one moving
 1. **On its own**, a transient failure (RPC blip, a node missing the block's receipts) is
    retried with that
    per-id backoff on retry turns. A pending submit is retried at the base delay (it
-   does not count as an attempt). A retry with a stored tx uses the cached
-   event or receipt and makes no `eth_getLogs` walk from the shared cursor.
+   does not count as an attempt). If `retryDeposit` fails without a VM exit code,
+   look for a warning with the chain ID, deposit ID and error. The tick counts as
+   `an_pending` and the ID stays outstanding.
 2. **With `--skip-after-attempts N`**, after N consecutive *failed* attempts (a
    receipt-proof failure or a rejection by AN) the deposit is **parked**. It is appended to
    `parked_deposit_ids`, dropped from outstanding, and the log shows `daemon: deposit
@@ -113,10 +113,10 @@ A stuck deposit no longer holds every later user. What gets the stuck one moving
 
    `--tx-hash` with `--log-index` (the position of the log inside the transaction's
    receipt) skips the log scan. Fix the cause first (table in §5); a deposit AN rejected
-   will be rejected again. Then `finalize-one` reports `ACCEPTED` or `already
-   finalised`. `witness.json` is the block header and receipt proof; it does not go
-   stale, but it only finalizes once the AN bridge has accepted that block. Neither command takes the
-   state lock, so the daemon can keep running.
+   will be rejected again. On success, `finalize-one` logs `deposit minted on AN` or
+   `bridge reports deposit already minted`. The header and receipt proof in
+   `witness.json` stay valid. The initial submission requires the AN bridge to have
+   accepted the block. Both commands can run while the daemon holds the state lock.
 4. **Clear the entry.** The daemon never removes ids from `parked_deposit_ids`, and the
    `deposit_relayer_parked_deposits` gauge counts them. Stop the daemon, delete the
    finished ids from the file, then start it again. An edit made while the daemon runs
@@ -137,10 +137,10 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 
 | Outcome | Meaning | Automatic handling | Counts toward parking |
 |---|---|---|---|
-| `finalized`, `already_finalized` | voucher deployed / already there | next deposit | resets the count |
+| `finalized`, `already_finalized` | bridge credited the deposit / credit already recorded | next deposit | resets the count |
 | `not_yet_available` | deposit not made, or not `--confirmations` deep | wait | no |
 | `waiting_for_anchor` | the confirmed deposit's block is not yet accepted by the AN bridge | save the log reference; a first wait resets daemon delay, repeat waits preserve failure backoff and otherwise reset idle delay; honor per-id retry deadlines; nothing is built or broadcast, later ids remain runnable | **no** |
-| `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; ready retries alternate with new work. On the next retry the voucher pre-check (`AnSubmitter::is_finalized`) answers before anything is sent again | **no** |
+| `an_pending` | the outcome is not known yet | outstanding with backoff, no extra attempt; ready retries alternate with new work. On the next retry the bridge status is checked before anything is sent again | **no** |
 | `proof_failed` | building the receipt proof failed: an RPC error, a node that does not serve `eth_getBlockReceipts` or no longer has the block, receipts that do not rebuild the block's `receiptsRoot`, or a deposit that moved to another block | retried | yes |
 | `an_rejected` | AN refused the deposit (exit code in the log) | retried with a freshly built proof | yes |
 | `unprovable` | the deposit cannot be finalized from its receipt: the transaction failed, the log is not a `Deposit` in the one shape the AN bridge reads (3 topics, 4 data words), the transaction or log index is over 65535, or the AN bridge could not check the receipt proof within the 500 000 gas an external message may spend before it is accepted (`deposit_receipt::AN_GAS_CREDIT`; about 65 to 88 or more ERC-20 transfers before the `Deposit` in its receipt, depending on the size of its block) | recorded in `unprovable_deposit_ids` and skipped at once; nothing is sent. `finalize-one` cannot help | no |
@@ -151,13 +151,13 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 
 - `finalizeDeposit` was not confirmed within the fixed 60-second confirm timeout
   (`AnSubmitConfig::confirm_timeout_secs`; no CLI flag);
-- it exited 0, but its voucher deploy and `confirmDeposit` were not both visible within
-  that time (`AnInterfaceSubmitter::settle`);
+- the transaction succeeded but the bridge had not yet reported the mint within
+  that time;
 - the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235);
 - the token is not registered for the source chain (241), or its deposits are closed on AN (243).
   Both clear once the owner calls `setBridgeToken`;
 - an external message was already recorded or expired (400 / 402). Observe the
-  voucher before retrying; this does not establish that its mint succeeded.
+  on-chain deposit status before retrying.
 
 Before building the receipt proof, the daemon reads `isAcceptedBlockHash(chainId, blockHash)`
 on its configured AN token bridge. `--confirmations` controls Ethereum log
@@ -198,17 +198,15 @@ anchor writer admits a missing hash with
 enabled, otherwise through the light client. The deposit daemon never
 admits hashes itself.
 
-For pending submissions, if the submit did land, the next tick sees the
-voucher and moves on without submitting again. If it did not, a later tick
-builds the proof and submits again once the anchor is present, and a duplicate
-cannot mint. Pending submissions need no manual action unless the pending status
+For an uncertain submission the daemon reads the deposit status on its next
+attempt. It submits a receipt proof for an unknown deposit, retries a pending
+credit by identity and advances past a completed mint. Pending submissions need no manual action unless the pending status
 persists (alert in §7). If it does, check the AN endpoint and `isPaused()`
 on the bridge.
 
 ## 5. Rejections: what the exit code tells you
 
-The daemon logs the decoded reason (`submitter::describe_exit_code`,
-`describe_voucher_exit`). Exit codes that point at bridge configuration hit every
+The daemon logs the decoded reason (`submitter::describe_exit_code`). Exit codes that point at bridge configuration hit every
 deposit, so parking will not help; fix the setting, and parked deposits then finish with
 `finalize-one`.
 
@@ -224,12 +222,11 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | 307 `ERR_NO_LOG` (`EthTrie`) | `finalizeDeposit` | the proven receipt has no log at `logIndex` | `logIndex` counts within the receipt, not the block; the relayer computes it from the receipt, so this points at a relayer bug |
 | 308 `ERR_RECEIPT_STATUS` (`EthTrie`) | `finalizeDeposit` | the deposit transaction failed on the source chain | no deposit was made; the relayer refuses a failed transaction itself (`unprovable`) |
 | 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | proven amount exceeds 50 USDC | contact the operator; old oversized transfers must settle before activating the new pair |
-| 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full | retried without counting a failed attempt; wait for withdrawals |
-| 400 / 402 | message header | identical recorded message / expired message | pending; observe the voucher before retrying |
+| 235 `ERR_TVL_CAP` | `finalizeDeposit` or `retryDeposit` | chain capacity is full | retried without counting a failed attempt; wait for withdrawals |
+| 400 / 402 | message header | identical recorded message / expired message | pending; check the deposit status before retrying |
 | 231 `ERR_PAUSED` | `finalizeDeposit` | the lane is paused | pending until `setPaused(false)` |
 | 401 | message header | expiry is at least five minutes ahead of block time | use the matching client and check clock synchronization; this build caps finalization expiry at 240 seconds |
-| 9 | voucher deploy | the bridge's `_depositVoucherCode` predates the voucher ABI (the 2026-07-02 outage) | recompile and redeploy the bridge and voucher as a pair |
-| 51 | voucher deploy | already finalized | none; reported as `already_finalized` |
+| 245 / 246 | `finalizeDeposit` / `retryDeposit` | deposit already recorded / deposit not pending | check `getDepositStatus`; only status 2 means minted |
 
 Settings 222 and 224 do not survive an AN bridge code upgrade. After every deploy or
 upgrade they must be set again before the first deposit can finalize.
@@ -259,12 +256,11 @@ old values are logged at `warn`, and the daemon begins at `--start-deposit-id`
 
 Other cases:
 
-- **Crash between submit and save.** The next tick finds the voucher and records the
-  deposit as `already_finalized`; nothing is submitted twice.
+- **Crash between submit and save.** The next tick checks the deposit status and retries a
+  pending credit or records a minted one as `already_finalized`.
 - **A corrupt or unreadable file** stops the daemon at start-up. Restore the backup. If
   there is none, deleting the file is safe apart from the parked and outstanding
-  ids: the daemon restarts at `START_DEPOSIT_ID` and skips finalized deposits by
-  their vouchers. An outstanding id below `START_DEPOSIT_ID` is never retried.
+  ids: the daemon restarts at `START_DEPOSIT_ID` and skips deposits the bridge already marked minted. An outstanding id below `START_DEPOSIT_ID` is never retried.
 - **Two daemons on one file**: the second fails to take the lock and exits.
 
 ## 7. Monitoring
@@ -308,8 +304,7 @@ the same binary, env file and AN keys, and keep the service disabled. To fail ov
    A `FROM_BLOCK` above it makes every tick fail (`EthLogSource::fetch` finds no log).
 3. Start the service and watch for `finalized` / `already_finalized` ticks.
 
-A one-off `finalize-one` by another operator while the daemon runs is safe: the slower
-submit gets exit 51 and is reported as already finalized.
+A one-off `finalize-one` by another operator while the daemon runs is safe: the bridge records one mint and both callers can check its status.
 
 No service-level targets are defined in the code. How quickly a dead daemon must be
 replaced, and how long a parked deposit may wait, is a production decision for the

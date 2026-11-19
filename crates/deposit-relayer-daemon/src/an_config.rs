@@ -200,8 +200,8 @@ mod tests {
             .collect();
         assert!(functions.contains(&"finalizeDeposit"), "{functions:?}");
         assert!(functions.contains(&"isAcceptedBlockHash"), "{functions:?}");
-        // The voucher check reads the bridge's storage layout.
-        assert!(!abi["fields"].as_array().unwrap().is_empty());
+        assert!(functions.contains(&"getDepositStatus"), "{functions:?}");
+        assert!(functions.contains(&"retryDeposit"), "{functions:?}");
         assert!(matches!(bridge_abi(), Abi::Json(_)));
     }
 

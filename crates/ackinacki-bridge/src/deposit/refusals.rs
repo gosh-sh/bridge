@@ -23,6 +23,9 @@ pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
 pub const ERR_TVL_CAP: i32 = 235;
 /// The proven log is not the bridge's `Deposit` in the shape it reads.
 pub const ERR_NOT_DEPOSIT_LOG: i32 = 244;
+/// The bridge has already accepted this deposit identity, possibly through a
+/// concurrent relayer.
+pub const ERR_DEPOSIT_EXISTS: i32 = 245;
 /// The receipt proof does not prove a receipt of the block: a node too
 /// short (300), not RLP (301), not hashing to its parent's reference
 /// (302), off the transaction's path (303), inlined (304), or the path
@@ -98,6 +101,7 @@ pub enum Reaction {
 /// The reaction to a bridge exit code.
 fn by_code(code: i32) -> Reaction {
     match code {
+        ERR_DEPOSIT_EXISTS => Reaction::ToCredit,
         ERR_PAUSED => Reaction::WaitPaused,
         ERR_TVL_CAP => Reaction::WaitCapacity,
         ERR_MESSAGE_WITH_HUGE_EXPIREAT => Reaction::Refused {
@@ -208,6 +212,8 @@ mod tests {
     fn the_table_of_refusals() {
         assert_eq!(react(&rejected(231)), Reaction::WaitPaused);
         assert_eq!(react(&rejected(235)), Reaction::WaitCapacity);
+        assert_eq!(react(&executed(ERR_DEPOSIT_EXISTS)), Reaction::ToCredit);
+        assert_eq!(react(&rejected(ERR_DEPOSIT_EXISTS)), Reaction::ToCredit);
         assert!(matches!(react(&rejected(234)), Reaction::Refused {
             code: 234,
             ..

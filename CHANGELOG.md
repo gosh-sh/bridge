@@ -29,12 +29,20 @@ assigns it when the release is tagged.
 - `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
   `submit.status` `already_paid` and `submit.nullifier`, not 13; found before proving, `proof` is
   `null` in the JSON output.
+- Deploy `eccBridge` 1.18.0 (code hash `4a9712b7…`) with a fresh testnet EVM bridge and upgrade `ackinacki-bridge` and `deposit-relayer` together. Start the relayer with a fresh `--state-dir` for the new EVM bridge. Earlier testnet deposits are outside this migration.
+- `ackinacki-bridge deposit` raises its minimum supported bridge version (`MIN_BRIDGE_VERSION`) to 1.18.0. Update scripts that handled exit 37 to resume with `deposit --resume <op-id>` on exit 34.
 
 ### New / Improvements
 
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.
+
+### Fixes
+
+- `finalizeDeposit` aborts with exit code 245 for an already recorded deposit, and `retryDeposit` aborts with exit code 246 for an unknown or already minted deposit. Read `getDepositStatus` to distinguish pending (1) from minted (2).
+- Keep `deposit-relayer-state.json` when restarting against the same deployment. The relayer retries pending credits even after Ethereum prunes the receipt. A `retryDeposit` failure without a VM exit code logs a warning and records an `an_pending` tick without counting toward `--skip-after-attempts`.
+- The CLI retries pending credits automatically and reports the source chain's TVL cap (235) while waiting for withdrawals to free capacity.
 
 ## [0.9.0]
 

@@ -5,8 +5,8 @@
 //!
 //! 1. asks the [`DepositSource`] for the confirmed `Deposit` event;
 //! 2. cheaply checks whether AN already finalized it
-//!    ([`AnSubmitter::is_finalized`]) so a replay sends nothing; then waits for
-//!    [`AnSubmitter::is_block_accepted`] before building anything;
+//!    ([`AnSubmitter::resume_deposit`]) so a replay sends nothing; then waits
+//!    for [`AnSubmitter::is_block_accepted`] before building anything;
 //! 3. collects the block header and receipt proof via the [`WitnessBuilder`];
 //! 4. submits them to AN via the [`AnSubmitter`] (`finalizeDeposit`);
 //! 5. on success — advances [`RelayerState`] and persists it; otherwise records
@@ -33,6 +33,7 @@ use crate::{
     source::{advance_scan_cursor, DepositSource},
     state::{unix_now_secs, DeploymentIdentity, RelayerState},
     submitter::{AnSubmitter, SubmitOutcome},
+    voucher::DepositIdentity,
     witness::{check_gas_credit, WitnessBuilder},
 };
 
@@ -111,7 +112,7 @@ pub enum TickOutcome {
         deposit_id: u64,
         tx_hash: Option<[u8; 32]>,
     },
-    /// The deposit's voucher already exists on AN (another relayer beat us,
+    /// The bridge already minted the deposit on AN (another relayer beat us,
     /// or a prior submit we didn't observe succeeded). Cursor advances;
     /// nothing was sent.
     AlreadyFinalized { deposit_id: u64 },
@@ -218,7 +219,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     }
 
     /// One step of the loop. Idempotent: a deposit already finalised on AN
-    /// is skipped via the nullifier pre-check rather than re-submitted.
+    /// is skipped after reading the bridge status.
     ///
     /// Alternate forward work with ready outstanding retries. When no new
     /// deposit is available, use that same tick for a retry instead of leaving
@@ -274,6 +275,20 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     async fn tick_target(&mut self, target: u64) -> Result<TickOutcome, RelayerError> {
         self.publish_state_gauges(target);
 
+        // A saved id belongs to the deployment checked at startup. AN can
+        // settle it even if Ethereum has pruned the original receipt.
+        let saved_identity = self
+            .state
+            .outstanding(target)
+            .and(self.state.deployment.as_ref())
+            .map(|d| DepositIdentity::new(target, d.bridge_address, d.chain_id));
+        if let Some(id) = saved_identity {
+            if let Some(outcome) = self.resume_on_an(id).await? {
+                self.state.clear_anchor_wait(target);
+                return self.record_submission(target, None, outcome);
+            }
+        }
+
         // 1. Fetch the confirmed deposit event. Outstanding ids load from the stored tx
         //    / block so the shared scan cursor can keep moving.
         debug!(deposit_id = target, "fetching deposit event");
@@ -314,22 +329,12 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
             });
         }
 
-        // 2. Cheap pre-check — send nothing on replays. Needs the event: the deposit's
-        //    AN identity includes its source contract and chain.
-        let timer = StageTimer::start("is_finalized");
-        let finalized = self.submitter.is_finalized(&event).await;
-        timer.finish();
-        if finalized? {
-            self.mark_finalized_block(event.block_number);
-            self.state.record_progress(target);
-            self.persist_state()?;
-            info!(
-                deposit_id = target,
-                "already finalized on AN; advancing without submitting"
-            );
-            return Ok(TickOutcome::AlreadyFinalized {
-                deposit_id: target,
-            });
+        let event_identity = DepositIdentity::from(&event);
+        if saved_identity != Some(event_identity) {
+            if let Some(outcome) = self.resume_on_an(event_identity).await? {
+                self.state.clear_anchor_wait(target);
+                return self.record_submission(target, Some(&event), outcome);
+            }
         }
 
         // Ethereum confirmation depth is not AN anchor readiness: the light
@@ -448,18 +453,41 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
         let timer = StageTimer::start("submit");
         let submitted = self.submitter.submit(&event, &witness).await;
         timer.finish();
-        match submitted? {
+        self.record_submission(target, Some(&event), submitted?)
+    }
+
+    async fn resume_on_an(
+        &self,
+        id: DepositIdentity,
+    ) -> Result<Option<SubmitOutcome>, RelayerError> {
+        let timer = StageTimer::start("is_finalized");
+        let outcome = self.submitter.resume_deposit(id).await;
+        timer.finish();
+        outcome
+    }
+
+    fn record_submission(
+        &mut self,
+        target: u64,
+        event: Option<&crate::types::DepositEvent>,
+        outcome: SubmitOutcome,
+    ) -> Result<TickOutcome, RelayerError> {
+        let block_number = event
+            .map(|e| e.block_number)
+            .or_else(|| self.state.outstanding(target)?.block_number);
+        match outcome {
             SubmitOutcome::Finalized {
                 tx_hash,
             } => {
-                self.mark_finalized_block(event.block_number);
+                self.mark_finalized_block(block_number);
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
                     deposit_id = target,
-                    amount = ?event.amount,
-                    sender = %event.sender,
-                    "finalized on AN",
+                    block_number,
+                    amount = event.map(|e| tracing::field::debug(e.amount)),
+                    sender = event.map(|e| tracing::field::display(e.sender)),
+                    "finalized on AN"
                 );
                 Ok(TickOutcome::Finalized {
                     deposit_id: target,
@@ -467,7 +495,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                 })
             },
             SubmitOutcome::AlreadyFinalized => {
-                self.mark_finalized_block(event.block_number);
+                self.mark_finalized_block(block_number);
                 self.state.record_progress(target);
                 self.persist_state()?;
                 info!(
@@ -482,7 +510,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                 reason,
             } => {
                 if let Some(outcome) =
-                    self.record_failure(target, &format!("AN rejected: {reason}"), Some(&event))?
+                    self.record_failure(target, &format!("AN rejected: {reason}"), event)?
                 {
                     return Ok(outcome);
                 }
@@ -490,7 +518,7 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                     deposit_id = target,
                     attempts = self.state.attempts_since_progress,
                     reason = %reason,
-                    "AN rejected finalizeDeposit",
+                    "AN rejected deposit submission",
                 );
                 Ok(TickOutcome::AnRejected {
                     deposit_id: target,
@@ -504,13 +532,13 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
                     target,
                     unix_now_secs(),
                     self.config.outstanding_backoff_secs,
-                    Some(deposit_log_ref(&event)),
+                    event.map(deposit_log_ref),
                 );
                 self.persist_state()?;
                 info!(
                     deposit_id = target,
                     reason = %reason,
-                    "finalizeDeposit still pending; will retry",
+                    "deposit mint still pending; will retry",
                 );
                 Ok(TickOutcome::AnPending {
                     deposit_id: target,
@@ -576,10 +604,11 @@ impl<S: DepositSource, W: WitnessBuilder, A: AnSubmitter> Relayer<S, W, A> {
     /// Remember that the deposit at `block_number` is done. The next log
     /// scan still includes that block: a later `depositId` can share it.
     /// Outstanding retries do not use this cursor: they load the stored tx.
-    fn mark_finalized_block(&self, block_number: u64) {
-        if let (Some(cursor), Some(through)) =
-            (&self.config.scan_cursor, block_number.checked_sub(1))
-        {
+    fn mark_finalized_block(&self, block_number: Option<u64>) {
+        if let (Some(cursor), Some(through)) = (
+            &self.config.scan_cursor,
+            block_number.and_then(|n| n.checked_sub(1)),
+        ) {
             advance_scan_cursor(cursor, through);
         }
     }
@@ -688,8 +717,11 @@ mod tests {
             Ok(self.accepted.lock().unwrap().contains(&event.deposit_id))
         }
 
-        async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
-            self.inner.is_finalized(event).await
+        async fn resume_deposit(
+            &self,
+            id: DepositIdentity,
+        ) -> Result<Option<SubmitOutcome>, RelayerError> {
+            self.inner.resume_deposit(id).await
         }
 
         async fn submit(
@@ -699,6 +731,74 @@ mod tests {
         ) -> Result<SubmitOutcome, RelayerError> {
             self.inner.submit(event, witness).await
         }
+    }
+
+    #[tokio::test]
+    async fn restart_finishes_a_pending_credit_without_an_anchor_or_receipt_proof() {
+        use acki_nacki_interface::MockAckiNacki;
+
+        use crate::submitter::{AnInterfaceSubmitter, AnSubmitConfig};
+
+        let dir = tempdir().unwrap();
+        let config = RelayerConfig {
+            deployment: Some(DeploymentIdentity::new(
+                deposit(0).source_chain_id,
+                deposit(0).source_contract,
+            )),
+            outstanding_backoff_secs: 0,
+            skip_after_attempts: Some(1),
+            ..RelayerConfig::new(dir.path().join("state.json"))
+        };
+        let source = Arc::new(InMemoryDepositSource::new());
+        source.insert(deposit(0));
+        let builder = Arc::new(CountingBuilder::default());
+        let client = Arc::new(MockAckiNacki::new());
+        let account = "ee".repeat(32);
+        let bridge = format!("{account}::{account}");
+        let submitter = Arc::new(AnInterfaceSubmitter::new(client.clone(), AnSubmitConfig {
+            from: bridge.clone(),
+            token_bridge: bridge,
+            confirm_timeout_secs: 0,
+        }));
+        client.set_getter_response(serde_json::json!({"status": 1}));
+        let mut daemon = Relayer::new(
+            config.clone(),
+            source.clone(),
+            builder.clone(),
+            submitter.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            daemon.tick().await.unwrap(),
+            TickOutcome::AnPending {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert_eq!(client.transaction_count(), 1);
+        assert_eq!(daemon.state().outstanding(0).unwrap().attempts, 0);
+        drop(daemon);
+
+        // The Ethereum node no longer serves this receipt after the restart.
+        let pruned_source = Arc::new(InMemoryDepositSource::new());
+        let mut daemon = Relayer::new(config, pruned_source, builder.clone(), submitter).unwrap();
+        assert!(matches!(
+            daemon.tick().await.unwrap(),
+            TickOutcome::AnPending {
+                deposit_id: 0,
+                ..
+            }
+        ));
+        assert_eq!(daemon.state().outstanding(0).unwrap().attempts, 0);
+        client.set_getter_response(serde_json::json!({"status": 2}));
+        assert!(matches!(
+            daemon.tick().await.unwrap(),
+            TickOutcome::AlreadyFinalized {
+                deposit_id: 0
+            }
+        ));
+        assert!(daemon.state().outstanding_deposits.is_empty());
+        assert_eq!(builder.0.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -843,7 +943,7 @@ mod tests {
                 relayer.tick().await.unwrap();
             }
             assert!(
-                gate.inner.is_finalized(&deposit(0)).await.unwrap(),
+                gate.inner.finalized_log().contains(&0),
                 "ready id 0 starved; new_blocks_accepted={new_blocks_accepted}"
             );
             if new_blocks_accepted {
@@ -890,7 +990,7 @@ mod tests {
             relayer.tick().await.unwrap();
         }
         assert!(
-            gate.inner.is_finalized(&deposit(0)).await.unwrap(),
+            gate.inner.finalized_log().contains(&0),
             "new arrivals kept extending the retry round indefinitely"
         );
     }
@@ -1603,8 +1703,11 @@ mod tests {
             Ok(true)
         }
 
-        async fn is_finalized(&self, _: &DepositEvent) -> Result<bool, RelayerError> {
-            Ok(false)
+        async fn resume_deposit(
+            &self,
+            _: DepositIdentity,
+        ) -> Result<Option<SubmitOutcome>, RelayerError> {
+            Ok(None)
         }
 
         async fn submit(

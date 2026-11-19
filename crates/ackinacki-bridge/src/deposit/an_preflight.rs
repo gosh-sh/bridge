@@ -34,11 +34,11 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The first bridge whose `finalizeDeposit` takes the deposit's receipt
-/// proof: `(chainId, header, txIndex, receiptProof, logIndex)`.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 17, 0));
+/// The first bridge that records accepted receipts and supports permissionless
+/// retryDeposit.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 18, 0));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 17, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 18, 0);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
@@ -567,9 +567,9 @@ mod tests {
             ecc3: 0,
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
-        // A 1.17.0 bridge answers getL2Verifier; this chain is not a rollup,
+        // A 1.18.0 bridge answers getL2Verifier; this chain is not a rollup,
         // so it names none. Without the answer the read falls into
         // `transient`, which retries for ever.
         an.getter(BRIDGE, "getL2Verifier", vec![
@@ -616,23 +616,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bridge_that_still_verifies_a_proof_is_refused_by_version() {
+    async fn a_bridge_without_permissionless_deposit_retries_is_refused_by_version() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.16.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.17.0"), "{error}");
+        assert!(error.to_string().contains("1.18.0"), "{error}");
     }
 
-    /// A bridge whose version says 1.17.0 but whose code has no
+    /// A bridge whose version says 1.18.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -678,7 +678,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -848,7 +848,7 @@ mod tests {
     async fn a_bridge_with_verifiers_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -868,7 +868,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),
@@ -898,7 +898,7 @@ mod tests {
             json!({ "value0": "1.10.0", "value1": "eccUSDCBridge" }),
         ]);
         let err = go(&an, [0; 32]).await.unwrap_err();
-        assert!(err.to_string().contains("needs 1.17.0 or newer"), "{err}");
+        assert!(err.to_string().contains("needs 1.18.0 or newer"), "{err}");
     }
 
     #[tokio::test]

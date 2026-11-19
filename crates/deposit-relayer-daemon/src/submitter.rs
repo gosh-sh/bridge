@@ -7,50 +7,36 @@
 //! (exit 224 otherwise, before it accepts the message), proves the receipt of
 //! transaction `txIndex` against the header's `receiptsRoot`, reads log
 //! `logIndex` of that receipt as the bridge's `Deposit` event, and deploys a
-//! per-deposit `DepositVoucher`, whose `confirmDeposit` call back into the
+//! per-deposit `DepositVoucher`, whose `confirmTokenDeposit` call back into the
 //! bridge mints. Every deposit field comes from the proven receipt; the
 //! relayer cannot change any of them.
 //!
-//! Two implementations:
-//!
-//! - [`MockAnSubmitter`] — an in-memory mirror of the voucher semantics, used
-//!   by the unit tests to drive the relayer through many deposits without a
-//!   live AN node.
-//! - [`AnInterfaceSubmitter`] — wraps any [`acki_nacki_interface::IAckiNacki`]
-//!   client: it ABI-encodes the `finalizeDeposit` call into an
-//!   [`acki_nacki_interface::AckiNackiTransaction`] and sends it. The live
-//!   client is [`acki_nacki_interface::TvmAckiNacki`]. A second
-//!   `finalizeDeposit` for the same deposit fails in the voucher constructor
-//!   (exit 51), so re-submission is rejected rather than double-crediting.
+//! The bridge records whether that identity is absent, pending, or minted.
+//! A pending record can be minted with `retryDeposit` without another proof.
 
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use acki_nacki_interface::{
-    types::TxHash, AckiNackiError, ContractCallRequest, ExtendedAddress, IAckiNacki,
-    TransactionStatus,
-};
+use acki_nacki_interface::{ContractCallRequest, ExtendedAddress, IAckiNacki, TransactionStatus};
 use alloy::primitives::U256;
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::sync::OnceCell;
-use tracing::{debug, warn};
-use tvm_client::{abi::Abi, ClientContext};
+use tokio::time::Instant;
 
 use crate::{
     error::RelayerError,
     types::DepositEvent,
-    voucher::{self, DepositIdentity},
+    voucher::DepositIdentity,
     witness::{check_gas_credit, check_witness_matches, DepositWitness},
 };
 
 /// Outcome of an [`AnSubmitter::submit`] call.
 #[derive(Clone, Debug)]
 pub enum SubmitOutcome {
-    /// `finalizeDeposit` succeeded; the deposit's nullifier is now set.
+    /// The bridge reports that the deposit was minted.
     Finalized {
         /// `Some` for the live client (the AN tx hash), `None` for the mock.
         tx_hash: Option<[u8; 32]>,
@@ -62,7 +48,7 @@ pub enum SubmitOutcome {
     /// AN rejected the submission (receipt proof refused, malformed call).
     /// The relayer logs and records an attempt.
     Rejected { reason: String },
-    /// The tx was broadcast but confirmation timed out while still pending.
+    /// The deposit is waiting for a retry or mint confirmation.
     /// Distinct from [`Rejected`] — the relayer retries without counting it
     /// as a failed attempt.
     Pending { reason: String },
@@ -75,11 +61,13 @@ pub trait AnSubmitter: Send + Sync {
     /// submit.
     async fn is_block_accepted(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
 
-    /// Cheap pre-check: has this deposit already been finalised on AN? Used
-    /// to skip building and sending on replays. A backend that
-    /// can't tell returns `Ok(false)` (the submit path is still safe — AN
-    /// rejects double-finalisation).
-    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError>;
+    /// Check the bridge before proving. A minted deposit is done, a pending
+    /// deposit can be retried by its identity, and an absent deposit needs a
+    /// proof.
+    async fn resume_deposit(
+        &self,
+        id: DepositIdentity,
+    ) -> Result<Option<SubmitOutcome>, RelayerError>;
 
     /// Send `finalizeDeposit` with `witness` and finalise the deposit.
     async fn submit(
@@ -104,7 +92,7 @@ pub struct MockAnSubmitter {
 }
 
 struct MockInner {
-    nullifiers: HashSet<u64>,
+    nullifiers: HashSet<U256>,
     finalized_log: Vec<u64>,
 }
 
@@ -128,7 +116,7 @@ impl MockAnSubmitter {
     /// processed it).
     pub fn seed_finalized(&self, deposit_id: u64) {
         let mut inner = self.inner.lock().expect("poisoned lock");
-        inner.nullifiers.insert(deposit_id);
+        inner.nullifiers.insert(U256::from(deposit_id));
     }
 
     pub fn finalized_count(&self) -> usize {
@@ -154,13 +142,17 @@ impl AnSubmitter for MockAnSubmitter {
         Ok(true)
     }
 
-    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
+    async fn resume_deposit(
+        &self,
+        id: DepositIdentity,
+    ) -> Result<Option<SubmitOutcome>, RelayerError> {
         Ok(self
             .inner
             .lock()
             .expect("poisoned lock")
             .nullifiers
-            .contains(&event.deposit_id))
+            .contains(&id.deposit_id)
+            .then_some(SubmitOutcome::AlreadyFinalized))
     }
 
     async fn submit(
@@ -172,7 +164,7 @@ impl AnSubmitter for MockAnSubmitter {
         check_gas_credit(witness)?;
 
         let mut inner = self.inner.lock().expect("poisoned lock");
-        if inner.nullifiers.contains(&event.deposit_id) {
+        if inner.nullifiers.contains(&U256::from(event.deposit_id)) {
             return Ok(SubmitOutcome::AlreadyFinalized);
         }
         if !(self.verifier)(witness) {
@@ -180,7 +172,7 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "the mock bridge refused the receipt proof".to_string(),
             });
         }
-        inner.nullifiers.insert(event.deposit_id);
+        inner.nullifiers.insert(U256::from(event.deposit_id));
         inner.finalized_log.push(event.deposit_id);
         Ok(SubmitOutcome::Finalized {
             tx_hash: None,
@@ -204,27 +196,51 @@ pub struct AnSubmitConfig {
     pub confirm_timeout_secs: u64,
 }
 
-/// Live AN submitter. Encodes `finalizeDeposit` and sends it through an
-/// [`IAckiNacki`] client.
-///
-/// With [`Self::with_voucher_check`], `is_finalized` looks for the deposit's
-/// `DepositVoucher` on AN (see [`crate::voucher`]); without it, or when the
-/// lookup fails, it returns `Ok(false)` and the deposit is submitted. That is
-/// safe: a duplicate `finalizeDeposit` still exits 0, but its voucher deploy
-/// fails with exit 51, which [`settle_finalize`] reports as
-/// [`SubmitOutcome::AlreadyFinalized`].
+/// The result of the bridge's `getDepositStatus` getter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepositStatus {
+    Absent,
+    Pending,
+    Minted,
+}
+
+impl From<&DepositEvent> for DepositIdentity {
+    fn from(event: &DepositEvent) -> Self {
+        Self::new(
+            event.deposit_id,
+            event.source_contract,
+            event.source_chain_id,
+        )
+    }
+}
+
+impl DepositIdentity {
+    pub(crate) fn new(
+        deposit_id: u64,
+        contract: alloy::primitives::Address,
+        chain_id: u64,
+    ) -> Self {
+        Self {
+            deposit_id: U256::from(deposit_id),
+            contract_addr: U256::from_be_slice(contract.as_slice()),
+            chain_id: U256::from(chain_id),
+        }
+    }
+
+    fn params(self) -> serde_json::Value {
+        json!({
+            "depositId": self.deposit_id.to_string(),
+            "contractAddr": self.contract_addr.to_string(),
+            "chainId": self.chain_id.to_string(),
+        })
+    }
+}
+
+const RETRY_DEPOSIT: &str = "retryDeposit";
+
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
-    voucher_check: Option<VoucherCheck>,
-}
-
-/// What the voucher pre-check needs beyond the client.
-struct VoucherCheck {
-    ctx: Arc<ClientContext>,
-    bridge_abi: Abi,
-    /// `_depositVoucherCode`, read from the bridge once per process.
-    code: OnceCell<String>,
 }
 
 impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
@@ -232,165 +248,129 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         Self {
             client,
             config,
-            voucher_check: None,
         }
     }
 
-    /// Answer `is_finalized` by looking for the deposit's `DepositVoucher`.
-    /// `bridge_abi` is the deployed bridge's ABI; its storage fields are what
-    /// locates `_depositVoucherCode`.
-    pub fn with_voucher_check(mut self, bridge_abi: Abi) -> Result<Self, RelayerError> {
-        self.voucher_check = Some(VoucherCheck {
-            ctx: voucher::offline_context()?,
-            bridge_abi,
-            code: OnceCell::new(),
-        });
-        Ok(self)
-    }
-
-    #[cfg(test)]
-    fn with_voucher_code(mut self, code: &str) -> Self {
-        self.voucher_check = Some(VoucherCheck {
-            ctx: voucher::offline_context().unwrap(),
-            bridge_abi: Abi::Json("{}".to_string()),
-            code: OnceCell::new_with(Some(code.to_string())),
-        });
-        self
-    }
-
-    async fn voucher_code(&self, check: &VoucherCheck) -> Result<String, RelayerError> {
-        check
-            .code
-            .get_or_try_init(|| async {
-                let bridge = ExtendedAddress::parse(&self.config.token_bridge)
-                    .map_err(RelayerError::from)?;
-                let data = self
-                    .client
-                    .get_account_info(&bridge)
-                    .await
-                    .map_err(RelayerError::from)?
-                    .and_then(|info| info.data)
-                    .ok_or_else(|| RelayerError::other("bridge account has no data"))?;
-                voucher::voucher_code_from_bridge_data(&check.ctx, &check.bridge_abi, &data)
-            })
-            .await
-            .cloned()
-    }
-
-    async fn voucher_active(
-        &self,
-        check: &VoucherCheck,
-        event: &DepositEvent,
-    ) -> Result<bool, RelayerError> {
-        let code = self.voucher_code(check).await?;
-        let id = DepositIdentity {
-            deposit_id: U256::from(event.deposit_id),
-            contract_addr: U256::from_be_slice(event.source_contract.as_slice()),
-            chain_id: U256::from(event.source_chain_id),
-        };
-        let account = voucher::voucher_account_id(&check.ctx, &code, &id)?;
-        // A voucher is the root of its own dapp.
-        let address =
-            ExtendedAddress::parse(&format!("{account}::{account}")).map_err(RelayerError::from)?;
-        let info = self
+    pub async fn deposit_status(&self, id: DepositIdentity) -> Result<DepositStatus, RelayerError> {
+        let output = self
             .client
-            .get_account_info(&address)
-            .await
-            .map_err(RelayerError::from)?;
-        debug!(deposit_id = event.deposit_id, voucher = %account, ?info, "voucher pre-check");
-        Ok(info.is_some_and(|i| i.active))
+            .run_getter(&self.config.token_bridge, "getDepositStatus", id.params())
+            .await?;
+        let status = &output["status"];
+        match status.as_u64().or_else(|| status.as_str()?.parse().ok()) {
+            Some(0) => Ok(DepositStatus::Absent),
+            Some(1) => Ok(DepositStatus::Pending),
+            Some(2) => Ok(DepositStatus::Minted),
+            _ => Err(RelayerError::other(format!(
+                "getDepositStatus: unknown status {status}"
+            ))),
+        }
     }
 
-    /// Submit a witness directly, without a [`DepositEvent`] to compare it
-    /// with: the bridge reads every deposit field from the proven receipt, so
-    /// this is the path of the `finalize-one` operator command, where the
-    /// Ethereum event is not fetched again. A witness the bridge could not
-    /// check within its gas credit is refused before anything is sent.
+    async fn resume(&self, id: DepositIdentity) -> Result<Option<SubmitOutcome>, RelayerError> {
+        match self.deposit_status(id).await? {
+            DepositStatus::Absent => Ok(None),
+            DepositStatus::Pending => self.send(id, RETRY_DEPOSIT, id.params()).await.map(Some),
+            DepositStatus::Minted => Ok(Some(SubmitOutcome::AlreadyFinalized)),
+        }
+    }
+
+    /// Submit a saved witness. Read the identity from the proven log so older
+    /// witness files can also resume a pending deposit.
     pub async fn submit_witness(
         &self,
         witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
-        check_gas_credit(witness)?;
-        let from = ExtendedAddress::parse(&self.config.from).map_err(RelayerError::from)?;
-        let to = ExtendedAddress::parse(&self.config.token_bridge).map_err(RelayerError::from)?;
-        let params = witness.finalize_params();
-        let call = ContractCallRequest {
-            from,
-            to,
-            function: "finalizeDeposit".to_string(),
-            params,
+        let (contract, deposit_id) = witness.deposit_identity().map_err(RelayerError::other)?;
+        let id = DepositIdentity {
+            deposit_id: U256::from_be_bytes(deposit_id.0),
+            contract_addr: U256::from_be_slice(contract.as_slice()),
+            chain_id: U256::from(witness.chain_id),
         };
-
-        let sent = match self.client.call_contract(call).await {
-            Ok(hash) => hash,
-            Err(e) => return Ok(classify_call_error(&e.to_string())),
-        };
-        let receipt = self
-            .client
-            .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
-            .await?;
-
-        match receipt.status {
-            TransactionStatus::Confirmed | TransactionStatus::Included => self.settle(&sent).await,
-            TransactionStatus::Reverted | TransactionStatus::Failed => Ok(classify_reverted(
-                receipt.exit_code,
-                &format!("{:?}", receipt.status),
-            )),
-            TransactionStatus::Pending => Ok(SubmitOutcome::Pending {
-                reason: "finalizeDeposit tx still pending after timeout".to_string(),
-            }),
+        if let Some(outcome) = self.resume(id).await? {
+            return Ok(outcome);
         }
+        check_gas_credit(witness)?;
+        self.send(id, "finalizeDeposit", witness.finalize_params())
+            .await
     }
 
-    /// Waits up to `confirm_timeout_secs` for [`settle_finalize`] to reach a
-    /// verdict.
-    async fn settle(&self, root: &TxHash) -> Result<SubmitOutcome, RelayerError> {
-        let deadline =
-            Instant::now() + Duration::from_secs(self.config.confirm_timeout_secs.max(1));
-        let mut last_error = None;
+    async fn send(
+        &self,
+        id: DepositIdentity,
+        function: &str,
+        params: serde_json::Value,
+    ) -> Result<SubmitOutcome, RelayerError> {
+        let call = ContractCallRequest {
+            from: ExtendedAddress::parse(&self.config.from)?,
+            to: ExtendedAddress::parse(&self.config.token_bridge)?,
+            function: function.to_string(),
+            params,
+        };
+        let sent = match self.client.call_contract(call).await {
+            Ok(hash) => hash,
+            Err(e) => return Ok(classify_call_error(id, function, &e.to_string())),
+        };
+        let receipt = match self
+            .client
+            .wait_for_confirmation(&sent, self.config.confirm_timeout_secs)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(e) if function == RETRY_DEPOSIT => {
+                return Ok(pending_retry_error(
+                    id,
+                    format!("{function} {} confirmation failed: {e}", hex::encode(sent)),
+                ))
+            },
+            Err(e) => return Err(e.into()),
+        };
+        match receipt.status {
+            TransactionStatus::Reverted | TransactionStatus::Failed => {
+                return Ok(classify_reverted(
+                    id,
+                    function,
+                    receipt.exit_code,
+                    &format!("{function} {:?}", receipt.status),
+                ))
+            },
+            TransactionStatus::Pending => {
+                return Ok(SubmitOutcome::Pending {
+                    reason: format!("{function} tx still pending after timeout"),
+                })
+            },
+            TransactionStatus::Confirmed | TransactionStatus::Included => {},
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(self.config.confirm_timeout_secs);
         loop {
-            match settle_finalize(self.client.as_ref(), root).await {
-                Ok(Some(outcome)) => return Ok(outcome),
-                Ok(None) => {},
-                Err(AckiNackiError::NotImplemented) => {
-                    warn!(
-                        tx = %hex::encode(root),
-                        "AN client cannot read child transactions; finalizeDeposit counted as \
-                         finalized without checking the voucher"
-                    );
-                    return Ok(SubmitOutcome::Finalized {
-                        tx_hash: Some(*root),
-                    });
-                },
-                Err(e) => last_error = Some(e.to_string()),
+            let status = self.deposit_status(id).await;
+            if matches!(status, Ok(DepositStatus::Minted)) {
+                return Ok(SubmitOutcome::Finalized {
+                    tx_hash: Some(sent),
+                });
             }
-            if Instant::now() >= deadline {
-                let why = last_error.map(|e| format!(": {e}")).unwrap_or_default();
+            let now = Instant::now();
+            if now >= deadline {
+                let observed = match status {
+                    Ok(s) => format!("{s:?}"),
+                    Err(e) => e.to_string(),
+                };
                 return Ok(SubmitOutcome::Pending {
                     reason: format!(
-                        "finalizeDeposit {} exited 0 but its voucher deploy and confirmDeposit \
-                         are not both visible yet{why}",
-                        hex::encode(root)
+                        "{function} {} confirmed, awaiting mint (getDepositStatus: {observed})",
+                        hex::encode(sent)
                     ),
                 });
             }
-            tokio::time::sleep(SETTLE_POLL).await;
+            tokio::time::sleep((deadline - now).min(Duration::from_secs(2))).await;
         }
     }
 }
 
-/// TVM: the constructor of an already deployed contract was called again — a
-/// `DepositVoucher` for this deposit exists, so it was finalized before.
-const EXIT_CONSTRUCTOR_ALREADY_CALLED: i32 = 51;
-/// TVM: cell underflow. From a voucher constructor, the signature of a bridge
-/// whose `_depositVoucherCode` predates the voucher's constructor ABI.
-const EXIT_CELL_UNDERFLOW: i32 = 9;
-
 // eccBridge `modifiers/errors.sol`.
 const EXIT_ZERO_AMOUNT: i32 = 204;
-const EXIT_INVALID_SENDER: i32 = 207;
 const EXIT_OVERFLOW: i32 = 214;
-const EXIT_HASH_MISMATCH: i32 = 219;
 const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 const EXIT_UNKNOWN_BLOCK: i32 = 224;
 const EXIT_ZERO_RECIPIENT: i32 = 230;
@@ -471,26 +451,6 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
     }
 }
 
-/// Explains a failed `DepositVoucher` constructor. It runs in its own
-/// transaction after `finalizeDeposit` has already exited 0, so nothing was
-/// minted and nothing upstream reports it.
-fn describe_voucher_exit(code: Option<i32>) -> &'static str {
-    match code {
-        Some(EXIT_CELL_UNDERFLOW) => {
-            "cell underflow in the voucher constructor — the bridge's _depositVoucherCode does not \
-             match the DepositVoucher constructor it calls; compare getDepositVoucherCodeHash() \
-             with the compiled DepositVoucher and redeploy the pair"
-        },
-        Some(EXIT_INVALID_SENDER) => {
-            "ERR_INVALID_SENDER — the voucher's USDC_BRIDGE_ADDRESS is not this bridge"
-        },
-        Some(EXIT_HASH_MISMATCH) => {
-            "ERR_HASH_MISMATCH — the voucher's deposit hash disagrees with the bridge's"
-        },
-        _ => "DepositVoucher deploy failed",
-    }
-}
-
 fn rejected(code: i32, context: &str, detail: &str) -> SubmitOutcome {
     let reason = match (describe_exit_code(code), code) {
         (
@@ -508,7 +468,14 @@ fn rejected(code: i32, context: &str, detail: &str) -> SubmitOutcome {
 
 fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
     match code {
-        EXIT_CONSTRUCTOR_ALREADY_CALLED => SubmitOutcome::AlreadyFinalized,
+        // Duplicate constructor, existing registration, or a retry racing
+        // another mint. Only the bridge's next status read settles the id.
+        51 | 245 | 246 => SubmitOutcome::Pending {
+            reason: format!(
+                "deposit state may have changed; checking getDepositStatus on retry \
+                 (exit_code={code}): {detail}"
+            ),
+        },
         // A paused lane rejects every deposit; counting that against the
         // deposit would park healthy deposits for the length of the pause.
         EXIT_PAUSED => SubmitOutcome::Pending {
@@ -537,7 +504,7 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
         },
         400 | 402 => SubmitOutcome::Pending {
             reason: format!(
-                "external message already seen or expired; observe the voucher before retrying \
+                "external message already seen or expired; check getDepositStatus before retrying \
                  (exit_code={code}): {detail}"
             ),
         },
@@ -550,81 +517,51 @@ fn classify_exit(code: i32, context: &str, detail: &str) -> SubmitOutcome {
     }
 }
 
-fn classify_reverted(exit_code: Option<i32>, detail: &str) -> SubmitOutcome {
+fn pending_retry_error(id: DepositIdentity, reason: String) -> SubmitOutcome {
+    tracing::warn!(
+        deposit_id = %id.deposit_id,
+        chain_id = %id.chain_id,
+        %reason,
+        "retryDeposit error without a VM exit code"
+    );
+    SubmitOutcome::Pending {
+        reason,
+    }
+}
+
+fn classify_reverted(
+    id: DepositIdentity,
+    function: &str,
+    exit_code: Option<i32>,
+    detail: &str,
+) -> SubmitOutcome {
     match exit_code {
-        Some(code) => classify_exit(code, "finalizeDeposit reverted", detail),
+        Some(code) => classify_exit(code, "deposit call reverted", detail),
+        None if function == RETRY_DEPOSIT => pending_retry_error(
+            id,
+            format!("{detail} without an exit code; checking getDepositStatus on retry"),
+        ),
         None => SubmitOutcome::Rejected {
-            reason: format!("finalizeDeposit tx status = {detail}"),
+            reason: format!("deposit tx status = {detail}"),
         },
     }
 }
 
-fn classify_call_error(msg: &str) -> SubmitOutcome {
+fn classify_call_error(id: DepositIdentity, function: &str, msg: &str) -> SubmitOutcome {
     // Prefer acki_nacki_interface parser when the tvm-sdk feature is on; fall
     // back to a local regex-free scan so this module still builds without it.
     match parse_exit_code_loose(msg) {
-        Some(code) => classify_exit(code, "finalizeDeposit failed", msg),
+        Some(code) => classify_exit(code, "deposit call failed", msg),
+        // process_message wraps transport errors in TransactionFailed too.
+        None if function == RETRY_DEPOSIT => pending_retry_error(
+            id,
+            format!("{function} returned no exit code; checking getDepositStatus on retry: {msg}"),
+        ),
         None => SubmitOutcome::Rejected {
-            reason: format!("finalizeDeposit call failed: {msg}"),
+            reason: format!("deposit call failed: {msg}"),
         },
     }
 }
-
-/// Verdict on a `finalizeDeposit` that exited 0, from the two transactions
-/// it sets off: the `DepositVoucher` deploy, then the voucher's
-/// `confirmDeposit` call back into the bridge, which is where the mint
-/// happens. `None` while either is not yet visible.
-async fn settle_finalize<C: IAckiNacki>(
-    client: &C,
-    root: &TxHash,
-) -> Result<Option<SubmitOutcome>, AckiNackiError> {
-    let children = client.get_internal_children(root).await?;
-    let Some(voucher) = children.first() else {
-        // Empty is also "transaction not indexed yet": GraphQL returns
-        // `transaction: null` and `parse_internal_children` yields `[]`.
-        // Rejecting here parked successful deposits after a laggy index.
-        return Ok(None);
-    };
-    let Some(deploy) = &voucher.outcome else {
-        return Ok(None);
-    };
-    if deploy.exit_code == Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) {
-        return Ok(Some(SubmitOutcome::AlreadyFinalized));
-    }
-    if !deploy.is_success() {
-        return Ok(Some(SubmitOutcome::Rejected {
-            reason: format!(
-                "{} (voucher {}, exit_code={:?}, aborted={}); nothing was minted",
-                describe_voucher_exit(deploy.exit_code),
-                voucher.dst,
-                deploy.exit_code,
-                deploy.aborted,
-            ),
-        }));
-    }
-
-    let confirms = client.get_internal_children(&deploy.tx_hash).await?;
-    let Some(confirm) = confirms.first() else {
-        return Ok(None);
-    };
-    match &confirm.outcome {
-        None => Ok(None),
-        Some(c) if c.is_success() => Ok(Some(SubmitOutcome::Finalized {
-            tx_hash: Some(*root),
-        })),
-        Some(c) => Ok(Some(SubmitOutcome::Rejected {
-            reason: format!(
-                "confirmDeposit failed (exit_code={:?}, aborted={}) after voucher {} was \
-                 deployed; nothing was minted and the voucher now makes every resubmission report \
-                 already-finalized, so this deposit needs the bridge owner",
-                c.exit_code, c.aborted, voucher.dst,
-            ),
-        })),
-    }
-}
-
-/// Interval between looks at the voucher and `confirmDeposit` transactions.
-const SETTLE_POLL: Duration = Duration::from_secs(2);
 
 fn parse_exit_code_loose(msg: &str) -> Option<i32> {
     if let Some(c) = acki_nacki_interface::parse_exit_code_from_message(msg) {
@@ -668,21 +605,11 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .ok_or_else(|| RelayerError::other("isAcceptedBlockHash: expected a boolean value0"))
     }
 
-    async fn is_finalized(&self, event: &DepositEvent) -> Result<bool, RelayerError> {
-        let Some(check) = &self.voucher_check else {
-            return Ok(false);
-        };
-        match self.voucher_active(check, event).await {
-            Ok(active) => Ok(active),
-            Err(e) => {
-                warn!(
-                    deposit_id = event.deposit_id,
-                    error = %e,
-                    "voucher pre-check failed; submitting the deposit anyway",
-                );
-                Ok(false)
-            },
-        }
+    async fn resume_deposit(
+        &self,
+        id: DepositIdentity,
+    ) -> Result<Option<SubmitOutcome>, RelayerError> {
+        self.resume(id).await
     }
 
     async fn submit(
@@ -691,13 +618,15 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
         check_witness_matches(event, witness)?;
-        self.submit_witness(witness).await
+        check_gas_credit(witness)?;
+        self.send(event.into(), "finalizeDeposit", witness.finalize_params())
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use acki_nacki_interface::{ChildOutcome, ChildTransaction};
+    use acki_nacki_interface::MockAckiNacki;
     use alloy::primitives::{Address, B256};
 
     use super::*;
@@ -767,12 +696,15 @@ mod tests {
         let ev = event(1);
         let b = witness(&ev);
 
-        assert!(!sub.is_finalized(&ev).await.unwrap());
+        assert!(sub.resume_deposit((&ev).into()).await.unwrap().is_none());
         assert!(matches!(
             sub.submit(&ev, &b).await.unwrap(),
             SubmitOutcome::Finalized { .. }
         ));
-        assert!(sub.is_finalized(&ev).await.unwrap());
+        assert!(matches!(
+            sub.resume_deposit((&ev).into()).await.unwrap(),
+            Some(SubmitOutcome::AlreadyFinalized)
+        ));
         assert!(matches!(
             sub.submit(&ev, &b).await.unwrap(),
             SubmitOutcome::AlreadyFinalized
@@ -812,139 +744,80 @@ mod tests {
         assert_eq!(client.transaction_count(), 0);
     }
 
-    const VOUCHER_TX: TxHash = [0x11; 32];
-    const CONFIRM_TX: TxHash = [0x22; 32];
-
-    fn child(dst: &str, outcome: Option<(TxHash, i32)>) -> ChildTransaction {
-        ChildTransaction {
-            message_id: format!("msg-to-{dst}"),
-            dst: dst.to_string(),
-            outcome: outcome.map(|(tx_hash, code)| ChildOutcome {
-                tx_hash,
-                exit_code: Some(code),
-                aborted: code != 0,
-            }),
-        }
-    }
-
-    /// `finalizeDeposit` confirmed on a mock chain whose voucher deploy ends
-    /// with `voucher` and, when that succeeds, whose `confirmDeposit` ends
-    /// with `confirm` (`None` = not executed yet).
-    async fn submit_with_chain(voucher: Option<i32>, confirm: Option<i32>) -> SubmitOutcome {
-        use acki_nacki_interface::MockAckiNacki;
-
-        let client = Arc::new(MockAckiNacki::new());
-        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![child(
-            "0:voucher",
-            voucher.map(|c| (VOUCHER_TX, c)),
-        )]);
-        client.set_children(VOUCHER_TX, vec![child(
-            "0:bridge",
-            confirm.map(|c| (CONFIRM_TX, c)),
-        )]);
-        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        let cfg = AnSubmitConfig {
-            from: format!(
-                "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-            ),
+    fn live_submitter(client: Arc<MockAckiNacki>) -> AnInterfaceSubmitter<MockAckiNacki> {
+        let dapp = "ee".repeat(32);
+        AnInterfaceSubmitter::new(client, AnSubmitConfig {
+            from: format!("{dapp}::{}", "ff".repeat(32)),
             token_bridge: format!("{dapp}::{dapp}"),
-            confirm_timeout_secs: 1,
-        };
-        let sub = AnInterfaceSubmitter::new(client, cfg);
+            confirm_timeout_secs: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn confirmed_finalize_waits_for_minted_status() {
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = live_submitter(client.clone());
         let ev = event(3);
-        sub.submit(&ev, &witness(&ev)).await.unwrap()
-    }
-
-    #[tokio::test]
-    async fn finalized_only_once_confirm_deposit_succeeds() {
-        match submit_with_chain(Some(0), Some(0)).await {
-            SubmitOutcome::Finalized {
-                tx_hash,
-            } => assert!(tx_hash.is_some()),
-            other => panic!("expected Finalized, got {other:?}"),
+        for output in [json!({}), json!({"status":"0"}), json!({"status":1})] {
+            client.set_getter_response(output);
+            assert!(matches!(
+                sub.submit(&ev, &witness(&ev)).await.unwrap(),
+                SubmitOutcome::Pending { .. }
+            ));
         }
-    }
-
-    /// A duplicate `finalizeDeposit` exits 0 itself; only the voucher deploy
-    /// it sends fails, with 51.
-    #[tokio::test]
-    async fn duplicate_is_read_from_the_voucher_deploy() {
+        client.set_getter_response(json!({"status":"2"}));
         assert!(matches!(
-            submit_with_chain(Some(51), None).await,
-            SubmitOutcome::AlreadyFinalized
+            sub.submit(&ev, &witness(&ev)).await.unwrap(),
+            SubmitOutcome::Finalized {
+                tx_hash: Some(_)
+            }
         ));
     }
 
-    /// The 2026-07-02 outage: the bridge exited 0, the voucher constructor hit
-    /// a cell underflow and nothing was minted.
     #[tokio::test]
-    async fn failed_voucher_deploy_is_rejected_not_finalized() {
-        match submit_with_chain(Some(9), None).await {
-            SubmitOutcome::Rejected {
-                reason,
-            } => {
-                assert!(reason.contains("_depositVoucherCode"), "{reason}");
-                assert!(reason.contains("nothing was minted"), "{reason}");
-            },
-            other => panic!("expected Rejected, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn failed_confirm_deposit_is_rejected_not_finalized() {
-        match submit_with_chain(Some(0), Some(214)).await {
-            SubmitOutcome::Rejected {
-                reason,
-            } => assert!(reason.contains("confirmDeposit failed"), "{reason}"),
-            other => panic!("expected Rejected, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn unexecuted_children_leave_the_deposit_pending() {
-        for (voucher, confirm) in [(None, None), (Some(0), None)] {
-            match submit_with_chain(voucher, confirm).await {
-                SubmitOutcome::Pending {
-                    reason,
-                } => assert!(reason.contains("not both visible"), "{reason}"),
-                other => panic!("expected Pending for {voucher:?}/{confirm:?}, got {other:?}"),
-            }
-        }
-    }
-
-    /// GraphQL `transaction: null` parses as no children. That is lag, not
-    /// a missing voucher — keep polling until the confirm timeout.
-    #[tokio::test]
-    async fn unindexed_root_leaves_the_deposit_pending() {
-        use acki_nacki_interface::MockAckiNacki;
-
+    async fn resume_only_submits_a_retry_for_a_pending_deposit() {
         let client = Arc::new(MockAckiNacki::new());
-        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![]);
-        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        let cfg = AnSubmitConfig {
-            from: format!(
-                "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-            ),
-            token_bridge: format!("{dapp}::{dapp}"),
-            confirm_timeout_secs: 1,
-        };
-        let sub = AnInterfaceSubmitter::new(client, cfg);
-        let ev = event(3);
-        match sub.submit(&ev, &witness(&ev)).await.unwrap() {
-            SubmitOutcome::Pending {
-                reason,
-            } => {
-                assert!(reason.contains("not both visible"), "{reason}");
-            },
-            other => panic!("expected Pending, got {other:?}"),
+        let sub = live_submitter(client.clone());
+        let ev = event(5);
+        assert!(sub.resume_deposit((&ev).into()).await.is_err());
+        for output in [json!({}), json!({"status":3}), json!({"status":false})] {
+            client.set_getter_response(output);
+            assert!(sub.resume_deposit((&ev).into()).await.is_err());
         }
+        client.set_getter_response(json!({"status":0}));
+        assert!(sub.resume_deposit((&ev).into()).await.unwrap().is_none());
+        client.set_getter_response(json!({"status":"2"}));
+        assert!(matches!(
+            sub.resume_deposit((&ev).into()).await.unwrap(),
+            Some(SubmitOutcome::AlreadyFinalized)
+        ));
+        assert_eq!(client.transaction_count(), 0);
+        client.set_getter_response(json!({"status":"1"}));
+        assert!(matches!(
+            sub.resume_deposit((&ev).into()).await.unwrap(),
+            Some(SubmitOutcome::Pending { .. })
+        ));
+        assert_eq!(client.transaction_count(), 1);
+        assert_eq!(
+            DepositIdentity::from(&ev).params(),
+            json!({
+                "depositId": "5",
+                "contractAddr": U256::from_be_slice(&[0x22;20]).to_string(),
+                "chainId": "1",
+            })
+        );
     }
 
     #[test]
     fn paused_bridge_is_pending_not_rejected() {
+        let id = (&event(6)).into();
         for outcome in [
-            classify_call_error("contract call aborted (exit_code=231)"),
-            classify_reverted(Some(231), "Reverted"),
+            classify_call_error(
+                id,
+                "finalizeDeposit",
+                "contract call aborted (exit_code=231)",
+            ),
+            classify_reverted(id, "finalizeDeposit", Some(231), "Reverted"),
         ] {
             match outcome {
                 SubmitOutcome::Pending {
@@ -955,20 +828,86 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_exit_51_as_already_finalized() {
+    #[tokio::test]
+    async fn unclassified_retry_submission_failure_keeps_the_deposit_pending() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log.reopen().unwrap())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = live_submitter(client.clone());
+        let ev = event(6);
+        client.set_getter_response(json!({"status":1}));
+        client.enable_fail_mode();
+
+        let outcome = sub.resume((&ev).into()).await.unwrap();
+        assert!(
+            matches!(outcome, Some(SubmitOutcome::Pending { .. })),
+            "{outcome:?}"
+        );
+        let warning = std::fs::read_to_string(log.path()).unwrap();
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("retryDeposit")
+                && warning.contains("deposit_id=6")
+                && warning.contains("Mock failure mode enabled"),
+            "{warning}"
+        );
         assert!(matches!(
-            classify_call_error("contract call aborted (exit_code=Some(51))"),
-            SubmitOutcome::AlreadyFinalized
+            sub.submit(&ev, &witness(&ev)).await.unwrap(),
+            SubmitOutcome::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn a_retry_abort_needs_an_exit_code_to_reject_the_deposit() {
+        let id = (&event(6)).into();
+        let abort = "Transaction failed: contract call aborted (exit_code=None, aborted=true)";
+        assert!(matches!(
+            classify_reverted(id, "retryDeposit", None, "retryDeposit Reverted"),
+            SubmitOutcome::Pending { .. }
         ));
         assert!(matches!(
-            classify_reverted(Some(51), "Reverted"),
-            SubmitOutcome::AlreadyFinalized
+            classify_reverted(id, "finalizeDeposit", None, "finalizeDeposit Reverted"),
+            SubmitOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            classify_call_error(id, "retryDeposit", abort),
+            SubmitOutcome::Pending { .. }
+        ));
+        assert!(matches!(
+            classify_call_error(
+                id,
+                "retryDeposit",
+                "contract call aborted (exit_code=Some(234))"
+            ),
+            SubmitOutcome::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_constructor_needs_a_status_check() {
+        let id = (&event(6)).into();
+        assert!(matches!(
+            classify_call_error(
+                id,
+                "finalizeDeposit",
+                "contract call aborted (exit_code=Some(51))"
+            ),
+            SubmitOutcome::Pending { .. }
+        ));
+        assert!(matches!(
+            classify_reverted(id, "finalizeDeposit", Some(51), "Reverted"),
+            SubmitOutcome::Pending { .. }
         ));
     }
 
     #[test]
     fn receipt_proof_reverts_are_rejected_with_a_hint() {
+        let id = (&event(6)).into();
         for (code, name) in [
             (244, "ERR_NOT_DEPOSIT_LOG"),
             (300, "ERR_SHORT"),
@@ -981,8 +920,12 @@ mod tests {
             (308, "ERR_RECEIPT_STATUS"),
         ] {
             for outcome in [
-                classify_call_error(&format!("contract call aborted (exit_code={code})")),
-                classify_reverted(Some(code), "Reverted"),
+                classify_call_error(
+                    id,
+                    "finalizeDeposit",
+                    &format!("contract call aborted (exit_code={code})"),
+                ),
+                classify_reverted(id, "finalizeDeposit", Some(code), "Reverted"),
             ] {
                 match outcome {
                     SubmitOutcome::Rejected {
@@ -1005,10 +948,11 @@ mod tests {
 
     #[test]
     fn capacity_and_message_retries_do_not_park_a_deposit() {
-        for code in [235, 241, 243, 400, 402] {
+        let id = (&event(6)).into();
+        for code in [235, 241, 243, 245, 246, 400, 402] {
             for result in [
-                classify_reverted(Some(code), "Reverted"),
-                classify_call_error(&format!("exit_code={code}")),
+                classify_reverted(id, "finalizeDeposit", Some(code), "Reverted"),
+                classify_call_error(id, "finalizeDeposit", &format!("exit_code={code}")),
             ] {
                 assert!(
                     matches!(result, SubmitOutcome::Pending { .. }),
@@ -1017,7 +961,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            classify_reverted(Some(234), "Reverted"),
+            classify_reverted(id, "finalizeDeposit", Some(234), "Reverted"),
             SubmitOutcome::Rejected { .. }
         ));
     }
@@ -1027,13 +971,18 @@ mod tests {
     /// tell an unconfigured bridge from a rejected deposit.
     #[test]
     fn config_reverts_name_the_setter_that_fixes_them() {
+        let id = (&event(6)).into();
         for (code, err_name, setter) in [
             (222, "ERR_UNSUPPORTED_SRC_CHAIN", "setTrustedL1Bridge"),
             (224, "ERR_UNKNOWN_BLOCK", "setAcceptedBlockHash"),
         ] {
             for outcome in [
-                classify_call_error(&format!("contract call aborted (exit_code={code})")),
-                classify_reverted(Some(code), "Reverted"),
+                classify_call_error(
+                    id,
+                    "finalizeDeposit",
+                    &format!("contract call aborted (exit_code={code})"),
+                ),
+                classify_reverted(id, "finalizeDeposit", Some(code), "Reverted"),
             ] {
                 match outcome {
                     SubmitOutcome::Rejected {
@@ -1047,75 +996,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// The deposit behind the shellnet voucher in `voucher::tests`.
-    fn shellnet_deposit() -> DepositEvent {
-        DepositEvent {
-            deposit_id: 1,
-            token: Address::repeat_byte(0x7c),
-            source_contract: "0x32b9e87acaa1ad7d61a81f93dd9d525f64ff4f38"
-                .parse()
-                .unwrap(),
-            source_chain_id: 11_155_111,
-            ..event(1)
-        }
-    }
-
-    fn voucher_submitter(
-        client: Arc<acki_nacki_interface::MockAckiNacki>,
-        with_code: bool,
-    ) -> AnInterfaceSubmitter<acki_nacki_interface::MockAckiNacki> {
-        let dapp = "1a".repeat(32);
-        let sub = AnInterfaceSubmitter::new(client, AnSubmitConfig {
-            from: format!("{dapp}::{}", "ff".repeat(32)),
-            token_bridge: format!("{dapp}::{dapp}"),
-            confirm_timeout_secs: 1,
-        });
-        if with_code {
-            sub.with_voucher_code(include_str!("../tests/fixtures/deposit_voucher_code.b64").trim())
-        } else {
-            sub.with_voucher_check(Abi::Json("{}".to_string())).unwrap()
-        }
-    }
-
-    #[tokio::test]
-    async fn voucher_precheck_reads_the_voucher_account() {
-        use acki_nacki_interface::{AccountInfo, MockAckiNacki};
-
-        let voucher = "ffd5c4e7770b73e67ad8a44c828c0d2ee2e642cbbff53096ffd0c68ed0f9a80e";
-        let ev = shellnet_deposit();
-        let client = Arc::new(MockAckiNacki::new());
-        let sub = voucher_submitter(client.clone(), true);
-        assert!(!sub.is_finalized(&ev).await.unwrap(), "no voucher yet");
-
-        let info = |active| AccountInfo {
-            active,
-            code_hash: None,
-            data: None,
-        };
-        client.set_account(voucher, info(false));
-        assert!(
-            !sub.is_finalized(&ev).await.unwrap(),
-            "a failed deploy leaves no active voucher"
-        );
-        client.set_account(voucher, info(true));
-        assert!(sub.is_finalized(&ev).await.unwrap());
-        let other = DepositEvent {
-            source_chain_id: 1,
-            ..shellnet_deposit()
-        };
-        assert!(
-            !sub.is_finalized(&other).await.unwrap(),
-            "same depositId on another chain is a different deposit"
-        );
-    }
-
-    /// A pre-check that cannot run must not block the deposit.
-    #[tokio::test]
-    async fn voucher_precheck_failure_falls_back_to_proving() {
-        let client = Arc::new(acki_nacki_interface::MockAckiNacki::new());
-        let sub = voucher_submitter(client, false);
-        assert!(!sub.is_finalized(&shellnet_deposit()).await.unwrap());
     }
 }

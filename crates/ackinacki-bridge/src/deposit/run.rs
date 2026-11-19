@@ -853,7 +853,7 @@ fn finalized_check(
 }
 
 /// What the board says of a step a deposit finalized already does not need.
-const FINALIZED_ALREADY: &str = "the deposit is finalized already";
+const FINALIZED_ALREADY: &str = "the bridge already accepted the deposit proof";
 
 /// What the transaction deposited, as the bridge's `Deposit` events in its
 /// receipt say: every depositId with its amount and recipient. The
@@ -1345,7 +1345,7 @@ async fn walk(
                 )
                 .await
                 {
-                    // Step 9 reads it again and answers for it: exit 0 or 37.
+                    // Step 9 retries any pending mint and confirms delivery.
                     Some(via_events) => {
                         if rec.stage == OpStage::Anchored {
                             board.skip(StepId::Prove, FINALIZED_ALREADY);
@@ -1507,7 +1507,7 @@ async fn walk(
                 )
                 .await;
                 match already {
-                    // Step 9 reads it again and answers for it: exit 0 or 37.
+                    // Step 9 retries any pending mint and confirms delivery.
                     Some(via_events) => {
                         board.skip(StepId::Finalize, FINALIZED_ALREADY);
                         Phase::Credit {
@@ -1570,9 +1570,10 @@ async fn walk(
                 )
                 .await;
                 let left = p.credit_timeout.saturating_sub(started.elapsed());
-                match credit::confirm(
+                let c = credit::confirm(
                     d.an.as_ref(),
                     cx.bridge_acc,
+                    cx.bridge_dapp,
                     voucher,
                     &id,
                     via_events,
@@ -1582,41 +1583,18 @@ async fn walk(
                     &op,
                     ui,
                 )
-                .await
-                {
-                    Ok(c) => {
-                        let detail = format!("confirmDeposit {}", c.confirm_tx);
-                        rec.credit = Some(c);
-                        rec.stage = OpStage::Credited;
-                        persist(store, rec)?;
-                        board.done(StepId::Credit, &detail);
-                        // Diagnostic only: one bounded read.
-                        let after = once(None, d.an.account(to.account_id))
-                            .await
-                            .flatten()
-                            .map(|a| a.ecc3);
-                        return Ok(summary(rec, anchor_waited, (balance_before, after)));
-                    },
-                    Err(e) if e.exit_code() == ExitCode::CreditAborted => {
-                        // Not resumable: the voucher is spent.
-                        if close(
-                            store,
-                            rec,
-                            FailReason::CreditAborted,
-                            ExitCode::CreditAborted,
-                            &e.to_string(),
-                        ) {
-                            return Err(e);
-                        }
-                        return Err(err(
-                            ExitCode::CreditAborted,
-                            Stage::Credit,
-                            &op,
-                            format!("{e}\n  (the operation record could not be updated)"),
-                        ));
-                    },
-                    Err(e) => return Err(e),
-                }
+                .await?;
+                let detail = format!("mint transaction {}", c.confirm_tx);
+                rec.credit = Some(c);
+                rec.stage = OpStage::Credited;
+                persist(store, rec)?;
+                board.done(StepId::Credit, &detail);
+                // Diagnostic only: one bounded read.
+                let after = once(None, d.an.account(to.account_id))
+                    .await
+                    .flatten()
+                    .map(|a| a.ecc3);
+                return Ok(summary(rec, anchor_waited, (balance_before, after)));
             },
         };
     }
@@ -3143,7 +3121,7 @@ mod tests {
             ui.events().iter().any(|e| matches!(
                 e,
                 UiEvent::Step(StepId::Prove, StepState::Skipped, why)
-                    if why.contains("finalized already")
+                    if why == FINALIZED_ALREADY
             )),
             "{:#?}",
             ui.events()

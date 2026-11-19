@@ -39,7 +39,9 @@ assigns it when the release is tagged.
   `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).
 - `ackinacki-bridge withdraw` whose burn is already paid out (by a relayer, say) exits 0 with
   `submit.status` `already_paid` and `submit.nullifier`, not 13. The proof is always built; the send
-  is where the payout is found.
+  is where the payout is found. For NACKL, a payout found in the queue ends with `submit.status`
+  `queued`, `payout_id` and `ready_at`; a payout the CLI cannot read exits 13 and is marked nothing,
+  so `--resume` looks again.
 - `ackinacki-bridge`: `--token usdc|nackl` is required on `withdraw` and `deposit`;
   `withdraw --token-id` and `deposit --token <address>` (`DEPOSIT_TOKEN`) are gone: add `--token usdc`
   to scripts.
@@ -97,8 +99,9 @@ assigns it when the release is tagged.
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
   amount and recipient from the receipt.
 - `ackinacki-bridge deposit` JSON `finalize`: `sent` or `already_finalized` once credited.
-- `ackinacki-bridge withdraw` no longer reads the EVM bridge's payout cap and treasury before burning;
-  the Acki Nacki bridge's `getTotalBridged` and the chain's limits decide.
+- `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning; it refuses an
+  amount above the EVM bridge's payout cap, and the Acki Nacki bridge's `getTotalBridged` and the
+  chain's limits decide the rest.
 - `ackinacki-bridge withdraw --token nackl` withdraws NACKL; a queued payout ends with
   `submit.status: "queued"`, `payout_id` and `ready_at`, and a re-run does not resend the proof.
 - `ackinacki-bridge deposit` exits 38 (`CreditRefused`) when the bridge refuses the deposit for now;

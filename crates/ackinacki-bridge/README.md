@@ -17,8 +17,9 @@ Each direction runs whole, or in two steps, each a run of its own:
 `finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet. The proof is
 always built; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
 proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "already_paid"`,
-`finalize: "already_finalized"`. For NACKL, `already_paid` means the bridge accepted a proof of the
-burn: the payout may still be queued, and the relayer mints it once due.
+`finalize: "already_finalized"`. For NACKL, a payout still in the bridge's queue ends with
+`submit.status: "queued"`, `payout_id` and `ready_at`, and the relayer mints it once due; if the CLI
+cannot read the payout, it exits 13 without marking anything, and `--resume` looks again.
 `deposit proof` takes a deposit made through a contract wallet too: the `Deposit` event decides, not
 the transaction's calldata. A transaction with several deposits to the bridge is refused (the
 deposit relayer's `finalize-one` takes it). One operation holds one deposit: `deposit proof` of a transaction an operation in
@@ -78,7 +79,8 @@ pipeline:
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy — not only AN-side ones.** How much may be withdrawn
    is the Acki Nacki bridge's answer (`getTotalBridged`, the chain's
-   limits); the EVM bridge's payout cap and treasury are not read.
+   limits), and no more than the EVM bridge's payout cap; its treasury is
+   not read.
 
    *Real runs only*, because these need the submit-only flags: the burner
    key parses, the KZG ceremony resolves at k=20 **and** k=21, the
@@ -666,7 +668,7 @@ claiming there is no record — it never opened one to find out.
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
+| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the bridge already accepted the NACKL withdrawal but its payout could not be read (`--resume` looks again); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
 **Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went

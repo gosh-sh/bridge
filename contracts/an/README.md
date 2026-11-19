@@ -1,7 +1,7 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.5.0,
+`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.6.0,
 `EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
@@ -146,7 +146,7 @@ inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 
 `getTokenDepositConfig(chainId, evmToken)` and `getTokenWithdrawalConfig(chainId, tokenId)` expose
 the configuration and per-chain outstanding amount. Closing or throttling deposits does not
 lower the withdrawal allowance. `finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
-1.5.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
+1.6.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
 burns the attached currency and decrements only that currency's destination-chain inventory.
 
 ### NACKL

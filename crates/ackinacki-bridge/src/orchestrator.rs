@@ -1451,28 +1451,35 @@ async fn prove_and_submit(
             if token_id
                 == alloy::primitives::U256::from(bridge_relayer_daemon::bridge::NACKL_TOKEN_ID)
             {
-                match bridge.withdrawal_payout(nullifier).await {
+                let unknown = |why: String| CliError::EthSubmitFailed {
+                    reason: format!(
+                        "the EVM bridge has already accepted this withdrawal (nullifier \
+                         {nullifier:#066x}), but its NACKL payout could not be read: {why}. \
+                         Nothing is marked paid; re-run with --resume once the RPC serves the \
+                         bridge's logs."
+                    ),
+                    source: None,
+                };
+                return match bridge.withdrawal_payout(nullifier).await {
                     Ok(Some(WithdrawSubmitOutcome::Queued {
                         tx_hash,
                         payout_id,
                         ready_at,
-                    })) => {
-                        return SubmitSummary {
-                            eth_tx: Some(format!("{tx_hash:?}")),
-                            status: SubmitStatus::Queued,
-                            payout_id: Some(payout_id.to_string()),
-                            ready_at: Some(ready_at),
-                            nullifier: Some(format!("{nullifier:#066x}")),
-                        };
-                    },
-                    Ok(_) => {},
-                    Err(e) => warn!(
-                        error = %e,
-                        "looking up the NACKL payout of the spent nullifier failed"
-                    ),
-                }
+                    })) => Ok(SubmitSummary {
+                        eth_tx: Some(format!("{tx_hash:?}")),
+                        status: SubmitStatus::Queued,
+                        payout_id: Some(payout_id.to_string()),
+                        ready_at: Some(ready_at),
+                        nullifier: Some(format!("{nullifier:#066x}")),
+                    }),
+                    Ok(Some(WithdrawSubmitOutcome::Paid {
+                        ..
+                    })) => Ok(already_paid(nullifier)),
+                    Ok(_) => Err(unknown("no WithdrawalByProofExecuted event for it".into())),
+                    Err(e) => Err(unknown(e.to_string())),
+                };
             }
-            already_paid(nullifier)
+            Ok(already_paid(nullifier))
         }
     };
 
@@ -1558,7 +1565,7 @@ async fn prove_and_submit(
                     });
                 }
                 info!(%nullifier, "eth dry-run: the bridge has already accepted this withdrawal");
-                let submit = spent_already(nullifier).await;
+                let submit = spent_already(nullifier).await?;
                 if matches!(submit.status, SubmitStatus::Queued) {
                     if let Some(r) = record.as_deref_mut() {
                         r.status = Status::Queued;
@@ -1710,7 +1717,7 @@ async fn prove_and_submit(
             permanent: _,
         } if paid_out_after_all(&ro_bridge_for_wait, nullifier, &reason).await => {
             info!(%nullifier, "withdrawByProof: the bridge had already accepted this withdrawal");
-            spent_already(nullifier).await
+            spent_already(nullifier).await?
         },
         WithdrawSubmitOutcome::Reverted {
             reason,

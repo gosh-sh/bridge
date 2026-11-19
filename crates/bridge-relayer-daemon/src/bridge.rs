@@ -1321,14 +1321,31 @@ where
                 let logs = serde_json::to_value(&receipt)
                     .ok()
                     .and_then(|r| r.get("logs").cloned())
-                    .unwrap_or_default();
-                return Ok(Some(queued_from_logs(
+                    .filter(serde_json::Value::is_array)
+                    .ok_or_else(|| {
+                        RelayerError::other(format!("receipt of {tx_hash} has no logs"))
+                    })?;
+                let outcome = queued_from_logs(
                     WithdrawSubmitOutcome::Paid {
                         tx_hash,
                     },
                     &logs,
                     self.address,
-                )));
+                );
+                let queued_topic =
+                    format!("{:#x}", AckiNackiBridge::NacklPayoutQueued::SIGNATURE_HASH);
+                let names_a_queue = logs.as_array().into_iter().flatten().any(|log| {
+                    log.get("topics")
+                        .and_then(|t| t.get(0))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|t| t.eq_ignore_ascii_case(&queued_topic))
+                });
+                if names_a_queue && matches!(outcome, WithdrawSubmitOutcome::Paid { .. }) {
+                    return Err(RelayerError::other(format!(
+                        "receipt of {tx_hash} queues a NACKL payout that could not be read"
+                    )));
+                }
+                return Ok(Some(outcome));
             }
             if from <= scan.deploy_block {
                 return Ok(None);

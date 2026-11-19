@@ -2782,8 +2782,8 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 /// Preflight the destination *deploy*: something is there, its withdrawal
 /// verifier stack is real and is the one this build proves against, its
 /// pinned AN-side identity is ours, it pays this token under the id Acki
-/// Nacki assigns, and it is not paused. Its payout cap and treasury are
-/// not read: the Acki Nacki bridge's limits decide how much may leave.
+/// Nacki assigns, it is not paused, and its payout cap covers the amount.
+/// Its treasury is not read.
 ///
 /// Key-free, so `--dry-run` exercises all of it.
 ///

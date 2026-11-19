@@ -58,6 +58,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
     uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
     uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
+    uint128 constant MAX_NACKL_LOCKED = 10_000_000_000_000_000;
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -459,6 +460,12 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
             if (amount > _tokenOutstanding(dstChainId, tokenId)) {
                 _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                                   ERR_CHAIN_BALANCE_EXCEEDED);
+                return;
+            }
+        } else {
+            uint128 locked = _bridgeTokens[dstChainId][tokenId].outstanding;
+            if (locked > MAX_NACKL_LOCKED || amount > MAX_NACKL_LOCKED - locked) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_TVL_CAP);
                 return;
             }
         }

@@ -432,6 +432,17 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(len(result["messages"]), 1)
         self.assertEqual(self.locked(), 10 * NACKL)
 
+    def test_nb_an_lock_stops_at_ten_million_nackl(self):
+        cap = 10_000_000 * NACKL
+        self.nackl(max_transfer=cap, max_tvl=cap)
+        self.assertTrue(self.lock(cap - NACKL)["vm_success"])
+        result = self.lock(NACKL + 1)
+        self.assertEqual(int(self.call("testLastRefusal")["response"]["reason"]), 235)
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(self.locked(), cap - NACKL)
+        self.assertTrue(self.lock(NACKL)["vm_success"])
+        self.assertEqual(self.locked(), cap)
+
     def test_nb_an_lock_needs_an_evm_recipient(self):
         self.nackl()
         for recipient in ["11" * 21, "11" * 19, "11" * 64]:

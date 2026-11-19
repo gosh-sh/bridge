@@ -309,8 +309,9 @@ direct token donations do not increase that counter or its capacity.
 the lower product ceiling is `MAX_TRANSFER_AMOUNT`.
 
 The USDC TVL cap is checked on the EVM bridge only; AN does not bound
-deposits by `maxTvl`. NACKL is bounded on AN only, by the NACKL locked for its
-chain. `getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and
+deposits by `maxTvl`. NACKL is bounded on AN only: the NACKL locked for a chain
+stops at 10,000,000 NACKL (`MAX_NACKL_LOCKED`), above it `initiateWithdrawal`
+refunds with 235. `getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and
 `outstanding` in base units. `confirmDeposit` increases that chain's outstanding
 amount; a successful `initiateWithdrawal` decreases the destination chain's
 amount. A deposit that no longer fits when its voucher confirms it (another

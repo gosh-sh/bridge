@@ -427,6 +427,18 @@ pub async fn run_for_token(
                 source: None,
             });
         }
+        let lock_cap: u128 = 10_000_000_000_000_000;
+        if nackl && (outstanding > lock_cap || amount.0 > lock_cap - outstanding) {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge already holds {outstanding} nanoNACKL locked toward \
+                     chain {}; locking {} more would pass 10,000,000 NACKL and initiateWithdrawal \
+                     would return the NACKL with 235. Nothing was sent.",
+                    to.chain_id, amount.0
+                ),
+                source: None,
+            });
+        }
         // 6c. The EVM bridge the burn will be bound to.
         let bound =
             call_get_evm_bridge(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id).await?;

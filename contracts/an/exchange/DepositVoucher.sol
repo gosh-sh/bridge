@@ -17,8 +17,8 @@ interface IDepositConfirmation {
 ///         from any source chain. Its address is derived from `_depositHash`,
 ///         so re-deploying with the same hash collides with the existing
 ///         account and the second constructor call is a no-op — natural
-///         replay protection. If eccBridge refuses the confirmation, the
-///         bounce deletes the voucher and the deposit can be finalized again.
+///         replay protection. If eccBridge cannot pay the deposit, it calls
+///         `release` and the voucher deletes itself, so the deposit can be finalized again.
 contract DepositVoucher is eccBridgeModifiers {
     string constant version = "1.6.0";
 
@@ -51,12 +51,12 @@ contract DepositVoucher is eccBridgeModifiers {
             tvm.hash(abi.encode(depositId, contractAddr, dappId, chainId)) == _depositHash,
             ERR_HASH_MISMATCH
         );
-        IDepositConfirmation(USDC_BRIDGE_ADDRESS).confirmTokenDeposit{value: 0.5 vmshell, flag: 1}(
+        IDepositConfirmation(USDC_BRIDGE_ADDRESS).confirmTokenDeposit{value: 0.5 vmshell, flag: 1, bounce: false}(
             depositId, contractAddr, dappId, chainId, amount, anAccount, evmToken
         );
     }
 
-    onBounce(TvmSlice) external {
+    function release() external {
         require(msg.sender == USDC_BRIDGE_ADDRESS, ERR_INVALID_SENDER);
         selfdestruct(USDC_BRIDGE_ADDRESS);
     }

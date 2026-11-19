@@ -77,6 +77,15 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         address sender,
         uint16 reason
     );
+    event DepositRefused(
+        uint256 depositId,
+        uint256 contractAddr,
+        uint256 dappId,
+        uint256 chainId,
+        uint128 amount,
+        uint256 anAccount,
+        uint16 reason
+    );
     event DepositFinalized(
         uint256 depositId,
         uint256 contractAddr,
@@ -747,6 +756,31 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         }
     }
 
+    function _depositRefusal(uint256 chainId, uint256 evmToken, uint128 amount)
+        private view returns (uint32 tokenId, uint16 reason)
+    {
+        tokenId = _bridgeTokenIds[chainId][evmToken];
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        if (evmToken == 0 || config.evmToken != evmToken) {
+            return (tokenId, ERR_TOKEN_UNREGISTERED);
+        }
+        if (amount > config.maxWithdrawal) {
+            return (tokenId, ERR_TRANSFER_TOO_LARGE);
+        }
+        if (tokenId == NACKL_ECC_ID) {
+            if (amount > config.outstanding
+                || varuint32(amount) > address(this).currencies[NACKL_ECC_ID]) {
+                return (tokenId, ERR_CHAIN_BALANCE_EXCEEDED);
+            }
+        } else {
+            uint128 outstanding = _tokenOutstanding(chainId, tokenId);
+            if (outstanding > config.maxTvl || amount > config.maxTvl - outstanding) {
+                return (tokenId, ERR_TVL_CAP);
+            }
+        }
+        return (tokenId, 0);
+    }
+
     function _creditToken(uint256 chainId, uint32 tokenId, uint128 amount) private {
         _totalMintedBridgeByToken[tokenId] += amount;
         if (tokenId == USDC_ECC_ID) {
@@ -1020,9 +1054,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         registered ECC and sends it to the proof-bound AN recipient. The caller
     ///         must be the deterministic voucher address derived from the
     ///         deposit identity — replay attempts hit the existing voucher
-    ///         account whose constructor was already consumed. If this call
-    ///         aborts, it bounces to the voucher, which deletes itself, so the
-    ///         same deposit can be finalized again.
+    ///         account whose constructor was already consumed. If the bridge
+    ///         cannot pay the deposit now, it emits `DepositRefused` and tells the
+    ///         voucher to delete itself, so the same deposit can be finalized again.
     function confirmDeposit(
         uint256 depositId, uint256 contractAddr, uint256 dappId,
         uint256 chainId, uint128 amount, uint256 anAccount
@@ -1051,10 +1085,19 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
         require(amount > 0, ERR_ZERO_AMOUNT);
-        uint32 tokenId = _requireDepositToken(chainId, evmToken, amount, false);
+        (uint32 tokenId, uint16 refusal) = _depositRefusal(chainId, evmToken, amount);
 
         tvm.accept();
         ensureBalance();
+
+        if (refusal != 0) {
+            DepositVoucher(msg.sender).release{value: 0.1 vmshell, flag: 1, bounce: false}();
+            address refusedExtern = address.makeAddrExtern(DepositRefusedEmit, bitCntAddress);
+            emit DepositRefused{dest: refusedExtern}(
+                depositId, contractAddr, dappId, chainId, amount, anAccount, refusal
+            );
+            return;
+        }
 
         if (tokenId == NACKL_ECC_ID) {
             require(_unlockNackl(chainId, amount, anAccount), ERR_CHAIN_BALANCE_EXCEEDED);

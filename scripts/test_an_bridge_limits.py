@@ -81,8 +81,11 @@ class BridgeLimits(unittest.TestCase):
         source = finalized.sub(r"_testRecordFinalized(\1);", source)
         source = re.sub(r"emit (?:WithdrawalInitiated|UsdcMinted)\{dest: addrExtern\}\(.*?\);",
                         "", source, flags=re.S)
+        refused = re.compile(r"emit DepositRefused\{dest: refusedExtern\}\((.*?)\);", re.S)
+        assert len(refused.findall(source)) == 1
+        source = refused.sub(r"_testRecordRefused(\1);", source)
         held = "address(this).currencies[NACKL_ECC_ID]"
-        assert source.count(held) == 1
+        assert source.count(held) == 2
         source = source.replace(held, "_testNacklHeld()")
         hooks = """
     function testLegacyUpgrade() public {
@@ -123,6 +126,15 @@ class BridgeLimits(unittest.TestCase):
             (contractAddr, dappId, chainId, amount, anAccount) = abi.decode(
                 _testFinalizedFields[depositId], (uint256, uint256, uint256, uint128, uint256));
         }
+    }
+    mapping(uint256 => uint16) _testRefused;
+    function _testRecordRefused(uint256 depositId, uint256 contractAddr, uint256 dappId,
+                                uint256 chainId, uint128 amount, uint256 anAccount, uint16 reason) private {
+        contractAddr; dappId; chainId; amount; anAccount;
+        _testRefused[depositId] = reason;
+    }
+    function testRefused(uint256 depositId) public view returns (uint16 reason) {
+        reason = _testRefused[depositId];
     }
     uint16 _testLastRefusal;
     function testLastRefusal() public view returns (uint16 reason) {
@@ -378,6 +390,12 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual((int(got["contractAddr"], 0), int(got["dappId"], 0), int(got["chainId"], 0),
                           int(got["amount"]), int(got["anAccount"], 0)), (42, 0, chain, amount, 43))
 
+    def refused(self, result, deposit, reason, chain=1):
+        self.assertTrue(result["vm_success"])
+        self.assertEqual([m["destination"] for m in result["messages"]], [self.voucher(deposit, chain)])
+        self.assertEqual(int(self.call("testRefused", {"depositId": str(deposit)})["response"]["reason"]),
+                         reason)
+
     def paid(self, result, amount, recipient="0:" + "00" * 31 + "2b"):
         sent = []
         for m in result["messages"]:
@@ -449,14 +467,14 @@ class BridgeLimits(unittest.TestCase):
         self.nackl(chain=1)
         self.nackl(chain=2)
         self.lock(5 * NACKL, chain=2)
-        self.confirm_nackl(5 * NACKL, chain=1, expect=236)
+        self.refused(self.confirm_nackl(5 * NACKL, chain=1), 300, 236)
         self.assertEqual(self.locked(chain=2), 5 * NACKL)
         self.assertEqual(self.locked(chain=1), 0)
 
     def test_nb_an_short_lock_refuses_the_confirmation_until_it_is_covered(self):
         self.nackl()
         self.lock(3 * NACKL)
-        self.confirm_nackl(5 * NACKL, expect=236)
+        self.refused(self.confirm_nackl(5 * NACKL), 300, 236)
         self.assertEqual(self.locked(), 3 * NACKL)
         self.assertEqual(self.nackl_balance(), 3 * NACKL)
         self.assertEqual(int(self.call("testFinalized", {"depositId": "300"})["response"]["count"]), 0)
@@ -468,7 +486,7 @@ class BridgeLimits(unittest.TestCase):
     def test_nb_an_a_later_deposit_is_paid_while_an_earlier_one_is_refused(self):
         self.nackl()
         self.lock(3 * NACKL)
-        self.confirm_nackl(5 * NACKL, deposit=400, expect=236)
+        self.refused(self.confirm_nackl(5 * NACKL, deposit=400), 400, 236)
         self.paid(self.confirm_nackl(2 * NACKL, deposit=401), 2 * NACKL)
         self.finalized(401, 2 * NACKL)
         self.assertEqual(self.locked(), NACKL)
@@ -524,13 +542,13 @@ class BridgeLimits(unittest.TestCase):
             self.set_bridge_token(token, token_id, 100, 1000, expect=242)
             self.assertFalse(self.token_limits(token_id)["listed"])
         self.finalize(token=SECOND_TOKEN, expect=241)
-        self.confirm_token(expect=241)
+        self.refused(self.confirm_token(), 100, 241)
         self.assertTrue(self.token_limits(3)["listed"])
 
     def test_unregistered_proven_token_cannot_mint_usdc(self):
         before = self.call("getTotalBridged", {"tokenId": 3})["response"]
         self.finalize(token=SECOND_TOKEN, expect=241)
-        self.confirm_token(expect=241)
+        self.refused(self.confirm_token(), 100, 241)
         self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"], before)
 
     def test_second_token_has_independent_mint_burn_and_chain_accounting(self):
@@ -716,10 +734,10 @@ class BridgeLimits(unittest.TestCase):
 
     def test_confirmation_enforces_cap_and_sender(self):
         self.confirm(source=SENDER, expect=207)
-        self.confirm(amount=TRANSFER + 1, expect=234)
+        self.refused(self.confirm(amount=TRANSFER + 1), 0, 234)
         self.confirm()
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
-        self.confirm(deposit=1, amount=1, expect=235)
+        self.refused(self.confirm(deposit=1, amount=1), 1, 235)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
 
     def test_each_network_has_its_own_balance(self):
@@ -871,6 +889,30 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(second["messages"], [])
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
 
+    def test_voucher_deletes_itself_only_when_the_bridge_releases_it(self):
+        deploy = self.finalize()["messages"][0]
+        voucher = self.root / "voucher-release.tvc"
+        voucher.write_bytes(base64.b64decode(deploy["state_init"]))
+        params = {"depositId": "0", "contractAddr": "42", "dappId": "0", "chainId": "1",
+                  "amount": str(TRANSFER), "anAccount": "43", "evmToken": str(USDC_TOKEN)}
+        built = json.loads(command([
+            DEBUGGER, "run", "-i", str(voucher), "-a", str(self.voucher_abi), "--json",
+            "--address", deploy["destination"], "--internal", "--message-source", BRIDGE,
+            "--message-value", "2000000000", "-m", "constructor", "-p", json.dumps(params)]))
+        self.assertEqual(built["exit_code"], 0)
+        confirm = json.loads(command(["tvm-cli", "-j", "decode", "msg", built["messages"][0]["boc"], "--abi", str(self.abi)]))
+        self.assertEqual(confirm["Header"]["bounce"], "false")
+        call = [DEBUGGER, "run", "-i", str(voucher), "-a", str(self.voucher_abi), "--json",
+                "--address", deploy["destination"], "--internal", "--message-value", "100000000",
+                "-m", "release", "-p", "{}", "--message-source"]
+        stranger = json.loads(command(call + [SENDER]))
+        self.assertEqual(stranger["exit_code"], 207)
+        self.assertEqual(stranger["messages"], [])
+        released = json.loads(command(call + [BRIDGE]))
+        self.assertEqual(released["exit_code"], 0)
+        self.assertEqual([m["destination"] for m in released["messages"]], [BRIDGE])
+        header = json.loads(command(["tvm-cli", "-j", "decode", "msg", released["messages"][0]["boc"], "--abi", str(self.abi)]))
+        self.assertEqual(header["Header"]["bounce"], "false")
 
     # ------------------------------------------------------------ deposit receipt
 

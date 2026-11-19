@@ -91,6 +91,14 @@ pub trait AnSubmitter: Send + Sync {
 
     /// `getHead().finalizedSlot`.
     async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError>;
+
+    /// `isProvenExecutionBlockHash`: the hash is in the light client's live
+    /// proven set. `block_hash` is Ethereum byte order, re-packed with
+    /// [`anchor_key_hex`] like `rePushAnchor`.
+    async fn is_proven_execution_block_hash(
+        &self,
+        block_hash: [u8; 32],
+    ) -> Result<bool, RelayerError>;
 }
 
 /// Step PI word (32-byte little-endian BN254 scalar) → `uint256` argument
@@ -150,6 +158,11 @@ struct MockInner {
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
     gateway_error: bool,
+    /// Answer every `submitUpdate` the way a node did whose answer got lost:
+    /// an update that lands comes back as "Unknown error", and a resend the
+    /// contract refuses as stale comes back with no exit code.
+    lose_update_answers: bool,
+    update_submits: u32,
     /// `--dry-run`: the first accepted step bootstraps the committee period,
     /// and every accepted step sets the current committee to its own, as
     /// the contract's would be.
@@ -184,6 +197,8 @@ impl MockAnSubmitter {
                 gloas_get_fails_from: None,
                 committee_period_read_fails: false,
                 gateway_error: false,
+                lose_update_answers: false,
+                update_submits: 0,
                 follow_steps: false,
             }),
         }
@@ -252,6 +267,16 @@ impl MockAnSubmitter {
     /// runs the call: an HTTP 500 with no exit code.
     pub fn set_gateway_error(&self, on: bool) {
         self.inner.lock().expect("poisoned").gateway_error = on;
+    }
+
+    /// See `MockInner::lose_update_answers`.
+    pub fn lose_update_answers(&self) {
+        self.inner.lock().expect("poisoned").lose_update_answers = true;
+    }
+
+    /// Every `submitUpdate` reaching the mock, refused ones included.
+    pub fn update_submits(&self) -> u32 {
+        self.inner.lock().expect("poisoned").update_submits
     }
 
     /// Answer the next `submit_rotate` calls with these outcomes, in order.
@@ -364,11 +389,17 @@ impl MockAnSubmitter {
 impl AnSubmitter for MockAnSubmitter {
     async fn submit_update(&self, bundle: &StepProofBundle) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
+        inner.update_submits += 1;
         if inner.gateway_error {
             return Ok(SubmitOutcome::Rejected {
                 reason: "submitUpdate failed: HTTP status 500 Internal Server Error".into(),
             });
         }
+        let refused_without_code = SubmitOutcome::Rejected {
+            reason: "submitUpdate failed: Transaction failed: Failed to execute the message. \
+                     Error occurred during the compute phase."
+                .into(),
+        };
         if inner.reject {
             return Ok(SubmitOutcome::Rejected {
                 reason: "submitUpdate failed: ZKHALO2VERIFYWITHVK rejected the step proof, \
@@ -382,9 +413,15 @@ impl AnSubmitter for MockAnSubmitter {
         let unseen = !inner.proven.contains(&hash);
         let late = inner.head_slot.map(|h| slot < h).unwrap_or(false) && unseen;
         if inner.head_slot == Some(slot) {
+            if inner.lose_update_answers {
+                return Ok(refused_without_code);
+            }
             return Ok(SubmitOutcome::AlreadyOnHead);
         }
         if !advance && !late {
+            if inner.lose_update_answers {
+                return Ok(refused_without_code);
+            }
             return Ok(SubmitOutcome::Rejected {
                 reason: format!("ERR_STALE_UPDATE slot={slot}"),
             });
@@ -398,6 +435,11 @@ impl AnSubmitter for MockAnSubmitter {
                 inner.period = Some(slot / crate::types::SLOTS_PER_SYNC_PERIOD);
             }
             inner.current_committee = bundle.parsed.committee_commitment;
+        }
+        if inner.lose_update_answers {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "submitUpdate failed: Transaction failed: Unknown error".into(),
+            });
         }
         Ok(SubmitOutcome::Accepted {
             tx_hash: None,
@@ -557,6 +599,13 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn get_head_finalized_slot(&self) -> Result<u64, RelayerError> {
         Ok(self.inner.lock().expect("poisoned").head_slot.unwrap_or(0))
+    }
+
+    async fn is_proven_execution_block_hash(
+        &self,
+        block_hash: [u8; 32],
+    ) -> Result<bool, RelayerError> {
+        Ok(self.is_proven(&block_hash))
     }
 
     async fn set_committee_commitment(
@@ -1098,6 +1147,23 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         json_u64(v.get("finalizedSlot"))
             .ok_or_else(|| RelayerError::other("getHead: missing finalizedSlot"))
     }
+
+    async fn is_proven_execution_block_hash(
+        &self,
+        block_hash: [u8; 32],
+    ) -> Result<bool, RelayerError> {
+        let v = self
+            .client
+            .run_getter(
+                &self.config.light_client,
+                "isProvenExecutionBlockHash",
+                json!({ "blockHash": anchor_key_hex(&block_hash) }),
+            )
+            .await
+            .map_err(RelayerError::from)?;
+        json_bool(v.get("value0"))
+            .ok_or_else(|| RelayerError::other("isProvenExecutionBlockHash: missing value0"))
+    }
 }
 
 fn json_u64(v: Option<&serde_json::Value>) -> Option<u64> {
@@ -1117,11 +1183,17 @@ fn json_uint256_le_word(v: Option<&serde_json::Value>) -> Option<[u8; 32]> {
 
 fn json_bool(v: Option<&serde_json::Value>) -> Option<bool> {
     let v = v?;
-    v.as_bool().or_else(|| match v.as_u64() {
-        Some(0) => Some(false),
-        Some(_) => Some(true),
-        None => None,
-    })
+    v.as_bool()
+        .or_else(|| match v.as_str() {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => None,
+        })
+        .or_else(|| match v.as_u64() {
+            Some(0) => Some(false),
+            Some(_) => Some(true),
+            None => None,
+        })
 }
 
 /// Compare a TVM `address` getter (`0:<hex>` / `0x<hex>` / `dapp::account`)

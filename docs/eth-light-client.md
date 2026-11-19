@@ -116,6 +116,11 @@ chain. A proof the contract ran and refused (the error carries an exit code) is 
 checkpoint proven anew against what the contract holds then, so a proof pinned to a Gloas slot the
 owner has since changed does not stop the light client. A send that never reached the contract (an
 HTTP 4xx or 5xx from the gateway, a timeout, a dropped connection) goes again with the same proof.
+A send that runs on chain but whose answer is lost leaves the checkpoint on the head, and every
+resend is then refused as stale: after any send that does not come back accepted, the daemon reads
+`getHead` and `isProvenExecutionBlockHash`, and records a checkpoint the head has reached and whose
+hash is proven as on chain. The exit code of a refused message comes from the node's answer
+(`node_error.extensions.details.exit_code` in the SDK's error).
 Each failed try adds one to the counter `eth_lc_relayer_checkpoint_failures_total`, with
 `stage="prove"`, `stage="submit"`, or `stage="rotate"` while the checkpoint waits at a period
 boundary for the committee rotate, served at `GET /metrics` when `--metrics-addr` is set. The daemon
@@ -233,7 +238,10 @@ flowchart TD
   verification key is not the pinned one
   (`eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256`)
   or whose current committee is not the contract's is refused and logged,
-  not sent. It needs the decider of tvm-sdk PR #284 in the node VM; on a
+  not sent. A bundle from P also waits while a queued checkpoint is signed by a committee older
+  than P's: after the rotate the contract takes steps signed in P and P+1 only, so sending it
+  would leave that checkpoint without a committee for good. It needs the decider of tvm-sdk PR
+  #284 in the node VM; on a
   network without it `submitRotate` proves less than it claims (§2), and
   `--no-rotate` keeps it off.
 

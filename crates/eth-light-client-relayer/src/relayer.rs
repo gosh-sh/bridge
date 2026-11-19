@@ -758,6 +758,10 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 Ok(None)
             },
             PreSubmit::Send => {
+                if let Some(why) = self.rotate_would_orphan(from) {
+                    self.rotate_note(why);
+                    return Ok(None);
+                }
                 if let Some(why) = self.gloas_slot_blocks(&out).await {
                     self.rotate_note(why);
                     return Ok(None);
@@ -776,6 +780,29 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     .map(Some)
             },
         }
+    }
+
+    /// After a rotate from `from` the contract takes steps signed in `from`
+    /// (by the committee it replaced) and in `from + 1`, and none older. A
+    /// queued checkpoint with an older signer could then never go on chain,
+    /// and the head would stand on it for good: a rotate sent while the head
+    /// was still a period behind left a whole period of checkpoints that way.
+    /// The proof waits until the head is past them.
+    fn rotate_would_orphan(&self, from: u64) -> Option<String> {
+        let recorded = self.state.last_finalized_slot;
+        let taken = lock(&self.taken);
+        let front = taken
+            .queue
+            .iter()
+            .find(|u| recorded.is_none_or(|r| u.finalized_slot > r))?;
+        (front.signing_period() < from).then(|| {
+            format!(
+                "the rotate from period {from} waits for checkpoint {} (signed in period {}): the \
+                 committee after it would not take that checkpoint",
+                front.finalized_slot,
+                front.signing_period()
+            )
+        })
     }
 
     /// Why `out` cannot go out against the contract's `getGloasForkSlot`
@@ -1397,6 +1424,43 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         );
     }
 
+    /// A send that did not come back accepted may still have run: the
+    /// message executes and only its answer is lost. Every resend of that
+    /// update is then refused as stale, and when the node's error carries no
+    /// exit code nothing tells that refusal apart from any other, so the same
+    /// checkpoint went out every tick while the head stood on it. The chain
+    /// decides instead: the checkpoint is there when the head has reached its
+    /// slot and its execution hash is proven, the two facts the contract's
+    /// `ERR_STALE_UPDATE` stands for. The head check keeps a hash that a span
+    /// proved from being taken for a head. A read that fails answers no, and
+    /// the checkpoint is tried again as before.
+    async fn on_chain_anyway(&self, update: &FinalityUpdate) -> bool {
+        let slot = update.finalized_slot;
+        match self.submitter.get_head_finalized_slot().await {
+            Ok(head) if head >= slot => {},
+            Ok(_) => return false,
+            Err(e) => {
+                warn!(slot, error = %e, "getHead failed; the checkpoint counts as not on chain");
+                return false;
+            },
+        }
+        match self
+            .submitter
+            .is_proven_execution_block_hash(update.execution_block_hash)
+            .await
+        {
+            Ok(proven) => proven,
+            Err(e) => {
+                warn!(
+                    slot,
+                    error = %e,
+                    "isProvenExecutionBlockHash failed; the checkpoint counts as not on chain"
+                );
+                false
+            },
+        }
+    }
+
     /// Drop a queued checkpoint with its proof.
     fn forget_step(&mut self, finalized_slot: u64) -> Result<(), RelayerError> {
         self.proofs.remove(&finalized_slot);
@@ -1411,7 +1475,26 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         let old_head = self.state.last_execution_block_hash;
         let old_slot = self.state.last_finalized_slot;
         let slot = update.finalized_slot;
-        match self.submitter.submit_update(&bundle).await? {
+        let outcome = match self.submitter.submit_update(&bundle).await? {
+            outcome @ (SubmitOutcome::Accepted {
+                ..
+            }
+            | SubmitOutcome::AlreadyOnHead) => outcome,
+            outcome => {
+                if self.on_chain_anyway(&update).await {
+                    warn!(
+                        slot,
+                        outcome = ?outcome,
+                        "the send did not come back accepted, but the checkpoint is on chain; \
+                         recording it"
+                    );
+                    SubmitOutcome::AlreadyOnHead
+                } else {
+                    outcome
+                }
+            },
+        };
+        match outcome {
             SubmitOutcome::Accepted {
                 tx_hash,
             } => {
@@ -2326,6 +2409,57 @@ mod tests {
         ));
         assert_eq!(r.state().last_committee_period, Some(2));
         assert_eq!(r.rotate_running(), None);
+    }
+
+    /// A rotate proof that is ready while a checkpoint signed before its
+    /// period is still queued waits for that checkpoint: sent, it would leave
+    /// the checkpoint without a committee the contract takes.
+    #[tokio::test]
+    async fn a_rotate_waits_for_the_checkpoints_its_committee_would_not_take() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let mut rig = rotate_rig(
+            vec![
+                update(p - 60, p - 64),
+                update(p - 28, p - 32),
+                update(p + 70, p + 64),
+                update(p + 102, p + 96),
+            ],
+            false,
+            crate::rotate::MockRotateRunner::new([0xC0; 32]),
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::SubmittedUpdate { .. }
+        ));
+        // The checkpoint signed in period 0 does not get through.
+        rig.submitter.set_gateway_error(true);
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        r.wait_for_rotate().await;
+        r.tick().await.unwrap();
+        assert_eq!(
+            rig.submitter.rotate_submits(),
+            0,
+            "the rotate from period 1 must wait for the checkpoint signed in period 0"
+        );
+
+        rig.submitter.set_gateway_error(false);
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::SubmittedUpdate {
+                finalized_slot,
+                ..
+            } if finalized_slot == p - 32),
+            "{out:?}"
+        );
+        assert_eq!(rig.submitter.rotate_submits(), 0);
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
+        assert_eq!(rig.submitter.rotate_submits(), 1);
     }
 
     /// A restart after a stage was cut short: the finished stages are not run
@@ -3407,6 +3541,62 @@ mod tests {
         );
         assert_eq!(r.state.owed_spans[0].older, k(0));
         assert_eq!(r.state.owed_spans[0].newer, k(3));
+    }
+
+    /// The shellnet stall: `submitUpdate` ran on chain, its answer came back
+    /// as "Unknown error", and every resend was refused as stale with no exit
+    /// code in the node's error. Reading only the error, the daemon sent the
+    /// same checkpoint every tick for ever while the head stood on it. The
+    /// chain says the checkpoint is there, so it is recorded, its span is
+    /// owed, and nothing is sent twice.
+    #[tokio::test]
+    async fn an_update_that_landed_without_its_answer_is_recorded_from_the_chain() {
+        let (mut r, mock, chain) = span_relayer(true);
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+        mock.lose_update_answers();
+
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::AlreadyOnHead {
+                finalized_slot: 96
+            }),
+            "{out:?}"
+        );
+        assert_eq!(r.state.last_finalized_slot, Some(96));
+
+        let out = r.tick().await.unwrap();
+        assert!(
+            matches!(out, TickOutcome::AlreadyOnHead {
+                finalized_slot: 128
+            }),
+            "{out:?}"
+        );
+        assert_eq!(r.state.last_finalized_slot, Some(128));
+        assert_eq!(r.state.last_execution_block_hash, Some(k(3)));
+        assert_eq!(
+            r.state.owed_spans.len(),
+            1,
+            "the span behind the head is owed"
+        );
+        assert_eq!(r.state.owed_spans[0].older, k(0));
+        assert_eq!(r.state.owed_spans[0].newer, k(3));
+        assert_eq!(mock.update_submits(), 2, "no checkpoint is sent twice");
+    }
+
+    /// A refusal for a checkpoint the head has not reached is a refusal, even
+    /// when its hash is already proven (a span can prove a block that a later
+    /// checkpoint then names): the head must not move to it.
+    #[tokio::test]
+    async fn a_proven_hash_the_head_has_not_reached_is_not_recorded() {
+        let (mut r, mock, chain) = span_relayer(true);
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+        mock.mark_proven(k(0));
+        mock.set_gateway_error(true);
+
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnRejected { .. }), "{out:?}");
+        assert_eq!(r.state.last_finalized_slot, None);
+        assert!(r.state.owed_spans.is_empty());
     }
 
     #[tokio::test]

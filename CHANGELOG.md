@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `0ede2d09…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
+- `eccBridge` 1.18.0, code hash `0ae4ae4c…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
   with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
   finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.

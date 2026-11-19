@@ -130,7 +130,7 @@ docker run -p 8080:80 acki-nacki-bridge-frontend
 
 Set `BRIDGE_CONTRACT_ADDRESS` when building with Trunk. It must be a new
 Sepolia deployment exposing `deposit(address,uint256,bytes32)`, paired with an
-`eccBridge` 1.17.0 or newer. The old
+`eccBridge` that proves the deposit receipt itself (bridge-audit#139). The old
 workchain-bearing deployment addresses are incompatible.
 
 There is no default bridge address. Without a valid non-zero 20-byte address,

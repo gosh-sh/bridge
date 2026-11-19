@@ -93,7 +93,7 @@ fn witness(nodes: usize, node_len: usize, header_len: usize, log_index: u16) -> 
     }
 }
 
-/// Gas measured in tvm-debugger up to `tvm.accept()` of eccBridge 1.17.0:
+/// Gas measured in tvm-debugger up to `tvm.accept()` of eccBridge's `finalizeDeposit`:
 /// (proof nodes, header plus proof bytes, logIndex, gas).
 const MEASURED: [(usize, usize, u16, u64); 11] = [
     (3, 1_825, 0, 107_910),

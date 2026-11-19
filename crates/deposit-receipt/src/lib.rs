@@ -228,7 +228,7 @@ impl DepositWitness {
 
     /// An upper bound on the gas `finalizeDeposit` spends before it accepts
     /// the message: every proof node is hashed and parsed, and every log
-    /// before `logIndex` is skipped. Fitted to eccBridge 1.17.0 in
+    /// before `logIndex` is skipped. Fitted to eccBridge's `finalizeDeposit` in
     /// tvm-debugger, it exceeds the measured gas by 4.7–9.3% from 3 to 7 proof
     /// nodes and 0 to 150 logs of 0.2–1 KiB before the deposit.
     pub fn estimated_gas(&self) -> u64 {

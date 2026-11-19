@@ -25,8 +25,10 @@ assigns it when the release is tagged.
 
 - `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) holds the committees of the last seven
   periods (`getCommittees`) and takes a step from any of them for its own period. `eccBridge`
-  1.18.0 (code hash `2c2296a5…`) is 1.17.0 rebuilt for that layout, from which it builds the
-  client's data in `deployLightClient`.
+  1.18.0 (code hash `2c2296a5…`) is rebuilt for that layout, from which it builds the client's
+  data in `deployLightClient`; its deposit and withdrawal calls are unchanged.
+- `ackinacki-bridge` knows `eccBridge` 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`); an earlier CLI
+  refuses a 1.18.0 bridge, so upgrade the CLI with the bridge.
   An existing light client takes the new code with its own `updateCode` and keeps only its
   committee in force, so upgrade it while the relayer's queue holds no checkpoint signed in an
   earlier period; before any new `deployLightClient`, run `eccBridge.updateCode` and

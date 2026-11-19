@@ -442,7 +442,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_proved_operation_of_an_older_cli_builds_the_receipt_proof_instead_of_its_proof() {
         // An older CLI recorded `Proved` with proof.bin and public_inputs.bin
-        // in the work directory; the 1.17.0 bridge takes neither.
+        // in the work directory; a receipt-proof bridge takes neither.
         let mut w = World::healthy();
         let op = w.proved_operation();
         let work = w.work.path().join(&op);

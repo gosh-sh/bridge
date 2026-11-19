@@ -830,7 +830,7 @@ pub async fn run(args: WithdrawArgs, part: Part, skip_prompt: bool) -> CliResult
             // refused in `main::dispatch` (a policy check there, not a clap
             // conflict), so a live prompt here is safe to block on.
             if !skip_prompt {
-                confirm_before_burn(&from, &to, &amount, &args, anchor_mode)?;
+                confirm_before_burn(&from, &to, &amount, &args, anchor_mode, part)?;
             }
 
             info!("stage 3/6: burn (multisig sendTransaction → USDCBridge.initiateWithdrawal)");
@@ -2999,6 +2999,7 @@ fn confirm_before_burn(
     amount: &UsdcAmount,
     args: &WithdrawArgs,
     anchor_mode: AnchorLayerMode,
+    part: Part,
 ) -> CliResult<()> {
     use std::io::{BufRead, IsTerminal, Write};
 
@@ -3032,10 +3033,18 @@ fn confirm_before_burn(
          {chain_name} (chain {chain_id})\n\x20 amount    : {amount_display} {currency}\n\x20 \
          bridge    : {bridge}\n\x20 anchor    : {anchor_mode:?} (wait {wait_hint})\n\nThis \
          will:\n\x20 1. broadcast a multisig sendTransaction {burning} {amount_display} \
-         {currency} on Acki Nacki\n\x20 2. wait for the covering anchor bundle to land on \
-         Sepolia\n\x20 3. produce a Circuit-4 SHPLONK proof\n\x20 4. submit withdrawByProof \
-         (spends ETH gas)\n\nThe AN {burn} is irreversible once broadcast. Pass --yes to skip \
-         this prompt.\nProceed? [y/N]: ",
+         {currency} on Acki Nacki\n{rest}\n\nThe AN {burn} is irreversible once broadcast. Pass \
+         --yes to skip this prompt.\nProceed? [y/N]: ",
+        rest = match part {
+            Part::Whole => {
+                "\x20 2. wait for the covering anchor bundle to land on Sepolia\n\x20 3. produce a \
+                 Circuit-4 SHPLONK proof\n\x20 4. submit withdrawByProof (spends ETH gas)"
+            },
+            Part::Send => {
+                "\x20 2. capture its WithdrawalInitiated event and stop: the proof and \
+                 withdrawByProof are left to `withdraw proof` or the relayer"
+            },
+        },
         from = from.extended(),
         to_hex = hex::encode(to.address.as_slice()),
         chain_id = to.chain_id,

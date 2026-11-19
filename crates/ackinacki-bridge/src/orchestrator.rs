@@ -232,14 +232,14 @@ impl WhatStageOneFound {
 }
 
 /// `withdraw proof`: prove a burn already on Acki Nacki and send
-/// withdrawByProof. The burn is the one `--burn-tx` sent; everything the
+/// withdrawByProof. The burn is the one `--tx-hash` sent; everything the
 /// proof binds — token, amount, recipient, destination chain and bridge —
 /// is read from its WithdrawalInitiated, and only `--token` is compared with
 /// it. No idempotency record is read or written: a second proof of the same
 /// burn is refused by the bridge's nullifier, and that refusal of a burn
 /// paid out is success, `already_paid`.
 pub async fn run_proof(args: WithdrawProofArgs) -> CliResult<WithdrawSuccess> {
-    let an_tx_hash = args.burn_tx.clone();
+    let an_tx_hash = args.tx_hash.clone();
     let prove = &args.prove;
     let resume = ResumeNote::proof(&an_tx_hash, args.token_id);
     for (flag, path) in [
@@ -281,7 +281,7 @@ pub async fn run_proof(args: WithdrawProofArgs) -> CliResult<WithdrawSuccess> {
             ),
             source: None,
         })?;
-    info!(an_tx = %an_tx_hash, "capture WithdrawalInitiated event (targeted by --burn-tx)");
+    info!(an_tx = %an_tx_hash, "capture WithdrawalInitiated event (targeted by --tx-hash)");
     let gql = bridge_gql_fetcher::gql_client::create_client(&prove.gql_endpoint).map_err(|e| {
         CliError::Preflight {
             reason: format!("failed to build GqlClient for {}: {e}", prove.gql_endpoint),
@@ -1825,7 +1825,7 @@ fn mark_already_paid(
 struct ResumeNote(String);
 
 impl ResumeNote {
-    /// The note for `withdraw proof --burn-tx an_tx`: it keeps no record,
+    /// The note for `withdraw proof --tx-hash an_tx`: it keeps no record,
     /// and the same command carries on.
     fn proof(an_tx: &str, token_id: u32) -> Self {
         let token = args::Token::from_ecc_id(token_id).map_or("usdc", |t| match t {
@@ -1834,7 +1834,7 @@ impl ResumeNote {
         });
         Self(format!(
             "The AN burn {an_tx} is on the wire. Re-run `ackinacki-bridge withdraw proof \
-             --burn-tx {an_tx} --token {token}`, changing only what this error asks for: it \
+             --tx-hash {an_tx} --token {token}`, changing only what this error asks for: it \
              captures the burn again, waits for coverage and proves again."
         ))
     }

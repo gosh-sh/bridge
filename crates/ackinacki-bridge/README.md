@@ -11,7 +11,7 @@ summary includes `token_id` and displays the token amount at its own precision.
 
 Each direction runs whole, or in two steps, each a run of its own:
 `withdraw send` burns and stops once the bridge's `WithdrawalInitiated` is captured, and
-`withdraw proof --burn-tx <AN tx> --token …` proves that burn and sends `withdrawByProof`;
+`withdraw proof --tx-hash <AN tx> --token …` proves that burn and sends `withdrawByProof`;
 `deposit send` stops once the deposit is confirmed on the EVM chain, and
 `deposit proof --tx-hash <EVM tx> --token …` waits for its anchor, proves it and sends
 `finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet. The proof is

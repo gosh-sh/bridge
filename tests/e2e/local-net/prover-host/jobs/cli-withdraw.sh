@@ -21,9 +21,9 @@ for burn in "${burns[@]}"; do
   token=${burn%%:*} tx=${burn#*:}
   # One proof per snark directory: each burn has its own.
   mkdir -p "$WORK/withdraw-proof-$token/snark"
-  log "withdraw proof --burn-tx $tx --token $token"
+  log "withdraw proof --tx-hash $tx --token $token"
   BRIDGE_WORK_DIR=$WORK/withdraw-proof-$token BRIDGE_SNARK_DIR=$WORK/withdraw-proof-$token/snark \
-    ackinacki-bridge --json --yes --non-interactive withdraw proof --burn-tx "$tx" --token "$token" \
+    ackinacki-bridge --json --yes --non-interactive withdraw proof --tx-hash "$tx" --token "$token" \
     >>"/logs/cli-withdraw-$token.log" 2>&1 &
   pids+=("$!")
 done

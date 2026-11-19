@@ -4,7 +4,7 @@ paid by the relayers, every step of the CLI's own. `ackinacki-bridge deposit sen
 deposit and stops once it is confirmed; the deposit relayer finalizes it.
 `ackinacki-bridge withdraw send` makes each burn; daemon-withdraw-live finds both, proves them
 and pays them out with withdrawByProof. Then the CLI proves each transfer again —
-`deposit proof --tx-hash`, `withdraw proof --burn-tx` — and finds it finalized or paid when it
+`deposit proof --tx-hash`, `withdraw proof --tx-hash` — and finds it finalized or paid when it
 sends: success, already_finalized and already_paid.
 
 Nothing is accepted by hand. The one trusted input on the Acki Nacki side is the Sepolia
@@ -638,7 +638,7 @@ def test_72a_withdrawal_pulled_from_aave(arb, ctx):
 
 
 def test_73_withdraw_proofs_find_them_paid(run, ctx):
-    """`withdraw proof --burn-tx` of each burn `withdraw send` made, once daemon-withdraw-live paid both:
+    """`withdraw proof --tx-hash` of each burn `withdraw send` made, once daemon-withdraw-live paid both:
     the CLI builds the Circuit 4 proof, finds the burn paid out when it sends and ends in
     success, submit.status already_paid."""
     burns = {"usdc": ctx["usdc_burn_tx"], "nackl": ctx["nackl_burn_tx"]}

@@ -155,7 +155,7 @@ pub struct WithdrawCmd {
 pub enum WithdrawStep {
     /// Burn on Acki Nacki and capture the bridge's WithdrawalInitiated:
     /// nothing is proven or sent to the EVM chain. Finish it with
-    /// `withdraw proof --burn-tx <the burn's AN transaction>`.
+    /// `withdraw proof --tx-hash <the burn's AN transaction>`.
     Send(WithdrawFlags),
     /// Prove a burn already on Acki Nacki and send withdrawByProof. A burn
     /// the bridge has paid out meanwhile (a relayer, say) ends in success,
@@ -244,7 +244,7 @@ pub struct WithdrawProofFlags {
     /// The burn: the hash of the multisig's transaction on Acki Nacki that
     /// sent `initiateWithdrawal` to the bridge (64 hex, `0x` optional).
     #[arg(long, value_name = "HASH")]
-    pub burn_tx: String,
+    pub tx_hash: String,
 
     /// The token the burn withdrew; a burn of another token is refused.
     #[arg(long, value_enum)]
@@ -397,7 +397,7 @@ pub struct WithdrawArgs {
 #[derive(Debug, Clone)]
 pub struct WithdrawProofArgs {
     /// The burn's Acki Nacki transaction, 64 lower-case hex digits.
-    pub burn_tx: String,
+    pub tx_hash: String,
     /// The ECC currency id of `--token`.
     pub token_id: u32,
     pub prove: ProveArgs,
@@ -481,19 +481,19 @@ impl WithdrawFlags {
 }
 
 impl WithdrawProofFlags {
-    /// The flags past clap; `--burn-tx` normalised to 64 lower-case hex.
+    /// The flags past clap; `--tx-hash` normalised to 64 lower-case hex.
     pub fn into_args(self) -> CliResult<WithdrawProofArgs> {
-        let raw = self.burn_tx.trim();
+        let raw = self.tx_hash.trim();
         let hex = raw.strip_prefix("0x").unwrap_or(raw);
         if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(CliError::ArgInvalid {
-                flag: "burn-tx",
+                flag: "tx-hash",
                 expected: "the burn's Acki Nacki transaction hash, 64 hex digits".into(),
                 got: redact(raw),
             });
         }
         Ok(WithdrawProofArgs {
-            burn_tx: hex.to_ascii_lowercase(),
+            tx_hash: hex.to_ascii_lowercase(),
             token_id: self.token.ecc_id(),
             prove: self.prove.into_args()?,
         })

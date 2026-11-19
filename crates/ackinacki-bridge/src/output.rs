@@ -129,7 +129,7 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
             &format!(
                 "\nwithdraw sent:\n\x20 amount:       {} {unit}\n\x20 AN tx:        {}\n\x20 msg \
                  id:       {}\n\x20 block:        seq={} id={}\n\x20 next:         \
-                 ackinacki-bridge withdraw proof --burn-tx {} --token {}\n",
+                 ackinacki-bridge withdraw proof --tx-hash {} --token {}\n",
                 summary.burn.amount,
                 summary.burn.an_tx,
                 summary.capture.withdrawal_msg_id,

@@ -84,7 +84,7 @@ assigns it when the release is tagged.
   `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`, `NACKL_DELAY_THRESHOLD`).
 - `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` execute due NACKL payouts in
   `nextPayout` order and park a proof refused with `NacklMinterGone`.
-- `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --burn-tx <AN tx>
+- `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --tx-hash <AN tx>
   --token …` proves any burn and sends `withdrawByProof` (JSON `submit` is `null` after `send`).
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,

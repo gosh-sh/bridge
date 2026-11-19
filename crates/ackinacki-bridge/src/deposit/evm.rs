@@ -308,6 +308,16 @@ pub struct DepositEvent {
     pub an_account: B256,
 }
 
+/// The ERC-20 a bridge `Deposit` log names; `None` for any other log.
+pub fn deposit_log_token(log: &LogLite) -> Option<Address> {
+    if log.topics.first() != Some(&DEPOSIT_TOPIC0) {
+        return None;
+    }
+    IDeposit::Deposit::decode_raw_log(log.topics.iter().copied(), &log.data)
+        .ok()
+        .map(|ev| ev.token)
+}
+
 /// Decodes a bridge `Deposit` log; `None` for any other log.
 pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
     if log.topics.first() != Some(&DEPOSIT_TOPIC0) {
@@ -328,6 +338,26 @@ pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Add
         .call(bridge, IDeposit::usdcCall {}.abi_encode().into())
         .await?;
     Ok(IDeposit::usdcCall::abi_decode_returns(&out)?)
+}
+
+/// The ERC-20 the bridge lists under ECC id `token_id`; the zero address
+/// when it lists none.
+pub async fn read_token_of_id(
+    evm: &dyn EvmRead,
+    bridge: Address,
+    token_id: u32,
+) -> anyhow::Result<Address> {
+    let out = evm
+        .call(
+            bridge,
+            IDeposit::tokenInfoCall {
+                tokenId: token_id,
+            }
+            .abi_encode()
+            .into(),
+        )
+        .await?;
+    Ok(IDeposit::tokenInfoCall::abi_decode_returns(&out)?.token)
 }
 
 /// What the bridge says about one ERC-20.

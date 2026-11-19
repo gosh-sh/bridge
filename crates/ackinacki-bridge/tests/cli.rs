@@ -90,6 +90,8 @@ fn error_envelope(out: &Output) -> serde_json::Value {
 /// network.
 const BASE: &[&str] = &[
     "withdraw",
+    "--token",
+    "usdc",
     // `dapp_id::account_id`, both bare 64-hex: no `0x`, no workchain.
     "--from",
     "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a::3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
@@ -801,6 +803,8 @@ fn a_control_character_in_an_argument_does_not_reach_the_terminal() {
 fn deposit_refuses_an_unknown_network_before_the_network() {
     let out = run(&[
         "deposit",
+        "--token",
+        "usdc",
         "--network",
         "mainnet",
         "--amount",
@@ -822,6 +826,8 @@ fn deposit_tx_hash_needs_resume() {
 fn deposit_refuses_a_malformed_to_as_exit_2() {
     let out = run(&[
         "deposit",
+        "--token",
+        "usdc",
         "--network",
         "sepolia",
         "--amount",
@@ -879,6 +885,8 @@ fn deposit_without_home_refuses_to_default_its_directories() {
     let to = format!("{}::{}", "0".repeat(64), "a3".repeat(32));
     let out = run(&[
         "deposit",
+        "--token",
+        "usdc",
         "--network",
         "sepolia",
         "--amount",

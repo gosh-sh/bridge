@@ -18,7 +18,7 @@
 #   export BURNER_PRIVATE_KEY=0x…                        # your own key
 #   export BRIDGE_CONFIG=./config/bridge_config          # symlink → .shellnet
 #   ../bridge-prover-libraries/target/release/ackinacki-bridge withdraw \
-#       --from … --from-keys … --to … --to-chain 11155111 --amount 1.000000
+#       --token usdc --from … --from-keys … --to … --to-chain 11155111 --amount 1.000000
 #
 # Switching networks is a one-liner:
 #   export BRIDGE_CONFIG=./config/bridge_config.local

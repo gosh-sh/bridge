@@ -45,11 +45,11 @@ use bridge_relayer_daemon::{
 use tracing::{info, warn};
 
 use crate::{
-    args::{self, FromAddress, ToAddress, UsdcAmount, WithdrawArgs},
+    args::{self, FromAddress, ToAddress, UsdcAmount, WithdrawArgs, WithdrawProofArgs},
     burn,
     errors::{CliError, CliResult},
     idempotency::{self, Status},
-    preflight,
+    preflight::{self, ProverArtifacts},
     resurrect::{covering_bundle_seq_no, stride_for, wait_for_coverage},
 };
 
@@ -75,15 +75,24 @@ const COVERAGE_WAIT: Duration = Duration::from_secs(120 * 60);
 /// How often stage 4b asks whether the anchor covers the burn block.
 const COVERAGE_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Which part of a withdrawal [`run`] executes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    /// `withdraw`: the burn, its proof and withdrawByProof.
+    Whole,
+    /// `withdraw send`: the burn and the capture of its event.
+    Send,
+}
+
 /// Terminal success record — the one thing `main` prints (human or JSON).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WithdrawSuccess {
     pub burn: BurnSummary,
     pub capture: CaptureSummary,
-    /// `None` when the bridge had paid the withdrawal out before this run
-    /// proved it: there was nothing left to prove.
+    /// `None` for `withdraw send`, which proves nothing.
     pub proof: Option<ProofSummary>,
-    pub submit: SubmitSummary,
+    /// `None` for `withdraw send`, which sends nothing to the EVM chain.
+    pub submit: Option<SubmitSummary>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -91,7 +100,8 @@ pub struct WithdrawSuccess {
 pub struct BurnSummary {
     pub token_id: u32,
     pub an_tx: String,
-    pub bounce: bool,
+    /// `None` for `withdraw proof`: the burn was sent elsewhere.
+    pub bounce: Option<bool>,
     pub amount: String,
 }
 
@@ -138,10 +148,11 @@ pub enum SubmitStatus {
     DryRunOk,
     Confirmed,
     Queued,
-    /// The bridge has paid this withdrawal out, and not by a receipt this
-    /// run saw: the relayer daemon, an earlier run, another operator, or a
-    /// transaction of this run whose receipt never came. The USDC is on the
-    /// recipient; a success, like `Confirmed`.
+    /// The bridge has accepted a proof of this withdrawal, and not by a
+    /// receipt this run saw: the relayer daemon, an earlier run, another
+    /// operator, or a transaction of this run whose receipt never came. USDC
+    /// is on the recipient; NACKL is minted, or queued until
+    /// `executeNacklPayout` mints it. A success, like `Confirmed`.
     AlreadyPaid,
 }
 
@@ -220,6 +231,173 @@ impl WhatStageOneFound {
     }
 }
 
+/// `withdraw proof`: prove a burn already on Acki Nacki and send
+/// withdrawByProof. The burn is the one `--tx-hash` sent; everything the
+/// proof binds — token, amount, recipient, destination chain and bridge —
+/// is read from its WithdrawalInitiated, and only `--token` is compared with
+/// it. No idempotency record is read or written: a second proof of the same
+/// burn is refused by the bridge's nullifier, and that refusal of a burn
+/// paid out is success, `already_paid`.
+pub async fn run_proof(args: WithdrawProofArgs) -> CliResult<WithdrawSuccess> {
+    let an_tx_hash = args.tx_hash.clone();
+    let prove = &args.prove;
+    let resume = ResumeNote::proof(&an_tx_hash, args.token_id);
+    for (flag, path) in [
+        ("aggregator-dir", prove.aggregator_dir.as_deref()),
+        ("verifiers-dir", prove.verifiers_dir.as_deref()),
+        ("params-dir", prove.params_dir.as_deref()),
+        ("work-dir", prove.work_dir.as_deref()),
+        ("snark-dir", Some(prove.snark_dir.as_path())),
+        ("pk-cache-dir", prove.pk_cache_dir.as_deref()),
+        ("prover-out-dir", prove.prover_out_dir.as_deref()),
+    ] {
+        if let Some(c) = path.and_then(args::first_control_character) {
+            return Err(CliError::ArgInvalid {
+                flag,
+                expected: "a path with no control characters — printed into a refusal, one forges \
+                           lines the CLI never wrote"
+                    .into(),
+                got: args::redact(&format!(
+                    "{} (contains {})",
+                    path.unwrap_or(Path::new("")).to_string_lossy(),
+                    c.escape_debug(),
+                )),
+            });
+        }
+    }
+    let anchor_mode = parse_anchor_layer(&prove.anchor_layer)?;
+    let plumbing = prove.require_submit_plumbing()?;
+    preflight::parse_eth_signer(&plumbing.eth_private_key)?;
+    info!("burner key ok");
+
+    // ---- Capture the burn's WithdrawalInitiated ----
+    let an_bridge =
+        preflight::resolve_an_bridge(&prove.gql_endpoint, &prove.usdc_bridge_account).await?;
+    let (bridge_dapp_id_hex, bridge_account_id_hex) = split_extended(&an_bridge.extended)
+        .ok_or_else(|| CliError::Preflight {
+            reason: format!(
+                "internal: the Acki Nacki bridge {} is not `dapp_id::account_id`",
+                an_bridge.extended
+            ),
+            source: None,
+        })?;
+    info!(an_tx = %an_tx_hash, "capture WithdrawalInitiated event (targeted by --tx-hash)");
+    let gql = bridge_gql_fetcher::gql_client::create_client(&prove.gql_endpoint).map_err(|e| {
+        CliError::Preflight {
+            reason: format!("failed to build GqlClient for {}: {e}", prove.gql_endpoint),
+            source: Some(e),
+        }
+    })?;
+    let captured = bridge_relayer_daemon::withdraw_e2e::capture_targeted_withdrawal_event(
+        &gql,
+        &an_tx_hash,
+        &an_bridge.legacy,
+        DEFAULT_EVENT_DST,
+        &bridge_account_id_hex,
+        &bridge_dapp_id_hex,
+        EVENT_WAIT,
+        EVENT_POLL_INTERVAL,
+    )
+    .await
+    .map_err(|e| capture_timed_out(&an_tx_hash, &e, &resume))?;
+    let burn = crate::event_identity::read_burn(&captured.event_boc_b64, &an_tx_hash)?;
+    if burn.token_id != args.token_id {
+        return Err(CliError::ArgInvalid {
+            flag: "token",
+            expected: format!(
+                "the token the burn withdrew, {}",
+                args::Token::from_ecc_id(burn.token_id).map_or_else(
+                    || format!("ECC[{}]", burn.token_id),
+                    |t| t.name().to_string()
+                )
+            ),
+            got: args::redact(args::Token::from_ecc_id(args.token_id).map_or("?", |t| t.name())),
+        });
+    }
+    crate::event_identity::check_event_bridge(
+        &captured.event_boc_b64,
+        prove.bridge_address,
+        &an_tx_hash,
+    )?;
+    info!(
+        msg_id = %captured.message_id,
+        block_seq_no = captured.block_seq_no,
+        amount = burn.amount,
+        recipient = %burn.recipient,
+        chain_id = burn.chain_id,
+        "captured WithdrawalInitiated event",
+    );
+
+    // ---- The EVM side and the prover, as a whole run checks them ----
+    preflight::check_destination_chain(&prove.rpc_url, burn.chain_id).await?;
+    let amount = UsdcAmount(burn.amount);
+    crate::preflight::check_bridge_deploy_for_token(
+        &prove.rpc_url,
+        prove.bridge_address,
+        prove.verifiers_dir.as_deref(),
+        crate::preflight::withdrawal_identity_frs(&an_bridge.dapp_id, &an_bridge.account_id),
+        &amount,
+        args.token_id,
+        None,
+    )
+    .await?;
+    crate::preflight::check_window_scan(
+        &prove.rpc_url,
+        prove.bridge_address,
+        prove.log_scan_config(),
+    )
+    .await?;
+    let artifacts = crate::preflight::check_prover_artifacts(
+        &plumbing,
+        &prove.snark_dir,
+        prove.pk_cache_dir.as_deref(),
+        prove.allow_verifier_drift,
+    )
+    .await?;
+    let decimals = if args.token_id == crate::burn::USDC_ECC_ID {
+        6
+    } else {
+        preflight::withdrawal_asset(
+            &prove.rpc_url,
+            prove.bridge_address,
+            burn.chain_id,
+            args.token_id,
+        )
+        .await?
+        .decimals
+    };
+
+    let proving = Proving {
+        prove,
+        anchor_mode,
+        bridge_dapp_id_hex,
+        bridge_account_id_hex,
+        plumbing: &plumbing,
+        artifacts: &artifacts,
+        chain_id: burn.chain_id,
+        burn: BurnSummary {
+            token_id: args.token_id,
+            an_tx: an_tx_hash.clone(),
+            bounce: None,
+            amount: amount.display_with_decimals(decimals),
+        },
+        resume: &resume,
+    };
+    // No record and no lock: the slot stays empty, and nothing is written.
+    let slot = idempotency::LockSlot::empty();
+    let held = slot.hold();
+    let proved = prove_and_submit(
+        proving,
+        captured,
+        Path::new("/nonexistent/withdraw-proof-keeps-no-record"),
+        None,
+        &held,
+    )
+    .await;
+    drop(held);
+    proved
+}
+
 /// Full pipeline. `main` handles arg parsing, tracing setup, exit-code
 /// mapping, and JSON vs. human output — this fn just runs the ballet.
 ///
@@ -227,11 +405,9 @@ impl WhatStageOneFound {
 /// `--non-interactive` without `--yes` is refused upstream in `main` (by a
 /// policy check, not by clap — the two flags combine freely), so
 /// the orchestrator only needs the "may I skip the prompt?" bit here.
-pub async fn run(
-    args: WithdrawArgs,
-    dry_run: bool,
-    skip_prompt: bool,
-) -> CliResult<WithdrawSuccess> {
+pub async fn run(args: WithdrawArgs, part: Part, skip_prompt: bool) -> CliResult<WithdrawSuccess> {
+    let dry_run = args.dry_run;
+    let send_only = matches!(part, Part::Send);
     // ---- Arg validation (parses raw strings into typed forms) ----
     let from = args::parse_from(&args.from)?;
     let to = args::parse_to(&args.to, args.to_chain)?;
@@ -240,8 +416,8 @@ pub async fn run(
     } else {
         Some(
             preflight::withdrawal_asset(
-                &args.rpc_url,
-                args.bridge_address,
+                &args.prove.rpc_url,
+                args.prove.bridge_address,
                 to.chain_id,
                 args.token_id,
             )
@@ -365,13 +541,13 @@ pub async fn run(
     // `display()` in the crate open.
     for (flag, path) in [
         ("from-keys", Some(args.from_keys.as_path())),
-        ("aggregator-dir", args.aggregator_dir.as_deref()),
-        ("verifiers-dir", args.verifiers_dir.as_deref()),
-        ("params-dir", args.params_dir.as_deref()),
-        ("work-dir", args.work_dir.as_deref()),
-        ("snark-dir", Some(args.snark_dir.as_path())),
-        ("pk-cache-dir", args.pk_cache_dir.as_deref()),
-        ("prover-out-dir", args.prover_out_dir.as_deref()),
+        ("aggregator-dir", args.prove.aggregator_dir.as_deref()),
+        ("verifiers-dir", args.prove.verifiers_dir.as_deref()),
+        ("params-dir", args.prove.params_dir.as_deref()),
+        ("work-dir", args.prove.work_dir.as_deref()),
+        ("snark-dir", Some(args.prove.snark_dir.as_path())),
+        ("pk-cache-dir", args.prove.pk_cache_dir.as_deref()),
+        ("prover-out-dir", args.prove.prover_out_dir.as_deref()),
     ] {
         if let Some(c) = path.and_then(args::first_control_character) {
             let refusal = CliError::ArgInvalid {
@@ -389,7 +565,7 @@ pub async fn run(
         }
     }
 
-    let anchor_mode = parse_anchor_layer(&args.anchor_layer)
+    let anchor_mode = parse_anchor_layer(&args.prove.anchor_layer)
         .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 
     // Submit-only plumbing, resolved at stage 1 for a real run so that a
@@ -412,11 +588,12 @@ pub async fn run(
     // delete that record"; without them it exited 2 and never mentioned
     // the record at all, and a wrapper reading the code took the
     // withdrawal for untouched.
-    let plumbing = if dry_run {
+    let plumbing = if dry_run || send_only {
         None
     } else {
         Some(
-            args.require_submit_plumbing()
+            args.prove
+                .require_submit_plumbing()
                 .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?,
         )
     };
@@ -463,10 +640,10 @@ pub async fn run(
         &from,
         &args.from_keys,
         &to,
-        args.bridge_address,
+        args.prove.bridge_address,
         &amount,
-        &args.gql_endpoint,
-        &args.usdc_bridge_account,
+        &args.prove.gql_endpoint,
+        &args.prove.usdc_bridge_account,
         preflight::BalanceCheck::from_burn_sent(burn_already_sent),
         args.token_id,
     )
@@ -482,7 +659,7 @@ pub async fn run(
     // key, and "the RPC is not the chain you named" / "there is nothing at
     // that address" are exactly the irreversible mistakes a preflight
     // exists to catch.
-    preflight::check_destination_chain(&args.rpc_url, to.chain_id)
+    preflight::check_destination_chain(&args.prove.rpc_url, to.chain_id)
         .await
         .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(chain_id = to.chain_id, "destination chain ok");
@@ -501,14 +678,14 @@ pub async fn run(
         &preflight.bridge_account_id,
     );
     crate::preflight::check_bridge_deploy_for_token(
-        &args.rpc_url,
-        args.bridge_address,
+        &args.prove.rpc_url,
+        args.prove.bridge_address,
         // Read from `args`, NOT from `plumbing`: `plumbing` is `None` for
         // every dry run (`let plumbing = if dry_run { None }`), so sourcing
         // it there would make the "pass --verifiers-dir to a dry run"
         // advice unreachable — the flag would be accepted and silently
         // ignored on the one run that has time to use it.
-        args.verifiers_dir.as_deref(),
+        args.prove.verifiers_dir.as_deref(),
         expected_identity,
         &amount,
         args.token_id,
@@ -516,14 +693,18 @@ pub async fn run(
     )
     .await
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
-    info!(bridge = %args.bridge_address, "bridge deploy ok");
+    info!(bridge = %args.prove.bridge_address, "bridge deploy ok");
 
     // The window-heights read stage 4b performs after the burn, performed
     // now: a wrong BRIDGE_DEPLOY_BLOCK, an eth_getLogs span the RPC rejects
     // or an RPC without log history refuses here, before any money moves.
-    crate::preflight::check_window_scan(&args.rpc_url, args.bridge_address, args.log_scan_config())
-        .await
-        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
+    crate::preflight::check_window_scan(
+        &args.prove.rpc_url,
+        args.prove.bridge_address,
+        args.prove.log_scan_config(),
+    )
+    .await
+    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 
     // Signer + prover artifacts — real runs only (a dry-run has no
     // plumbing, never submits and never proves).
@@ -541,9 +722,9 @@ pub async fn run(
         prover_artifacts = Some(
             crate::preflight::check_prover_artifacts(
                 p,
-                &args.snark_dir,
-                args.pk_cache_dir.as_deref(),
-                args.allow_verifier_drift,
+                &args.prove.snark_dir,
+                args.prove.pk_cache_dir.as_deref(),
+                args.prove.allow_verifier_drift,
             )
             .await
             .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?,
@@ -602,7 +783,7 @@ pub async fn run(
         // keeping a byte-identical copy that mapped the failure to exit 10
         // — "the USDC has left the source multisig regardless", about a
         // run that had not composed a message yet.
-        let context = preflight::build_client_context(&args.gql_endpoint)
+        let context = preflight::build_client_context(&args.prove.gql_endpoint)
             .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 
         // Resume: a prior record carrying an an_tx_hash means the burn was
@@ -821,7 +1002,7 @@ pub async fn run(
             burn: BurnSummary {
                 token_id: args.token_id,
                 an_tx: "<dry-run>".into(),
-                bounce: true,
+                bounce: Some(true),
                 amount: amount.display_with_decimals(decimals),
             },
             capture: CaptureSummary {
@@ -835,13 +1016,13 @@ pub async fn run(
                 calldata_bytes: 0,
                 pi_count: 0,
             }),
-            submit: SubmitSummary {
+            submit: Some(SubmitSummary {
                 eth_tx: None,
                 status: SubmitStatus::DryRunOk,
                 payout_id: None,
                 ready_at: None,
                 nullifier: None,
-            },
+            }),
         });
     }
 
@@ -862,28 +1043,6 @@ pub async fn run(
             source: None,
         })?;
     let resume = ResumeNote::new(&an_tx_hash, &record_path);
-    // Past the dry-run return, so `plumbing` is `Some` by construction —
-    // it is resolved unconditionally for every non-dry run above.
-    //
-    // And an `ok_or_else`, not an `expect`. This was the last panic left
-    // in production and it sat AFTER the burn: an invariant that holds
-    // today, three hundred lines from where it is established, and if a
-    // future edit ever breaks it the run aborts with exit 101 and a
-    // message no consumer parses, about a withdrawal whose USDC has
-    // already left the multisig. The same reasoning as the line below —
-    // the STAGE picks the code, not the kind of failure — and here the
-    // stage is past the send.
-    let plumbing_ref = plumbing.as_ref().ok_or_else(|| {
-        proof_failed_after_burn(
-            format!(
-                "internal: submit plumbing is missing on a non-dry run. The AN burn {an_tx_hash} \
-                 IS on the wire — reconcile it before re-running.",
-            ),
-            None,
-            &resume,
-        )
-    })?;
-
     // ---- 4. Capture WithdrawalInitiated ----
     // Split the "dapp_id::account_id" the preflight resolved for USDCBridge
     // back into its two halves — the capture helper wants them separately.
@@ -909,13 +1068,17 @@ pub async fn run(
         })?;
 
     info!("stage 4/6: capture WithdrawalInitiated event (targeted by an_tx_hash)");
-    let gql = bridge_gql_fetcher::gql_client::create_client(&args.gql_endpoint).map_err(|e| {
-        proof_failed_after_burn(
-            format!("failed to build GqlClient for {}: {e}", args.gql_endpoint),
-            Some(e),
-            &resume,
-        )
-    })?;
+    let gql =
+        bridge_gql_fetcher::gql_client::create_client(&args.prove.gql_endpoint).map_err(|e| {
+            proof_failed_after_burn(
+                format!(
+                    "failed to build GqlClient for {}: {e}",
+                    args.prove.gql_endpoint
+                ),
+                Some(e),
+                &resume,
+            )
+        })?;
     // Multi-user-safe capture: chain-walk from the multisig tx hash we
     // just broadcast to the ExtOut USDCBridge emits when it processes the
     // internal message. This never picks up somebody else's concurrent
@@ -956,7 +1119,7 @@ pub async fn run(
     .map_err(|e| with_resume_note(e, &resume))?;
     crate::event_identity::check_event_bridge(
         &captured.event_boc_b64,
-        args.bridge_address,
+        args.prove.bridge_address,
         &an_tx_hash,
     )
     .map_err(|e| with_resume_note(e, &resume))?;
@@ -977,9 +1140,114 @@ pub async fn run(
         })?;
     }
 
+    if send_only {
+        info!(an_tx = %an_tx_hash, "withdraw send: the burn is captured; nothing is proven");
+        return Ok(WithdrawSuccess {
+            burn: BurnSummary {
+                token_id: args.token_id,
+                an_tx: an_tx_hash,
+                bounce: Some(bounce),
+                amount: amount.display_with_decimals(decimals),
+            },
+            capture: CaptureSummary {
+                withdrawal_msg_id: captured.message_id,
+                block_seq_no: captured.block_seq_no,
+                block_id: captured.block_id_hex,
+                envelope_hash: captured.envelope_hash_hex,
+            },
+            proof: None,
+            submit: None,
+        });
+    }
+
+    // Past the dry-run and send-only returns, so `plumbing` is `Some` by
+    // construction — it is resolved for every run that proves.
+    //
+    // And an `ok_or_else`, not an `expect`. This was the last panic left
+    // in production and it sat AFTER the burn: an invariant that holds
+    // today, three hundred lines from where it is established, and if a
+    // future edit ever breaks it the run aborts with exit 101 and a
+    // message no consumer parses, about a withdrawal whose USDC has
+    // already left the multisig. The same reasoning as the line below —
+    // the STAGE picks the code, not the kind of failure — and here the
+    // stage is past the send.
+    let plumbing_ref = plumbing.as_ref().ok_or_else(|| {
+        proof_failed_after_burn(
+            format!(
+                "internal: submit plumbing is missing on a non-dry run. The AN burn {an_tx_hash} \
+                 IS on the wire — reconcile it before re-running.",
+            ),
+            None,
+            &resume,
+        )
+    })?;
+
+    // Preflight checked the prover artifacts on every run that proves, so
+    // their absence is an internal invariant broken, after the burn: exit
+    // 12, like the plumbing above.
+    let artifacts = prover_artifacts.as_ref().ok_or_else(|| {
+        proof_failed_after_burn(
+            format!(
+                "internal: preflight left no prover artifacts on a run that proves. The AN burn \
+                 {an_tx_hash} IS on the wire — reconcile it before re-running.",
+            ),
+            None,
+            &resume,
+        )
+    })?;
+    let proving = Proving {
+        prove: &args.prove,
+        anchor_mode,
+        bridge_dapp_id_hex,
+        bridge_account_id_hex,
+        plumbing: plumbing_ref,
+        artifacts,
+        chain_id: to.chain_id,
+        burn: BurnSummary {
+            token_id: args.token_id,
+            an_tx: an_tx_hash,
+            bounce: Some(bounce),
+            amount: amount.display_with_decimals(decimals),
+        },
+        resume: &resume,
+    };
+    prove_and_submit(
+        proving,
+        captured,
+        &state_dir,
+        record.as_mut(),
+        &_lock_held_to_the_end,
+    )
+    .await
+}
+
+/// What stages 4b-6 take from the run that captured the burn: a whole
+/// `withdraw` or a `withdraw proof`.
+struct Proving<'a> {
+    prove: &'a args::ProveArgs,
+    anchor_mode: AnchorLayerMode,
+    bridge_dapp_id_hex: String,
+    bridge_account_id_hex: String,
+    plumbing: &'a args::SubmitPlumbing,
+    artifacts: &'a ProverArtifacts,
+    chain_id: u64,
+    burn: BurnSummary,
+    resume: &'a ResumeNote,
+}
+
+/// Stages 4b-6: wait for the bundle that covers the burn, prove it and send
+/// withdrawByProof. `record` is the burn's idempotency record, kept in
+/// `state_dir` under `held`; a `withdraw proof` has none.
+async fn prove_and_submit(
+    c: Proving<'_>,
+    captured: bridge_relayer_daemon::withdraw_e2e::CapturedEvent,
+    state_dir: &Path,
+    mut record: Option<&mut idempotency::Record>,
+    held: &idempotency::LockHold<'_>,
+) -> CliResult<WithdrawSuccess> {
     // ---- 4b. Resurrect BridgeState from contract; wait for coverage ----
     info!("stage 4b/6: resurrect BridgeState from AckiNackiBridge + wait for covering bundle");
-    let stride = stride_for(anchor_mode);
+    let stride = stride_for(c.anchor_mode);
     let target_covering_seq_no = covering_bundle_seq_no(captured.block_seq_no, stride);
     info!(
         burn_seq_no = captured.block_seq_no,
@@ -987,23 +1255,27 @@ pub async fn run(
         target_covering_seq_no,
         "waiting for on-chain coverage",
     );
-    let ro_provider = ProviderBuilder::new().connect_http(args.rpc_url.parse().map_err(|e| {
-        CliError::EthSubmitFailed {
-            reason: format!("--rpc-url is not a valid URL: {e}"),
-            source: None,
-        }
-    })?);
-    let ro_bridge_for_wait =
-        EthBridgeClient::with_scan_config(args.bridge_address, ro_provider, args.log_scan_config());
+    let ro_provider =
+        ProviderBuilder::new().connect_http(c.prove.rpc_url.parse().map_err(|e| {
+            CliError::EthSubmitFailed {
+                reason: format!("--rpc-url is not a valid URL: {e}"),
+                source: None,
+            }
+        })?);
+    let ro_bridge_for_wait = EthBridgeClient::with_scan_config(
+        c.prove.bridge_address,
+        ro_provider,
+        c.prove.log_scan_config(),
+    );
     let bridge_state = wait_for_coverage(
         &ro_bridge_for_wait,
-        anchor_mode,
+        c.anchor_mode,
         target_covering_seq_no,
         COVERAGE_POLL_INTERVAL,
         COVERAGE_WAIT,
     )
     .await
-    .map_err(|e| proof_failed_after_burn(format!("wait_for_coverage: {e}"), Some(e), &resume))?;
+    .map_err(|e| proof_failed_after_burn(format!("wait_for_coverage: {e}"), Some(e), c.resume))?;
 
     // ---- 5. Prove ----
     info!("stage 5/6: Circuit-4 SHPLONK proof (in-process C4 → aggregator subprocess)");
@@ -1014,24 +1286,24 @@ pub async fn run(
     // that make the intent clear if anything ever accidentally reads
     // them.
     let mut e2e_cfg = WithdrawE2EConfig {
-        gql_endpoint: args.gql_endpoint.clone(),
+        gql_endpoint: c.prove.gql_endpoint.clone(),
         prover_state_path: PathBuf::new(),
         window_size: 0,
-        bridge_account_id_hex,
-        bridge_dapp_id_hex,
+        bridge_account_id_hex: c.bridge_account_id_hex,
+        bridge_dapp_id_hex: c.bridge_dapp_id_hex,
         event_dst_filter: DEFAULT_EVENT_DST.to_string(),
         event_wait: EVENT_WAIT,
         event_poll_interval: EVENT_POLL_INTERVAL,
-        anchor_mode,
-        i_know_the_wait: args.i_know_the_wait,
-        work_dir: plumbing_ref.work_dir.clone(),
-        aggregate_proof_bin: crate::preflight::aggregate_proof_bin(&plumbing_ref.aggregator_dir),
-        verifiers_dir: plumbing_ref.verifiers_dir.clone(),
-        params_dir: plumbing_ref.params_dir.clone(),
-        snark_dir: args.snark_dir.clone(),
-        pk_cache_dir: args.pk_cache_dir.clone(),
-        prover_out_dir: args.prover_out_dir.clone(),
-        prover_timeout: Duration::from_secs(args.prover_timeout_s),
+        anchor_mode: c.anchor_mode,
+        i_know_the_wait: c.prove.i_know_the_wait,
+        work_dir: c.plumbing.work_dir.clone(),
+        aggregate_proof_bin: crate::preflight::aggregate_proof_bin(&c.plumbing.aggregator_dir),
+        verifiers_dir: c.plumbing.verifiers_dir.clone(),
+        params_dir: c.plumbing.params_dir.clone(),
+        snark_dir: c.prove.snark_dir.clone(),
+        pk_cache_dir: c.prove.pk_cache_dir.clone(),
+        prover_out_dir: c.prove.prover_out_dir.clone(),
+        prover_timeout: Duration::from_secs(c.prove.prover_timeout_s),
         // Set under the prove lock, below.
         slot_report: None,
         // The event's own block seq_no, not a constant.
@@ -1053,9 +1325,9 @@ pub async fn run(
     };
     // One proof per snark directory: its intermediate files have fixed
     // names. Held for stage 5 only, and released before the submit.
-    let prove_lock = crate::prove_lock::take(&args.snark_dir)
+    let prove_lock = crate::prove_lock::take(&c.prove.snark_dir)
         .await
-        .map_err(|e| with_resume_note(e, &resume))?;
+        .map_err(|e| with_resume_note(e, c.resume))?;
     // A run that queued behind another proof holds a snapshot as old as the
     // wait, and the wait has no bound: an anchor can leave the window
     // meanwhile, and the proof would bind to it anyway. Read the bridge
@@ -1064,7 +1336,7 @@ pub async fn run(
         info!("waited for the prove lock; reading the bridge state again before proving");
         wait_for_coverage(
             &ro_bridge_for_wait,
-            anchor_mode,
+            c.anchor_mode,
             target_covering_seq_no,
             COVERAGE_POLL_INTERVAL,
             COVERAGE_WAIT,
@@ -1074,85 +1346,45 @@ pub async fn run(
             proof_failed_after_burn(
                 format!("wait_for_coverage after the prove lock: {e}"),
                 Some(e),
-                &resume,
+                c.resume,
             )
         })?
     } else {
         bridge_state
     };
-    // Paid already? The relayer daemon pays every burn to its bridge and
-    // usually gets there first; the proof would then be minutes of work
-    // for a submit the bridge refuses. The nullifier follows from the
-    // enriched witness without proving. A failed read proves anyway: the
-    // dry run below asks again.
+    // The proof is built whether or not the bridge has paid this burn out
+    // meanwhile: the send is where a payout by someone else (the relayer
+    // daemon, say) is found, and it ends the run in success, `already_paid`.
     let enriched = enrich_captured(&e2e_cfg, &bridge_state, &captured)
         .await
         .map_err(|e| {
-            proof_failed_after_burn(format!("enrich the witness: {e:#}"), Some(e), &resume)
+            proof_failed_after_burn(format!("enrich the witness: {e:#}"), Some(e), c.resume)
         })?;
     let nullifier = nullifier_of(&enriched.witness).map_err(|e| {
         proof_failed_after_burn(
             format!("the withdrawal's nullifier: {e:#}"),
             Some(e),
-            &resume,
+            c.resume,
         )
     })?;
-    match ro_bridge_for_wait.is_nullifier_used(nullifier).await {
-        Ok(true) => {
-            info!(%nullifier, "the bridge has already paid this withdrawal out; nothing to prove");
-            mark_already_paid(&state_dir, record.as_mut(), &_lock_held_to_the_end)?;
-            return Ok(WithdrawSuccess {
-                burn: BurnSummary {
-                    token_id: args.token_id,
-                    an_tx: an_tx_hash,
-                    bounce,
-                    amount: amount.display_with_decimals(decimals),
-                },
-                capture: CaptureSummary {
-                    withdrawal_msg_id: captured.message_id,
-                    block_seq_no: captured.block_seq_no,
-                    block_id: captured.block_id_hex,
-                    envelope_hash: captured.envelope_hash_hex,
-                },
-                proof: None,
-                submit: already_paid(nullifier),
-            });
-        },
-        Ok(false) => {},
-        Err(e) => warn!(error = %e, "isNullifierUsed failed; proving anyway"),
-    }
     // Right before the proof reads the key. Stage 1 verified it; the burn,
     // the anchor wait and the wait for the prove lock — which has no bound
     // — sit between then and now, and nothing else re-checks:
     // `keys_cached()` asks only whether the file EXISTS. Cheap enough to do
     // unconditionally, and the refusal it produces is strictly better than
     // proving against an unvouched-for key and being rejected on submit.
-    //
-    // Preflight checked the prover artifacts on every run that proves — a
-    // dry run returned above — so their absence is an internal invariant
-    // broken, after the burn: exit 12, like the plumbing above.
-    let artifacts = prover_artifacts.as_ref().ok_or_else(|| {
-        proof_failed_after_burn(
-            format!(
-                "internal: preflight left no prover artifacts on a run that proves. The AN burn \
-                 {an_tx_hash} IS on the wire — reconcile it before re-running.",
-            ),
-            None,
-            &resume,
-        )
-    })?;
-    crate::preflight::recheck_proving_key(artifacts.pk_fingerprint.as_ref())
-        .map_err(|e| with_resume_note(e, &resume))?;
+    crate::preflight::recheck_proving_key(c.artifacts.pk_fingerprint.as_ref())
+        .map_err(|e| with_resume_note(e, c.resume))?;
     // The aggregator too, which preflight probed and hashed: its digest is
     // what the slot it uses is noted against.
     crate::preflight::recheck_aggregate_proof(
-        &artifacts.aggregate_proof_sha256,
-        &crate::preflight::aggregate_proof_bin(&plumbing_ref.aggregator_dir),
+        &c.artifacts.aggregate_proof_sha256,
+        &crate::preflight::aggregate_proof_bin(&c.plumbing.aggregator_dir),
     )
-    .map_err(|e| with_resume_note(e, &resume))?;
+    .map_err(|e| with_resume_note(e, c.resume))?;
     // The aggregator names the slot its key is in, in the snark directory
     // this run holds the lock on; what an earlier proof left there goes.
-    let slot_report = crate::aggregator_slot::fresh_report(&args.snark_dir);
+    let slot_report = crate::aggregator_slot::fresh_report(&c.prove.snark_dir);
     e2e_cfg.slot_report = slot_report.clone();
     let e2e = prove_enriched(&e2e_cfg, captured, enriched)
         .await
@@ -1160,7 +1392,7 @@ pub async fn run(
             proof_failed_after_burn(
                 format!("withdraw-e2e pipeline failed: {e}"),
                 Some(e),
-                &resume,
+                c.resume,
             )
         })?;
     // So that the next withdrawal's preflight reserves no room for the
@@ -1169,11 +1401,11 @@ pub async fn run(
     // lock goes: the next proof in this snark directory clears the report.
     crate::aggregator_slot::note_proof(
         &crate::preflight::effective_pk_cache_dir(
-            args.pk_cache_dir.as_deref(),
-            &plumbing_ref.params_dir,
+            c.prove.pk_cache_dir.as_deref(),
+            &c.plumbing.params_dir,
         ),
         slot_report.as_deref(),
-        artifacts.proof_inputs(&plumbing_ref.params_dir).as_ref(),
+        c.artifacts.proof_inputs(&c.plumbing.params_dir).as_ref(),
     );
     drop(prove_lock);
     let calldata_bytes = e2e.proof.proof_hex.len() / 2;
@@ -1187,11 +1419,11 @@ pub async fn run(
         self_verified = e2e.proof.self_verified,
         "capture + prove complete",
     );
-    if let Some(r) = record.as_mut() {
+    if let Some(r) = record.as_deref_mut() {
         r.status = Status::Proved;
         r.withdrawal_msg_id = Some(e2e.captured.message_id.clone());
         r.block_seq_no = Some(e2e.captured.block_seq_no);
-        idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+        idempotency::update(state_dir, r, held).map_err(|e| {
             e.after_send("the AN burn is on the wire and the Circuit-4 proof is complete")
         })?;
     }
@@ -1217,14 +1449,14 @@ pub async fn run(
     // treasury shortfall) before we spend gas.
     {
         let ro_provider =
-            ProviderBuilder::new().connect_http(args.rpc_url.parse().map_err(|e| {
+            ProviderBuilder::new().connect_http(c.prove.rpc_url.parse().map_err(|e| {
                 CliError::EthSubmitFailed {
                     reason: format!("--rpc-url is not a valid URL: {e}"),
                     source: None,
                 }
             })?);
         // Getters only; no window scan on this client.
-        let ro_bridge = EthBridgeClient::new(args.bridge_address, ro_provider);
+        let ro_bridge = EthBridgeClient::new(c.prove.bridge_address, ro_provider);
         let adapter =
             ro_bridge
                 .withdrawal_verifier()
@@ -1295,14 +1527,9 @@ pub async fn run(
                     });
                 }
                 info!(%nullifier, "eth dry-run: the bridge has already paid this withdrawal out");
-                mark_already_paid(&state_dir, record.as_mut(), &_lock_held_to_the_end)?;
+                mark_already_paid(state_dir, record.as_deref_mut(), held)?;
                 return Ok(WithdrawSuccess {
-                    burn: BurnSummary {
-                        token_id: args.token_id,
-                        an_tx: an_tx_hash,
-                        bounce,
-                        amount: amount.display_with_decimals(decimals),
-                    },
+                    burn: c.burn.clone(),
                     capture: CaptureSummary {
                         withdrawal_msg_id: e2e.captured.message_id,
                         block_seq_no: e2e.captured.block_seq_no,
@@ -1314,7 +1541,7 @@ pub async fn run(
                         calldata_bytes,
                         pi_count,
                     }),
-                    submit: already_paid(nullifier),
+                    submit: Some(already_paid(nullifier)),
                 });
             },
         }
@@ -1340,7 +1567,7 @@ pub async fn run(
     // The parse itself stays. It cannot fail — stage 1 parsed the same
     // string — and the point is what it costs WHEN THE IMPOSSIBLE
     // HAPPENS, which is the only thing an exit code is read for.
-    let signer = preflight::parse_eth_signer(&plumbing_ref.eth_private_key).map_err(|e| {
+    let signer = preflight::parse_eth_signer(&c.plumbing.eth_private_key).map_err(|e| {
         CliError::EthSubmitFailed {
             reason: format!(
                 "internal: --eth-private-key parsed in stage 1 and not in stage 6: {e}\n\x20 The \
@@ -1350,12 +1577,13 @@ pub async fn run(
             source: None,
         }
     })?;
-    let wallet = EthereumWallet::from(signer.with_chain_id(Some(to.chain_id)));
+    let wallet = EthereumWallet::from(signer.with_chain_id(Some(c.chain_id)));
     let provider =
         ProviderBuilder::new()
             .wallet(wallet)
             .connect_http(
-                args.rpc_url
+                c.prove
+                    .rpc_url
                     .parse()
                     .map_err(|e| CliError::EthSubmitFailed {
                         reason: format!("--rpc-url parse: {e}"),
@@ -1363,7 +1591,7 @@ pub async fn run(
                     })?,
             );
     // Dry run and submit only; no window scan on this client.
-    let bridge = EthBridgeClient::new(args.bridge_address, provider);
+    let bridge = EthBridgeClient::new(c.prove.bridge_address, provider);
 
     // NB: `Status::Submitted` is written only AFTER `submit_withdraw`
     // returns with an actual `tx_hash`. Writing it beforehand (as v1
@@ -1388,10 +1616,10 @@ pub async fn run(
             // tools and crash recovery can distinguish "we broadcast" from
             // "we saw the receipt". Both writes happen post-broadcast, so
             // the state file never over-claims.
-            if let Some(r) = record.as_mut() {
+            if let Some(r) = record.as_deref_mut() {
                 r.status = Status::Submitted;
                 r.eth_tx_hash = Some(tx.clone());
-                idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+                idempotency::update(state_dir, r, held).map_err(|e| {
                     e.after_send(&format!(
                         "withdrawByProof paid out on the EVM side as {tx} — the USDC has MOVED on \
                          both chains"
@@ -1413,10 +1641,10 @@ pub async fn run(
         } => {
             let tx = format!("{tx_hash:?}");
             info!(tx = %tx, %payout_id, ready_at, "withdrawByProof accepted; NACKL payout queued");
-            if let Some(r) = record.as_mut() {
+            if let Some(r) = record.as_deref_mut() {
                 r.status = Status::Submitted;
                 r.eth_tx_hash = Some(tx.clone());
-                idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+                idempotency::update(state_dir, r, held).map_err(|e| {
                     e.after_send(&format!(
                         "withdrawByProof was accepted on the EVM side as {tx} and its NACKL \
                          payout {payout_id} queued — the proof is spent"
@@ -1455,7 +1683,7 @@ pub async fn run(
             // `<dir>/proof_event_<seq>.json`, but nothing ever put that
             // path on the record and nothing ever read it back, so the
             // field is gone and re-proving is the only path there was.
-            if let Some(r) = record.as_mut() {
+            if let Some(r) = record.as_deref_mut() {
                 r.status = Status::Failed;
                 // Deliberately not propagated, and the only `update` in
                 // this file that is not. We are already returning
@@ -1471,7 +1699,7 @@ pub async fn run(
                 // would otherwise see exit 13, go to the record to find
                 // `Failed`, and find `Proved` with nothing anywhere
                 // explaining the difference.
-                if let Err(e) = idempotency::update(&state_dir, r, &_lock_held_to_the_end) {
+                if let Err(e) = idempotency::update(state_dir, r, held) {
                     warn!(
                         error = %e.after_send("the withdrawal reverted on chain"),
                         "could not mark the record failed after the revert; it stays at `proved`, \
@@ -1490,18 +1718,18 @@ pub async fn run(
         },
     };
 
-    if let Some(r) = record.as_mut() {
+    if let Some(r) = record {
         r.eth_tx_hash = submit.eth_tx.clone();
         if matches!(submit.status, SubmitStatus::Queued) {
             r.status = Status::Queued;
             r.nackl_payout_id = submit.payout_id.clone();
             r.nackl_ready_at = submit.ready_at;
-            idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+            idempotency::update(state_dir, r, held).map_err(|e| {
                 e.after_send("the withdrawal was accepted and its NACKL payout queued")
             })?;
         } else {
             r.status = Status::Confirmed;
-            idempotency::update(&state_dir, r, &_lock_held_to_the_end).map_err(|e| {
+            idempotency::update(state_dir, r, held).map_err(|e| {
                 e.after_send(
                     "the withdrawal completed on both chains and its payout receipt was seen",
                 )
@@ -1510,12 +1738,7 @@ pub async fn run(
     }
 
     Ok(WithdrawSuccess {
-        burn: BurnSummary {
-            token_id: args.token_id,
-            an_tx: an_tx_hash,
-            bounce,
-            amount: amount.display_with_decimals(decimals),
-        },
+        burn: c.burn.clone(),
         capture: CaptureSummary {
             withdrawal_msg_id: e2e.captured.message_id,
             block_seq_no: e2e.captured.block_seq_no,
@@ -1527,7 +1750,7 @@ pub async fn run(
             calldata_bytes,
             pi_count,
         }),
-        submit,
+        submit: Some(submit),
     })
 }
 
@@ -1602,6 +1825,20 @@ fn mark_already_paid(
 struct ResumeNote(String);
 
 impl ResumeNote {
+    /// The note for `withdraw proof --tx-hash an_tx`: it keeps no record,
+    /// and the same command carries on.
+    fn proof(an_tx: &str, token_id: u32) -> Self {
+        let token = args::Token::from_ecc_id(token_id).map_or("usdc", |t| match t {
+            args::Token::Usdc => "usdc",
+            args::Token::Nackl => "nackl",
+        });
+        Self(format!(
+            "The AN burn {an_tx} is on the wire. Re-run `ackinacki-bridge withdraw proof \
+             --tx-hash {an_tx} --token {token}`, changing only what this error asks for: it \
+             captures the burn again, waits for coverage and proves again."
+        ))
+    }
+
     /// The note for the burn `an_tx`, kept in `record`. A record, not an
     /// `Option`: `--allow-retry` skips the burn only by reading it, so the
     /// note has nothing to offer a run without one.
@@ -2774,7 +3011,7 @@ fn confirm_before_burn(
             "burning"
         },
         burn = if args.token_id == 1 { "lock" } else { "burn" },
-        bridge = args.bridge_address,
+        bridge = args.prove.bridge_address,
     );
 
     let mut stderr = std::io::stderr().lock();
@@ -3883,7 +4120,14 @@ mod tests {
         assert_eq!(result.burn.token_id, 4);
         assert_eq!(result.burn.amount, "1.000000000000000001");
         assert_eq!(result.burn.an_tx, "<dry-run>");
-        assert!(matches!(result.submit.status, SubmitStatus::DryRunOk));
+        assert!(matches!(
+            result
+                .submit
+                .as_ref()
+                .expect("a dry run reports its submit")
+                .status,
+            SubmitStatus::DryRunOk
+        ));
         assert_eq!(
             std::fs::read_dir(world.state_dir.path()).unwrap().count(),
             0
@@ -3900,8 +4144,21 @@ mod tests {
             .expect("a dry run passes both preflights and stops before either chain");
 
         assert_eq!(ok.burn.an_tx, "<dry-run>", "nothing was broadcast");
-        assert!(matches!(ok.submit.status, SubmitStatus::DryRunOk));
-        assert_eq!(ok.submit.eth_tx, None, "and nothing was submitted");
+        assert!(matches!(
+            ok.submit
+                .as_ref()
+                .expect("a dry run reports its submit")
+                .status,
+            SubmitStatus::DryRunOk
+        ));
+        assert_eq!(
+            ok.submit
+                .as_ref()
+                .expect("a dry run reports its submit")
+                .eth_tx,
+            None,
+            "and nothing was submitted"
+        );
 
         // A dry run neither reads nor writes idempotency state, so the
         // state directory it was given is still empty. This is the half
@@ -4246,7 +4503,13 @@ mod tests {
             .run(true)
             .await
             .expect("the AN pause cannot stop a burn that already happened");
-        assert!(matches!(ok.submit.status, SubmitStatus::DryRunOk));
+        assert!(matches!(
+            ok.submit
+                .as_ref()
+                .expect("a dry run reports its submit")
+                .status,
+            SubmitStatus::DryRunOk
+        ));
     }
 
     #[test]
@@ -4878,7 +5141,7 @@ mod tests {
             // the last character of its line. `?;` is a statement; `?,`
             // and `?)` are the same operator inside a match arm or an
             // argument list, which is where `default_state_dir()?` and
-            // `Some(args.require_submit_plumbing()?)` live — the
+            // `Some(args.prove.require_submit_plumbing()?)` live — the
             // statement form alone saw neither; a bare `?` ends a line in
             // the middle of a chain.
             //

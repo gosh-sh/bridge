@@ -57,6 +57,62 @@ pub(crate) fn check_event_bridge(
     })
 }
 
+/// What a `WithdrawalInitiated` asks for: the token, the amount in base
+/// units, the EVM recipient and the destination chain.
+pub(crate) struct BurnRead {
+    pub token_id: u32,
+    pub amount: u128,
+    pub recipient: alloy::primitives::Address,
+    pub chain_id: u64,
+}
+
+/// Read the burn `withdraw proof` proves from its event. An event that does
+/// not decode, or asks for something no EVM chain takes, is exit 12: the
+/// prover reads the same bytes and would refuse them the same way.
+pub(crate) fn read_burn(event_boc_b64: &str, an_tx: &str) -> CliResult<BurnRead> {
+    let event = bridge_event_witness::decode_event_boc_base64(event_boc_b64).map_err(|e| {
+        CliError::ProofFailed {
+            reason: format!(
+                "the event behind AN tx {an_tx} does not decode as WithdrawalInitiated: {e:#}."
+            ),
+            source: None,
+        }
+    })?;
+    let refuse = |what: String| CliError::ProofFailed {
+        reason: format!("the WithdrawalInitiated behind AN tx {an_tx}: {what}"),
+        source: None,
+    };
+    let amount = u128::from_str_radix(&event.amount_hex, 16)
+        .map_err(|_| refuse(format!("amount 0x{} is not a u128", event.amount_hex)))?;
+    let recipient = hex::decode(&event.recipient_hex)
+        .ok()
+        .filter(|b| b.len() == 20)
+        .map(|b| alloy::primitives::Address::from_slice(&b))
+        .ok_or_else(|| {
+            refuse(format!(
+                "recipient 0x{} is not 20 bytes",
+                event.recipient_hex
+            ))
+        })?;
+    let chain_id = hex::decode(&event.dst_chain_id_hex)
+        .ok()
+        .filter(|b| b.len() == 32)
+        .map(|b| alloy::primitives::U256::from_be_slice(&b))
+        .and_then(|c| u64::try_from(c).ok())
+        .ok_or_else(|| {
+            refuse(format!(
+                "destination chain 0x{} is not a u64",
+                event.dst_chain_id_hex
+            ))
+        })?;
+    Ok(BurnRead {
+        token_id: event.token_id,
+        amount,
+        recipient,
+        chain_id,
+    })
+}
+
 /// Compare the captured event with the withdrawal this run is executing.
 ///
 /// A mismatch is exit 10: the record names a burn that is not this

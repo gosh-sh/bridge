@@ -172,6 +172,66 @@ pub async fn run(
     .await
 }
 
+/// The Acki Nacki bridge `--usdc-bridge-account` names, resolved: its
+/// dApp id, its address in both forms and the two ids the proof binds.
+pub struct AnBridge {
+    pub dapp_id_hex: String,
+    /// `dapp_id::account_id`.
+    pub extended: String,
+    /// `0:account_id`, the form the ABI encoder takes.
+    pub legacy: String,
+    pub dapp_id: [u8; 32],
+    pub account_id: [u8; 32],
+}
+
+/// Resolve the Acki Nacki bridge's dApp id and check the account is Active:
+/// one GraphQL round-trip through the same helper the daemon uses.
+pub async fn resolve_an_bridge(
+    gql_endpoint: &str,
+    usdc_bridge_account_id_hex: &str,
+) -> CliResult<AnBridge> {
+    let gql = create_client(gql_endpoint).map_err(|e| CliError::Preflight {
+        reason: format!("failed to build GraphQL client for {gql_endpoint}: {e}"),
+        source: Some(e),
+    })?;
+    let (usdc_bridge_dapp_id, usdc_bridge_acc_type) =
+        query_usdc_bridge_state(&gql, usdc_bridge_account_id_hex).await?;
+    if usdc_bridge_acc_type != "Active" {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "USDCBridge account {usdc_bridge_account_id_hex}: acc_type is \
+                 {usdc_bridge_acc_type} (need Active) — is the bridge deployed?"
+            ),
+            source: None,
+        });
+    }
+    let usdc_bridge_extended = format!("{usdc_bridge_dapp_id}::{usdc_bridge_account_id_hex}");
+    let usdc_bridge_legacy = format!("0:{usdc_bridge_account_id_hex}");
+
+    // Decode once, here, where both hex strings are in hand and already
+    // known good — `query_usdc_bridge_state` normalises the zerostate
+    // empty dapp_id to 64 zeros, and the account id was validated by
+    // `args`. A helper keeps the two identical; hand-rolling the second
+    // one is how they end up differing.
+    let decode_id = |label: &str, hex_str: &str| -> CliResult<[u8; 32]> {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(hex_str, &mut out).map_err(|e| CliError::Preflight {
+            reason: format!("{label}: expected 64 hex chars, got {hex_str:?} ({e})"),
+            source: None,
+        })?;
+        Ok(out)
+    };
+    let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
+    let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+    Ok(AnBridge {
+        dapp_id_hex: usdc_bridge_dapp_id,
+        extended: usdc_bridge_extended,
+        legacy: usdc_bridge_legacy,
+        dapp_id: bridge_dapp_id,
+        account_id: bridge_account_id,
+    })
+}
+
 /// Validate the source account and AN inventory for the selected ECC currency.
 pub async fn run_for_token(
     from: &FromAddress,
@@ -263,41 +323,14 @@ pub async fn run_for_token(
         });
     }
 
-    // 6. USDCBridge lookup: resolve dapp_id AND verify the account is Active. One
-    //    GQL round-trip through the same helper the daemon uses.
-    let gql = create_client(gql_endpoint).map_err(|e| CliError::Preflight {
-        reason: format!("failed to build GraphQL client for {gql_endpoint}: {e}"),
-        source: Some(e),
-    })?;
-    let (usdc_bridge_dapp_id, usdc_bridge_acc_type) =
-        query_usdc_bridge_state(&gql, usdc_bridge_account_id_hex).await?;
-    if usdc_bridge_acc_type != "Active" {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "USDCBridge account {usdc_bridge_account_id_hex}: acc_type is \
-                 {usdc_bridge_acc_type} (need Active) — is the bridge deployed?"
-            ),
-            source: None,
-        });
-    }
-    let usdc_bridge_extended = format!("{usdc_bridge_dapp_id}::{usdc_bridge_account_id_hex}");
-    let usdc_bridge_legacy = format!("0:{usdc_bridge_account_id_hex}");
-
-    // Decode once, here, where both hex strings are in hand and already
-    // known good — `query_usdc_bridge_state` normalises the zerostate
-    // empty dapp_id to 64 zeros, and the account id was validated by
-    // `args`. A helper keeps the two identical; hand-rolling the second
-    // one is how they end up differing.
-    let decode_id = |label: &str, hex_str: &str| -> CliResult<[u8; 32]> {
-        let mut out = [0u8; 32];
-        hex::decode_to_slice(hex_str, &mut out).map_err(|e| CliError::Preflight {
-            reason: format!("{label}: expected 64 hex chars, got {hex_str:?} ({e})"),
-            source: None,
-        })?;
-        Ok(out)
-    };
-    let bridge_dapp_id = decode_id("USDCBridge dapp_id", &usdc_bridge_dapp_id)?;
-    let bridge_account_id = decode_id("USDCBridge account_id", usdc_bridge_account_id_hex)?;
+    // 6. USDCBridge lookup: resolve dapp_id AND verify the account is Active.
+    let AnBridge {
+        dapp_id_hex: usdc_bridge_dapp_id,
+        extended: usdc_bridge_extended,
+        legacy: usdc_bridge_legacy,
+        dapp_id: bridge_dapp_id,
+        account_id: bridge_account_id,
+    } = resolve_an_bridge(gql_endpoint, usdc_bridge_account_id_hex).await?;
 
     // 6b. The AN bridge's own pause. While it is set `initiateWithdrawal`
     //     refuses the burn with 231, the ECC bounces back to the multisig,
@@ -2736,8 +2769,9 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 
 /// Preflight the destination *deploy*: something is there, its withdrawal
 /// verifier stack is real and is the one this build proves against, its
-/// pinned AN-side identity is ours, its treasury visibly covers this
-/// amount, and it is not paused.
+/// pinned AN-side identity is ours, it pays this token under the id Acki
+/// Nacki assigns, and it is not paused. Its payout cap and treasury are
+/// not read: the Acki Nacki bridge's limits decide how much may leave.
 ///
 /// Key-free, so `--dry-run` exercises all of it.
 ///
@@ -2745,13 +2779,6 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 /// `--bridge-address` is far more common than a mis-deployed verifier, and
 /// the operator should see the useful message, not a decode failure three
 /// calls deeper.
-///
-/// The treasury check is a **preflight, not a promise** — the same rule the
-/// ticket sets for the multisig's ECC[3] balance. Between this call and
-/// `withdrawByProof` (up to ~101 min later) other withdrawals can drain the
-/// treasury and operators can top it up; the chain has the last word. Its
-/// job is to refuse now when it is already visible that the payout cannot
-/// happen, not to guarantee that it will.
 ///
 /// The identity and verifier checks carry no such caveat: both read
 /// `immutable` storage, so what this function sees is what
@@ -2974,43 +3001,11 @@ pub async fn check_bridge_deploy_for_token(
         });
     }
 
-    let (max_transfer, treasury) = if token_id == 3 {
-        if let Some(expected_token) = expected_token {
-            let info =
-                client
-                    .token_payout_info(token_id)
-                    .await
-                    .map_err(|e| CliError::Preflight {
-                        reason: format!("cannot read registered USDC token: {e}"),
-                        source: None,
-                    })?;
-            if info.token != expected_token {
-                return Err(CliError::Preflight {
-                    reason: "EVM and AN assign ECC[3] to different tokens".into(),
-                    source: None,
-                });
-            }
-        }
-        (
-            client
-                .usdc_payout_cap()
-                .await
-                .map_err(|e| CliError::Preflight {
-                    reason: format!(
-                        "--bridge-address {bridge}: cannot read the USDC payout cap \
-                         (usdcTokenId()/maxWithdrawalAmount()): {e}"
-                    ),
-                    source: None,
-                })?,
-            client
-                .treasury_balance()
-                .await
-                .map_err(|e| CliError::Preflight {
-                    reason: format!("--bridge-address {bridge}: treasuryBalance() failed: {e}"),
-                    source: None,
-                })?,
-        )
-    } else {
+    // The token the EVM bridge pays this id in is the one Acki Nacki
+    // assigns to it. How much may be withdrawn is the Acki Nacki bridge's
+    // answer (`getTotalBridged`, the chain's limits), checked before the
+    // burn; the EVM bridge's payout cap and treasury are not read.
+    if let Some(expected_token) = expected_token {
         let info = client
             .token_payout_info(token_id)
             .await
@@ -3018,28 +3013,26 @@ pub async fn check_bridge_deploy_for_token(
                 reason: format!("cannot read payout registry for ECC[{token_id}]: {e}"),
                 source: None,
             })?;
-        if let Some(expected_token) = expected_token {
-            if info.token != expected_token {
-                return Err(CliError::Preflight {
-                    reason: format!("EVM and AN assign ECC[{token_id}] to different tokens"),
-                    source: None,
-                });
-            }
+        if info.token != expected_token {
+            return Err(CliError::Preflight {
+                reason: format!("EVM and AN assign ECC[{token_id}] to different tokens"),
+                source: None,
+            });
         }
-        (info.max_withdrawal, info.liabilities)
-    };
-    if U256::from(amount.0) > max_transfer {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "withdrawal exceeds the bridge's current payout cap for {}; reduce the amount \
-                 before burning ECC",
-                payout_cap_label(token_id, max_transfer),
-            ),
-            source: None,
-        });
     }
-
-    let needed = U256::from(amount.0);
+    // The EVM bridge's USDC is ECC id 3, as on Acki Nacki.
+    if token_id == 3 {
+        client
+            .usdc_payout_cap()
+            .await
+            .map_err(|e| CliError::Preflight {
+                reason: format!(
+                    "--bridge-address {bridge}: cannot confirm it pays USDC under ECC id 3 \
+                     (usdcTokenId()): {e}"
+                ),
+                source: None,
+            })?;
+    }
     if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
         let nackl = client
             .nackl_state()
@@ -3061,6 +3054,7 @@ pub async fn check_bridge_deploy_for_token(
                 source: None,
             });
         }
+        let needed = U256::from(amount.0);
         if needed > nackl.delay_threshold {
             tracing::warn!(
                 amount = amount.0,
@@ -3077,19 +3071,6 @@ pub async fn check_bridge_deploy_for_token(
                  limit has room"
             );
         }
-    } else if treasury < needed {
-        return Err(CliError::Preflight {
-            reason: format!(
-                "--bridge-address {bridge}: {} but this withdrawal needs {needed} ({}). \
-                 withdrawByProof would revert WithdrawTreasuryShortfall. {}\n\x20 Note this is a \
-                 preflight, not a guarantee — the amount is shared, and it can be drained again \
-                 while this withdrawal waits for its anchor bundle.",
-                held_label(token_id, treasury),
-                requested_label(token_id, *amount),
-                shortfall_advice(token_id),
-            ),
-            source: None,
-        });
     }
 
     // 6. Is it open? While `paused()` is true, `verifyBlock` and `withdrawByProof`
@@ -5387,95 +5368,6 @@ pub(crate) mod tests {
         assert!(
             msg.contains("3 680"),
             "must name the size of the previous build: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_treasury_shortfall_is_refused_before_the_burn() {
-        // `treasuryBalance` is a new ABI binding no test called. Its check
-        // is the last of the five, so this also proves the four before it
-        // are reachable in sequence.
-        let short = format!("0x{:0>64x}", 999_999u64); // one µUSDC short
-        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_TREASURY, short)])).await;
-        let err = check_bridge_deploy(
-            &url,
-            Address::repeat_byte(1),
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(1_000_000),
-        )
-        .await
-        .expect_err("withdrawByProof would revert WithdrawTreasuryShortfall");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("WithdrawTreasuryShortfall"),
-            "must name the revert: {msg}"
-        );
-        assert!(msg.contains("999999"), "must show what is there: {msg}");
-        assert!(msg.contains("1000000"), "must show what is needed: {msg}");
-        assert!(
-            msg.contains("not a guarantee"),
-            "must not promise the treasury will still be there: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn exactly_enough_treasury_is_not_a_shortfall() {
-        // The boundary the `<` sits on. `<=` here would refuse every
-        // withdrawal that drains the treasury exactly.
-        let exact = format!("0x{:0>64x}", 1_000_000u64);
-        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_TREASURY, exact)])).await;
-        check_bridge_deploy(
-            &url,
-            Address::repeat_byte(1),
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(1_000_000),
-        )
-        .await
-        .expect("a treasury holding exactly the withdrawal amount is enough");
-    }
-
-    #[tokio::test]
-    async fn withdrawal_transfer_ceiling_is_checked_before_burning() {
-        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[])).await;
-        let bridge = Address::repeat_byte(1);
-        check_bridge_deploy(
-            &url,
-            bridge,
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(50_000_000),
-        )
-        .await
-        .unwrap();
-        let err = check_bridge_deploy(
-            &url,
-            bridge,
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(50_000_001),
-        )
-        .await
-        .unwrap_err();
-        assert!(err.to_string().contains("payout cap"), "{err}");
-        let broken = mock_rpc_code_for(
-            &full_walk_code(),
-            full_walk(&[(SEL_PAYOUT_CAP, "0x".to_string())]),
-        )
-        .await;
-        let err = check_bridge_deploy(
-            &broken,
-            bridge,
-            None,
-            (U256::ZERO, U256::ZERO),
-            &UsdcAmount(1),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("cannot read the USDC payout cap"),
-            "a bridge that cannot answer the listing is not one to burn ECC against: {err}"
         );
     }
 

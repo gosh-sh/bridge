@@ -95,6 +95,12 @@ async fn dispatch(
             let d = live_deps(p, ui, current_op)?;
             start(p, &d).await
         },
+        args::RunMode::Proof {
+            tx_hash,
+        } => {
+            let d = live_deps(p, ui, current_op)?;
+            run::run_proof(p, &d, *tx_hash).await
+        },
     }
 }
 
@@ -237,6 +243,12 @@ pub struct DepositSuccess {
     pub balance: Option<serde_json::Value>,
     /// The operation was released instead of completed.
     pub abandoned: bool,
+    /// Who finalized the deposit on Acki Nacki: `sent` when this CLI's
+    /// `finalizeDeposit` did, `already_finalized` when somebody else (a
+    /// relayer, say) had done it by the time this CLI was to send its
+    /// proof. Absent until the deposit is credited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finalize: Option<&'static str>,
 }
 
 #[cfg(test)]

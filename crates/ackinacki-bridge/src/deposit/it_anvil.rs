@@ -229,7 +229,7 @@ async fn a_type_2_deposit_and_a_legacy_one_are_both_confirmed() {
         let exp = Expect {
             bridge,
             from: signer.address(),
-            calldata: tx.data.clone(),
+            calldata: Some(tx.data.clone()),
             amount: 1_000_000,
             account: acc,
             confirmations: 12,

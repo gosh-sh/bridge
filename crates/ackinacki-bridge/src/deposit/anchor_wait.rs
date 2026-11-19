@@ -7,8 +7,7 @@
 //! pause or an anchor it no longer needs.
 //!
 //! `--anchor-timeout-s` bounds the whole wait, reads and their retries
-//! included; the grace period after the anchor has its own bound,
-//! `--relayer-grace-s`.
+//! included.
 
 use std::{
     sync::{Mutex, PoisonError},
@@ -21,7 +20,7 @@ use serde_json::json;
 
 use crate::{
     deposit::{
-        an::{AccStatus, AnRead},
+        an::AnRead,
         credit::{self, FinalizedCheck, Look},
         evm::{BlockTag, EvmRead},
         identity::BRIDGE_ABI,
@@ -182,12 +181,8 @@ pub fn anchor_step(
 /// How the wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitExit {
-    /// Anchored, final and not paused, and no voucher in the grace period:
-    /// build the proof here.
+    /// Anchored, final and not paused: build the proof here.
     Proceed,
-    /// The voucher was deployed in the grace period: the operator's
-    /// relayer is finalizing; confirm the credit.
-    VoucherDeployed,
     /// Somebody finalized the deposit before the wait was through, found
     /// on a poll before the anchor and the pause were read: confirm the
     /// credit, by events when only they showed it.
@@ -224,8 +219,6 @@ pub struct WaitCtx {
     pub plan: AnchorPlan,
     /// `--anchor-timeout-s`; `None` waits without end.
     pub timeout: Option<Duration>,
-    /// `--relayer-grace-s`.
-    pub grace: Duration,
     /// The pause between two polls.
     pub poll: Duration,
     /// The operation, for `--resume`.
@@ -238,9 +231,6 @@ const LC_RECHECK_EVERY: u64 = 10;
 
 /// What a light-client re-check that could not be read is reported as.
 const LC_RECHECK: &str = "re-checking the light client";
-
-/// The longest pause between two voucher reads in the grace period.
-const VOUCHER_POLL: Duration = Duration::from_secs(15);
 
 /// A bool getter of the bridge, retried until `deadline`. An answer that
 /// is not a bool is a failed read, never a `false`.
@@ -264,11 +254,9 @@ async fn flag(
     .await
 }
 
-/// Waits for the anchor, then gives the operator's relayer the grace
-/// period. `--anchor-timeout-s` bounds everything up to the anchor —
-/// reads, their retries, the light-client re-checks, the looks for a
-/// deposit finalized already — and ends it with exit 31; the grace period
-/// is bounded by `--relayer-grace-s` alone.
+/// Waits for the anchor. `--anchor-timeout-s` bounds all of it — reads,
+/// their retries, the light-client re-checks, the looks for a deposit
+/// finalized already — and ends it with exit 31.
 pub async fn wait(
     evm: &dyn EvmRead,
     an: &dyn AnRead,
@@ -290,32 +278,7 @@ pub async fn wait(
         let last = last.into_inner().unwrap_or_else(PoisonError::into_inner);
         return Err(timed_out(cx, last));
     };
-    match reached {
-        WaitExit::Proceed => {},
-        other => return Ok(other),
-    }
-    // The operator's relayer may finalize it; do not spend 20 minutes proving in
-    // parallel.
-    let grace_end = deadline_after(cx.grace);
-    while tokio::time::Instant::now() < grace_end {
-        // An unreadable voucher only ends the grace period early: we prove.
-        let Some(v) = until(
-            ui,
-            "looking for the deposit voucher",
-            Some(grace_end),
-            || an.account(cx.finalized.voucher),
-        )
-        .await
-        else {
-            break;
-        };
-        if v.is_some_and(|a| a.status == AccStatus::Active) {
-            return Ok(WaitExit::VoucherDeployed);
-        }
-        ui.status("block anchored; giving the operator's relayer a moment before proving here");
-        tokio::time::sleep_until((tokio::time::Instant::now() + VOUCHER_POLL).min(grace_end)).await;
-    }
-    Ok(WaitExit::Proceed)
+    Ok(reached)
 }
 
 /// Exit 31, with the last status the wait showed, if any.
@@ -619,72 +582,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_relayer_wins_during_the_grace_period() {
-        use crate::deposit::{
-            an::{AccStatus, AccountInfo},
-            testkit::*,
-        };
-        let evm = FakeEvm::sepolia();
-        let b = header(100, 1);
-        evm.script_receipt(B256::repeat_byte(7), vec![Some(deposit_receipt(
-            B256::repeat_byte(7),
-            &b,
-            true,
-            vec![],
-        ))]);
-        evm.txs.lock().unwrap().insert(
-            B256::repeat_byte(7),
-            deposit_tx(
-                B256::repeat_byte(7),
-                Default::default(),
-                Default::default(),
-                1,
-                Default::default(),
-            ),
-        );
-        evm.by_hash.lock().unwrap().insert(b.hash, b.clone());
-        evm.latest.set([header(200, 9)]);
-        evm.finalized.set([Some(header(150, 8))]);
-        let an = FakeAn::default();
-        an.accepted.lock().unwrap().insert(b.hash, 2); // accepted on the third poll
-        an.getter([0x1a; 32], "isPaused", vec![
-            serde_json::json!({"value0": false}),
-        ]);
-        // The bridge keeps the recorded voucher code, so every poll's look
-        // reads the voucher, and finds none on the three polls up to the
-        // anchor; the grace period's first read finds it.
-        voucher_codes(&an, &[CODE]);
-        an.accounts.lock().unwrap().insert([0xee; 32], AccountInfo {
-            status: AccStatus::Active,
-            dapp_id: Some([0; 32]),
-            ecc3: 0,
-            ecc: vec![(3, 0)],
-        });
-        an.accounts_hidden_for.lock().unwrap().insert([0xee; 32], 3);
-        let cx = WaitCtx {
-            tx_hash: B256::repeat_byte(7),
-            block_hash: b.hash,
-            block_number: 100,
-            chain_id: 11_155_111,
-            bridge: [0x1a; 32],
-            finalized: finalized_check(),
-            light_client: None,
-            plan: AnchorPlan::Owner {
-                lc_ready: false,
-            },
-            timeout: None,
-            grace: std::time::Duration::from_secs(120),
-            poll: std::time::Duration::from_secs(30),
-            op_id: "OP".into(),
-        };
-        let ui = crate::deposit::ui::RecordingUi::new(true);
-        assert_eq!(
-            wait(&evm, &an, &cx, &ui).await.unwrap(),
-            WaitExit::VoucherDeployed
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn failing_reads_do_not_outlive_the_anchor_timeout() {
         use crate::deposit::testkit::*;
         let evm = FakeEvm::sepolia();
@@ -711,7 +608,6 @@ mod tests {
                 lc_ready: false,
             },
             timeout: Some(std::time::Duration::from_secs(300)),
-            grace: std::time::Duration::from_secs(120),
             poll: std::time::Duration::from_secs(30),
             op_id: "OP".into(),
         };
@@ -759,7 +655,6 @@ mod tests {
                 lc_ready: false,
             },
             timeout: Some(std::time::Duration::from_secs(300)),
-            grace: std::time::Duration::from_secs(1),
             poll: std::time::Duration::from_secs(30),
             op_id: "OP".into(),
         };
@@ -801,7 +696,6 @@ mod tests {
             light_client: Some([0x1c; 32]),
             plan: AnchorPlan::LightClient,
             timeout: Some(std::time::Duration::from_secs(300)),
-            grace: std::time::Duration::from_secs(120),
             poll: std::time::Duration::from_secs(30),
             op_id: "OP".into(),
         };
@@ -860,7 +754,6 @@ mod tests {
                 lc_ready: false,
             },
             timeout: Some(std::time::Duration::from_secs(300)),
-            grace: std::time::Duration::from_secs(120),
             poll: std::time::Duration::from_secs(30),
             op_id: "OP".into(),
         };
@@ -910,7 +803,6 @@ mod tests {
             light_client: matches!(plan, AnchorPlan::LightClient).then_some(LC),
             plan,
             timeout: timeout.map(Duration::from_secs),
-            grace: Duration::from_secs(120),
             poll: Duration::from_secs(30),
             op_id: "OP".into(),
         }
@@ -1048,8 +940,7 @@ mod tests {
         deployed_voucher(&an);
         an.failing_accounts.lock().unwrap().insert(VOUCHER);
         // Not known is not finalized: no event shows it either, so the wait
-        // goes on to the anchor, and the grace period cannot read the
-        // voucher.
+        // goes on to the anchor.
         assert_eq!(
             wait(
                 &evm,
@@ -1091,9 +982,8 @@ mod tests {
             "{:?}",
             ui.warnings()
         );
-        // Two polls before the anchor held, then the whole grace period
-        // with no voucher.
-        assert_eq!(t0.elapsed(), Duration::from_secs(60) + cx.grace);
+        // Two polls before the anchor held.
+        assert_eq!(t0.elapsed(), Duration::from_secs(60));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1167,7 +1057,7 @@ mod tests {
         let ui = RecordingUi::new(true);
         assert_eq!(
             wait(&evm, &an, &ctx(&b, OWNER, None), &ui).await.unwrap(),
-            WaitExit::VoucherDeployed
+            WaitExit::Proceed
         );
         let retries: Vec<_> = ui
             .events()
@@ -1200,7 +1090,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            WaitExit::VoucherDeployed
+            WaitExit::Proceed
         );
         // No verdict from the failed read; it is logged and made again on
         // each of the two polls before the anchor.

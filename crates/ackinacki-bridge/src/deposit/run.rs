@@ -25,7 +25,7 @@ use crate::{
     deposit::{
         an::AnRead,
         anchor_wait::{self, WaitCtx, WaitExit},
-        args::{an_network_id, AnTarget, DepositParams, Network, OpRef, RunMode},
+        args::{an_network_id, AnTarget, DepositParams, DepositPart, Network, OpRef, RunMode},
         binding::{check_explicit, claims_of_others, decide, Binding, Candidate},
         credit::{self, FinalizedCheck, Identity, Look},
         evm::{
@@ -47,7 +47,7 @@ use crate::{
         retry::{once, transient, until, ONE_READ},
         signals,
         store::{
-            blocking_by_sender, DepositInfo, FailReason, FinalizeInfo, OpRecord, OpStage, Store,
+            blocking_by_sender, DepositInfo, FailReason, OpRecord, OpStage, RequestInfo, Store,
             TxClaim,
         },
         ui::{self, StepId, StepState, Ui},
@@ -1020,12 +1020,10 @@ enum Phase {
         /// When it ends with exit 31; `None` waits without end.
         deadline: Option<Instant>,
     },
-    /// Before a proof is built on a resume of an anchored operation, or
-    /// again for a proof that is gone: whether somebody finalized the
-    /// deposit meanwhile. A new proof costs minutes.
-    Look,
-    /// Step 7.
-    Prove,
+    /// Step 7. `finalized` is `Some` when the anchor wait already found
+    /// the deposit finalized by somebody else (by the bridge's events when
+    /// `true`): the proof is built all the same, and nothing is sent.
+    Prove { finalized: Option<bool> },
     /// Step 8, after a look at whether someone finalized the deposit.
     Finalize,
     /// Step 9.
@@ -1045,6 +1043,195 @@ impl Phase {
             deadline: p.anchor_timeout.and_then(|t| since.checked_add(t)),
         }
     }
+}
+
+/// How far before a `deposit proof` deposit's block a search for it after a
+/// reorg starts.
+const REORG_MARGIN_BLOCKS: u64 = 64;
+
+/// `deposit proof --tx-hash`: a deposit already on the EVM bridge, made by
+/// any wallet, proven and finalized by a new operation. The deposit is read
+/// from the transaction's receipt — its sender, amount, token and Acki
+/// Nacki recipient — and the operation starts at its confirmation (step 5),
+/// so it waits for the depth and the anchor like any other. The receipt
+/// proof is built whether or not somebody finalized the deposit meanwhile;
+/// the send finds that out, and a deposit finalized already ends in
+/// success, `finalize: already_finalized`.
+pub async fn run_proof(p: &DepositParams, d: &Deps, tx_hash: B256) -> CliResult<DepositSuccess> {
+    let ui = d.ui.as_ref();
+    let board = Board::new(ui);
+    let (Some(bridge), Some(bridge_acc), Some(work_dir)) =
+        (p.bridge, p.usdc_bridge_account, p.work_dir.as_ref())
+    else {
+        return Err(CliError::Usage {
+            reason: "deposit proof needs --bridge-address, --usdc-bridge-account and --work-dir"
+                .into(),
+        });
+    };
+    let store = Store::open(&p.state_dir)?;
+
+    // Step 1: the deposit, as its receipt says, and the checks it still needs.
+    board.start(StepId::Preflight, "");
+    let refused = |why: String| CliError::Preflight {
+        reason: format!("--tx-hash {tx_hash:#x}: {why} (nothing was sent)"),
+        source: None,
+    };
+    let receipt = transient(ui, "reading the deposit's receipt", || {
+        d.evm.receipt(tx_hash)
+    })
+    .await
+    .ok_or_else(|| refused("the RPC has no receipt for it".into()))?;
+    let tx = transient(ui, "reading the deposit's transaction", || {
+        d.evm.transaction(tx_hash)
+    })
+    .await
+    .ok_or_else(|| refused("the RPC does not know the transaction".into()))?;
+    if !receipt.status {
+        return Err(refused("the transaction reverted".into()));
+    }
+    // The bridge finalizes a transaction with one Deposit of its own; a
+    // batch of several (a Safe multiSend, an ERC-4337 bundle) is the deposit
+    // relayer's (`finalize-one`), not this run's.
+    let ours: Vec<_> = receipt
+        .logs
+        .iter()
+        .filter(|l| l.address == bridge)
+        .filter_map(|l| {
+            crate::deposit::evm::parse_deposit_log(l).zip(crate::deposit::evm::deposit_log_token(l))
+        })
+        .collect();
+    let [(ev, token)] = ours.as_slice() else {
+        return Err(refused(format!(
+            "it emitted {} Deposit events of bridge {bridge}; this CLI proves a transaction with \
+             one, and `deposit-relayer finalize-one` finalizes the others",
+            ours.len()
+        )));
+    };
+    let (ev, token) = (ev.clone(), *token);
+    let amount = u64::try_from(ev.amount)
+        .map_err(|_| refused(format!("its amount {} does not fit 64 bits", ev.amount)))?;
+    let seen = preflight::DepositSeen {
+        from: ev.sender,
+        nonce: tx.nonce,
+        amount,
+        token,
+        an_account: ev.an_account.0,
+    };
+    let checked = board.answer(preflight::check_proof(p, d, &seen).await)?;
+    board.done(
+        StepId::Preflight,
+        &format!("bridge {}, deposit {}", checked.an.version, ev.deposit_id),
+    );
+
+    // One operation per deposit, checked and created under the directory
+    // lock: a second would prove and send it again. A hash a wallet answered
+    // to another operation, not bound to it yet, counts too.
+    let Some(dir_lock) = DirLock::try_take(&p.state_dir)? else {
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            None,
+            format!(
+                "another deposit run on this machine holds {}: retry once it is past the \
+                 confirmation of its deposit (nothing was sent)",
+                p.state_dir.display()
+            ),
+        ));
+    };
+    // An operation of the same wallet whose outcome is unknown binds any
+    // deposit in its nonce slot by its own rules, as `--resume --tx-hash`
+    // also refuses.
+    let in_its_slot = |r: &OpRecord| {
+        seen.from == tx.from
+            && r.params.chain_id == checked.params.chain_id
+            && r.params.bridge == bridge
+            && r.is_unresolved()
+            && r.from == Some(tx.from)
+            && r.tx.is_none()
+            && !r.abandoned_ever
+            && r.request
+                .as_ref()
+                .is_some_and(|q| q.nonce_before == tx.nonce)
+    };
+    let holds = |r: &OpRecord| {
+        r.tx.is_some_and(|t| t.tx_hash == tx_hash)
+            || r.request.as_ref().and_then(|q| q.wallet_hash) == Some(tx_hash)
+    };
+    if let Some(r) = store
+        .list()?
+        .into_iter()
+        .find(|r| r.stage != OpStage::Failed && (holds(r) || in_its_slot(r)))
+    {
+        // The deposit `deposit send` made, say: its operation goes on.
+        if holds(&r) {
+            drop(dir_lock);
+            ui.warn(&format!(
+                "operation {} already holds the deposit {tx_hash:#x}; continuing it",
+                r.op_id
+            ));
+            return resume(p, d, &OpRef::Op(r.op_id.clone()), None).await;
+        }
+        return Err(CliError::deposit(
+            ExitCode::DuplicateRefused,
+            Stage::Preflight,
+            Some(&r.op_id),
+            format!(
+                "operation {} in {} may hold the deposit {tx_hash:#x}, in its nonce slot: \
+                 continue it with `deposit --resume {} --tx-hash {tx_hash:#x}` (nothing was sent)",
+                r.op_id,
+                p.state_dir.display(),
+                r.op_id
+            ),
+        ));
+    }
+
+    // The operation that finishes it.
+    let mut rec = OpRecord::new(
+        Store::new_op_id(),
+        checked.params.clone(),
+        hex::encode(checked.an.voucher_code_hash),
+    );
+    rec.token_id = checked.token_id;
+    rec.token_decimals = Some(checked.evm.decimals);
+    rec.from = Some(seen.from);
+    rec.found_by_tx = true;
+    // What a request of this CLI would have recorded, read off the
+    // transaction: a resume after a reorg searches the sender's deposits
+    // from a few blocks before it.
+    rec.request = Some(RequestInfo {
+        nonce_before: seen.nonce,
+        from_block: receipt.block_number.saturating_sub(REORG_MARGIN_BLOCKS),
+        calldata: tx.input.clone(),
+        wallet_hash: Some(tx_hash),
+    });
+    rec.tx = Some(TxClaim {
+        tx_hash,
+        tx_nonce: seen.nonce,
+    });
+    rec.stage = OpStage::Signed;
+    let op = rec.op_id.clone();
+    let Some(op_lock) = OpLock::try_take(&p.state_dir, &op)? else {
+        return Err(CliError::Preflight {
+            reason: format!("operation {op} is locked by another process (nothing was sent)"),
+            source: None,
+        });
+    };
+    rec.work_dir = Some(work_dir.join(&op));
+    rec.an_bridge_dapp = Some(hex::encode(checked.an.bridge_dapp));
+    store.write(&mut rec).map_err(nothing_sent)?;
+    // The operation is on disk and holds the transaction: the next run's
+    // check finds it.
+    drop(dir_lock);
+    ui.op_id(&op);
+    *d.current_op.lock().unwrap_or_else(PoisonError::into_inner) = Some(op.clone());
+    let cx = RunCx {
+        plan: checked.plan,
+        bridge_acc,
+        bridge_dapp: checked.an.bridge_dapp,
+        light_client: checked.an.light_client,
+        token: checked.evm.token,
+    };
+    drive(p, d, &store, &mut rec, &cx, None, None, op_lock).await
 }
 
 /// Continues the operation from its recorded stage to the credit. The
@@ -1102,9 +1289,11 @@ async fn walk(
         },
         OpStage::Requested | OpStage::Signed | OpStage::Abandoned => Phase::Confirm,
         OpStage::Confirmed => Phase::anchor(p),
-        // The operator's relayer may have finalized it since this
-        // operation's run stopped.
-        OpStage::Anchored => Phase::Look,
+        // The proof is built whether or not somebody finalized the deposit
+        // since: the send finds that out (step 8).
+        OpStage::Anchored => Phase::Prove {
+            finalized: None,
+        },
         OpStage::Proved | OpStage::Finalizing => Phase::Finalize,
     };
     let to = AnTarget::parse(&rec.params.to).map_err(|e| after_request(store, &op, e))?;
@@ -1112,13 +1301,14 @@ async fn walk(
     let exp = Expect {
         bridge: rec.params.bridge,
         from,
-        calldata: rec
-            .request
-            .as_ref()
-            .map(|q| q.calldata.clone())
-            .unwrap_or_else(|| {
-                deposit_calldata(rec.params.token, rec.params.amount_units, to.account_b256())
-            }),
+        calldata: (!rec.found_by_tx).then(|| {
+            rec.request
+                .as_ref()
+                .map(|q| q.calldata.clone())
+                .unwrap_or_else(|| {
+                    deposit_calldata(rec.params.token, rec.params.amount_units, to.account_b256())
+                })
+        }),
         amount: rec.params.amount_units,
         account: to.account_b256(),
         confirmations: p.confirmations,
@@ -1184,9 +1374,25 @@ async fn walk(
                             w.close().await;
                         }
                         board.done(StepId::EvmConfirm, &format!("depositId {}", f.deposit_id));
+                        if p.part == DepositPart::Send {
+                            return Ok(summary(rec, None, (balance_before, None)));
+                        }
                         Phase::anchor(p)
                     },
                     Outcome::Final(n) => return Err(negative(d, store, rec, n).await),
+                    // `deposit proof` binds the one transaction it was given:
+                    // when the node does not show it, that is the answer.
+                    Outcome::Lost if rec.found_by_tx => {
+                        return Err(err(
+                            ExitCode::DepositOutcomeUnknown,
+                            Stage::Deposit,
+                            &op,
+                            format!(
+                                "the node does not show the deposit transaction {:#x}",
+                                claim.tx_hash
+                            ),
+                        ));
+                    },
                     Outcome::Lost => {
                         ui.warn(
                             "the deposit transaction left the chain (a reorg or a replacement); \
@@ -1220,7 +1426,6 @@ async fn walk(
                     light_client: cx.light_client,
                     plan: cx.plan,
                     timeout: deadline.map(|t| t.saturating_duration_since(Instant::now())),
-                    grace: p.relayer_grace,
                     poll: d.polls.anchor,
                     op_id: op.clone(),
                 };
@@ -1274,44 +1479,27 @@ async fn walk(
                                 }
                                 persist(store, rec)?;
                                 board.done(StepId::Anchor, &format!("{:#x}", dep.block_hash));
-                                Phase::Prove
+                                Phase::Prove {
+                                    finalized: None,
+                                }
                             },
                         }
                     },
-                    done @ (WaitExit::VoucherDeployed
-                    | WaitExit::Finalized {
-                        ..
-                    }) => {
+                    WaitExit::Finalized {
+                        via_events,
+                    } => {
+                        // Somebody finalized it before this run saw the
+                        // anchor; the bridge accepted the block to do so.
+                        // The proof is built all the same, and not sent.
                         anchor_waited = Some(since.elapsed());
-                        // The anchor was seen only when the voucher came in
-                        // the grace period after it.
-                        let anchored = done == WaitExit::VoucherDeployed;
-                        if anchored {
-                            rec.anchor_writer = Some(writer_of(cx.plan).into());
+                        rec.anchor_writer = Some(writer_of(cx.plan).into());
+                        if rec.stage != OpStage::Finalizing {
+                            rec.stage = OpStage::Anchored;
                         }
-                        // Somebody finalized it: a resume goes to the checks
-                        // before a send, which find it again, and on.
-                        rec.stage = OpStage::Finalizing;
-                        let info = FinalizeInfo {
-                            voucher_code_hash: rec.voucher_code_hash.clone(),
-                            voucher_account: dep.voucher_account.clone(),
-                            sends: 0,
-                        };
-                        rec.finalize.get_or_insert(info);
                         persist(store, rec)?;
-                        let why = if anchored {
-                            board.done(StepId::Anchor, &format!("{:#x}", dep.block_hash));
-                            "the operator's relayer finalized it"
-                        } else {
-                            board.skip(StepId::Anchor, FINALIZED_ALREADY);
-                            FINALIZED_ALREADY
-                        };
-                        board.skip(StepId::Prove, why);
-                        board.skip(StepId::Finalize, why);
-                        Phase::Credit {
-                            via_events: matches!(done, WaitExit::Finalized {
-                                via_events: true
-                            }),
+                        board.done(StepId::Anchor, &format!("{:#x}", dep.block_hash));
+                        Phase::Prove {
+                            finalized: Some(via_events),
                         }
                     },
                     back @ (WaitExit::BackToConfirm | WaitExit::Search) => {
@@ -1322,8 +1510,9 @@ async fn walk(
                              transaction"
                         });
                         // Back to an unknown outcome: under the directory
-                        // lock, like the first confirmation.
-                        if dir_lock.is_none() {
+                        // lock, like the first confirmation. `deposit proof`
+                        // searches nothing, so it takes none.
+                        if dir_lock.is_none() && !rec.found_by_tx {
                             let lock = DirLock::wait(&p.state_dir).await;
                             dir_lock = Some(lock.map_err(|e| after_request(store, &op, e))?);
                         }
@@ -1335,42 +1524,9 @@ async fn walk(
                     },
                 }
             },
-            Phase::Look => {
-                let Some(dep) = rec.deposit.clone() else {
-                    return Err(damaged(store, &op, "no confirmed deposit"));
-                };
-                let voucher = hex32(&dep.voucher_account)
-                    .ok_or_else(|| damaged(store, &op, "the voucher address"))?;
-                // It decides whether to prove, within --credit-timeout-s.
-                let look = Instant::now().checked_add(p.credit_timeout);
-                let not_before = block_time(d, &dep, look, &mut block_seen).await;
-                let check = finalized_check(rec, &dep, &to, voucher, not_before);
-                match credit::finalized_already(
-                    d.an.as_ref(),
-                    ui,
-                    cx.bridge_acc,
-                    &check,
-                    Look::BeforeSend {
-                        have_proof: false,
-                    },
-                    look,
-                )
-                .await
-                {
-                    // Step 9 reads it again and answers for it: exit 0 or 37.
-                    Some(via_events) => {
-                        if rec.stage == OpStage::Anchored {
-                            board.skip(StepId::Prove, FINALIZED_ALREADY);
-                        }
-                        board.skip(StepId::Finalize, FINALIZED_ALREADY);
-                        Phase::Credit {
-                            via_events,
-                        }
-                    },
-                    None => Phase::Prove,
-                }
-            },
-            Phase::Prove => {
+            Phase::Prove {
+                finalized,
+            } => {
                 let (Some(dep), Some(claim)) = (rec.deposit.clone(), rec.tx) else {
                     return Err(damaged(store, &op, "no confirmed deposit"));
                 };
@@ -1479,7 +1635,16 @@ async fn walk(
                         ""
                     },
                 );
-                Phase::Finalize
+                match finalized {
+                    // Step 9 reads it again and answers for it: exit 0 or 37.
+                    Some(via_events) => {
+                        board.skip(StepId::Finalize, FINALIZED_ALREADY);
+                        Phase::Credit {
+                            via_events,
+                        }
+                    },
+                    None => Phase::Finalize,
+                }
             },
             Phase::Finalize => {
                 let Some(dep) = rec.deposit.clone() else {
@@ -1493,11 +1658,11 @@ async fn walk(
                     .and_then(|w| witness::load(&w))
                     .filter(|w| witness::proves(w, rec.params.chain_id, &dep));
                 let Some(proof) = found else {
-                    // A missing receipt proof is not built again for a
-                    // deposit somebody finalized already. A record an older
-                    // CLI left at `Proved` has proof files and none of
-                    // this: it is built here.
-                    phase = Phase::Look;
+                    // A receipt proof that is gone (a resume on another
+                    // machine, a cleaned work directory) is built again.
+                    phase = Phase::Prove {
+                        finalized: None,
+                    };
                     continue;
                 };
                 // This is step 8, and its deadline starts now: the reads
@@ -1705,6 +1870,10 @@ pub fn summary(
             "after": balance.1.map(|b| b.to_string()),
         })),
         abandoned: false,
+        finalize: rec.credit.as_ref().map(|_| match &rec.finalize {
+            Some(f) if f.sends > 0 => "sent",
+            _ => "already_finalized",
+        }),
     }
 }
 
@@ -2300,6 +2469,7 @@ pub async fn abandon(p: &DepositParams, op: &str, ui: &dyn Ui) -> CliResult<Depo
         confirmation: None,
         balance: None,
         abandoned: true,
+        finalize: None,
     })
 }
 
@@ -2329,8 +2499,7 @@ mod tests {
     /// The world's command line and dependencies with polls short enough
     /// for the real clock.
     fn on_the_real_clock(w: &World) -> (DepositParams, Deps) {
-        let mut p = w.params(RunMode::Fresh);
-        p.relayer_grace = Duration::from_millis(10);
+        let p = w.params(RunMode::Fresh);
         let mut d = w.deps();
         let fast = Duration::from_millis(10);
         d.polls = Polls {
@@ -3150,20 +3319,50 @@ mod tests {
         assert_eq!(*w.an.sent.lock().unwrap(), 2);
     }
 
+    /// `deposit proof --tx-hash` of a deposit the relayer finalized: an
+    /// operation is created from the receipt, the proof is built, nothing is
+    /// sent, and the run ends in success, `already_finalized`. A second run
+    /// for the same transaction continues that operation: it is credited,
+    /// and answers from its record.
     #[tokio::test]
-    async fn a_voucher_deployed_during_the_anchor_wait_skips_the_proof() {
+    async fn deposit_proof_of_a_finalized_deposit_builds_the_proof_and_sends_none() {
+        let mut w = World::healthy();
+        let h = w.mined_deposit(7);
+        w.anchor_after(0);
+        w.credit_chain_for_mined_deposit();
+        w.voucher_deployed();
+        let (mut p, d) = on_the_real_clock(&w);
+        p.mode = RunMode::Proof {
+            tx_hash: h,
+        };
+        let s = run_proof(&p, &d, h).await.unwrap();
+        assert_eq!(s.finalize, Some("already_finalized"), "{s:?}");
+        assert!(s.confirmation.is_some());
+        assert_eq!(w.witness_builds(), 1);
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        let again = run_proof(&p, &d, h).await.unwrap();
+        assert_eq!(again.op_id, s.op_id, "the same operation goes on");
+        assert_eq!(again.finalize, Some("already_finalized"));
+        assert_eq!(w.witness_builds(), 1, "nothing is proven twice");
+    }
+
+    #[tokio::test]
+    async fn a_voucher_deployed_during_the_anchor_wait_still_builds_the_proof_and_sends_none() {
         // Deployed before the first poll: the look before the anchor finds
-        // it. The grace period after the anchor finds a later one
-        // (anchor_wait's tests).
+        // it. The proof is built all the same; the send is skipped.
         let (w, r, ui) = happy_world(|w| w.voucher_deployed()).await;
         let s = r.unwrap();
         assert!(s.confirmation.is_some());
-        assert_eq!(w.witness_builds(), 0);
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the proof is built whoever finalizes"
+        );
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
         assert!(
             ui.events().iter().any(|e| matches!(
                 e,
-                UiEvent::Step(StepId::Prove, StepState::Skipped, why)
+                UiEvent::Step(StepId::Finalize, StepState::Skipped, why)
                     if why.contains("finalized already")
             )),
             "{:#?}",
@@ -3478,7 +3677,11 @@ mod tests {
         });
         let s = resume(&p, &w.deps(), &target, None).await.unwrap();
         assert!(s.confirmation.is_some());
-        assert_eq!(w.witness_builds(), 0);
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the proof is built whoever finalizes"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4099,7 +4302,11 @@ mod tests {
         });
         let s = resume(&p, &w.deps(), &target, None).await.unwrap();
         assert_eq!(s.confirmation.unwrap()["via_events"], true);
-        assert_eq!(w.witness_builds(), 0);
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the proof is built whoever finalizes"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4298,7 +4505,11 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("credited, never exit 31: {e}"));
         assert_eq!(s.confirmation.unwrap()["via_events"], false);
-        assert_eq!(w.witness_builds(), 0);
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the proof is built whoever finalizes"
+        );
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Credited);
@@ -4373,7 +4584,11 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("credited by its event: {e}"));
         assert_eq!(s.confirmation.unwrap()["via_events"], true);
-        assert_eq!(w.witness_builds(), 0);
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the proof is built whoever finalizes"
+        );
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Credited);
@@ -4404,7 +4619,11 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("credited: {e}"));
         assert!(s.confirmation.is_some());
-        assert_eq!(w.witness_builds(), 0, "no proof for a finalized deposit");
+        assert_eq!(
+            w.witness_builds(),
+            1,
+            "the proof is built whoever finalizes"
+        );
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
     }
 

@@ -967,11 +967,12 @@ df -h ../bridge-prover-libraries/params/
   timeout:
 
   ```bash
-  # Same 5 intent flags as README Step 5 — everything else comes from
+  # Same 6 intent flags as README Step 5 — everything else comes from
   # $BRIDGE_CONFIG. Only new arg is the timeout override.
   cargo run --release -p ackinacki-bridge \
     --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
     withdraw \
+      --token      usdc \
       --from       "$WITHDRAW_FROM" \
       --from-keys  "$WITHDRAW_FROM_KEYS" \
       --to         "$WITHDRAW_TO" \

@@ -1,8 +1,11 @@
-"""Arbitrum Sepolia e2e: a fresh AckiNackiBridge on Arbitrum Sepolia, 2 USDC deposited through
-it to the local Acki Nacki network and the same 2 USDC withdrawn back, both proven by the
-relayers. `ackinacki-bridge deposit` only sends the deposit and waits for its credit: the
-deposit relayer finalizes it. The withdrawal is a burn on Acki Nacki, as the wallet makes it;
-daemon-withdraw-live finds it, proves it and pays it out with withdrawByProof.
+"""Arbitrum Sepolia e2e: a fresh AckiNackiBridge on Arbitrum Sepolia, 2 USDC and 3 NACKL
+deposited through it to the local Acki Nacki network, and 2 USDC and 5 NACKL withdrawn, all
+paid by the relayers, every step of the CLI's own. `ackinacki-bridge deposit send` makes each
+deposit and stops once it is confirmed; the deposit relayer finalizes it.
+`ackinacki-bridge withdraw send` makes each burn; daemon-withdraw-live finds both, proves them
+and pays them out with withdrawByProof. Then the CLI proves each transfer again —
+`deposit proof --tx-hash`, `withdraw proof --tx-hash` — and finds it finalized or paid when it
+sends: success, already_finalized and already_paid.
 
 Nothing is accepted by hand. The one trusted input on the Acki Nacki side is the Sepolia
 light client's committee, proven from the beacon chain and set once (section 5); then the
@@ -15,7 +18,8 @@ deployed and the deposit sent as soon as the network is up; the light client is 
 the deposit waits for its Arbitrum assertion (half an hour at least), and daemon-live proves
 the network's 16384-block bundles from the start. The withdrawal does not wait for the deposit:
 its 2 USDC are minted by the owner for 421614 and burned right away, so the burn lands in the
-first bundle, and daemon-withdraw-live pays it out of the deposit's 2 USDC.
+first bundle, and daemon-withdraw-live pays it out of the deposit's 2 USDC. The NACKL burn locks its 5
+NACKL on the Acki Nacki bridge before the NACKL deposit is finalized, which unlocks 3 of them.
 
 The tests run in file order and pytest stops at the first failure (-x): each one is a step
 of the scenario and asserts what that step must have produced, from the chains or from the
@@ -30,9 +34,11 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
-from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, REPO, SEPOLIA_CHAIN, env,
-                      evm_address, keccak256, kv, tail, wait_for)
+from conftest import (ARB_AAVE_POOL, ARB_AUSDC, ARB_CHAIN, ARB_ROLLUP, ARB_USDC, PERIOD_SLOTS, REPO,
+                      SEPOLIA_BEACON_GENESIS, SEPOLIA_CHAIN, SLOT_SECS, env, evm_address, keccak256, kv,
+                      tail, wait_for)
 
 AMOUNT = 2_000_000          # base units: 2 USDC, there and back
 NACKL = 1_000_000_000
@@ -43,6 +49,10 @@ GENESIS_SECS = 600          # the genesis at seq_no 0 reads only the BK set from
 ANCHOR_SECS = 7200          # one or two Arbitrum Sepolia assertion intervals, plus the parent block
 COVERAGE_SECS = 7800        # the next 16384-block boundary (~90 min) and its proof
 LC_PROOF_SECS = 3600        # the step key's generation, or one light-client step proof
+RUN_SECS = 2 * 3600         # how long a run may take, for the committee-period check (green runs: ~104 min)
+# What eth-lc-relayer logs once Sepolia's committee period has moved on: with no rotate proof and no
+# owner hop in the e2e, its light client cannot follow, and no later Sepolia block is accepted.
+PERIOD_ENDED = "committee period advanced"
 # The local network's GraphQL behind nginx0, on this runner's end of the tunnels fixture.
 GRAPHQL = "http://127.0.0.1:18080/graphql"
 
@@ -73,6 +83,18 @@ def test_01_deployer_key_matches_its_address(arb, ctx):
 
 
 # ── 1 · the network ─────────────────────────────────────────────────────────
+
+
+def test_02_no_sepolia_committee_change_during_the_run():
+    """The Sepolia sync committee stays the same for the whole run. The light client follows a
+    new committee only through a rotate proof, which the e2e does not run, or by the owner's hand,
+    which test_54 forbids: a run across the change would stall at the deposit's anchor."""
+    slot = int((time.time() - SEPOLIA_BEACON_GENESIS) // SLOT_SECS)
+    left = (PERIOD_SLOTS - slot % PERIOD_SLOTS) * SLOT_SECS
+    change = datetime.fromtimestamp(time.time() + left, timezone.utc)
+    print(f"  Sepolia period {slot // PERIOD_SLOTS}, next committee at {change:%F %H:%M} UTC")
+    assert left > RUN_SECS, (f"the Sepolia sync committee changes in {left // 60} min, at {change:%H:%M} UTC; "
+                             f"start the run after that")
 
 
 def test_10_local_network_bridge_active(an):
@@ -207,8 +229,8 @@ def test_31_deposit_services_started(run):
     """daemon-live, eth-lc-relayer arbitrum-anchors and deposit-relayer daemon start from their
     images and say so in their logs. arbitrum-anchors has to run before the deposit: it takes
     the slot proofs when the deposit's batch lands, a minute or two after the deposit. The
-    deposit relayer finalizes the deposit; the CLI waits for it (--relayer-grace-s). Beside
-    daemon-live, daemon-withdraw-live pays out every burn that names the run's bridge."""
+    deposit relayer finalizes the deposits. Beside daemon-live, daemon-withdraw-live pays out every
+    burn that names the run's bridge."""
     run.job("relayer", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"))
     # The ARB_RPC secret, when set, follows the keys on the job's stdin: ci-entry logs every
     # command line, so a secret never travels as a job argument.
@@ -243,13 +265,13 @@ def test_32_recipient_multisig(an, ctx):
     assert int(an("ecc", ctx["msig"])["ECC3"]) == 0
 
 
-# ── 4 · deposit: ackinacki-bridge deposit ───────────────────────────────────
+# ── 4 · deposits: ackinacki-bridge deposit send ─────────────────────────────
 
 
-def steps(run, job):
-    """The CLI's --json step events so far: {step: (state, detail)} of the latest of each."""
+def steps(run, log):
+    """The CLI's --json step events so far in `log`: {step: (state, detail)} of the latest of each."""
     out = {}
-    for line in run.log(job).splitlines():
+    for line in run.log(log).splitlines():
         try:
             e = json.loads(line)
         except ValueError:
@@ -259,30 +281,45 @@ def steps(run, job):
     return out
 
 
-def step_done(run, step, what, timeout):
+def summary(run, log, key):
+    """The CLI's --json summary in `log`: the last JSON object that carries `key`."""
+    for line in reversed(run.log(log).splitlines()):
+        if line.startswith("{") and f'"{key}"' in line:
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    raise AssertionError(f"no summary with {key} in {log}\n" + tail(run.log(log)))
+
+
+def step_done(run, job, step, what, timeout):
     def check():
-        state = steps(run, "cli-deposit").get(step, ("", ""))
-        assert state[0] != "failed", f"deposit step {step} failed: {state[1]}\n" + tail(run.log("cli-deposit"))
-        code = run.wait("cli-deposit", 1)
-        assert code in (None, 0), f"ackinacki-bridge deposit exited {code} before {step}\n" + tail(run.log("cli-deposit"))
+        state = steps(run, job).get(step, ("", ""))
+        assert state[0] != "failed", f"{job}: step {step} failed: {state[1]}\n" + tail(run.log(job))
+        code = run.wait(job, 1)
+        assert code in (None, 0), f"{job} exited {code} before {step}\n" + tail(run.log(job))
         return state if state[0] in ("done", "skipped") else None
-    return wait_for(what, check, timeout, log=lambda: run.log("cli-deposit"))
+    return wait_for(what, check, timeout, log=lambda: run.log(job))
 
 
 def test_40_deposit_sent(run, ctx):
-    """The CLI sends approve and deposit from ARBITRUM_SEPOLIA_E2E_ADDRESS."""
+    """`deposit send` sends approve and deposit from ARBITRUM_SEPOLIA_E2E_ADDRESS."""
     run.job("cli-deposit", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
-            FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2")
-    state = step_done(run, "deposit", "the deposit transaction is sent", 900)
+            TOKEN="usdc", FROM=ctx["address"], TO=ctx["msig"], AMOUNT="2")
+    state = step_done(run, "cli-deposit", "deposit", "the deposit transaction is sent", 900)
     print(f"  deposit https://sepolia.arbiscan.io/tx/{state[1]}")
     ctx.update(deposit_tx=state[1])
 
 
 def test_41_deposit_event_received(run, arb, ctx):
-    """TC-21. The deposit is mined, confirmed, and its Deposit event is found. The bridge is on the
-    AAVE market of 421614, and the deposit put part of its 2 USDC into the pool."""
-    state = step_done(run, "evm_confirm", "the Deposit event is received", 900)
+    """TC-21. The deposit is mined, confirmed, and its Deposit event is found; `deposit send` ends
+    there, with nothing sent to Acki Nacki. The bridge is on the AAVE market of 421614, and the
+    deposit put part of its 2 USDC into the pool."""
+    state = step_done(run, "cli-deposit", "evm_confirm", "the Deposit event is received", 900)
     assert state[1].startswith("depositId"), state
+    run.finish("cli-deposit", 300)
+    got = summary(run, "cli-deposit", "deposit")
+    assert got["deposit"]["tx_hash"] == ctx["deposit_tx"] and got.get("confirmation") is None, got
     bridge = ctx["bridge"]
     assert arb.call(bridge, "aavePool()") == int(ARB_AAVE_POOL, 16), "the bridge is not on the AAVE pool of 421614"
     assert arb.call(bridge, "aUSDC()") == int(ARB_AUSDC, 16), "the bridge does not hold the aUSDC of 421614"
@@ -291,7 +328,7 @@ def test_41_deposit_event_received(run, arb, ctx):
     ctx.update(supplied=supplied)
 
 
-# ── 4b · withdrawal: a burn on Acki Nacki, alongside the deposit ──────────
+# ── 4b · withdrawals: burns on Acki Nacki, alongside the deposits ─────────
 
 
 def test_42_withdrawal_multisig_funded(an, ctx):
@@ -299,37 +336,21 @@ def test_42_withdrawal_multisig_funded(an, ctx):
     withdrawal runs alongside the deposit instead of after it: the bridge on Arbitrum Sepolia
     already holds the deposit's 2 USDC to pay it with."""
     got = an("msig-funded", AMOUNT)
-    ctx.update(wmsig=got["MSIG"], wmsig_keys_path=got["MSIG_KEYS"])
+    ctx.update(wmsig=got["MSIG"], wmsig_keys=an.cat(got["MSIG_KEYS"]))
     assert int(an("ecc", ctx["wmsig"])["ECC3"]) == AMOUNT, "the withdrawal multisig does not hold the 2 USDC"
 
 
 def test_42b_nackl_withdrawal_multisig_funded(an, ctx):
+    """A third multisig gets 5 NACKL from the giver."""
     got = an("msig-nackl", NACKL_OUT)
     ctx.update(nmsig=got["MSIG"], nmsig_keys=an.cat(got["MSIG_KEYS"]))
     assert int(an("ecc", ctx["nmsig"])["ECC1"]) >= NACKL_OUT
 
 
-def log_line(run, pattern, what, timeout, log="cli-withdraw"):
-    def check():
-        text = run.log(log)
-        code = run.wait("cli-withdraw", 1)
-        m = re.search(pattern, text)
-        assert m or code in (None, 0), f"ackinacki-bridge withdraw exited {code} before: {what}\n" + tail(text)
-        return m
-    return wait_for(what, check, timeout, log=lambda: run.log(log))
-
-
-def test_43_burn_on_acki_nacki(run, ctx):
-    """The CLI burns the 2 USDC on Acki Nacki."""
-    stdin = "\n".join([env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"), ctx["wmsig_keys"].replace("\n", ""),
-                       ctx["nmsig_keys"].replace("\n", "")])
-    run.job("cli-withdraw", stdin=stdin, FROM=ctx["wmsig"], TO=ctx["address"], AMOUNT="2",
-            NACKL_FROM=ctx["nmsig"], NACKL_AMOUNT=str(NACKL_OUT // NACKL))
-    log_line(run, r"burn broadcast an_tx=", "the burn is sent", 900)
-def the_claim(run, ctx):
-    """daemon-withdraw-live's record of this run's burn (its withdraw-claims.json, kept in /out), or None
-    while it has not seen it. The relayer job, daemon-live and daemon-withdraw-live, must keep
-    running: it ends as soon as either stops."""
+def the_claim(run, ctx, amount):
+    """daemon-withdraw-live's record of this run's burn of `amount` base units (its
+    withdraw-claims.json, kept in /out), or None while it has not seen it. The relayer job,
+    daemon-live and daemon-withdraw-live, must keep running: it ends as soon as either stops."""
     code = run.wait("relayer", 1)
     assert code is None, f"the relayer job (daemon-live or daemon-withdraw-live) exited {code}\n" + tail(run.log("relayer", 200))
     try:
@@ -337,36 +358,48 @@ def the_claim(run, ctx):
     except ValueError:
         return None
     for claim in claims.get("withdrawals", []):
-        if (claim.get("recipient") or "").lower() == ctx["address"].lower() and claim.get("amount") == str(AMOUNT):
+        if (claim.get("recipient") or "").lower() == ctx["address"].lower() and claim.get("amount") == str(amount):
             return claim
     return None
 
 
-def claim_reaches(run, ctx, what, done, timeout):
-    """Waits until `done(claim)`; the failure shows the claim and the tail of daemon-live's log."""
+def claim_reaches(run, ctx, amount, what, done, timeout):
+    """Waits until `done(claim)`; the failure shows the claim and the tail of the relayer job's log."""
     def show():
-        return f"claim: {the_claim(run, ctx)}\n" + run.log("relayer", 200)
-    return wait_for(what, lambda: (lambda c: c if c and done(c) else None)(the_claim(run, ctx)), timeout, log=show)
+        return f"claim: {the_claim(run, ctx, amount)}\n" + run.log("relayer", 200)
+    return wait_for(what, lambda: (lambda c: c if c and done(c) else None)(the_claim(run, ctx, amount)),
+                    timeout, log=show)
 
 
-def test_43_burn_on_acki_nacki(an, ctx):
-    """The multisig burns the 2 USDC on Acki Nacki to ARBITRUM_SEPOLIA_E2E_ADDRESS, as the wallet
-    does: sendTransaction to the bridge with initiateWithdrawal, and nothing after it."""
-    got = an("burn", ctx["wmsig"], ctx["wmsig_keys_path"], AMOUNT, ctx["address"])
-    assert int(got["ECC3_AFTER"]) == 0, "the multisig still holds the USDC it burned"
+def test_43_burns_by_withdraw_send(run, an, ctx):
+    """`withdraw send` burns the 2 USDC and the 5 NACKL on Acki Nacki to
+    ARBITRUM_SEPOLIA_E2E_ADDRESS, each from its multisig, and stops once the bridge's
+    WithdrawalInitiated is captured: nothing is proven or sent to Arbitrum Sepolia."""
+    sends = {"usdc": (ctx["wmsig"], ctx["wmsig_keys"], "2"),
+             "nackl": (ctx["nmsig"], ctx["nmsig_keys"], str(NACKL_OUT // NACKL))}
+    run.job("cli-withdraw-send", stdin="\n".join(keys.replace("\n", "") for _, keys, _ in sends.values()),
+            TO=ctx["address"], SENDS="+".join(f"{t},{f},{a}" for t, (f, _, a) in sends.items()))
+    run.finish("cli-withdraw-send", 900)
+    for token, ecc in (("usdc", 3), ("nackl", 1)):
+        got = summary(run, f"cli-withdraw-send-{token}", "burn")
+        assert got["burn"]["token_id"] == ecc and got["proof"] is None and got["submit"] is None, got
+        ctx[f"{token}_burn_tx"] = got["burn"]["an_tx"]
+    assert int(an("ecc", ctx["wmsig"])["ECC3"]) == 0, "the multisig still holds the USDC it burned"
 
 
 def test_44_withdrawal_found_by_the_relayer(run, ctx):
-    """The bridge emits WithdrawalInitiated and daemon-live finds it on its next poll: the burn's
-    recipient and amount are in its record, waiting for coverage."""
-    claim = claim_reaches(run, ctx, "daemon-live finds the burn", lambda c: c.get("block_seq_no") is not None, 600)
-    assert claim["state"] == "pending", claim
-    ctx.update(burn_seq_no=claim["block_seq_no"])
+    """The bridge emits WithdrawalInitiated and daemon-withdraw-live finds both burns on its next polls:
+    their recipient and amount are in its record, waiting for coverage."""
+    usdc = claim_reaches(run, ctx, AMOUNT, "daemon-withdraw-live finds the USDC burn",
+                         lambda c: c.get("block_seq_no") is not None, 600)
+    nackl = claim_reaches(run, ctx, NACKL_OUT, "daemon-withdraw-live finds the NACKL burn",
+                          lambda c: c.get("block_seq_no") is not None, 600)
+    assert usdc["state"] == "pending" and nackl["state"] == "pending", (usdc, nackl)
+    ctx.update(burn_seq_no=max(usdc["block_seq_no"], nackl["block_seq_no"]))
 
 
-def test_45_nackl_locked_on_acki_nacki(run, an, ctx):
-    log_line(run, r"captured WithdrawalInitiated event", "the NACKL WithdrawalInitiated is captured", 900,
-             log="cli-withdraw-nackl")
+def test_45_nackl_locked_on_acki_nacki(an, ctx):
+    """The NACKL burn locked the 5 NACKL on the Acki Nacki bridge, for 421614 and for this bridge."""
     got = an("nackl", ctx["bridge"])
     assert int(got["LOCKED"]) == NACKL_OUT, f"locked for 421614: {got}"
     assert int(got["LOCKED_TO"]) == NACKL_OUT, f"locked to the bridge: {got}"
@@ -374,11 +407,17 @@ def test_45_nackl_locked_on_acki_nacki(run, an, ctx):
 
 
 def test_46_nackl_deposit_sent(run, arb, ctx):
+    """`deposit send --token nackl` deposits 3 of the NACKL the deployer holds to the recipient
+    multisig and ends once it is confirmed."""
     at = arb.block()
     ctx["nackl_supply_before"] = arb.call(ctx["nackl"], "totalSupply()", block=at)
     ctx["nackl_minted_before"] = arb.words(ctx["bridge"], "nacklState()", block=at)[4]
     run.job("cli-deposit-nackl", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
             FROM=ctx["address"], TO=ctx["msig"], AMOUNT=str(NACKL_IN // NACKL))
+    run.finish("cli-deposit-nackl", 900)
+    got = summary(run, "cli-deposit-nackl", "deposit")
+    assert got.get("confirmation") is None, got
+    ctx.update(nackl_deposit_tx=got["deposit"]["tx_hash"])
 
 
 # ── 5 · the light client, while the deposit waits for its assertion ────────
@@ -460,63 +499,77 @@ def test_55_light_client_relayer_started(run, an, ctx):
         assert run.wait(job, 1) is None, f"{job} exited\n" + tail(run.log(job))
 
 
-# ── 6 · the deposit lands ───────────────────────────────────────────────────
+# ── 6 · the deposits land ───────────────────────────────────────────────────
 
 
 def test_60_light_client_accepts_spans(run):
     """arbitrum-anchors sends the light client the Sepolia blocks of the epoch an Arbitrum
     assertion landed in (submitAncestry), between the two checkpoints around it."""
     sent = "submitAncestry sent for the assertion's parent-chain block"
-    wait_for("arbitrum-anchors gets a span accepted", lambda: sent in run.log("anchors"),
-             ANCHOR_SECS, log=lambda: run.log("anchors"))
+
+    def span_sent():
+        lc = run.log("lc-relayer")
+        assert PERIOD_ENDED not in lc, ("Sepolia's sync committee changed during the run: the light client "
+                                        "stops there and the deposit's block cannot be anchored; run again\n"
+                                        + tail(lc))
+        return sent in run.log("anchors")
+    wait_for("arbitrum-anchors gets a span accepted", span_sent, ANCHOR_SECS, log=lambda: run.log("anchors"))
     assert "no more submitAncestry" not in run.log("anchors"), \
         "arbitrum-anchors gave a span up: its block will never be accepted\n" + tail(run.log("anchors"))
 
 
 def test_61_deposit_block_anchored(run, an, arb, ctx):
     """The deposit's Arbitrum block reaches the anchor set through ArbitrumBlockVerifier, from an
-    assertion in a Sepolia block the light client accepted. The CLI may see the deposit
-    finalized by the relayer before it sees the anchor, and then skips its anchor step: the
-    block hash comes from the deposit's receipt."""
-    step_done(run, "anchor", "the deposit block is accepted on Acki Nacki", ANCHOR_SECS)
+    assertion in a Sepolia block the light client accepted."""
     block = arb.receipt(ctx["deposit_tx"])["blockHash"]
-    assert an("accepted", ARB_CHAIN, block).get("ACCEPTED") == "true", f"isAcceptedBlockHash({ARB_CHAIN}, {block})"
-    log = run.log("anchors")
-    assert "proveBlock sent" in log and "the bridge accepts the deposit block" in log, \
-        "arbitrum-anchors did not get the block accepted through proveBlock\n" + tail(log)
+    wait_for("the deposit block is accepted on Acki Nacki",
+             lambda: an("accepted", ARB_CHAIN, block).get("ACCEPTED") == "true", ANCHOR_SECS,
+             log=lambda: run.log("anchors"))
+    # arbitrum-anchors logs the acceptance on its next tick, up to a tick after Acki Nacki has it.
+    wait_for("arbitrum-anchors sees the block accepted",
+             lambda: "the bridge accepts the deposit block" in run.log("anchors"), 120,
+             log=lambda: run.log("anchors"))
+    assert "proveBlock sent" in run.log("anchors"), \
+        "arbitrum-anchors did not get the block accepted through proveBlock\n" + tail(run.log("anchors"))
 
 
-def test_62_deposit_finalized_by_the_relayer(run):
-    """The deposit relayer builds the deposit's receipt proof and finalizes it on Acki Nacki;
-    the CLI, waiting for it, proves nothing and sends nothing."""
-    wait_for("the deposit relayer finalizes the deposit", lambda: "daemon: finalized" in run.log("deposit-relayer"),
-             900, log=lambda: run.log("deposit-relayer"))
-    for step in ("prove", "finalize"):
-        state = step_done(run, step, f"the CLI's {step} step ends", 900)
-        # "the operator's relayer finalized it" once the CLI saw the anchor first, "the deposit
-        # is finalized already" when the relayer was quicker than its anchor poll.
-        assert state[0] == "skipped" and "finalized" in state[1], \
-            f"the CLI's {step} step: {state}, not left to the relayer\n" + tail(run.log("cli-deposit"))
+def test_62_deposits_finalized_by_the_relayer(run, an, ctx):
+    """The deposit relayer builds each deposit's receipt proof and finalizes it on Acki Nacki, and
+    the vouchers credit the recipient: 2 USDC and 3 NACKL."""
+    def credited():
+        got = an("ecc", ctx["msig"])
+        return int(got["ECC3"]) == AMOUNT and int(got["ECC1"]) == NACKL_IN
+    wait_for("the deposit relayer finalizes both deposits and they are credited", credited, 1800,
+             log=lambda: run.log("deposit-relayer"))
+    assert "daemon: finalized" in run.log("deposit-relayer"), tail(run.log("deposit-relayer"))
 
 
-def test_64_deposit_minted(run):
-    """The voucher confirms the deposit: USDC is minted on Acki Nacki."""
-    state = step_done(run, "credit", "the deposit is minted (confirmDeposit)", 900)
-    assert state[1].startswith("confirmDeposit"), state
+def test_63_deposit_proofs_find_them_finalized(run, ctx):
+    """`deposit proof --tx-hash` of each deposit, once the relayer finalized it: the CLI builds the
+    receipt proof, finds the deposit finalized before sending, sends nothing, confirms the credit
+    and ends in success, finalize: already_finalized."""
+    deposits = {"usdc": ctx["deposit_tx"], "nackl": ctx["nackl_deposit_tx"]}
+    run.job("cli-deposit-proof", DEPOSITS="+".join(f"{t}:{tx}" for t, tx in deposits.items()))
+    run.finish("cli-deposit-proof", 1800)
+    for token in deposits:
+        log = f"cli-deposit-proof-{token}"
+        got = steps(run, log)
+        assert got.get("prove", ("",))[0] == "done", f"{token}: the receipt proof was not built: {got}"
+        finalize = got.get("finalize", ("", ""))
+        assert finalize[0] == "skipped" and "finalized" in finalize[1], f"{token}: finalize {finalize}"
+        assert got.get("credit", ("",))[0] == "done", f"{token}: no credit confirmed: {got}"
+        done = summary(run, log, "finalize")
+        assert done["finalize"] == "already_finalized" and done["confirmation"], done
 
 
-def test_65_deposit_delivered(run, an, ctx):
-    """The CLI ends well, and the 2 USDC are on the multisig."""
-    run.finish("cli-deposit", 600)
-    summary = [json.loads(line) for line in run.log("cli-deposit").splitlines()
-               if line.startswith("{") and '"confirmation"' in line]
-    assert summary and summary[-1]["confirmation"].get("delivery_tx"), \
-        "no delivery transaction in the CLI's summary\n" + tail(run.log("cli-deposit"))
+def test_65_deposit_delivered(an, ctx):
+    """The 2 USDC are on the recipient multisig."""
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the multisig does not hold the 2 USDC"
 
 
-def test_66_nackl_deposit_delivered(run, an, arb, ctx):
-    run.finish("cli-deposit-nackl", ANCHOR_SECS)
+def test_66_nackl_deposit_delivered(an, arb, ctx):
+    """The 3 NACKL are on the recipient multisig, burned on Arbitrum Sepolia and unlocked from the 5
+    the withdrawal locked."""
     assert int(an("ecc", ctx["msig"])["ECC1"]) == NACKL_IN, "the multisig did not receive the 3 NACKL"
     at = arb.block()
     minted = arb.words(ctx["bridge"], "nacklState()", block=at)[4] - ctx["nackl_minted_before"]
@@ -525,32 +578,36 @@ def test_66_nackl_deposit_delivered(run, an, arb, ctx):
     assert int(an("nackl", ctx["bridge"])["LOCKED"]) == NACKL_OUT - NACKL_IN
 
 
-# ── 7 · the withdrawal lands ────────────────────────────────────────────────
+# ── 7 · the withdrawals land ────────────────────────────────────────────────
 
 
 def test_70_burn_bundle_verified(arb, ctx):
-    """daemon-live gets the bundle that covers the burn verified on Arbitrum Sepolia: the next
-    16384 boundary past the burn's block."""
+    """daemon-live gets the bundle that covers both burns verified on Arbitrum Sepolia: the next
+    16384 boundary past the later burn's block."""
     covering = (ctx["burn_seq_no"] // 16384 + 1) * 16384
     wait_for(f"verifyBlock reaches {covering}",
              lambda: arb.call(ctx["bridge"], "storedLastSeenBlockSeqNo()") >= covering, COVERAGE_SECS)
 
 
 def test_71_withdrawal_paid_by_the_relayer(run, ctx):
-    """daemon-withdraw-live proves the withdrawal (Circuit 4 and its SHPLONK aggregation) and pays
-    it out with withdrawByProof: its record says paid, with the transaction."""
-    claim = claim_reaches(run, ctx, "daemon-withdraw-live pays the withdrawal out", lambda c: c["state"] != "pending", 5400)
+    """daemon-withdraw-live proves the USDC withdrawal (Circuit 4 and its SHPLONK aggregation) and
+    pays it out with withdrawByProof: its record says paid, with the transaction."""
+    claim = claim_reaches(run, ctx, AMOUNT, "daemon-withdraw-live pays the USDC withdrawal out",
+                          lambda c: c["state"] != "pending", 5400)
     assert claim["state"] == "paid", f"the burn ended {claim['state']}, not paid by daemon-withdraw-live: {claim}"
     ctx.update(withdraw_tx=claim["tx_hash"])
     print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{claim['tx_hash']}")
 
 
-def test_72_withdrawal_paid(run, ctx):
-    """withdrawByProof is sent and confirmed on Arbitrum Sepolia."""
-    m = log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "withdrawByProof is confirmed", 1800)
-    print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{m.group(1)}")
-    run.finish("cli-withdraw", 3600)
-    ctx.update(withdraw_tx=m.group(1))
+def test_71b_nackl_withdrawal_paid_by_the_relayer(run, ctx):
+    """daemon-withdraw-live proves the NACKL withdrawal after the USDC one and pays it out: the
+    bridge mints the 5 NACKL at once, within the daily limit and below the delay threshold."""
+    claim = claim_reaches(run, ctx, NACKL_OUT, "daemon-withdraw-live pays the NACKL withdrawal out",
+                          lambda c: c["state"] != "pending", 1800)
+    assert claim["state"] == "paid", f"the NACKL burn ended {claim['state']}, not paid at once: {claim}"
+    print(f"  withdrawByProof https://sepolia.arbiscan.io/tx/{claim['tx_hash']}")
+
+
 WITHDRAWAL_PAID = "0x" + keccak256(b"WithdrawalByProofExecuted(uint256,address,uint256,uint256,address)").hex()
 
 
@@ -580,7 +637,22 @@ def test_72a_withdrawal_pulled_from_aave(arb, ctx):
         f"{ctx['supplied'] / 1e6} USDC were supplied; the payout left some booked"
 
 
-def test_73_usdc_delivered(arb, an, ctx):
+def test_73_withdraw_proofs_find_them_paid(run, ctx):
+    """`withdraw proof --tx-hash` of each burn `withdraw send` made, once daemon-withdraw-live paid both:
+    the CLI builds the Circuit 4 proof, finds the burn paid out when it sends and ends in
+    success, submit.status already_paid."""
+    burns = {"usdc": ctx["usdc_burn_tx"], "nackl": ctx["nackl_burn_tx"]}
+    run.job("cli-withdraw", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
+            BURNS="+".join(f"{t}:{tx}" for t, tx in burns.items()))
+    run.finish("cli-withdraw", 3600)
+    for token, tx in burns.items():
+        got = summary(run, f"cli-withdraw-{token}", "submit")
+        assert got["burn"]["an_tx"] == tx.removeprefix("0x").lower(), got
+        assert got["proof"] and got["proof"]["calldata_bytes"] > 0, f"{token}: no proof built: {got}"
+        assert got["submit"]["status"] == "already_paid" and got["submit"]["eth_tx"] is None, got
+
+
+def test_74_usdc_delivered(arb, an, ctx):
     """The 2 USDC are back on ARBITRUM_SEPOLIA_E2E_ADDRESS, the withdrawal multisig is empty, and
     the deposit's 2 USDC stay on the recipient multisig."""
     after = arb.usdc(ctx["address"])
@@ -590,15 +662,15 @@ def test_73_usdc_delivered(arb, an, ctx):
     assert int(an("ecc", ctx["msig"])["ECC3"]) == AMOUNT, "the deposit's 2 USDC left the recipient multisig"
 
 
-def test_74_nackl_minted(run, arb, ctx):
-    log_line(run, r"withdrawByProof paid out tx=(0x[0-9a-fA-F]+)", "the NACKL withdrawByProof is confirmed",
-             1800, log="cli-withdraw-nackl")
+def test_75_nackl_minted(arb, ctx):
+    """The bridge minted the 5 NACKL it accepted, and nothing waits in its queue."""
     state = arb.words(ctx["bridge"], "nacklState()")
     accepted, minted, pending = state[3], state[4], state[5]
     assert (accepted, minted, pending) == (NACKL_OUT, NACKL_OUT, 0), f"nacklState: {state}"
 
 
-def test_75_nackl_reconciles(arb, an, ctx):
+def test_76_nackl_reconciles(arb, an, ctx):
+    """NACKL supply on Arbitrum Sepolia and the lock on Acki Nacki agree: 5 out, 3 back."""
     assert arb.call(ctx["nackl"], "totalSupply()") == NACKL_SUPPLY - NACKL_IN + NACKL_OUT
     got = an("nackl", ctx["bridge"])
     assert int(got["LOCKED"]) == NACKL_OUT - NACKL_IN, got
@@ -614,7 +686,7 @@ PROOF_TIMING = re.compile(
     r"|withdraw claimer: (proving the withdrawal|proof built)")
 
 
-def test_74_proof_timings(run):
+def test_77_proof_timings(run):
     """Prints how long each proof took on the prover host, from the relayer job's log: the
     runbooks quote these figures. A bundle and the withdrawal were proven above, so their lines
     are there; a run without them is a log that lost them."""

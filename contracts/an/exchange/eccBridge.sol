@@ -396,16 +396,17 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     }
 
     // ========================================================
-    // Cross-chain bridge — outbound (AN -> any chain): burn ECC, emit proof-source event
+    // Cross-chain bridge — outbound (AN -> EVM): burn ECC, emit proof-source event
     // ========================================================
 
     /// @notice Burns the ECC currency attached to this message and emits an event
     ///         carrying the data needed to mint the equivalent on the destination
     ///         chain. Exactly one ECC currency must be attached; its id and amount
-    ///         are taken from `msg.currencies`. The destination chain is opaque
-    ///         to this contract — `dstChainId` is just passed through to the event.
-    /// @param dstChainId — opaque destination chain identifier (passed through to event)
-    /// @param recipient  — destination-chain recipient bytes (≤64 bytes)
+    ///         are taken from `msg.currencies`.
+    /// @dev Circuit 4 requires a 20-byte EVM recipient. Update Circuit 4
+    ///      before enabling withdrawals to a non-EVM destination.
+    /// @param dstChainId — chain identifier of a configured EVM destination
+    /// @param recipient  — destination EVM address as 20 raw bytes
     function initiateWithdrawal(uint256 dstChainId, bytes recipient) public {
         require(!_paused, ERR_PAUSED);
         require(recipient.length > 0, ERR_RECIPIENT_EMPTY);

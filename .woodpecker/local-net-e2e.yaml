@@ -19,12 +19,17 @@ variables:
   # nginx0 is not pinned: acki-nacki's compose names docker.gosh.sh/ackinacki-nginx without
   # a tag and up.sh does not pull it.
   - &acki_repo "https://github.com/gosh-sh/acki-nacki.git"
+  # The branch must build a gql-server (>= 1.5.0) that serves blockchain.latestBkSet and
+  # a block-manager that keeps the bkSetUpdates history: daemon-live's cold start and
+  # compute_bridge_anchors build the starting BK set from them. Its nodes must have the
+  # KECCAK256 instruction ArbitrumBlockVerifier needs (tvm-sdk v3.1.0.an has it).
+  # acki-nacki's CI tags a push build of dev latest-dev (and its commit sha); br_<branch>,
+  # with "/" as "_", marks the source branch of a pull request, so br_dev is the build of
+  # some pull request from dev, not dev's latest commit.
   - &acki_branch "dev"
-  # The build shellnet runs: acki-nacki b31c9d8b pins tvm-sdk 8b108bac, which has the
-  # KECCAK256 instruction ArbitrumBlockVerifier needs; br_dev (c8c9e67e, tvm-sdk v3.0.6.an)
-  # does not. gql-server and block-manager fall back to br_dev when the tag lacks them.
-  - &acki_image_tag "b31c9d8bcda724887afb02f0016a3bb305027792"
-  - &acki_aux_fallback_tag "br_dev"
+  # gql-server and block-manager fall back to this tag when the image tag lacks them.
+  - &acki_image_tag "latest-dev"
+  - &acki_aux_fallback_tag "latest-dev"
   - &registry "docker.gosh.sh"
   # Contract toolchain for zerostate generation and for the test on the host (the checkout's
   # own contracts/compiler binaries are macOS builds). Every tarball is sha256-verified.

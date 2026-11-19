@@ -1340,7 +1340,7 @@ crates/bridge-prover-libraries/                ← halo2 sub-workspace (shared w
 │   └── ackinacki-bridge                       ← this CLI (built into the sub-workspace)
 ├── ackinacki-bridge/                          ← symlink → ../ackinacki-bridge
 ├── L1_config/env  L2_config/env               ← daemon env files (BRIDGE_BOOTSTRAP_SEQNO,
-│                                              #   BRIDGE_ANCHOR_LEVEL, BRIDGE_BK_SET_CONFIG) —
+│                                              #   BRIDGE_ANCHOR_LEVEL) —
 │                                              #   the CLI does NOT read these
 ├── shellnet.common                            ← shared shellnet-network env (RPC and GraphQL
 │                                              #   endpoints, paths); keys come from .env beside it

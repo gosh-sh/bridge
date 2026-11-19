@@ -24,6 +24,11 @@ against it. [`README.md`](README.md) walks through both directions and the repos
 depth: the Acki Nacki contracts in [`contracts/an/README.md`](contracts/an/README.md), the Ethereum contracts
 in [`docs/EVM-contracts-spec.md`](docs/EVM-contracts-spec.md).
 
+**Withdrawal destinations.** The bridge supports EVM destinations, and Circuit 4 commits to a
+[20-byte EVM recipient](crates/bridge-circuits/bridge-event-prove-circuit/src/bridge_event_prove_circuit.rs#L165).
+Before enabling a non-EVM withdrawal destination, update Circuit 4, its witness decoder, and the
+payout path to support the destination's recipient format.
+
 ## Issues, branches and pull requests
 
 One Linear issue (or one GitHub issue) → one branch and one pull request → one assignee.
@@ -188,7 +193,7 @@ cd crates/bridge-prover-libraries && cargo test --locked -p bridge-relayer-daemo
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- --help
 # daemon-bridge runs both ETH legs in one process on one EOA: verifyBlock, falling forward through
 # proof_<N>.json, and withdrawByProof on proof_event_*.json. daemon-withdraw is the payout leg alone;
-# daemon-live proves in-process.
+# daemon-live proves in-process; daemon-withdraw-live finds every burn itself, proves and pays it.
 cd crates/bridge-prover-libraries && cargo run -p bridge-relayer-daemon --bin relayer -- daemon-bridge \
     --state-dir <state dir/> --proofs-dir <prover proofs/> --rpc-url ... --bridge-address ... --private-key ...
 # daemon, daemon-bridge and smoke-fixture read the bundle stride from the bridge's bundleStride();
@@ -224,7 +229,7 @@ cd crates/deposit-relayer-daemon && BRIDGE_DEPLOY_BLOCK=<block> SEPOLIA_RPC_URL=
 | `images.yaml` | PRs (build only), pushes to `main`, tags `v*`, manual on `main` | The four service images from `docker/Dockerfile` (every Rust workspace compiles), pushed to the registry from `main` and tags; `docker/compose.yaml` checked against the example settings |
 | `release.yaml` | tags `v*` | Refuses the tag while `MIN_BRIDGE_VERSION` (`crates/ackinacki-bridge/src/deposit/an_preflight.rs`) is unset or no earlier release has `kzg_bn254_21.srs`; builds `ackinacki-bridge` and `aggregate-proof`; publishes the three assets `crates/ackinacki-bridge/scripts/install.sh` downloads. Runs no test suite |
 | `request_review.yaml`, `notify_review_submitted.yaml` | PRs; cron | Re-requests stale reviews and pings reviewers and authors in Discord |
-| `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of acki-nacki's `dev`) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
+| `local-net-e2e.yaml` | PRs labelled `local-network`; manual | A whole acki-nacki network (latest build of the acki-nacki branch the pipeline's `acki_branch` names) on one host with the PR's `contracts/an/*` in its zerostate, then `test_deploy_and_withdraw_only.py` against it (`tests/e2e/local-net/README.md`) |
 
 Each pipeline's header comment has the detail. A step that names a secret which does not exist, or
 is not ticked for the event, makes Woodpecker refuse the whole pipeline before any step runs.
@@ -324,6 +329,14 @@ with more than 16 live locals fails with `Stack too deep` there even though `for
 The nightly is pinned in `rust-toolchain.toml` because `rustfmt.toml` uses nightly-only options and
 `make lint` runs clippy with `-D warnings`. When bumping it, land the resulting reformat in the same
 commit.
+
+### Before every commit and push
+
+Before the local commit, review and update the relevant docs.
+After the local commit and before every push, review the unpushed commits with a fresh run of the
+same agent from its CLI: no context of the work, the same model and reasoning effort, read-only.
+Push only when it finds nothing critical, that is, at least nothing that can lead to funds being
+stolen or stuck in the bridge.
 
 ## Where to look next
 

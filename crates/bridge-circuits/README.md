@@ -241,7 +241,7 @@ Mode is selected by **whether you run the event-emitting orchestrator** after th
 
 | Env var | Used by | Default | Meaning |
 |---|---|---|---|
-| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Verifier uses it for the BK-set fetch and falls back to `./bk_set.json` on failure. |
+| `BRIDGE_GQL_ENDPOINT` | prover, verifier | `http://localhost/graphql` | Acki Nacki GraphQL URL. Without `state/prover_bk_set.json` the prover builds its starting BK set from it (gql-server >= 1.5.0, Step 2). |
 | `BRIDGE_BOOTSTRAP_SEQNO` | prover only | unset → auto | Explicit seed seqno. Must be `> 0` and divisible by `W·P` (= 512) or the daemon refuses to start. |
 | `RUST_LOG` | both | `info` | Standard env_logger spec. |
 
@@ -276,39 +276,17 @@ curl -s -X POST -H 'Content-Type: application/json' \
      https://shellnet.ackinacki.org/graphql
 ```
 
-#### Step 2 — Sync `bk_set.json` to the chain's BLS pubkeys
+#### Step 2 — Check GraphQL serves the BK set
 
-Both daemons read the BK set from the file at `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`); GraphQL serves only the rotation log, not the current set. Mismatched keys are the #1 cause of Circuit 1A failing with ~96 BLS-pairing constraint violations.
-
-**Local devnet** — match the cluster's `block_keeper{0..4}_bls.keys.json`. If the chain branch is unchanged since your last run, restore the backup:
-
-```bash
-cd /path/to/acki-nacki-to-eth-bridge-halo2-prover
-cp bk_set.json.poseidon_profile_new_local.bak bk_set.json
-```
-
-Otherwise rebuild from the live cluster's config:
-
-```bash
-python3 -c '
-import json
-out = {}
-for i in range(5):
-    with open(f"/path/to/acki-nacki/config/block_keeper{i}_bls.keys.json") as f:
-        out[str(i)] = json.load(f)[0]["public"]
-print(json.dumps(out, indent=2))
-' > bk_set.json
-```
-
-**Shellnet** — the file must hold the set at your bootstrap seed. `crates/bridge-prover-libraries/bk_set.shellnet.json` is the committee at the network's genesis (shellnet restarted on 2026-10-14); fold the rotations up to the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)). The newest rotation the chain reports:
+Neither daemon reads a BK-set file: without `state/prover_bk_set.json` the prover builds the set at the seed from GraphQL (`blockchain.latestBkSet`, then `bkSetUpdates`, checked against the block leaves). The endpoint must be gql-server 1.5.0 or later:
 
 ```bash
 curl -s -X POST -H 'Content-Type: application/json' \
-     -d '{"query":"{ blockchain { bkSetUpdates(last: 1) { edges { node { height block_id } } } } }"}' \
-     https://shellnet.ackinacki.org/graphql
+     -d '{"query":"{ blockchain { latestBkSet { height } } }"}' \
+     http://localhost/graphql            # or https://shellnet.ackinacki.org/graphql
 ```
 
-The startup log shows `BK-set bootstrap: mode=file, loaded N signers from <path>`.
+An `Unknown field "latestBkSet"` error means an older gql-server. The startup log shows `BK set: N signers, commitment=…`.
 
 #### Step 3 — Generate keys (first run only)
 
@@ -441,7 +419,7 @@ If only the prover binaries or the orchestrator changed, **skip `make run`** —
 | `Connection refused` on GraphQL (local) | Cluster not fully up yet — wait until `docker ps` shows all containers healthy and the `seq_no` query in Step 1 returns. |
 | Verifier exits at boot with `"event VK not found"` | Run `cargo run --release --bin bridge-event-prove -- --selftest` once (Mode A Step 3 — the verifier always loads all three VKs at startup). |
 | Verifier exits at boot with `"primary VK not found"` / `"layer VK not found"` | Start `bridge-prover` first — it generates Circuits 1A/2 keys on its initial run (~10 min). |
-| Circuit 1A fails with ~96 BLS-pairing equality constraint violations | `bk_set.json` stale relative to chain — re-sync from `acki-nacki/config/block_keeper{0..4}_bls.keys.json` (local) or delete the file and let GQL fetch take over (shellnet). |
+| Circuit 1A fails with ~96 BLS-pairing equality constraint violations | `state/prover_bk_set.json` is not the set that signs the block. Wipe `state/` and `proofs/` on both daemons: the prover builds the set again from GraphQL. |
 | Prover seed seqno never reached (auto-mode) | Was a real bug, fixed 2026-05-23: the seed is now pinned **once** at startup. If you still hit it, pin explicitly via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |
 | Re-seeding silently ignored — verifier keeps old `last_key_block` | The verifier never re-reads `bootstrap_seed.json` after first init. Wipe `state/` on **both** daemons together before re-seeding. |
 | `target_seq` never reached (orchestrator) | Confirm the prover is producing bundles: `logs/prover_output.log` should show `=== Processing key block at height ===` every ~3 min. |

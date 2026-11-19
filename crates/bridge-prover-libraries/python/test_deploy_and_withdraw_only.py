@@ -141,9 +141,8 @@ def main():
                          f"after {BRIDGE_READY_TIMEOUT_SECS:.0f} s")
     tracer.log(f"  USDCBridge active at {USDC_BRIDGE_ADDRESS}")
 
-    # bk_set: local devnet fetches from GraphQL AND falls back to bk_set.json.
-    # The daemons handle this themselves — the isolated test does not run
-    # daemons, so we skip materialization here regardless of MODE.
+    # The BK set: the daemons build it from GraphQL themselves, and the
+    # isolated test does not run daemons, so nothing is materialized here.
     if not IS_SHELLNET and USDC_BRIDGE_KEY_PATH_OVERRIDE is None:
         tracer.log_phase("Materializing USDCBridge.keys.json from local cluster config")
         materialize_usdc_bridge_key_from_node_config(tracer, PROVER_DIR, USDC_BRIDGE_KEY_PATH)

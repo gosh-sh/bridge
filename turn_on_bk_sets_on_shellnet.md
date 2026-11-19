@@ -285,10 +285,9 @@ Two safe scenarios:
 
 - **DO NOT** toggle `minBK` 4↔5 more often than once per epoch — the relayer may not have finished
   processing the previous `applyBkSetUpdate`.
-- **DO NOT** edit `bk_set.shellnet.json`: it is the BK set from before rotations began, and every
-  BK-set rebuild for a new bridge replays the changes on top of it (runbook §3.2). The daemon starts
-  from the set built for its seed and afterwards follows `prover_bk_set.json` and GraphQL
-  `bkSetUpdates`.
+- **DO NOT** edit the daemon's `prover_bk_set.json`. The daemon builds its starting BK set from
+  GraphQL (`blockchain.latestBkSet` and `bkSetUpdates`) and afterwards follows that file and
+  `bkSetUpdates`; there is no BK-set file of the operator's to keep up to date.
 
 ---
 

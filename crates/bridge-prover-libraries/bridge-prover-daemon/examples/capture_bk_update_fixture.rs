@@ -1,11 +1,12 @@
 //! Capture a live-chain BK-set-update fixture for
 //! [`bridge_prover_lib::tests::parity_bk_update`].
 //!
-//! Walks `bkSetUpdates` on the endpoint given by `BRIDGE_GQL_ENDPOINT`,
-//! folds every rotation with `height < --height` onto `--genesis-bk-set` to
-//! reconstruct `old_pubkeys`, applies the target rotation's delta to derive
-//! `expected_new_pubkeys`, fetches the target block's 16-leaf tree, and
-//! writes the JSON fixture the parity test consumes.
+//! On the endpoint given by `BRIDGE_GQL_ENDPOINT`, builds the BK set before
+//! and after the rotation at `--height` from GraphQL with
+//! [`build_bk_set_with_retry`] (`old_pubkeys` checked against leaf 2 of the
+//! rotation block, `expected_new_pubkeys` against leaf 3), fetches the
+//! block's 16-leaf tree and the rotation's delta blob, and writes the JSON
+//! fixture the parity test consumes.
 //!
 //! Usage:
 //!
@@ -13,28 +14,27 @@
 //! BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql \
 //!     cargo run --release --example capture_bk_update_fixture -- \
 //!         --height 2584711 \
-//!         --genesis-bk-set path/to/bk_set.shellnet.json \
 //!         --out crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json
 //! ```
 //!
 //! `--height` must be the seq_no of the block that emits the rotation event
-//! (not the block-before). `--genesis-bk-set` is the JSON snapshot of the
-//! BK set at chain height 0 (or any known-good anchor prior to `--height`).
+//! (not the block-before). The server must serve `blockchain.latestBkSet`
+//! (gql-server >= 1.5.0) and still hold the `bkSetUpdates` rows between its
+//! snapshot and `--height`.
 //!
-//! The tool re-runs the same code paths the daemon uses at drain time —
-//! [`bk_set_at_height`] to reconstruct old_pubkeys,
-//! [`parse_bk_set_changes_pub`] to apply the delta — so if the capture
-//! itself is broken the parity test will fail at CI time and prompt a
-//! recapture rather than shipping bad data.
+//! The delta is applied to `old_pubkeys` with the code the daemon uses
+//! ([`parse_changes`] and [`apply_block_changes`], node order) and must give
+//! `expected_new_pubkeys`, so a broken capture fails here rather than
+//! shipping bad data.
 
 use std::collections::HashMap;
 
 use anyhow::{bail, Context};
-use bridge_gql_fetcher::bk_set_fetcher::{
-    bk_set_at_height, load_bk_set_from_config, normalize_bk_set_pubkeys,
-    parse_bk_set_changes_pub, BK_CHANGE_VARIANT_ADDED, BK_CHANGE_VARIANT_REMOVED,
+use bridge_gql_fetcher::gql_client::{create_client, DEFAULT_THREAD_ID_HEX};
+use bridge_prover_lib::{
+    bk_set_history::{build_bk_set_with_retry, BuildPolicy},
+    bk_set_replay::{apply_block_changes, parse_changes, BkTarget, FinalCheck},
 };
-use bridge_gql_fetcher::gql_client::create_client;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -57,7 +57,6 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let mut target_height: Option<u64> = None;
-    let mut genesis_path: Option<String> = None;
     let mut out_path: String =
         "crates/bridge-prover-libraries/bridge-prover-lib/tests/fixtures/bk_update_shellnet.json"
             .to_string();
@@ -73,9 +72,6 @@ async fn main() -> anyhow::Result<()> {
                         .context("--height must be u64")?,
                 );
             }
-            "--genesis-bk-set" => {
-                genesis_path = Some(args.next().context("--genesis-bk-set needs a path")?);
-            }
             "--out" => {
                 out_path = args.next().context("--out needs a path")?;
             }
@@ -84,8 +80,7 @@ async fn main() -> anyhow::Result<()> {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: capture_bk_update_fixture --height N --genesis-bk-set PATH \\\n\
-                    \x20\x20                            [--out PATH] [--source LABEL]"
+                    "usage: capture_bk_update_fixture --height N [--out PATH] [--source LABEL]"
                 );
                 return Ok(());
             }
@@ -95,27 +90,47 @@ async fn main() -> anyhow::Result<()> {
 
     let target_height =
         target_height.context("--height is required (bk-update block seq_no)")?;
-    let genesis_path = genesis_path.context("--genesis-bk-set is required")?;
+    if target_height == 0 {
+        // Height 0 is the genesis, not a rotation: fail loudly rather than
+        // emit a self-consistent nothing.
+        bail!("--height=0 has no rotation to capture");
+    }
 
     let endpoint = std::env::var("BRIDGE_GQL_ENDPOINT")
         .context("BRIDGE_GQL_ENDPOINT not set")?;
     let client = create_client(&endpoint).context("create_client failed")?;
 
-    // Reconstruct old_pubkeys = fold(genesis, all updates with height < target).
-    let genesis = load_bk_set_from_config(&genesis_path)
-        .with_context(|| format!("load genesis {}", genesis_path))?;
-    println!("genesis: {} signers from {}", genesis.len(), genesis_path);
-
-    let old_pubkeys = if target_height == 0 {
-        // Odd case: target IS genesis. Not useful for a rotation fixture but
-        // let's fail loudly rather than emit a self-consistent nothing.
-        bail!("--height=0 has no rotation to capture");
-    } else {
-        bk_set_at_height(&client, genesis, target_height - 1)
-            .await
-            .with_context(|| format!("bk_set_at_height({})", target_height - 1))?
-    };
-    println!("old_pubkeys: {} signers (folded to height {})", old_pubkeys.len(), target_height - 1);
+    // The set before the rotation signs the rotation block (leaf 2); the set
+    // after it is leaf 3 of the same block.
+    let policy = BuildPolicy::default();
+    let old_pubkeys = build_bk_set_with_retry(
+        &client,
+        &BkTarget {
+            height: target_height - 1,
+            check: FinalCheck::L2Of(target_height),
+        },
+        &policy,
+    )
+    .await
+    .with_context(|| format!("build the BK set before the rotation at {target_height}"))?
+    .pubkeys;
+    let expected_new = build_bk_set_with_retry(
+        &client,
+        &BkTarget {
+            height: target_height,
+            check: FinalCheck::L3Of(target_height),
+        },
+        &policy,
+    )
+    .await
+    .with_context(|| format!("build the BK set after the rotation at {target_height}"))?
+    .pubkeys;
+    println!(
+        "old_pubkeys: {} signers, expected_new_pubkeys: {} signers (rotation at {})",
+        old_pubkeys.len(),
+        expected_new.len(),
+        target_height,
+    );
 
     // Fetch the target block and locate its bk_set_update_hex.
     let block = client
@@ -131,15 +146,19 @@ async fn main() -> anyhow::Result<()> {
         )
     })?;
 
-    // The delta blob lives on the bkSetUpdates event, not the block itself —
-    // walk the update stream and find the event whose height matches.
-    // Uses `bk_set_at_height`-style pagination for robustness on chains with
-    // many rotations.
-    let (page1, _) = client
-        .query_bk_set_updates_paged(target_height, 500, None)
+    // The delta blob lives on the bkSetUpdates row, not the block itself —
+    // ask for the rows at exactly the target height.
+    let (rows, _) = client
+        .query_bk_set_updates_range(
+            DEFAULT_THREAD_ID_HEX,
+            Some(target_height),
+            Some(target_height),
+            10,
+            None,
+        )
         .await
-        .context("query_bk_set_updates_paged")?;
-    let hit = page1
+        .context("query_bk_set_updates_range")?;
+    let hit = rows
         .into_iter()
         .find(|u| u.height == Some(target_height))
         .with_context(|| {
@@ -167,26 +186,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Apply the delta to old_pubkeys to derive expected_new_pubkeys — this
-    // is what the parity test will independently recompute.
-    let blob = hex::decode(&hit.bk_set_update_hex).context("decode bk_set_update_hex")?;
-    let changes = parse_bk_set_changes_pub(&blob);
-    if changes.is_empty() {
-        bail!("parsed 0 changes from delta — parser or blob broken");
+    // Apply the delta to old_pubkeys in node order — what the parity test
+    // recomputes — and require the set built after the rotation.
+    let changes = parse_changes(&hit.bk_set_update_hex).context("parse the rotation's delta")?;
+    let mut applied = old_pubkeys.clone();
+    apply_block_changes(&mut applied, &changes).context("apply the rotation's delta")?;
+    if applied != expected_new {
+        bail!(
+            "the delta at {} applied to the set before it does not give the set after it — parser \
+             or blob broken",
+            target_height,
+        );
     }
-    let mut expected_new = old_pubkeys.clone();
-    for (variant, idx, pk) in &changes {
-        match *variant {
-            BK_CHANGE_VARIANT_ADDED => {
-                expected_new.insert(*idx, pk.clone());
-            }
-            BK_CHANGE_VARIANT_REMOVED => {
-                expected_new.remove(idx);
-            }
-            _ => {}
-        }
-    }
-    let expected_new = normalize_bk_set_pubkeys(expected_new).context("normalize expected_new")?;
 
     let fixture = BkUpdateFixture {
         source: format!("{source_label} @ height {target_height}"),

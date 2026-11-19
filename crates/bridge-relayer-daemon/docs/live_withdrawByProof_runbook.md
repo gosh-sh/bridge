@@ -6,6 +6,11 @@
 > is the worked example, fed by `compute_bridge_anchors`. The Sepolia steps below that name
 > the script describe bridges already deployed and no longer apply to a new one.
 
+For paying every withdrawal as it comes, run `relayer daemon-withdraw-live` (compose
+service `withdraw-live`, [`docker/README.md`](../../../docker/README.md)). On the CI prover host
+(a container capped at 32 CPUs, shared with `daemon-live`) it proves a withdrawal in about 3
+minutes: Circuit 4 about 80 s, `aggregate-proof` 92–94 s (local-network e2e, 2026-11-18).
+
 Operational guide for driving a full AN→ETH withdrawal E2E through the
 in-process `relayer withdraw-e2e` orchestrator against a deployed
 `AckiNackiBridge` on Sepolia. Covers first-time end-to-end demo from a
@@ -161,7 +166,7 @@ Stride and per-bundle wall time depend on `L`: **L1** = `W·P = 1024`
 seq_nos (~5.7 min chain-time, ~12 min prover); **L2** = `W² = 16384`
 seq_nos (~91 min chain-time, ~101 min prover — see
 [L2 timing model](#l2-timing-model) for the level=2 table). L1 fast-case
-table (warm PK cache, ~5 min for C4+submit):
+table (warm PK cache; C4+submit took ~5 min then, ~3 min on the CI prover host in 2026-11):
 
 | daemon lag at burn (bundles) | catch-up | +covering | +C4+submit | **total** |
 |---|---|---|---|---|
@@ -269,7 +274,7 @@ done
 ```
 
 `shellnet.common` holds `RPC_URL`, `RPC_FAILOVER_URLS`,
-`BRIDGE_GQL_ENDPOINT`, `BRIDGE_BK_SET_CONFIG`, `BRIDGE_PARAMS_DIR`,
+`BRIDGE_GQL_ENDPOINT`, `BRIDGE_PARAMS_DIR`,
 `BRIDGE_AGGREGATOR_DIR`, `BRIDGE_AGGREGATE_PROOF_BIN`, `BRIDGE_VERIFIERS_DIR`; `$BRIDGE_CONFIG_DIR/env` sources it
 and layers on `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO`,
 `BRIDGE_ANCHOR_LEVEL`, `BRIDGE_CONFIG_DIR`. `RELAYER_PRIVATE_KEY` and the RPC
@@ -594,9 +599,9 @@ Follow the relayer runbook
 [Case 1](./live_relayer_bridge_runbook.md#3-case-1--fresh-deploy-and-cold-start)
 end-to-end; it is written for L2 (`LEVEL=2`,
 `BRIDGE_CONFIG_DIR=./L2_config`, `BRIDGE_ANCHOR_LEVEL=2`) and covers
-building the BK set for the seed, `deploy_bridge_bundle.sh LEVEL=2`
-(which runs `compute_bridge_anchors --level 2`), and `daemon-live`
-startup with its refusal diagnostics.
+the GraphQL check, `deploy_bridge_bundle.sh LEVEL=2` (which runs
+`compute_bridge_anchors --level 2`), and `daemon-live` startup with its
+refusal diagnostics.
 
 **Two withdraw-side sanity checks worth doing inline:**
 
@@ -1248,8 +1253,8 @@ crates/bridge-prover-libraries/
 **Cleanup rules:**
 
 - `work_dir/`, `proofs/` — safe to prune between demos. Proof
-  regeneration is deterministic; only cost is CPU (~5 min per proof with
-  warm cache).
+  regeneration is deterministic; only cost is CPU (~3 min per proof with
+  warm cache on the CI prover host).
 - `python/contracts/USDCBridge.shellnet.keys.json` — **NEVER** commit
   changes upstream; keys are shellnet-operator state, not repo state.
 

@@ -569,16 +569,54 @@ impl BkUpdateProofsSource {
     }
 }
 
+/// A rotation the contract has already applied, as the rotation source holds
+/// it until the prover takes it. Carries no proof: it cannot be submitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedRotation {
+    pub seq_no: u64,
+    /// The set that signs the rotation block (leaf `[2]`), as the contract
+    /// stores commitments.
+    pub old_commitment: U256,
+    /// The set after the rotation block (leaf `[3]`).
+    pub new_commitment: U256,
+}
+
+/// What [`BkUpdateSource::ack_last_bk_update`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AckOutcome {
+    /// The prover took the pending rotation now.
+    Acked,
+    /// The prover already holds a set at or past this rotation.
+    AlreadyApplied,
+    /// No rotation at this height was pending; nothing changed.
+    NothingPending,
+}
+
 #[async_trait]
 pub trait BkUpdateSource: Send + Sync {
+    /// A proven rotation at or above `target_seq_no` (the contract's
+    /// `last_bk_set_update_seq_no + 1`), ready for `applyBkSetUpdate`.
     async fn fetch_bk_update(
         &self,
         target_seq_no: u64,
     ) -> Result<Option<crate::types::BkSetUpdateData>, RelayerError>;
 
-    /// Acknowledge that a BK-set update was applied on-chain. Default no-op.
-    async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<(), RelayerError> {
-        Ok(())
+    /// The next rotation the prover has not taken yet, if it is at or below
+    /// `applied_up_to` (the contract's `last_bk_set_update_seq_no`). Never
+    /// builds a proof. The rotation stays pending, and is returned again,
+    /// until [`Self::ack_last_bk_update`] answers `Acked` or
+    /// `AlreadyApplied` for it. Default: none.
+    async fn next_applied_rotation(
+        &self,
+        _applied_up_to: u64,
+    ) -> Result<Option<AppliedRotation>, RelayerError> {
+        Ok(None)
+    }
+
+    /// Acknowledge that the rotation at `seq_no` is applied on-chain, so the
+    /// prover may take it. Default: nothing pending.
+    async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<AckOutcome, RelayerError> {
+        Ok(AckOutcome::NothingPending)
     }
 
     /// The contract rejected the `applyBkSetUpdate` proof for `seq_no`: drop

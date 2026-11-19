@@ -152,7 +152,8 @@ fn test_circuit1a_real_proof() {
     // 1. Load BK set. The former GraphQL fallback (`fetch_bk_set`) was
     //    disabled on 2026-07-22 as architecturally broken; if the JSON is
     //    absent, skip the test rather than fabricate an incorrect set.
-    let bk_set = match bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config("./bk_set.json") {
+    let bk_set = match bridge_gql_fetcher::bk_set_fetcher::load_bk_set_fixture_json("./bk_set.json")
+    {
         Ok(bk) => {
             println!("BK set loaded from config: {} signers", bk.len());
             bk

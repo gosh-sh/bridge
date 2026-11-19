@@ -38,6 +38,9 @@
 //! - `fetch_bk_update(target)` — same shape, minus C2: BK-set rotations only
 //!   consume an attestation proof (Solidity `applyBkSetUpdate`).
 //!
+//! - `next_applied_rotation` — delegated as is: a rotation the contract already
+//!   has carries no proof, so there is nothing to aggregate.
+//!
 //! - Reuse. The calldata of the last bundle and of the last rotation is kept
 //!   with a digest of every input it was built from. A retry after a failure
 //!   the contract never saw (the RPC refused the send, the receipt did not
@@ -65,7 +68,7 @@ use crate::{
     aggregator::{Circuit12ShplonkPipeline, ProofAggregator, SnarkWrapper},
     error::RelayerError,
     live_source::LiveBlockSource,
-    source::{BkUpdateSource, BlockSource},
+    source::{AckOutcome, AppliedRotation, BkUpdateSource, BlockSource},
     types::{AnBlockData, BkSetUpdateData, FinalizationType},
 };
 
@@ -376,7 +379,16 @@ where
         Ok(Some(upd))
     }
 
-    async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+    /// A rotation the contract already has carries no proof: handed on as
+    /// the inner source has it, never aggregated.
+    async fn next_applied_rotation(
+        &self,
+        applied_up_to: u64,
+    ) -> Result<Option<AppliedRotation>, RelayerError> {
+        self.inner.next_applied_rotation(applied_up_to).await
+    }
+
+    async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
         forget(&self.bk_update_calldata, seq_no);
         self.inner.ack_last_bk_update(seq_no).await
     }
@@ -461,6 +473,7 @@ mod tests {
         bundle_pending: Mutex<Option<BundleProofArtifacts>>,
         bkupd: Mutex<Option<BkSetUpdateData>>,
         bkupd_pending: Mutex<Option<BkUpdateProofArtifacts>>,
+        applied: Mutex<Option<AppliedRotation>>,
         acked_bundles: Mutex<Vec<u64>>,
         acked_bkupds: Mutex<Vec<u64>>,
     }
@@ -502,9 +515,19 @@ mod tests {
         ) -> Result<Option<BkSetUpdateData>, RelayerError> {
             Ok(self.bkupd.lock().unwrap().clone())
         }
-        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+        async fn next_applied_rotation(
+            &self,
+            applied_up_to: u64,
+        ) -> Result<Option<AppliedRotation>, RelayerError> {
+            Ok(self
+                .applied
+                .lock()
+                .unwrap()
+                .filter(|r| r.seq_no <= applied_up_to))
+        }
+        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
             self.acked_bkupds.lock().unwrap().push(seq_no);
-            Ok(())
+            Ok(AckOutcome::Acked)
         }
     }
 
@@ -733,6 +756,32 @@ mod tests {
         src.ack_last_bk_update(42).await.unwrap();
         assert_eq!(&*stub.acked_bundles.lock().unwrap(), &[7]);
         assert_eq!(&*stub.acked_bkupds.lock().unwrap(), &[42]);
+    }
+
+    #[tokio::test]
+    async fn applied_rotations_pass_through_without_aggregation() {
+        // A rotation the contract already has carries no proof: the wrapper
+        // hands it on as the inner source has it and runs no aggregation.
+        let stub = Arc::new(StubInnerSource::default());
+        let rotation = AppliedRotation {
+            seq_no: 20_000,
+            old_commitment: U256::from(0xC0u64),
+            new_commitment: U256::from(0xC1u64),
+        };
+        *stub.applied.lock().unwrap() = Some(rotation);
+        let src = make_aggregated(Arc::clone(&stub));
+
+        assert_eq!(
+            src.next_applied_rotation(20_000).await.unwrap(),
+            Some(rotation)
+        );
+        assert_eq!(src.next_applied_rotation(19_999).await.unwrap(), None);
+        assert_eq!(
+            src.ack_last_bk_update(20_000).await.unwrap(),
+            AckOutcome::Acked
+        );
+        assert_eq!(&*stub.acked_bkupds.lock().unwrap(), &[20_000]);
+        assert!(src.pipeline.aggregator.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

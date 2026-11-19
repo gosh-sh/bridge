@@ -204,28 +204,16 @@ cargo run --release --bin bridge-event-halo2-prover -- --selftest    # ~5 min, f
 
 ---
 
-## Step 3 — BK set file
+## Step 3 — BK set
 
-Both daemons read the BK set from the file at `BRIDGE_BK_SET_CONFIG` (default `./bk_set.local.json`) on a cold start; GraphQL serves only the rotation log, not the current set. The commands below write `bk_set.json`, so point `BRIDGE_BK_SET_CONFIG` at it. The startup log shows `BK-set bootstrap: mode=file, loaded N signers from <path>`.
-
-**Local devnet** — must match `acki-nacki/config/block_keeper{0..4}_bls.keys.json`:
+Nothing to prepare: neither daemon reads a BK-set file. Without `state/prover_bk_set.json` the prover builds the set at the seed from GraphQL (`blockchain.latestBkSet`, then `bkSetUpdates`, checked against the block leaves), so `BRIDGE_GQL_ENDPOINT` must be gql-server 1.5.0 or later. Check it:
 
 ```bash
-# If the bundled backup matches your current chain branch:
-cp bk_set.json.poseidon_dex_local.bak bk_set.json
-
-# Otherwise rebuild from the cluster's actual keyfiles:
-python3 -c '
-import json
-out = {}
-for i in range(5):
-    with open(f"/path/to/acki-nacki/config/block_keeper{i}_bls.keys.json") as f:
-        out[str(i)] = json.load(f)[0]["public"]
-print(json.dumps(out, indent=2))
-' > bk_set.json
+curl -s "${BRIDGE_GQL_ENDPOINT:-http://localhost/graphql}" -H 'Content-Type: application/json' \
+  -d '{"query":"{ blockchain { latestBkSet { height } } }"}'    # "Unknown field": an older gql-server
 ```
 
-**Shellnet** — the file must hold the set at the bootstrap seed. `bk_set.shellnet.json` is the committee at the network's genesis (shellnet restarted on 2026-10-14); build the set at the seed with `seed_prover_bk_set --cap-height <seed>` ([live relayer runbook §3.2](../../bridge-relayer-daemon/docs/live_relayer_bridge_runbook.md#32-build-the-bk-set-at-s)).
+The startup log shows `BK set: N signers, commitment=…`. Details: `Starting BK set` in `../TECHNICAL_README.md`.
 
 > Rotation: the prover follows rotations at runtime. It proves each `bkSetUpdates` event and switches to the new set once the bundles at or below the rotation are done; a key block signed by keepers outside its current set is held back (`signers … not in BK set — returning None so caller can drain pending bk-update or refresh the set`) until then. Keys do **not** need to be regenerated. See `BK set rotation` in `../TECHNICAL_README.md`.
 
@@ -305,7 +293,7 @@ If you launched via `scripts/run-bridge-test.sh`, use `scripts/stop-bridge-test.
 |---|---|
 | Verifier exits with `"event VK not found"` | Run Step 2's `--selftest` command once. |
 | Verifier exits with `"primary VK not found"` / `"fallback VK not found"` / `"layer VK not found"` | Let `bridge-prover-daemon` finish its first start — it generates 1A/1B/2 keys on disk (~15 min, all four PKs sized). |
-| Circuit 1A fails with ~96 BLS pairing equality constraint violations | `bk_set.json` is stale relative to the live chain. Re-sync (Step 3) or delete the file to force a GQL fetch. |
+| Circuit 1A fails with ~96 BLS pairing equality constraint violations | `state/prover_bk_set.json` is not the set that signs the block. Wipe `state/` and `proofs/` on both daemons (Step 4): the prover builds the set again from GraphQL. |
 | Prover never starts proving — seed seqno keeps moving | Should not happen post-2026-05-23 (seed is pinned once at startup). Workaround: pin manually via `BRIDGE_BOOTSTRAP_SEQNO=<next W·P boundary past chain head>`. |
 | Verifier state shows old `last_key_block` after switching networks | Wipe `state/` on **both** daemons together — the verifier never re-reads `bootstrap_seed.json` after first init. |
 | `spawned_tasks_count not found` / tokio errors | `--cfg tokio_unstable` missing. Restore `.cargo/config.toml` at the workspace root. |

@@ -30,11 +30,13 @@ for k in 17 19 20 21 22; do
   [[ "$head" == 928fafb3d0cc ]] || die "K=$k is not a Hermez SRS"
 done
 
-for stem in primary fallback layer; do
+for stem in primary fallback layer event; do
   for suffix in _pk.bin _vk.bin _config_params.json; do
     [[ -s "$params_dir/$stem$suffix" ]] || die "missing/empty $stem$suffix"
   done
 done
+# Circuit 4's keys carry the circuit revision they were built for.
+[[ -s "$params_dir/event_manifest.json" ]] || die "missing/empty event_manifest.json"
 
 manifest_tmp=$(mktemp --tmpdir="$params_dir" .SHA256SUMS.XXXXXX)
 cleanup() {

@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
             "--bk-set-config <path> is required (GraphQL BK-set fetch is disabled)",
         )
     })?;
-    let bk_set = bk_set_fetcher::load_bk_set_from_config(cfg)?;
+    let bk_set = bk_set_fetcher::load_bk_set_fixture_json(cfg)?;
     println!("BK set loaded: {} keepers", bk_set.len());
 
     // Fast pre-flight: is this the set that actually signed the block?

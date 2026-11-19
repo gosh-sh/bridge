@@ -245,7 +245,7 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
             let dry_run = args.dry_run;
             orchestrator::run(args, dry_run, skip_prompt)
                 .await
-                .map(output::RunSuccess::Withdraw)
+                .map(|w| output::RunSuccess::Withdraw(Box::new(w)))
         },
         Command::Deposit(args) => {
             // From here on nothing this process prints carries the path,

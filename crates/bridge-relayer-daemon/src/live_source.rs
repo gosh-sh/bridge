@@ -6,17 +6,22 @@
 //! [`LiveBlockSource::ack_last_bundle`] only after ETH `verifyBlock`
 //! accepts the tx. Rotation acks are deferred until the next bundle
 //! target is above N, so [`ack_last_bk_update`] may run many ticks after
-//! `applyBkSetUpdate` (and is a no-op if that N is already in the
-//! driver). See Alina's live-integration plan §4.2 / §5.
+//! `applyBkSetUpdate` (and answers `AlreadyApplied` if that N is already in
+//! the driver).
+//!
+//! Rotations the contract already has are never proven: the driver checks
+//! them against their blocks and hands them over as deltas, which wait in
+//! the same pending slot as a proven rotation until the relayer acks them.
 
 use std::{path::PathBuf, sync::Arc};
 
+use alloy::primitives::U256;
 use async_trait::async_trait;
 use bridge_prover_lib::{
     bridge_state::BridgeState,
     live_driver::{
-        BkUpdateProofArtifacts, BundleProofArtifacts, DriverError, LiveBkUpdateEvent,
-        LiveBundleEvent, LiveProverDriver,
+        BkUpdateDelta, BkUpdateProofArtifacts, BundleProofArtifacts, DriverError,
+        LiveBkUpdateEvent, LiveBundleEvent, LiveProverDriver,
     },
     prover_bk_set::ProverBkSet,
 };
@@ -26,7 +31,7 @@ use tracing::warn;
 use crate::{
     an_chain_guard::ChainBehindGuard,
     error::RelayerError,
-    source::{BkUpdateSource, BlockSource},
+    source::{AckOutcome, AppliedRotation, BkUpdateSource, BlockSource},
     types::{AnBlockData, BkSetUpdateData},
 };
 
@@ -47,10 +52,51 @@ impl StatePaths {
     }
 }
 
+/// The rotation the source holds between the driver's poll and the ack.
+enum PendingRotation {
+    /// Proven by this driver; served for `applyBkSetUpdate` until acked.
+    Proven(BkUpdateProofArtifacts),
+    /// Already on the contract, checked against its block, no proof.
+    Applied(BkUpdateDelta),
+}
+
+impl PendingRotation {
+    fn seq_no(&self) -> u64 {
+        match self {
+            PendingRotation::Proven(u) => u.block_seq_no,
+            PendingRotation::Applied(d) => d.block_seq_no,
+        }
+    }
+
+    fn rotation(&self) -> AppliedRotation {
+        let (seq_no, old, new) = match self {
+            PendingRotation::Proven(u) => (
+                u.block_seq_no,
+                u.old_bk_set_commitment_be,
+                u.new_bk_set_commitment_be,
+            ),
+            PendingRotation::Applied(d) => (
+                d.block_seq_no,
+                d.old_bk_set_commitment_be,
+                d.new_bk_set_commitment_be,
+            ),
+        };
+        // `Fr::to_repr()` bytes, read as `BkSetUpdateData::from` reads them:
+        // the numeric field element the contract stores.
+        AppliedRotation {
+            seq_no,
+            old_commitment: U256::from_le_bytes(old),
+            new_commitment: U256::from_le_bytes(new),
+        }
+    }
+}
+
 /// What a test driver answers to `ack_bk_update`.
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum AckStubKind {
+    /// Takes the rotation: the stub's cursor moves to it.
+    Accept,
     TooEarly,
     Other,
 }
@@ -59,13 +105,26 @@ enum AckStubKind {
 struct AckStub {
     last_bk_seq: u64,
     kind: AckStubKind,
+    /// What both rotation polls of the driver fail with. `None`: a poll is
+    /// not expected, and fails saying so.
+    poll_error: Option<fn() -> DriverError>,
+}
+
+#[cfg(test)]
+impl AckStub {
+    fn poll_err(&self, unexpected: &str) -> RelayerError {
+        match self.poll_error {
+            Some(err) => map_driver_err(err()),
+            None => RelayerError::other(unexpected),
+        }
+    }
 }
 
 /// Live source sharing one [`LiveProverDriver`] across both lanes.
 pub struct LiveBlockSource {
     driver: Option<Arc<Mutex<LiveProverDriver>>>,
     pending_bundle: Mutex<Option<BundleProofArtifacts>>,
-    pending_bk_update: Mutex<Option<BkUpdateProofArtifacts>>,
+    pending_bk_update: Mutex<Option<PendingRotation>>,
     state_paths: StatePaths,
     chain_behind: Mutex<ChainBehindGuard>,
     /// Stands in for the driver in tests. `None` in the daemon: every ack
@@ -111,6 +170,7 @@ impl LiveBlockSource {
             stub: Mutex::new(Some(AckStub {
                 last_bk_seq: 0,
                 kind,
+                poll_error: None,
             })),
             poll_bk_calls: Mutex::new(0),
         }
@@ -137,8 +197,13 @@ impl LiveBlockSource {
     }
 
     /// Symmetric peek for the BK-update lane. See [`peek_pending_bundle`].
+    /// Only a proven rotation: one already on the contract has no proof to
+    /// aggregate.
     pub async fn peek_pending_bk_update(&self) -> Option<BkUpdateProofArtifacts> {
-        self.pending_bk_update.lock().await.clone()
+        match self.pending_bk_update.lock().await.as_ref() {
+            Some(PendingRotation::Proven(u)) => Some(u.clone()),
+            Some(PendingRotation::Applied(_)) | None => None,
+        }
     }
 
     /// Advance the driver cursor after ETH `verifyBlock` succeeded.
@@ -146,15 +211,17 @@ impl LiveBlockSource {
         self.do_ack_bundle(seq_no).await
     }
 
-    /// Advance the driver after the next bundle target is above N.
-    /// Takes the pending update only on an exact seq match. If the
-    /// driver already has `stored_last_bk_set_update_seq_no >= seq_no`,
-    /// the ack is a no-op and a different pending N is left in place.
+    /// Advance the driver after the rotation's bundle gate opened.
+    /// Takes the pending rotation, proven or applied, only on an exact seq
+    /// match (`Acked`); `NothingPending` otherwise. If the driver already
+    /// has `stored_last_bk_set_update_seq_no >= seq_no` the answer is
+    /// `AlreadyApplied`: a pending rotation at or below that cursor is
+    /// dropped, a later one is left in place.
     ///
-    /// `AckTooEarly` puts that proof back. The driver contract is to
+    /// `AckTooEarly` puts the rotation back. The driver contract is to
     /// re-ack the same artifacts once the cursor has passed N, not to
     /// build the rotation again.
-    pub async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+    pub async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
         self.do_ack_bk_update(seq_no).await
     }
 
@@ -189,13 +256,17 @@ impl LiveBlockSource {
             .stored_last_bk_set_update_seq_no
     }
 
-    async fn ack_bk_on_driver(&self, u: &BkUpdateProofArtifacts) -> Result<(), RelayerError> {
+    async fn ack_bk_on_driver(&self, rotation: &PendingRotation) -> Result<(), RelayerError> {
         #[cfg(test)]
-        if let Some(kind) = self.stub.lock().await.as_ref().map(|stub| stub.kind) {
-            return match kind {
+        if let Some(stub) = self.stub.lock().await.as_mut() {
+            return match stub.kind {
+                AckStubKind::Accept => {
+                    stub.last_bk_seq = rotation.seq_no();
+                    Ok(())
+                },
                 AckStubKind::TooEarly => Err(map_driver_err(DriverError::AckTooEarly {
                     cursor: 0,
-                    rotation_seqno: u.block_seq_no,
+                    rotation_seqno: rotation.seq_no(),
                 })),
                 AckStubKind::Other => Err(map_driver_err(DriverError::Other(anyhow::anyhow!(
                     "bk ack failed"
@@ -203,30 +274,38 @@ impl LiveBlockSource {
             };
         }
         let mut d = self.live().lock().await;
-        d.ack_bk_update(u).map_err(map_driver_err)?;
+        match rotation {
+            PendingRotation::Proven(u) => d.ack_bk_update(u),
+            PendingRotation::Applied(delta) => d.ack_bk_delta(delta),
+        }
+        .map_err(map_driver_err)?;
         persist_driver(&d, &self.state_paths)?;
         Ok(())
     }
 
-    async fn do_ack_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
-        if self.stored_last_bk_seq().await >= seq_no {
-            return Ok(());
-        }
-        let u = {
+    async fn do_ack_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
+        let stored = self.stored_last_bk_seq().await;
+        if stored >= seq_no {
             let mut pending = self.pending_bk_update.lock().await;
-            let matches = pending.as_ref().is_some_and(|u| u.block_seq_no == seq_no);
-            if !matches {
-                return Ok(());
+            if pending.as_ref().is_some_and(|p| p.seq_no() <= stored) {
+                *pending = None;
+            }
+            return Ok(AckOutcome::AlreadyApplied);
+        }
+        let rotation = {
+            let mut pending = self.pending_bk_update.lock().await;
+            if !pending.as_ref().is_some_and(|p| p.seq_no() == seq_no) {
+                return Ok(AckOutcome::NothingPending);
             }
             pending.take().expect("matched pending")
         };
-        match self.ack_bk_on_driver(&u).await {
-            Ok(()) => Ok(()),
-            // The proof is already built. Dropping it here makes the next
+        match self.ack_bk_on_driver(&rotation).await {
+            Ok(()) => Ok(AckOutcome::Acked),
+            // A proof is already built. Dropping it here makes the next
             // tick call `poll_next_bk_update` and prove the same rotation
             // again. `AckTooEarly` is retryable against these artifacts.
             Err(e) if e.is_rotation_ack_waiting() => {
-                *self.pending_bk_update.lock().await = Some(u);
+                *self.pending_bk_update.lock().await = Some(rotation);
                 Err(e)
             },
             Err(e) => Err(e),
@@ -239,40 +318,82 @@ impl LiveBlockSource {
 }
 
 fn persist_driver(d: &LiveProverDriver, paths: &StatePaths) -> Result<(), RelayerError> {
-    let state_path = paths
-        .prover_state_json
-        .to_str()
-        .ok_or_else(|| RelayerError::other("prover_state path is not UTF-8"))?;
+    persist_bk_pair(paths, d.snapshot_prover_bk_set(), Some(d.snapshot_state()))
+}
+
+/// Write `prover_bk_set.json`, then `prover_state.json` when `state` is
+/// given, each atomically (tmp + rename). Every place that writes both
+/// writes them in this order.
+pub fn persist_bk_pair(
+    paths: &StatePaths,
+    set: &ProverBkSet,
+    state: Option<&BridgeState>,
+) -> Result<(), RelayerError> {
+    persist_bk_pair_with(paths, set, state, |_| {})
+}
+
+/// [`persist_bk_pair`], reporting each file once it is written:
+/// `"prover_bk_set"`, then `"prover_state"`.
+pub(crate) fn persist_bk_pair_with(
+    paths: &StatePaths,
+    set: &ProverBkSet,
+    state: Option<&BridgeState>,
+    mut on_step: impl FnMut(&'static str),
+) -> Result<(), RelayerError> {
     let bk_path = paths
         .prover_bk_set_json
         .to_str()
         .ok_or_else(|| RelayerError::other("prover_bk_set path is not UTF-8"))?;
-    d.snapshot_state()
-        .save(state_path)
-        .map_err(|e| RelayerError::other(format!("save prover_state: {e}")))?;
-    d.snapshot_prover_bk_set()
-        .save(bk_path)
+    let state_path = paths
+        .prover_state_json
+        .to_str()
+        .ok_or_else(|| RelayerError::other("prover_state path is not UTF-8"))?;
+    set.save(bk_path)
         .map_err(|e| RelayerError::other(format!("save prover_bk_set: {e}")))?;
+    on_step("prover_bk_set");
+    if let Some(state) = state {
+        state
+            .save(state_path)
+            .map_err(|e| RelayerError::other(format!("save prover_state: {e}")))?;
+        on_step("prover_state");
+    }
     Ok(())
 }
 
+/// Anyhow payloads are printed with `{:#}`, so the message keeps every
+/// cause, not only the outermost context.
 fn map_driver_err(e: DriverError) -> RelayerError {
     match e {
-        DriverError::GqlTransient(inner) => RelayerError::AckiNacki(inner.to_string()),
+        DriverError::GqlTransient(inner) => RelayerError::AckiNacki(format!("{inner:#}")),
         DriverError::Bootstrapping {
             seed_seqno,
             chain_head_seqno,
             source,
         } => RelayerError::AckiNacki(format!(
-            "bootstrap seed={seed_seqno} head={chain_head_seqno}: {source}"
+            "bootstrap seed={seed_seqno} head={chain_head_seqno}: {source:#}"
         )),
-        DriverError::GqlSchema(inner) => RelayerError::AckiNacki(format!("gql schema: {inner}")),
+        DriverError::GqlSchema(inner) => RelayerError::AckiNacki(format!("gql schema: {inner:#}")),
         DriverError::ProofGen {
             seq_no,
             source,
-        } => RelayerError::Other(format!("proof-gen failed for {seq_no}: {source}")),
+        } => RelayerError::Other(format!("proof-gen failed for {seq_no}: {source:#}")),
         DriverError::StateInconsistent(inner) => {
-            RelayerError::Other(format!("driver state inconsistent: {inner}"))
+            RelayerError::Other(format!("driver state inconsistent: {inner:#}"))
+        },
+        // Read as `PendingRotation::rotation` reads commitments: the field
+        // elements the contract stores.
+        DriverError::BkSetOutOfSync {
+            seq_no,
+            expected,
+            actual,
+        } => RelayerError::BkSetDiverged {
+            seq_no,
+            reason: format!(
+                "the prover holds BK set {:#x}, Acki Nacki signs the rotation block with {:#x} \
+                 (its leaf [2])",
+                U256::from_le_bytes(actual),
+                U256::from_le_bytes(expected)
+            ),
         },
         DriverError::AckTooEarly {
             cursor,
@@ -281,7 +402,7 @@ fn map_driver_err(e: DriverError) -> RelayerError {
             "ack_bk_update deferred: cursor {cursor} + stride ≤ rotation {rotation_seqno}; retry \
              after the next bundle ack"
         )),
-        DriverError::Other(inner) => RelayerError::Other(inner.to_string()),
+        DriverError::Other(inner) => RelayerError::Other(format!("{inner:#}")),
     }
 }
 
@@ -354,62 +475,126 @@ impl BkUpdateSource for LiveBlockSource {
     async fn fetch_bk_update(&self, target: u64) -> Result<Option<BkSetUpdateData>, RelayerError> {
         {
             let pending = self.pending_bk_update.lock().await;
-            if let Some(p) = pending.as_ref() {
-                if p.block_seq_no >= target {
+            match pending.as_ref() {
+                Some(PendingRotation::Proven(p)) if p.block_seq_no >= target => {
                     return Ok(Some(BkSetUpdateData::from(p)));
-                }
+                },
                 // Already applied on-chain (target is last_bk+1) and
-                // waiting for the next bundle to pass N before we ack
-                // the prover. Keep the artifacts.
-                return Ok(None);
+                // waiting for its bundle gate before the prover takes it.
+                // Keep it; an applied one is never served for submission.
+                Some(_) => return Ok(None),
+                None => {},
             }
         }
 
         #[cfg(test)]
-        if self.stub.lock().await.is_some() {
+        if let Some(stub) = self.stub.lock().await.as_ref() {
             *self.poll_bk_calls.lock().await += 1;
-            return Err(RelayerError::other(
+            return Err(stub.poll_err(
                 "poll_next_bk_update called while the pending rotation should have been reused",
             ));
         }
 
+        // Rotations up to `target - 1`, the contract's last one, come back
+        // as checked deltas; only one above it is proven.
         let mut d = self.live().lock().await;
-        match d.poll_next_bk_update().await.map_err(map_driver_err)? {
+        match d
+            .poll_next_bk_update(target.saturating_sub(1))
+            .await
+            .map_err(map_driver_err)?
+        {
             LiveBkUpdateEvent::Bootstrapping {
                 ..
             }
             | LiveBkUpdateEvent::Nothing => Ok(None),
+            LiveBkUpdateEvent::Applied(delta) => {
+                *self.pending_bk_update.lock().await = Some(PendingRotation::Applied(delta));
+                Ok(None)
+            },
             LiveBkUpdateEvent::BkUpdate(u) => {
                 if u.block_seq_no < target {
-                    // Re-discovered after a restart, or applied on-chain
-                    // while the prover is still on the outgoing set.
-                    // Do not rotate the prover here.
-                    *self.pending_bk_update.lock().await = Some(u);
+                    // A rotation below the target needs no proof: store it as
+                    // `Proven` so the relayer acks it, and serve nothing.
+                    *self.pending_bk_update.lock().await = Some(PendingRotation::Proven(u));
                     return Ok(None);
                 }
                 let data = BkSetUpdateData::from(&u);
-                *self.pending_bk_update.lock().await = Some(u);
+                *self.pending_bk_update.lock().await = Some(PendingRotation::Proven(u));
                 Ok(Some(data))
             },
         }
     }
 
-    async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+    async fn next_applied_rotation(
+        &self,
+        applied_up_to: u64,
+    ) -> Result<Option<AppliedRotation>, RelayerError> {
+        {
+            let pending = self.pending_bk_update.lock().await;
+            if let Some(p) = pending.as_ref() {
+                // A proven one at or below the contract's N is ours, applied
+                // and waiting for its gate. One above it is still to submit.
+                return Ok((p.seq_no() <= applied_up_to).then(|| p.rotation()));
+            }
+        }
+
+        #[cfg(test)]
+        if let Some(stub) = self.stub.lock().await.as_ref() {
+            *self.poll_bk_calls.lock().await += 1;
+            return Err(stub.poll_err(
+                "poll_next_applied_bk_update called while a pending rotation should have answered",
+            ));
+        }
+
+        let mut d = self.live().lock().await;
+        let Some(delta) = d
+            .poll_next_applied_bk_update(applied_up_to)
+            .await
+            .map_err(map_driver_err)?
+        else {
+            return Ok(None);
+        };
+        // Pending until the ack, or the ack would find nothing to take.
+        let pending = PendingRotation::Applied(delta);
+        let rotation = pending.rotation();
+        *self.pending_bk_update.lock().await = Some(pending);
+        Ok(Some(rotation))
+    }
+
+    async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
         self.do_ack_bk_update(seq_no).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::Arc,
+        time::Duration,
+    };
 
+    use alloy::primitives::U256;
+    use anyhow::Context;
     use bridge_prover_lib::{
-        live_driver::{BkUpdateProofArtifacts, BundleFinalizationType},
+        bridge_state::BridgeState,
+        live_driver::{BkUpdateDelta, BkUpdateProofArtifacts, BundleFinalizationType, DriverError},
+        prover_bk_set::ProverBkSet,
         transcript::TranscriptKind,
     };
 
-    use super::{AckStubKind, LiveBlockSource};
-    use crate::source::BkUpdateSource;
+    use super::{
+        map_driver_err, persist_bk_pair_with, AckStubKind, LiveBlockSource, PendingRotation,
+        StatePaths,
+    };
+    use crate::{
+        bridge::{BridgeOnChainState, MockBridgeClient},
+        daemon::BackoffConfig,
+        error::RelayerError,
+        relayer::{Relayer, RelayerConfig},
+        source::{AckOutcome, AppliedRotation, BkUpdateSource, InMemoryBlockSource},
+        types::BkSetUpdateData,
+    };
 
     fn rotation(seq: u64) -> BkUpdateProofArtifacts {
         BkUpdateProofArtifacts {
@@ -437,7 +622,7 @@ mod tests {
     async fn deferred_rotation_ack_keeps_the_proof_for_the_next_tick() {
         let src = LiveBlockSource::stubbed(AckStubKind::TooEarly);
         let proved = rotation(1_890_758);
-        *src.pending_bk_update.lock().await = Some(proved.clone());
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Proven(proved.clone()));
 
         let err = src
             .ack_last_bk_update(proved.block_seq_no)
@@ -471,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn other_rotation_ack_failure_drops_the_pending_proof() {
         let src = LiveBlockSource::stubbed(AckStubKind::Other);
-        *src.pending_bk_update.lock().await = Some(rotation(100));
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Proven(rotation(100)));
 
         let err = src.ack_last_bk_update(100).await.unwrap_err();
         assert!(!err.is_rotation_ack_waiting(), "{err}");
@@ -480,5 +665,246 @@ mod tests {
         let err = src.fetch_bk_update(100).await.unwrap_err();
         assert!(err.to_string().contains("poll_next_bk_update"), "{err}");
         assert_eq!(*src.poll_bk_calls.lock().await, 1);
+    }
+
+    fn delta(seq: u64, old: U256, new: U256) -> BkUpdateDelta {
+        BkUpdateDelta {
+            block_seq_no: seq,
+            block_height: seq,
+            old_bk_set_commitment_be: old.to_le_bytes(),
+            new_bk_set_commitment_be: new.to_le_bytes(),
+            new_pubkeys: HashMap::new(),
+        }
+    }
+
+    /// The driver keeps commitments as `Fr::to_repr()` bytes; the contract
+    /// stores the field element. A delta built from what the contract stores
+    /// for N must read back as exactly that, from either kind of pending
+    /// rotation, and agree with what a proven one would submit.
+    #[tokio::test]
+    async fn an_applied_rotation_reads_the_commitments_the_contract_stores() {
+        let on_chain = BridgeOnChainState {
+            last_seen_block_seq_no: 16_384,
+            bk_set_commitment: U256::from(0xC1C1_0102_0304u64),
+            prev_bk_set_commitment: U256::from(0xC0C0_0506_0708u64),
+            prev_max_level_layer_hash: U256::ZERO,
+            last_bk_set_update_seq_no: 20_000,
+        };
+        let want = AppliedRotation {
+            seq_no: 20_000,
+            old_commitment: on_chain.prev_bk_set_commitment,
+            new_commitment: on_chain.bk_set_commitment,
+        };
+
+        let src = LiveBlockSource::stubbed(AckStubKind::Accept);
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Applied(delta(
+            20_000,
+            on_chain.prev_bk_set_commitment,
+            on_chain.bk_set_commitment,
+        )));
+        assert_eq!(src.next_applied_rotation(20_000).await.unwrap(), Some(want));
+
+        let mut proved = rotation(20_000);
+        proved.old_bk_set_commitment_be = on_chain.prev_bk_set_commitment.to_le_bytes();
+        proved.new_bk_set_commitment_be = on_chain.bk_set_commitment.to_le_bytes();
+        let submitted = BkSetUpdateData::from(&proved);
+        assert_eq!(submitted.old_commitment_l2, want.old_commitment);
+        assert_eq!(submitted.new_commitment_l3, want.new_commitment);
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Proven(proved));
+        assert_eq!(src.next_applied_rotation(20_000).await.unwrap(), Some(want));
+    }
+
+    #[tokio::test]
+    async fn rotation_acks_tell_taken_from_already_applied_from_nothing_pending() {
+        let src = LiveBlockSource::stubbed(AckStubKind::Accept);
+        assert_eq!(
+            src.ack_last_bk_update(20_000).await.unwrap(),
+            AckOutcome::NothingPending
+        );
+
+        // A pending rotation at another height is neither taken nor dropped.
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Applied(delta(
+            20_000,
+            U256::from(1u64),
+            U256::from(2u64),
+        )));
+        assert_eq!(
+            src.ack_last_bk_update(18_000).await.unwrap(),
+            AckOutcome::NothingPending
+        );
+        assert_eq!(
+            src.next_applied_rotation(20_000)
+                .await
+                .unwrap()
+                .unwrap()
+                .seq_no,
+            20_000
+        );
+
+        assert_eq!(
+            src.ack_last_bk_update(20_000).await.unwrap(),
+            AckOutcome::Acked
+        );
+        assert!(src.pending_bk_update.lock().await.is_none());
+        assert_eq!(
+            src.ack_last_bk_update(20_000).await.unwrap(),
+            AckOutcome::AlreadyApplied
+        );
+        assert_eq!(*src.poll_bk_calls.lock().await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_applied_rotation_is_never_served_for_submission() {
+        let src = LiveBlockSource::stubbed(AckStubKind::Accept);
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Applied(delta(
+            20_000,
+            U256::from(1u64),
+            U256::from(2u64),
+        )));
+        assert!(src.fetch_bk_update(20_000).await.unwrap().is_none());
+        assert!(src.fetch_bk_update(20_001).await.unwrap().is_none());
+        assert!(src.peek_pending_bk_update().await.is_none());
+
+        // A proven rotation above the contract's N is still to submit, so it
+        // is not offered as applied; neither call reaches the driver.
+        *src.pending_bk_update.lock().await = Some(PendingRotation::Proven(rotation(30_000)));
+        assert_eq!(src.next_applied_rotation(20_000).await.unwrap(), None);
+        assert!(src.fetch_bk_update(20_001).await.unwrap().is_some());
+        assert_eq!(*src.poll_bk_calls.lock().await, 0);
+    }
+
+    /// The operator needs the cause, not only the outermost context.
+    #[test]
+    fn mapped_driver_errors_keep_the_cause() {
+        fn chained() -> anyhow::Error {
+            Err::<(), _>(anyhow::anyhow!("connection refused"))
+                .context("bk-update 20000: GQL block fetch")
+                .unwrap_err()
+        }
+        let mapped = [
+            map_driver_err(DriverError::GqlTransient(chained())),
+            map_driver_err(DriverError::GqlSchema(chained())),
+            map_driver_err(DriverError::ProofGen {
+                seq_no: 20_000,
+                source: chained(),
+            }),
+            map_driver_err(DriverError::StateInconsistent(chained())),
+            map_driver_err(DriverError::Bootstrapping {
+                seed_seqno: 16_384,
+                chain_head_seqno: 100,
+                source: chained(),
+            }),
+            map_driver_err(DriverError::Other(chained())),
+        ];
+        for err in mapped {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("bk-update 20000: GQL block fetch")
+                    && msg.contains("connection refused"),
+                "{msg}"
+            );
+        }
+    }
+
+    /// Leaf `[2]` of rotation 20000 is `0xc1c1`; the prover holds `0xf0f0`.
+    fn out_of_sync() -> DriverError {
+        DriverError::BkSetOutOfSync {
+            seq_no: 20_000,
+            expected: U256::from(0xC1C1u64).to_le_bytes(),
+            actual: U256::from(0xF0F0u64).to_le_bytes(),
+        }
+    }
+
+    fn assert_diverged_at_20000(err: &RelayerError) {
+        let RelayerError::BkSetDiverged {
+            seq_no: 20_000,
+            reason,
+        } = err
+        else {
+            panic!("expected BkSetDiverged at 20000, got {err:?}");
+        };
+        assert!(
+            reason.contains("0xf0f0") && reason.contains("0xc1c1"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn an_out_of_sync_set_is_a_diverged_set_naming_both_sides() {
+        assert_diverged_at_20000(&map_driver_err(out_of_sync()));
+    }
+
+    /// Both rotation polls go through the same check of leaf `[2]`.
+    #[tokio::test]
+    async fn both_rotation_polls_report_an_out_of_sync_set_as_diverged() {
+        let src = LiveBlockSource::stubbed(AckStubKind::Accept);
+        src.stub.lock().await.as_mut().unwrap().poll_error = Some(out_of_sync);
+        assert_diverged_at_20000(&src.next_applied_rotation(20_000).await.unwrap_err());
+        assert_diverged_at_20000(&src.fetch_bk_update(20_001).await.unwrap_err());
+        assert_eq!(*src.poll_bk_calls.lock().await, 2);
+    }
+
+    /// The daemon loop stops on it at once instead of retrying the poll.
+    #[tokio::test]
+    async fn the_daemon_stops_when_the_prover_set_is_out_of_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Arc::new(LiveBlockSource::stubbed(AckStubKind::Accept));
+        src.stub.lock().await.as_mut().unwrap().poll_error = Some(out_of_sync);
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(0xC0C0u64),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let mut r = Relayer::new(
+            RelayerConfig::new(dir.path().join("state.json"), 1),
+            Arc::new(InMemoryBlockSource::new()),
+            src.clone(),
+            bridge,
+        )
+        .unwrap();
+        let backoff = BackoffConfig {
+            initial: Duration::from_millis(1),
+            max: Duration::from_millis(10),
+            multiplier: 2,
+        };
+        let run = r.run_until_shutdown(backoff, None, std::future::pending());
+        let err = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the daemon must stop on an out-of-sync BK set")
+            .unwrap_err();
+        assert_diverged_at_20000(&err);
+        assert_eq!(*src.poll_bk_calls.lock().await, 1);
+    }
+
+    #[test]
+    fn pair_is_written_set_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let set = ProverBkSet {
+            commitment: [7; 32],
+            pubkeys_hex: BTreeMap::new(),
+            last_applied_update_seq_no: 20_000,
+        };
+        let mut state = BridgeState::new(4);
+        state.stored_last_bk_set_update_seq_no = 20_000;
+
+        let mut log = Vec::new();
+        persist_bk_pair_with(&paths, &set, Some(&state), |step| {
+            // What is on disk when each step reports: the set lands alone.
+            if step == "prover_bk_set" {
+                assert!(paths.prover_bk_set_json.exists());
+                assert!(!paths.prover_state_json.exists());
+            }
+            log.push(step);
+        })
+        .unwrap();
+        assert_eq!(log, ["prover_bk_set", "prover_state"]);
+
+        let saved = ProverBkSet::load(paths.prover_bk_set_json.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.commitment, set.commitment);
+        let saved = BridgeState::load(paths.prover_state_json.to_str().unwrap(), 4).unwrap();
+        assert_eq!(saved.stored_last_bk_set_update_seq_no, 20_000);
     }
 }

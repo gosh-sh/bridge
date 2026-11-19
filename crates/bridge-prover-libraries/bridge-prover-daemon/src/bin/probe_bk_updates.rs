@@ -44,7 +44,8 @@ use bridge_gql_fetcher::gql_client::{
 use serde::Serialize;
 
 const PAGE_SIZE: u32 = 500;
-/// Hard ceiling on pagination — same shape as `bk_set_at_height`.
+/// Hard ceiling on pagination, so a server that keeps returning a next-page
+/// cursor cannot keep the probe walking forever.
 const MAX_PAGES: usize = 10_000;
 
 #[derive(Debug, Serialize)]

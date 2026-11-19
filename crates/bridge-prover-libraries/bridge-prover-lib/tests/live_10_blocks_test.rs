@@ -31,7 +31,7 @@ async fn test_prove_10_live_blocks() {
     let t_total = Instant::now();
 
     // 1. Load BK set.
-    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_from_config(bk_set_path)
+    let bk_set = bridge_gql_fetcher::bk_set_fetcher::load_bk_set_fixture_json(bk_set_path)
         .expect("failed to load BK set");
     let (bk_set_commitment, _) = bridge_poseidon::compute_bk_set_poseidon(&bk_set);
     println!("\nBK set: {} signers", bk_set.len());

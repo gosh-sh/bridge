@@ -9,9 +9,13 @@
 //!    next boundary, and the first one past it, may land ahead of the layer
 //!    cursor. The live prover is acked only once the next bundle target is
 //!    above N, so it keeps the outgoing set for blocks `<= N`.
-//! 3. **Phase 2** — fetches the next block and submits `verifyBlock` against
+//! 3. **Phase 2** — hands the prover the rotations the contract already has (N
+//!    and below: another relayer applied them, or this one stopped before the
+//!    ack) one by one, without proofs, as far as the bundle gate allows; then
+//!    fetches the next block and submits `verifyBlock` against
 //!    `_expectedBkSetFor` (outgoing set for `seqNo <= N`);
-//! 4. on success — acks the live driver (if any), runs Check A, persists state.
+//! 4. on success — acks the live driver (if any) for the bundle and for the
+//!    rotations it lets through, runs Check A, persists state.
 //!
 //! [`Relayer::run_loop`] just calls `tick` in a `loop` with a configurable
 //! delay between iterations and a "max ticks" budget for tests.
@@ -30,7 +34,7 @@ use crate::{
     },
     error::RelayerError,
     history_consistency::{check_chain_monotonicity_with_stride, check_history_consistency},
-    source::{BkUpdateSource, BlockSource},
+    source::{AckOutcome, AppliedRotation, BkUpdateSource, BlockSource},
     state::RelayerState,
 };
 
@@ -402,7 +406,9 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         }
 
         // ── Phase 2: verifyBlock lane ────────────────────────────────
-        self.maybe_ack_prover_rotation(&on_chain).await?;
+        // First the rotations the contract already has, as far as the gate
+        // allows, so that by the bundle's ack N is the one left pending.
+        self.catch_up_applied_rotations(&on_chain).await?;
         let target = on_chain.last_seen_block_seq_no.saturating_add(1);
 
         debug!(target_seq_no = target, "fetching block");
@@ -481,7 +487,7 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
                 tx_hash,
             } => {
                 self.source.ack_last_bundle(seq_no).await?;
-                self.maybe_ack_prover_rotation(&new_state).await?;
+                self.catch_up_applied_rotations(&new_state).await?;
                 self.after_ack_consistency(seq_no, &new_state).await?;
                 self.state.record_progress(seq_no);
                 self.state.last_observed_on_chain = Some(new_state.clone());
@@ -572,20 +578,132 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
         }
     }
 
-    async fn maybe_ack_prover_rotation(
+    /// Whether the prover may take rotation `r`, already applied on the
+    /// contract, now. Below N it waits until its own next bundle is past `r`,
+    /// as the driver does: the bundles signed by the set before `r` come
+    /// first, and the contract may have them while the local cursor is
+    /// behind. At N the contract's cursor decides, as for a rotation this
+    /// relayer applied.
+    fn applied_rotation_may_ack(
+        local_last_seen: u64,
+        on_chain: &BridgeOnChainState,
+        r: u64,
+        stride: u64,
+    ) -> bool {
+        match r.cmp(&on_chain.last_bk_set_update_seq_no) {
+            std::cmp::Ordering::Less => Self::next_bundle_boundary(local_last_seen, stride) > r,
+            std::cmp::Ordering::Equal => Self::prover_rotation_may_ack(on_chain, stride),
+            std::cmp::Ordering::Greater => false,
+        }
+    }
+
+    /// The contract, applying N, stored the set after it and moved the set
+    /// before it to the previous slot. A rotation at N that leads between
+    /// other sets means the prover follows another BK-set history.
+    fn check_rotation_at_n(
+        rotation: &AppliedRotation,
+        on_chain: &BridgeOnChainState,
+    ) -> Result<(), RelayerError> {
+        if rotation.new_commitment == on_chain.bk_set_commitment
+            && rotation.old_commitment == on_chain.prev_bk_set_commitment
+        {
+            return Ok(());
+        }
+        Err(RelayerError::BkSetDiverged {
+            seq_no: rotation.seq_no,
+            reason: format!(
+                "the prover's rotation leads {:#x} -> {:#x}, the bridge stores \
+                 storedPrevBkSetCommitment {:#x} -> storedBkSetCommitment {:#x}",
+                rotation.old_commitment,
+                rotation.new_commitment,
+                on_chain.prev_bk_set_commitment,
+                on_chain.bk_set_commitment
+            ),
+        })
+    }
+
+    /// Hand the prover, one by one, the rotations the contract has already
+    /// applied (N and below), without proofs, until none is left or the
+    /// gate holds one back. The held one stays pending: usually N in the
+    /// hold window, acked after the bundle that opens it. A prover whose
+    /// bundle cursor is still behind the rotation refuses it
+    /// ([`RelayerError::is_rotation_ack_waiting`]); that ends the loop, not
+    /// the tick.
+    async fn catch_up_applied_rotations(
         &self,
         on_chain: &BridgeOnChainState,
     ) -> Result<(), RelayerError> {
-        self.try_ack_rotation(on_chain, on_chain.last_bk_set_update_seq_no)
-            .await
-            .map(|_| ())
+        let n = on_chain.last_bk_set_update_seq_no;
+        let mut taken: Option<u64> = None;
+        while let Some(rotation) = self.bk_update_source.next_applied_rotation(n).await? {
+            // Each pass takes a later rotation; a source offering one it has
+            // already handed over would spin here forever.
+            if taken.is_some_and(|t| rotation.seq_no <= t) {
+                warn!(
+                    rotation = rotation.seq_no,
+                    "rotation source offered a rotation the prover has already taken"
+                );
+                return Ok(());
+            }
+            if rotation.seq_no == n {
+                Self::check_rotation_at_n(&rotation, on_chain)?;
+            }
+            let local_last_seen = match self.source.driver_snapshot().await {
+                Some(state) => state.stored_last_seen_block_seq_no,
+                None => on_chain.last_seen_block_seq_no,
+            };
+            let stride = self.config.bundle_stride;
+            if !Self::applied_rotation_may_ack(local_last_seen, on_chain, rotation.seq_no, stride) {
+                debug!(
+                    rotation = rotation.seq_no,
+                    last_bk = n,
+                    local_last_seen,
+                    "applied rotation waits for its bundle gate"
+                );
+                return Ok(());
+            }
+            match self
+                .bk_update_source
+                .ack_last_bk_update(rotation.seq_no)
+                .await
+            {
+                Ok(AckOutcome::Acked | AckOutcome::AlreadyApplied) => {
+                    info!(
+                        rotation = rotation.seq_no,
+                        last_bk = n,
+                        "prover took a rotation already on the contract"
+                    );
+                    taken = Some(rotation.seq_no);
+                },
+                Ok(AckOutcome::NothingPending) => {
+                    warn!(
+                        rotation = rotation.seq_no,
+                        "rotation source offered a rotation it then had no pending copy of"
+                    );
+                    return Ok(());
+                },
+                Err(e) if e.is_rotation_ack_waiting() => {
+                    info!(
+                        rotation = rotation.seq_no,
+                        local_last_seen,
+                        "rotation is on the contract; the local bundle cursor is behind it, so \
+                         the ack waits while those bundles are caught up"
+                    );
+                    return Ok(());
+                },
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
-    /// Ack the prover's rotation when the chain says the next bundle is past
-    /// N. A prover whose bundle cursor is still behind N returns
-    /// [`RelayerError::is_rotation_ack_waiting`]; that is not a failed tick.
-    /// The verifyBlock lane then acks the bundles the contract already has,
-    /// and a later tick rotates. Returns whether the ack landed.
+    /// Phase 1: ack the rotation this relayer just applied when the chain
+    /// says the next bundle is past N. A prover whose bundle cursor is
+    /// still behind N returns [`RelayerError::is_rotation_ack_waiting`];
+    /// that is not a failed tick. The verifyBlock lane then acks the
+    /// bundles the contract already has, and a later tick rotates. Returns
+    /// whether the prover holds the rotation now (`Acked` or
+    /// `AlreadyApplied`).
     async fn try_ack_rotation(
         &self,
         on_chain: &BridgeOnChainState,
@@ -595,7 +713,8 @@ impl<S: BlockSource, U: BkUpdateSource, B: BridgeClient> Relayer<S, U, B> {
             return Ok(false);
         }
         match self.bk_update_source.ack_last_bk_update(seq_no).await {
-            Ok(()) => Ok(true),
+            Ok(AckOutcome::Acked | AckOutcome::AlreadyApplied) => Ok(true),
+            Ok(AckOutcome::NothingPending) => Ok(false),
             Err(e) if e.is_rotation_ack_waiting() => {
                 info!(
                     rotation = seq_no,
@@ -668,7 +787,11 @@ mod tests {
     use super::*;
     use crate::{
         bridge::{BridgeClient, MockBridgeClient},
-        source::{BkUpdateSource, BlockSource, EmptyBkUpdateSource, InMemoryBlockSource},
+        daemon::{BackoffConfig, RelayerMetrics},
+        source::{
+            AckOutcome, AppliedRotation, BkUpdateSource, BlockSource, EmptyBkUpdateSource,
+            InMemoryBlockSource,
+        },
         types::{AnBlockData, BkSetUpdateData, FinalizationType, MAX_LAYER_HASHES},
     };
 
@@ -749,6 +872,67 @@ mod tests {
         assert_eq!(bridge.accepted_count(), 5);
         assert_eq!(relayer.state().last_processed_seqno, Some(5));
         assert_eq!(relayer.state().attempts_since_progress, 0);
+    }
+
+    /// A source whose driver has no snapshot until a bundle is acked, then
+    /// reports a BK-set commitment the contract does not hold.
+    struct DriftsAfterAck {
+        inner: InMemoryBlockSource,
+        acked: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockSource for DriftsAfterAck {
+        async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
+            self.inner.fetch(target).await
+        }
+
+        async fn ack_last_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
+            self.acked
+                .store(seq_no, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+            let acked = self.acked.load(std::sync::atomic::Ordering::SeqCst);
+            if acked == 0 {
+                return None;
+            }
+            let mut s = bridge_prover_lib::bridge_state::BridgeState::new(4);
+            s.stored_last_seen_block_seq_no = acked;
+            s.stored_bk_set_commitment = U256::from(BK + 1).to_le_bytes();
+            Some(s)
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_fails_when_the_driver_disagrees_with_the_contract_after_a_verified_bundle() {
+        let dir = tempdir().unwrap();
+        let bridge = Arc::new(MockBridgeClient::with_genesis(
+            U256::from(BK),
+            U256::ZERO,
+            Arc::new(|_| true),
+        ));
+        let source = Arc::new(DriftsAfterAck {
+            inner: InMemoryBlockSource::new(),
+            acked: std::sync::atomic::AtomicU64::new(0),
+        });
+        source.inner.insert(block(1, U256::ZERO));
+        let cfg = RelayerConfig {
+            state_path: dir.path().join("state.json"),
+            poll_interval: Duration::from_millis(0),
+            max_attempts_warn: 16,
+            max_attempts_abort: u32::MAX,
+            bundle_stride: BUNDLE_STRIDE_L1,
+        };
+        let mut r =
+            Relayer::new(cfg, source, Arc::new(EmptyBkUpdateSource), bridge.clone()).unwrap();
+        let err = r
+            .tick()
+            .await
+            .expect_err("the consistency check must run after a verified bundle");
+        assert!(err.to_string().contains("drift"), "got {err}");
+        assert_eq!(bridge.accepted_count(), 1, "the bundle itself was accepted");
     }
 
     #[tokio::test]
@@ -928,13 +1112,14 @@ mod tests {
             Ok(self.upd.lock().unwrap().clone())
         }
 
-        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
             let mut g = self.upd.lock().unwrap();
             if g.as_ref().is_some_and(|u| u.block_seq_no == seq_no) {
                 *g = None;
                 self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(AckOutcome::Acked);
             }
-            Ok(())
+            Ok(AckOutcome::NothingPending)
         }
     }
 
@@ -1068,16 +1253,49 @@ mod tests {
         );
     }
 
+    /// The rotation [`FakeProver`] holds between its poll and its ack.
+    #[derive(Clone)]
+    enum FakePending {
+        Proven(BkSetUpdateData),
+        Applied(AppliedRotation),
+    }
+
+    impl FakePending {
+        fn rotation(&self) -> AppliedRotation {
+            match self {
+                FakePending::Proven(u) => AppliedRotation {
+                    seq_no: u.block_seq_no,
+                    old_commitment: u.old_commitment_l2,
+                    new_commitment: u.new_commitment_l3,
+                },
+                FakePending::Applied(r) => *r,
+            }
+        }
+    }
+
     /// Shared fake prover: one signer set, a stride, queued rotations.
     /// Serves a boundary only when the block was signed by the set it holds.
+    ///
+    /// Like the live source it holds one pending rotation. `queued` rotations
+    /// are proven when served (`proofs` counts them); `applied` ones are on
+    /// the contract already and come back as deltas without a proof. Like the
+    /// live driver it refuses a rotation ack while a bundle signed by the
+    /// outgoing set is still owed (`AckTooEarly`), acks a boundary the
+    /// contract already has without serving it, and its snapshot carries the
+    /// cursors Check A compares. `events` records every bundle and rotation
+    /// the prover took, in order.
     struct FakeProver {
         stride: u64,
         current_bk: std::sync::Mutex<U256>,
         last_bk: std::sync::atomic::AtomicU64,
-        pending: std::sync::Mutex<Option<BkSetUpdateData>>,
+        local_last_seen: std::sync::atomic::AtomicU64,
+        pending: std::sync::Mutex<Option<FakePending>>,
         queued: std::sync::Mutex<Vec<BkSetUpdateData>>,
+        applied: std::sync::Mutex<Vec<(u64, U256, U256)>>,
         blocks: std::sync::Mutex<std::collections::BTreeMap<u64, AnBlockData>>,
         acks: std::sync::atomic::AtomicU64,
+        proofs: std::sync::atomic::AtomicU64,
+        events: std::sync::Mutex<Vec<(&'static str, u64)>>,
     }
 
     impl FakeProver {
@@ -1086,11 +1304,26 @@ mod tests {
                 stride,
                 current_bk: std::sync::Mutex::new(genesis),
                 last_bk: std::sync::atomic::AtomicU64::new(0),
+                local_last_seen: std::sync::atomic::AtomicU64::new(0),
                 pending: std::sync::Mutex::new(None),
                 queued: std::sync::Mutex::new(Vec::new()),
+                applied: std::sync::Mutex::new(Vec::new()),
                 blocks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 acks: std::sync::atomic::AtomicU64::new(0),
+                proofs: std::sync::atomic::AtomicU64::new(0),
+                events: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        /// A prover that has bundled up to `last_seen` and holds `bk`, the
+        /// set after its rotation at `last_bk`.
+        fn at(stride: u64, bk: U256, last_bk: u64, last_seen: u64) -> Self {
+            let p = Self::new(stride, bk);
+            p.last_bk
+                .store(last_bk, std::sync::atomic::Ordering::SeqCst);
+            p.local_last_seen
+                .store(last_seen, std::sync::atomic::Ordering::SeqCst);
+            p
         }
 
         fn insert_block(&self, b: AnBlockData) {
@@ -1100,13 +1333,89 @@ mod tests {
         fn queue_update(&self, upd: BkSetUpdateData) {
             self.queued.lock().unwrap().push(upd);
         }
+
+        /// A rotation another relayer applied on the contract.
+        fn queue_applied(&self, seq: u64, old: u64, new: u64) {
+            self.applied
+                .lock()
+                .unwrap()
+                .push((seq, U256::from(old), U256::from(new)));
+        }
+
+        fn pending_seq(&self) -> Option<u64> {
+            self.pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|p| p.rotation().seq_no)
+        }
+
+        fn proofs(&self) -> u64 {
+            self.proofs.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn events(&self) -> Vec<(&'static str, u64)> {
+            self.events.lock().unwrap().clone()
+        }
+
+        /// The next applied rotation, if it is at or below `n`.
+        fn take_applied_up_to(&self, n: u64) -> Option<AppliedRotation> {
+            let mut applied = self.applied.lock().unwrap();
+            let &(seq_no, old_commitment, new_commitment) = applied.first()?;
+            if seq_no > n {
+                return None;
+            }
+            applied.remove(0);
+            Some(AppliedRotation {
+                seq_no,
+                old_commitment,
+                new_commitment,
+            })
+        }
+
+        fn take_bundle(&self, seq_no: u64) {
+            self.local_last_seen
+                .store(seq_no, std::sync::atomic::Ordering::SeqCst);
+            self.events.lock().unwrap().push(("bundle", seq_no));
+        }
+
+        fn take_rotation(&self, r: AppliedRotation) {
+            *self.current_bk.lock().unwrap() = r.new_commitment;
+            self.last_bk
+                .store(r.seq_no, std::sync::atomic::Ordering::SeqCst);
+            self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.events.lock().unwrap().push(("rotation", r.seq_no));
+        }
+
+        /// Takes the pending rotation `seq_no` past the bundle gate, as a
+        /// source that released it early would.
+        fn release_by_hand(&self, seq_no: u64) {
+            let p = self.pending.lock().unwrap().take().expect("pending");
+            assert_eq!(p.rotation().seq_no, seq_no);
+            self.take_rotation(p.rotation());
+        }
     }
 
     #[async_trait::async_trait]
     impl BlockSource for FakeProver {
         async fn fetch(&self, target: u64) -> Result<Option<AnBlockData>, RelayerError> {
             let hold = *self.current_bk.lock().unwrap();
+            let local = self
+                .local_last_seen
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let next_local = (local / self.stride + 1) * self.stride;
             let blocks = self.blocks.lock().unwrap();
+            if next_local < target {
+                // The contract has this boundary already: take it, serve
+                // nothing (the live source's pre-target bundle).
+                if blocks
+                    .get(&next_local)
+                    .is_some_and(|b| b.bk_set_commitment == hold)
+                {
+                    self.take_bundle(next_local);
+                }
+                return Ok(None);
+            }
             Ok(blocks
                 .values()
                 .find(|b| {
@@ -1115,6 +1424,22 @@ mod tests {
                         && b.bk_set_commitment == hold
                 })
                 .cloned())
+        }
+
+        async fn ack_last_bundle(&self, seq_no: u64) -> Result<(), RelayerError> {
+            self.take_bundle(seq_no);
+            Ok(())
+        }
+
+        async fn driver_snapshot(&self) -> Option<bridge_prover_lib::bridge_state::BridgeState> {
+            let mut s = bridge_prover_lib::bridge_state::BridgeState::new(4);
+            s.stored_last_seen_block_seq_no = self
+                .local_last_seen
+                .load(std::sync::atomic::Ordering::SeqCst);
+            s.stored_bk_set_commitment = self.current_bk.lock().unwrap().to_le_bytes();
+            s.stored_last_bk_set_update_seq_no =
+                self.last_bk.load(std::sync::atomic::Ordering::SeqCst);
+            Some(s)
         }
     }
 
@@ -1126,37 +1451,76 @@ mod tests {
         ) -> Result<Option<BkSetUpdateData>, RelayerError> {
             {
                 let pending = self.pending.lock().unwrap();
-                if let Some(p) = pending.as_ref() {
-                    if p.block_seq_no >= target {
+                match pending.as_ref() {
+                    Some(FakePending::Proven(p)) if p.block_seq_no >= target => {
                         return Ok(Some(p.clone()));
-                    }
-                    return Ok(None);
+                    },
+                    Some(_) => return Ok(None),
+                    None => {},
                 }
+            }
+            if let Some(r) = self.take_applied_up_to(target.saturating_sub(1)) {
+                *self.pending.lock().unwrap() = Some(FakePending::Applied(r));
+                return Ok(None);
             }
             let mut queued = self.queued.lock().unwrap();
             if let Some(i) = queued.iter().position(|u| u.block_seq_no >= target) {
                 let u = queued.remove(i);
-                *self.pending.lock().unwrap() = Some(u.clone());
+                self.proofs
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.pending.lock().unwrap() = Some(FakePending::Proven(u.clone()));
                 return Ok(Some(u));
             }
             Ok(None)
         }
 
-        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
-            if self.last_bk.load(std::sync::atomic::Ordering::SeqCst) >= seq_no {
-                return Ok(());
+        async fn next_applied_rotation(
+            &self,
+            applied_up_to: u64,
+        ) -> Result<Option<AppliedRotation>, RelayerError> {
+            if let Some(p) = self.pending.lock().unwrap().as_ref() {
+                let r = p.rotation();
+                return Ok((r.seq_no <= applied_up_to).then_some(r));
             }
+            let Some(r) = self.take_applied_up_to(applied_up_to) else {
+                return Ok(None);
+            };
+            *self.pending.lock().unwrap() = Some(FakePending::Applied(r));
+            Ok(Some(r))
+        }
+
+        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
+            let last_bk = self.last_bk.load(std::sync::atomic::Ordering::SeqCst);
             let mut pending = self.pending.lock().unwrap();
-            let matches = pending.as_ref().is_some_and(|u| u.block_seq_no == seq_no);
-            if !matches {
-                return Ok(());
+            if last_bk >= seq_no {
+                if pending
+                    .as_ref()
+                    .is_some_and(|p| p.rotation().seq_no <= last_bk)
+                {
+                    *pending = None;
+                }
+                return Ok(AckOutcome::AlreadyApplied);
             }
-            let u = pending.take().expect("matched");
-            *self.current_bk.lock().unwrap() = u.new_commitment_l3;
-            self.last_bk
-                .store(u.block_seq_no, std::sync::atomic::Ordering::SeqCst);
-            self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
+            let Some(r) = pending
+                .as_ref()
+                .map(FakePending::rotation)
+                .filter(|r| r.seq_no == seq_no)
+            else {
+                return Ok(AckOutcome::NothingPending);
+            };
+            let local = self
+                .local_last_seen
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if local + self.stride <= seq_no {
+                return Err(RelayerError::AckiNacki(format!(
+                    "ack_bk_update deferred: cursor {local} + stride ≤ rotation {seq_no}; retry \
+                     after the next bundle ack"
+                )));
+            }
+            *pending = None;
+            drop(pending);
+            self.take_rotation(r);
+            Ok(AckOutcome::Acked)
         }
     }
 
@@ -1190,6 +1554,11 @@ mod tests {
 
     /// Prover cursor still short of a rotation the contract already accepted.
     struct CursorBehindRotation {
+        rotation: AppliedRotation,
+        taken: std::sync::atomic::AtomicBool,
+        /// `false`: keeps offering the rotation after taking it, against the
+        /// source contract.
+        remembers_ack: bool,
         fetched: std::sync::atomic::AtomicBool,
         defer: std::sync::atomic::AtomicBool,
         acks: std::sync::atomic::AtomicU64,
@@ -1214,7 +1583,19 @@ mod tests {
             Ok(None)
         }
 
-        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<(), RelayerError> {
+        async fn next_applied_rotation(
+            &self,
+            applied_up_to: u64,
+        ) -> Result<Option<AppliedRotation>, RelayerError> {
+            if !self.remembers_ack && self.acks.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+                // Ends a relayer that keeps taking it, rather than spinning.
+                return Err(RelayerError::other("the same rotation was taken twice"));
+            }
+            let taken = self.remembers_ack && self.taken.load(std::sync::atomic::Ordering::SeqCst);
+            Ok((!taken && self.rotation.seq_no <= applied_up_to).then_some(self.rotation))
+        }
+
+        async fn ack_last_bk_update(&self, seq_no: u64) -> Result<AckOutcome, RelayerError> {
             self.acks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.defer.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(RelayerError::AckiNacki(format!(
@@ -1222,7 +1603,8 @@ mod tests {
                      after the next bundle ack"
                 )));
             }
-            Ok(())
+            self.taken.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(AckOutcome::Acked)
         }
     }
 
@@ -1242,6 +1624,13 @@ mod tests {
         ));
         bridge.land_rotation_for_test(1_884_160, 1_890_758, U256::from(0xBEEFu64));
         let source = Arc::new(CursorBehindRotation {
+            rotation: AppliedRotation {
+                seq_no: 1_890_758,
+                old_commitment: U256::from(BK),
+                new_commitment: U256::from(0xBEEFu64),
+            },
+            taken: std::sync::atomic::AtomicBool::new(false),
+            remembers_ack: true,
             fetched: std::sync::atomic::AtomicBool::new(false),
             defer: std::sync::atomic::AtomicBool::new(true),
             acks: std::sync::atomic::AtomicU64::new(0),
@@ -1271,6 +1660,40 @@ mod tests {
             TickOutcome::NotYetAvailable { .. }
         ));
         assert_eq!(source.acks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_source_offering_a_taken_rotation_again_does_not_hang_the_tick() {
+        let dir = tempdir().unwrap();
+        let stride = 16_384u64;
+        let bridge = Arc::new(MockBridgeClient::with_genesis_stride(
+            U256::from(BK),
+            U256::ZERO,
+            stride,
+            Arc::new(|_| true),
+        ));
+        bridge.land_rotation_for_test(16_384, 20_000, U256::from(0xBEEFu64));
+        let source = Arc::new(CursorBehindRotation {
+            rotation: AppliedRotation {
+                seq_no: 20_000,
+                old_commitment: U256::from(BK),
+                new_commitment: U256::from(0xBEEFu64),
+            },
+            taken: std::sync::atomic::AtomicBool::new(false),
+            remembers_ack: false,
+            fetched: std::sync::atomic::AtomicBool::new(false),
+            defer: std::sync::atomic::AtomicBool::new(false),
+            acks: std::sync::atomic::AtomicU64::new(0),
+        });
+        let cfg = cfg_with(dir.path().join("state.json"), stride, 3);
+        let mut r = Relayer::new(cfg, source.clone(), source.clone(), bridge).unwrap();
+
+        let out = r.tick().await.expect("the catch-up loop must end");
+        assert!(
+            matches!(out, TickOutcome::NotYetAvailable { .. }),
+            "{out:?}"
+        );
+        assert_eq!(source.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1316,10 +1739,11 @@ mod tests {
         // prover must keep signing against the outgoing set until
         // `verifyBlock` crosses the next owed boundary. Simulate the
         // asynchronous ack that would eventually land once `verifyBlock`
-        // catches up (`maybe_ack_prover_rotation` on a later tick) so
-        // that `pending` is clear for N2 on the next tick.
+        // catches up (the relayer acks it on a later tick, once `verifyBlock` has
+        // crossed the owed boundary) so that `pending` is clear for N2 on the
+        // next tick.
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
-        prover.ack_last_bk_update(1500).await.unwrap();
+        prover.release_by_hand(1500);
         assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 1);
         // N2 is discovered and deferred (bundle 1024 is owed by N1).
         let out = r.tick().await.unwrap();
@@ -1327,15 +1751,7 @@ mod tests {
             matches!(out, TickOutcome::NotYetAvailable { .. }),
             "got {out:?}"
         );
-        assert!(
-            prover
-                .pending
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|u| u.block_seq_no == 3000),
-            "N2 must stay pending"
-        );
+        assert_eq!(prover.pending_seq(), Some(3000), "N2 must stay pending");
     }
 
     #[tokio::test]
@@ -1395,7 +1811,8 @@ mod tests {
     /// Hands out the next queued rotation at or above the target and keeps
     /// no pending slot — unlike the live source, which withholds a newer
     /// rotation while one is still unacked. With it the relayer's own
-    /// deferral guard is reachable.
+    /// deferral guard is reachable. An ack therefore finds nothing pending
+    /// (the trait's default).
     struct QueueBkUpdates {
         queued: std::sync::Mutex<Vec<BkSetUpdateData>>,
     }
@@ -1413,10 +1830,6 @@ mod tests {
                 .iter()
                 .find(|u| u.block_seq_no >= target)
                 .cloned())
-        }
-
-        async fn ack_last_bk_update(&self, _seq_no: u64) -> Result<(), RelayerError> {
-            Ok(())
         }
     }
 
@@ -1938,5 +2351,387 @@ mod tests {
             err.to_string().contains("last_seen_block_seq_no_rewound"),
             "{err}"
         );
+    }
+
+    // ── Rotations another relayer already applied ────────────────────
+
+    const STRIDE_L2: u64 = 16_384;
+    const C1: u64 = 0xC1C1;
+    const C2: u64 = 0xC2C2;
+    const FOREIGN: u64 = 0xF0F0;
+
+    fn l2_bridge() -> Arc<MockBridgeClient> {
+        Arc::new(MockBridgeClient::with_genesis_stride(
+            U256::from(BK),
+            U256::ZERO,
+            STRIDE_L2,
+            Arc::new(|_| true),
+        ))
+    }
+
+    fn l2_relayer(
+        dir: &tempfile::TempDir,
+        prover: &Arc<FakeProver>,
+        bridge: &Arc<MockBridgeClient>,
+    ) -> Relayer<FakeProver, FakeProver, MockBridgeClient> {
+        let cfg = cfg_with(dir.path().join("state.json"), STRIDE_L2, 3);
+        Relayer::new(cfg, prover.clone(), prover.clone(), bridge.clone()).unwrap()
+    }
+
+    /// Boundaries signed by the given sets, each anchored on the one before.
+    fn boundaries(signed: &[(u64, u64)]) -> Vec<AnBlockData> {
+        let mut anchor = U256::ZERO;
+        signed
+            .iter()
+            .map(|&(seq, bk)| {
+                let mut b = block(seq, anchor);
+                b.bk_set_commitment = U256::from(bk);
+                anchor = b.next_anchor();
+                b
+            })
+            .collect()
+    }
+
+    /// Another relayer's `verifyBlock` on the shared bridge.
+    async fn sibling_verifies(bridge: &MockBridgeClient, b: &AnBlockData) {
+        let out = bridge.submit_block(b).await.unwrap();
+        assert!(matches!(out, SubmitOutcome::Verified { .. }), "{out:?}");
+    }
+
+    /// Another relayer's `applyBkSetUpdate` on the shared bridge.
+    async fn sibling_rotates(bridge: &MockBridgeClient, seq: u64, old: u64, new: u64) {
+        let out = bridge
+            .submit_bk_set_update(&rotation(seq, old, new))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, BkSetUpdateSubmitOutcome::Applied { .. }),
+            "{out:?}"
+        );
+    }
+
+    fn assert_verified(out: TickOutcome, seq: u64) {
+        assert!(
+            matches!(out, TickOutcome::Verified { seq_no, .. } if seq_no == seq),
+            "expected Verified at {seq}, got {out:?}"
+        );
+    }
+
+    /// Bundle cursor 16384 and rotation cursor 15000 with set `C0` (`BK`) on
+    /// both sides, this relayer having verified 16384 itself, so the next
+    /// ticks run Check B against what the other relayer did meanwhile.
+    async fn verified_16384(
+        dir: &tempfile::TempDir,
+        blocks: &[AnBlockData],
+    ) -> (
+        Arc<MockBridgeClient>,
+        Arc<FakeProver>,
+        Relayer<FakeProver, FakeProver, MockBridgeClient>,
+    ) {
+        let bridge = l2_bridge();
+        sibling_rotates(&bridge, 15_000, BK, BK).await;
+        let prover = Arc::new(FakeProver::at(STRIDE_L2, U256::from(BK), 15_000, 0));
+        for b in blocks {
+            prover.insert_block(b.clone());
+        }
+        let mut r = l2_relayer(dir, &prover, &bridge);
+        assert_verified(r.tick().await.unwrap(), 16_384);
+        (bridge, prover, r)
+    }
+
+    #[tokio::test]
+    async fn sibling_rotations_between_ticks_are_caught_up_without_proofs() {
+        let dir = tempdir().unwrap();
+        let blocks = boundaries(&[(16_384, BK), (32_768, C1)]);
+        let (bridge, prover, mut r) = verified_16384(&dir, &blocks).await;
+
+        // Between two ticks the other relayer applies two rotations: 18000
+        // keeps the set (only the future keys change), 20000 replaces it.
+        sibling_rotates(&bridge, 18_000, BK, BK).await;
+        sibling_rotates(&bridge, 20_000, BK, C1).await;
+        prover.queue_applied(18_000, BK, BK);
+        prover.queue_applied(20_000, BK, C1);
+
+        assert_verified(r.tick().await.unwrap(), 32_768);
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable { .. }
+        ));
+        assert_eq!(prover.proofs(), 0, "applied rotations are never proven");
+        assert_eq!(prover.events(), [
+            ("bundle", 16_384),
+            ("rotation", 18_000),
+            ("rotation", 20_000),
+            ("bundle", 32_768),
+        ]);
+        let last = bridge.accepted_log().pop().unwrap();
+        assert_eq!(last.block_seq_no, 32_768);
+        assert_eq!(last.bk_set_commitment, U256::from(C1));
+    }
+
+    #[tokio::test]
+    async fn one_missed_rotation_is_still_caught_up() {
+        let dir = tempdir().unwrap();
+        let blocks = boundaries(&[(16_384, BK), (32_768, C1)]);
+        let (bridge, prover, mut r) = verified_16384(&dir, &blocks).await;
+
+        sibling_rotates(&bridge, 20_000, BK, C1).await;
+        prover.queue_applied(20_000, BK, C1);
+
+        assert_verified(r.tick().await.unwrap(), 32_768);
+        assert_eq!(prover.proofs(), 0);
+        assert_eq!(prover.events(), [
+            ("bundle", 16_384),
+            ("rotation", 20_000),
+            ("bundle", 32_768),
+        ]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_window_with_an_intermediate_rotation_does_not_stall() {
+        // 18000 is below the contract's N and its gate is the local cursor;
+        // 40000 is N, still in the hold window: bundle 32768 is signed by the
+        // set before it. The prover takes 18000 at once, proves 32768 with
+        // that set, and takes 40000 right after the bundle, before Check A.
+        let dir = tempdir().unwrap();
+        let blocks = boundaries(&[(16_384, BK), (32_768, BK), (49_152, C1)]);
+        let (bridge, prover, mut r) = verified_16384(&dir, &blocks).await;
+
+        sibling_rotates(&bridge, 18_000, BK, BK).await;
+        sibling_rotates(&bridge, 40_000, BK, C1).await;
+        prover.queue_applied(18_000, BK, BK);
+        prover.queue_applied(40_000, BK, C1);
+
+        let metrics = RelayerMetrics::new();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let ticks = metrics.clone();
+        tokio::spawn(async move {
+            while ticks.ticks_total.load(std::sync::atomic::Ordering::Relaxed) < 4 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let _ = stop.send(());
+        });
+        let backoff = BackoffConfig {
+            initial: Duration::from_millis(5),
+            max: Duration::from_millis(20),
+            multiplier: 2,
+        };
+        let summary = r
+            .run_until_shutdown(backoff, Some(metrics.clone()), async {
+                let _ = stopped.await;
+            })
+            .await
+            .unwrap();
+
+        assert!(summary.ticks >= 4, "{summary:?}");
+        assert_eq!(summary.tick_errors, 0, "{summary:?}");
+        assert_eq!(metrics.snapshot().history_drift_detected, 0);
+        assert_eq!(prover.proofs(), 0);
+        assert_eq!(prover.events(), [
+            ("bundle", 16_384),
+            ("rotation", 18_000),
+            ("bundle", 32_768),
+            ("rotation", 40_000),
+            ("bundle", 49_152),
+        ]);
+        let signed: Vec<_> = bridge
+            .accepted_log()
+            .iter()
+            .map(|b| (b.block_seq_no, b.bk_set_commitment))
+            .collect();
+        assert_eq!(signed, [
+            (16_384, U256::from(BK)),
+            (32_768, U256::from(BK)),
+            (49_152, U256::from(C1)),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn ack_with_nothing_pending_does_not_count_as_acked() {
+        // A rotation source that keeps no pending slot: the phase-1 ack
+        // after `applyBkSetUpdate` finds nothing. The prover did not rotate,
+        // so Check A would report it as drift; it must not run.
+        let dir = tempdir().unwrap();
+        let bridge = l2_bridge();
+        let prover = Arc::new(FakeProver::new(STRIDE_L2, U256::from(BK)));
+        let bk = Arc::new(QueueBkUpdates {
+            queued: std::sync::Mutex::new(vec![rotation(2_000, BK, C1)]),
+        });
+        let cfg = cfg_with(dir.path().join("state.json"), STRIDE_L2, 3);
+        let mut r = Relayer::new(cfg, prover.clone(), bk, bridge.clone()).unwrap();
+
+        let out = r.tick().await.expect("no ack, no Check A");
+        assert!(
+            matches!(out, TickOutcome::BkUpdateApplied {
+                seq_no: 2_000,
+                ..
+            }),
+            "{out:?}"
+        );
+        let on_chain = bridge.read_state().await.unwrap();
+        assert!(
+            Relayer::<FakeProver, QueueBkUpdates, MockBridgeClient>::prover_rotation_may_ack(
+                &on_chain, STRIDE_L2
+            )
+        );
+        assert!(!r.try_ack_rotation(&on_chain, 2_000).await.unwrap());
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn crash_between_bundle_and_rotation_ack_at_the_same_height() {
+        // This relayer applied 32768 and verified bundle 32768, which is also
+        // a boundary, then stopped before the prover took the rotation: the
+        // contract has N = L = 32768, the prover has bundled 32768 with the
+        // old set. A proof of 32768 is impossible now (it needs a lastSeen
+        // below 32768); the rotation is taken as a delta.
+        let dir = tempdir().unwrap();
+        let blocks = boundaries(&[(16_384, BK), (32_768, BK), (49_152, C1)]);
+        let bridge = l2_bridge();
+        sibling_rotates(&bridge, 15_000, BK, BK).await;
+        sibling_verifies(&bridge, &blocks[0]).await;
+        sibling_rotates(&bridge, 32_768, BK, C1).await;
+        sibling_verifies(&bridge, &blocks[1]).await;
+        let prover = Arc::new(FakeProver::at(STRIDE_L2, U256::from(BK), 15_000, 32_768));
+        prover.insert_block(blocks[2].clone());
+        prover.queue_applied(32_768, BK, C1);
+        let mut r = l2_relayer(&dir, &prover, &bridge);
+
+        assert_verified(r.tick().await.unwrap(), 49_152);
+        assert_eq!(prover.proofs(), 0);
+        assert_eq!(prover.events(), [("rotation", 32_768), ("bundle", 49_152)]);
+        let last = bridge.accepted_log().pop().unwrap();
+        assert_eq!(last.bk_set_commitment, U256::from(C1));
+    }
+
+    #[tokio::test]
+    async fn catch_up_behind_on_bundles_interleaves_with_applied_rotations() {
+        // The prover is at bundle 16384; the contract is at 49152 with
+        // rotations 20000 and 40000 applied. Each rotation waits until the
+        // prover's own bundles before it are taken, and each bundle until the
+        // set that signed it is held.
+        let dir = tempdir().unwrap();
+        let blocks = boundaries(&[(16_384, BK), (32_768, C1), (49_152, C2), (65_536, C2)]);
+        let bridge = l2_bridge();
+        sibling_verifies(&bridge, &blocks[0]).await;
+        sibling_rotates(&bridge, 20_000, BK, C1).await;
+        sibling_verifies(&bridge, &blocks[1]).await;
+        sibling_rotates(&bridge, 40_000, C1, C2).await;
+        sibling_verifies(&bridge, &blocks[2]).await;
+        let prover = Arc::new(FakeProver::at(STRIDE_L2, U256::from(BK), 0, 16_384));
+        for b in &blocks[1..] {
+            prover.insert_block(b.clone());
+        }
+        prover.queue_applied(20_000, BK, C1);
+        prover.queue_applied(40_000, C1, C2);
+        let mut r = l2_relayer(&dir, &prover, &bridge);
+
+        // 20000 is taken; 40000 is refused as too early (bundle 32768 is
+        // still owed by C1) and stays pending; bundle 32768 is taken.
+        let out = r.tick().await.expect("an early ack is not a tick error");
+        assert!(
+            matches!(out, TickOutcome::NotYetAvailable { .. }),
+            "{out:?}"
+        );
+        assert_eq!(prover.pending_seq(), Some(40_000));
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::NotYetAvailable { .. }
+        ));
+        assert_verified(r.tick().await.unwrap(), 65_536);
+        assert_eq!(prover.proofs(), 0);
+        assert_eq!(prover.events(), [
+            ("rotation", 20_000),
+            ("bundle", 32_768),
+            ("rotation", 40_000),
+            ("bundle", 49_152),
+            ("bundle", 65_536),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn applied_delta_with_a_foreign_commitment_stops() {
+        // The contract applied 20000 from BK to C1. A delta at N leading
+        // anywhere else, or from anywhere else, means the prover follows
+        // another history: stop at once, before proving anything with it.
+        async fn diverging(
+            dir: &tempfile::TempDir,
+            old: u64,
+            new: u64,
+        ) -> (
+            Arc<FakeProver>,
+            Relayer<FakeProver, FakeProver, MockBridgeClient>,
+        ) {
+            let blocks = boundaries(&[(16_384, BK)]);
+            let bridge = l2_bridge();
+            sibling_rotates(&bridge, 15_000, BK, BK).await;
+            sibling_verifies(&bridge, &blocks[0]).await;
+            sibling_rotates(&bridge, 20_000, BK, C1).await;
+            let prover = Arc::new(FakeProver::at(STRIDE_L2, U256::from(BK), 15_000, 16_384));
+            prover.queue_applied(20_000, old, new);
+            let r = l2_relayer(dir, &prover, &bridge);
+            (prover, r)
+        }
+
+        let dir = tempdir().unwrap();
+        let (prover, mut r) = diverging(&dir, BK, FOREIGN).await;
+        let err = r.tick().await.unwrap_err();
+        assert!(
+            matches!(err, RelayerError::BkSetDiverged {
+                seq_no: 20_000,
+                ..
+            }),
+            "{err:?}"
+        );
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The daemon loop stops on it, as on `Stuck`.
+        let dir = tempdir().unwrap();
+        let (prover, mut r) = diverging(&dir, FOREIGN, C1).await;
+        let backoff = BackoffConfig {
+            initial: Duration::from_millis(1),
+            max: Duration::from_millis(10),
+            multiplier: 2,
+        };
+        let run = r.run_until_shutdown(backoff, None, std::future::pending());
+        let err = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("the daemon must stop on a diverged BK set")
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayerError::BkSetDiverged {
+                seq_no: 20_000,
+                ..
+            }),
+            "{err:?}"
+        );
+        assert_eq!(prover.acks.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn rotations_above_the_contract_are_still_proven_and_submitted() {
+        let dir = tempdir().unwrap();
+        let blocks = boundaries(&[(16_384, BK), (32_768, C1)]);
+        let (bridge, prover, mut r) = verified_16384(&dir, &blocks).await;
+        prover.queue_update(rotation(20_000, BK, C1));
+
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::BkUpdateApplied {
+                seq_no: 20_000,
+                ..
+            }
+        ));
+        assert_eq!(prover.proofs(), 1);
+        assert_verified(r.tick().await.unwrap(), 32_768);
+        assert_eq!(
+            bridge.read_state().await.unwrap().last_bk_set_update_seq_no,
+            20_000
+        );
+        assert_eq!(prover.events(), [
+            ("bundle", 16_384),
+            ("rotation", 20_000),
+            ("bundle", 32_768),
+        ]);
     }
 }

@@ -332,6 +332,12 @@ impl<S: BlockSource, U: crate::source::BkUpdateSource, B: BridgeClient> Relayer<
                         error!(error = ?e, "daemon: stuck — hard aborting");
                         return Err(e);
                     }
+                    if matches!(e, RelayerError::BkSetDiverged { .. }) {
+                        // The prover's BK-set history is not the bridge's;
+                        // every later proof would be built on it.
+                        error!(error = %e, "daemon: BK set diverged from the bridge — stopping");
+                        return Err(e);
+                    }
                     if matches!(e, RelayerError::AnChainBehindBridge { .. }) {
                         // Retrying cannot help: the chain this bridge
                         // follows is gone. Stop so the operator sees it.

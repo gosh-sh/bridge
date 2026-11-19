@@ -75,19 +75,12 @@ pub fn anchor_level_for(anchor: AnchorLayerMode) -> u8 {
     }
 }
 
-/// The covering bundle is the strictly-next multiple of `stride`.
-/// `l1_anchor_boundaries` uses the same rule: for an event at seq 1024
-/// (`W·P`), `K = 2048`, because the root at key block 1024 covers the
-/// *previous* batch. Rounding "at or after" waits one bundle too early
-/// and `resolve_anchor_layer` then probes a `K` the chain may not have
-/// produced yet.
-pub fn covering_bundle_seq_no(burn_seq_no: u64, stride: u64) -> u64 {
-    debug_assert!(stride > 0);
-    if burn_seq_no == 0 {
-        return 0;
-    }
-    (burn_seq_no / stride) * stride + stride
-}
+/// The covering bundle is the strictly-next multiple of `stride`: for an
+/// event at seq 1024 (`W·P`) it is 2048, because the root at key block 1024
+/// covers the *previous* batch (`real_chain_builder::l1_anchor_boundaries`
+/// uses the same rule). daemon-withdraw-live's claimer waits for the same
+/// bundle, so the rule lives in one place.
+pub use bridge_relayer_daemon::withdraw_claimer::covering_bundle_seq_no;
 
 /// Rounds [`wait_for_coverage`] may run past its deadline once `latest` has
 /// shown the target, so that a pinned snapshot still behind it can catch

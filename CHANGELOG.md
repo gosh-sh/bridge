@@ -55,8 +55,10 @@ assigns it when the release is tagged.
   (`getNacklLockedTo(chainId, evmBridge)`), refunded above the per-withdrawal cap (234) and for a
   recipient that is not 20 bytes (246).
 - `eccBridge`: `finalizeDeposit` refuses a NACKL deposit above the chain's locked NACKL with 236.
-- `eccBridge`: a deposit the bridge cannot pay when its voucher confirms it (the TVL cap 235, the
-  NACKL lock 236, the payout cap 234, an unregistered token 241) is refused instead of aborting:
+- `eccBridge`: the USDC TVL cap is checked on the EVM bridge only; `finalizeDeposit` and the
+  voucher confirmation no longer refuse with 235. NACKL is bounded on Acki Nacki only, by its lock.
+- `eccBridge`: a deposit the bridge cannot pay when its voucher confirms it (the NACKL lock 236, the
+  payout cap 234, an unregistered token 241) is refused instead of aborting:
   the bridge emits `DepositRefused` with the reason and calls the voucher's `release`, which
   deletes the voucher. Nothing is paid, and the same deposit can be finalized again.
 - `DepositVoucher` 1.6.0: confirms with `bounce: false`; `release` (only from the bridge) deletes

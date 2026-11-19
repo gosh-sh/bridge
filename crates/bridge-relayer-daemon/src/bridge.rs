@@ -959,6 +959,13 @@ mod sol_bindings {
             error AaveWithdrawFailed(uint256 requested, uint256 received);
             error WithdrawTransferFailed(address recipient, uint256 amount);
 
+            event WithdrawalByProofExecuted(
+                uint256 indexed nullifier,
+                address indexed recipient,
+                uint256 amount,
+                uint256 indexed tokenId,
+                address submitter
+            );
             event NacklPayoutQueued(
                 uint256 indexed payoutId,
                 address indexed recipient,
@@ -1276,6 +1283,58 @@ where
                 },
                 Err(e) => return Err(e),
             }
+        }
+    }
+
+    pub async fn withdrawal_payout(
+        &self,
+        nullifier: U256,
+    ) -> Result<Option<WithdrawSubmitOutcome>, RelayerError> {
+        let provider = self.contract.provider();
+        let head = provider
+            .get_block_number()
+            .await
+            .map_err(|e| RelayerError::other(format!("get_block_number: {e}")))?;
+        let scan = self.scan.normalized();
+        let mut to = head;
+        loop {
+            let from = to
+                .saturating_sub(scan.chunk_blocks.saturating_sub(1))
+                .max(scan.deploy_block);
+            let filter = Filter::new()
+                .address(self.address)
+                .event_signature(AckiNackiBridge::WithdrawalByProofExecuted::SIGNATURE_HASH)
+                .topic1(B256::from(nullifier))
+                .from_block(from)
+                .to_block(to);
+            let logs = provider.get_logs(&filter).await.map_err(|e| {
+                RelayerError::other(format!(
+                    "WithdrawalByProofExecuted get_logs [{from},{to}]: {e}"
+                ))
+            })?;
+            if let Some(tx_hash) = logs.iter().find_map(|l| l.transaction_hash) {
+                let receipt = provider
+                    .get_transaction_receipt(tx_hash)
+                    .await
+                    .map_err(|e| RelayerError::other(format!("receipt of {tx_hash}: {e}")))?
+                    .ok_or_else(|| RelayerError::other(format!("no receipt for {tx_hash} yet")))?;
+                let logs = serde_json::to_value(&receipt)
+                    .ok()
+                    .and_then(|r| r.get("logs").cloned())
+                    .unwrap_or_default();
+                return Ok(Some(queued_from_logs(
+                    WithdrawSubmitOutcome::Paid {
+                        tx_hash,
+                    },
+                    &logs,
+                    self.address,
+                )));
+            }
+            if from <= scan.deploy_block {
+                return Ok(None);
+            }
+            to = from - 1;
+            tokio::time::sleep(scan.pause).await;
         }
     }
 

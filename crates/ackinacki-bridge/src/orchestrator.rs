@@ -1526,8 +1526,21 @@ async fn prove_and_submit(
                         source: None,
                     });
                 }
-                info!(%nullifier, "eth dry-run: the bridge has already paid this withdrawal out");
-                mark_already_paid(state_dir, record.as_deref_mut(), held)?;
+                info!(%nullifier, "eth dry-run: the bridge has already accepted this withdrawal");
+                let submit = spent_already(&ro_bridge_for_wait, nullifier, pub_inputs.token_id).await;
+                if matches!(submit.status, SubmitStatus::Queued) {
+                    if let Some(r) = record.as_deref_mut() {
+                        r.status = Status::Queued;
+                        r.eth_tx_hash = submit.eth_tx.clone();
+                        r.nackl_payout_id = submit.payout_id.clone();
+                        r.nackl_ready_at = submit.ready_at;
+                        idempotency::update(state_dir, r, held).map_err(|e| {
+                            e.after_send("the withdrawal was accepted and its NACKL payout queued")
+                        })?;
+                    }
+                } else {
+                    mark_already_paid(state_dir, record.as_deref_mut(), held)?;
+                }
                 return Ok(WithdrawSuccess {
                     burn: c.burn.clone(),
                     capture: CaptureSummary {
@@ -1541,7 +1554,7 @@ async fn prove_and_submit(
                         calldata_bytes,
                         pi_count,
                     }),
-                    submit: Some(already_paid(nullifier)),
+                    submit: Some(submit),
                 });
             },
         }
@@ -1665,8 +1678,8 @@ async fn prove_and_submit(
             reason,
             permanent: _,
         } if paid_out_after_all(&ro_bridge_for_wait, nullifier, &reason).await => {
-            info!(%nullifier, "withdrawByProof: the bridge had already paid this withdrawal out");
-            already_paid(nullifier)
+            info!(%nullifier, "withdrawByProof: the bridge had already accepted this withdrawal");
+            spent_already(&ro_bridge_for_wait, nullifier, pub_inputs.token_id).await
         },
         WithdrawSubmitOutcome::Reverted {
             reason,
@@ -1763,6 +1776,37 @@ fn already_paid(nullifier: alloy::primitives::U256) -> SubmitSummary {
         ready_at: None,
         nullifier: Some(format!("{nullifier:#066x}")),
     }
+}
+
+async fn spent_already<P, N>(
+    bridge: &EthBridgeClient<P, N>,
+    nullifier: alloy::primitives::U256,
+    token_id: alloy::primitives::U256,
+) -> SubmitSummary
+where
+    P: alloy::providers::Provider<N> + Clone,
+    N: alloy::network::Network,
+{
+    if token_id == alloy::primitives::U256::from(bridge_relayer_daemon::bridge::NACKL_TOKEN_ID) {
+        match bridge.withdrawal_payout(nullifier).await {
+            Ok(Some(WithdrawSubmitOutcome::Queued {
+                tx_hash,
+                payout_id,
+                ready_at,
+            })) => {
+                return SubmitSummary {
+                    eth_tx: Some(format!("{tx_hash:?}")),
+                    status: SubmitStatus::Queued,
+                    payout_id: Some(payout_id.to_string()),
+                    ready_at: Some(ready_at),
+                    nullifier: Some(format!("{nullifier:#066x}")),
+                };
+            },
+            Ok(_) => {},
+            Err(e) => warn!(error = %e, "looking up the NACKL payout of the spent nullifier failed"),
+        }
+    }
+    already_paid(nullifier)
 }
 
 /// Whether a `withdrawByProof` revert says the nullifier is spent: the

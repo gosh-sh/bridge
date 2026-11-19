@@ -749,11 +749,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(!newDeposit || config.depositsEnabled, ERR_TOKEN_DEPOSITS_DISABLED);
         uint128 cap = newDeposit ? config.maxTransfer : config.maxWithdrawal;
         require(amount <= cap, ERR_TRANSFER_TOO_LARGE);
-        if (tokenId != NACKL_ECC_ID) {
-            uint128 outstanding = _tokenOutstanding(chainId, tokenId);
-            require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding,
-                    ERR_TVL_CAP);
-        }
     }
 
     function _depositRefusal(uint256 chainId, uint256 evmToken, uint128 amount)
@@ -767,16 +762,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         if (amount > config.maxWithdrawal) {
             return (tokenId, ERR_TRANSFER_TOO_LARGE);
         }
-        if (tokenId == NACKL_ECC_ID) {
-            if (amount > config.outstanding
-                || varuint32(amount) > address(this).currencies[NACKL_ECC_ID]) {
-                return (tokenId, ERR_CHAIN_BALANCE_EXCEEDED);
-            }
-        } else {
-            uint128 outstanding = _tokenOutstanding(chainId, tokenId);
-            if (outstanding > config.maxTvl || amount > config.maxTvl - outstanding) {
-                return (tokenId, ERR_TVL_CAP);
-            }
+        if (tokenId == NACKL_ECC_ID
+            && (amount > config.outstanding
+                || varuint32(amount) > address(this).currencies[NACKL_ECC_ID])) {
+            return (tokenId, ERR_CHAIN_BALANCE_EXCEEDED);
         }
         return (tokenId, 0);
     }
@@ -817,8 +806,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
 
     /// @notice States how much of one chain's principal this bridge still
     ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
-    ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
-    ///         credit to it. `confirmDeposit` raises the counter, a withdrawal
+    ///         to that chain. `confirmDeposit` raises the counter, a withdrawal
     ///         spends it, and `onCodeUpgrade` carries it between builds that
     ///         both have it. What leaves it empty is a migration from a build
     ///         that had none, while the principal stays locked on the source
@@ -826,12 +814,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///
     ///         The figure to write is the principal L1 holds less the deposits
     ///         not yet credited here and the burns L1 has not yet paid out —
-    ///         not L1's balance, which still carries both. The counter is also
-    ///         the deposit room, since `finalizeDeposit` and `confirmDeposit`
-    ///         bound `outstanding + amount` by `MAX_BRIDGE_TVL`, so writing
-    ///         more than that figure buys withdrawal room by refusing deposits
-    ///         with `ERR_TVL_CAP`, and a deposit caught between finalization
-    ///         and confirmation aborts and can be finalized again.
+    ///         not L1's balance, which still carries both. The deposit room is
+    ///         bounded on the EVM bridge, not here. Writing more than that
+    ///         figure buys withdrawal room the EVM treasury does not hold.
     ///         Writing less is the safe direction: it only refuses
     ///         withdrawals, which return the ECC.
     ///

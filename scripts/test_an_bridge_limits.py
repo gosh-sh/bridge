@@ -729,15 +729,17 @@ class BridgeLimits(unittest.TestCase):
 
     def test_limits_refuse_a_proven_deposit(self):
         self.finalize(amount=TRANSFER + 1, expect=234)
+
+    def test_the_tvl_cap_is_left_to_the_evm_bridge(self):
         self.seed(TVL)
-        self.finalize(amount=1, expect=235)
+        self.deployed(self.finalize(deposit=5, amount=TRANSFER), 5)
+        self.confirm(deposit=5)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL + TRANSFER)
 
     def test_confirmation_enforces_cap_and_sender(self):
         self.confirm(source=SENDER, expect=207)
         self.refused(self.confirm(amount=TRANSFER + 1), 0, 234)
         self.confirm()
-        self.assertEqual(int(self.limits()["outstanding"]), TVL)
-        self.refused(self.confirm(deposit=1, amount=1), 1, 235)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
 
     def test_each_network_has_its_own_balance(self):

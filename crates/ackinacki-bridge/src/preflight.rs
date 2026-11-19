@@ -3004,24 +3004,27 @@ pub async fn check_bridge_deploy_for_token(
     // The token the EVM bridge pays this id in is the one Acki Nacki
     // assigns to it. How much may be withdrawn is the Acki Nacki bridge's
     // answer (`getTotalBridged`, the chain's limits), checked before the
-    // burn; the EVM bridge's payout cap and treasury are not read.
+    // burn, and the EVM bridge's payout cap; its treasury is not read.
+    let payout_info = |e: bridge_relayer_daemon::RelayerError| CliError::Preflight {
+        reason: format!("cannot read payout registry for ECC[{token_id}]: {e}"),
+        source: None,
+    };
+    let mut cap = None;
     if let Some(expected_token) = expected_token {
         let info = client
             .token_payout_info(token_id)
             .await
-            .map_err(|e| CliError::Preflight {
-                reason: format!("cannot read payout registry for ECC[{token_id}]: {e}"),
-                source: None,
-            })?;
+            .map_err(payout_info)?;
         if info.token != expected_token {
             return Err(CliError::Preflight {
                 reason: format!("EVM and AN assign ECC[{token_id}] to different tokens"),
                 source: None,
             });
         }
+        cap = Some(info.max_withdrawal);
     }
     // The EVM bridge's USDC is ECC id 3, as on Acki Nacki.
-    if token_id == 3 {
+    let cap = if token_id == 3 {
         client
             .usdc_payout_cap()
             .await
@@ -3031,7 +3034,29 @@ pub async fn check_bridge_deploy_for_token(
                      (usdcTokenId()): {e}"
                 ),
                 source: None,
-            })?;
+            })?
+    } else {
+        match cap {
+            Some(c) => c,
+            None => {
+                client
+                    .token_payout_info(token_id)
+                    .await
+                    .map_err(payout_info)?
+                    .max_withdrawal
+            },
+        }
+    };
+    if U256::from(amount.0) > cap {
+        return Err(CliError::Preflight {
+            reason: format!(
+                "the amount is above the EVM bridge's payout cap for ECC[{token_id}] ({cap} base \
+                 units): withdrawByProof would revert TransferTooLarge, and nothing could pay it \
+                 out until the EVM owner raises the cap. Nothing was burnt or locked; withdraw \
+                 at most {cap}."
+            ),
+            source: None,
+        });
     }
     if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
         let nackl = client

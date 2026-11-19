@@ -153,7 +153,8 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
   (`AnSubmitConfig::confirm_timeout_secs`; no CLI flag);
 - it exited 0, but its voucher deploy and `confirmDeposit` were not both visible within
   that time (`AnInterfaceSubmitter::settle`);
-- the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235);
+- the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235, from an AN bridge
+  older than 1.18.0);
 - the token is not registered for the source chain (241), or its deposits are closed on AN (243).
   Both clear once the owner calls `setBridgeToken`;
 - an external message was already recorded or expired (400 / 402). Observe the
@@ -224,14 +225,14 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | 307 `ERR_NO_LOG` (`EthTrie`) | `finalizeDeposit` | the proven receipt has no log at `logIndex` | `logIndex` counts within the receipt, not the block; the relayer computes it from the receipt, so this points at a relayer bug |
 | 308 `ERR_RECEIPT_STATUS` (`EthTrie`) | `finalizeDeposit` | the deposit transaction failed on the source chain | no deposit was made; the relayer refuses a failed transaction itself (`unprovable`) |
 | 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | proven amount exceeds 50 USDC | contact the operator; old oversized transfers must settle before activating the new pair |
-| 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full | retried without counting a failed attempt; wait for withdrawals |
+| 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full (AN bridge before 1.18.0; from 1.18.0 the EVM bridge bounds it) | retried without counting a failed attempt; wait for withdrawals |
 | 236 `ERR_CHAIN_BALANCE_EXCEEDED` | `finalizeDeposit` | a NACKL deposit above the NACKL locked for its chain | retried without counting a failed attempt; wait for NACKL withdrawals to that chain |
 | 400 / 402 | message header | identical recorded message / expired message | pending; observe the voucher before retrying |
 | 231 `ERR_PAUSED` | `finalizeDeposit` | the lane is paused | pending until `setPaused(false)` |
 | 401 | message header | expiry is at least five minutes ahead of block time | use the matching client and check clock synchronization; this build caps finalization expiry at 240 seconds |
 | 9 | voucher deploy | the bridge's `_depositVoucherCode` predates the voucher ABI (the 2026-07-02 outage) | recompile and redeploy the bridge and voucher as a pair |
 | 51 | voucher deploy | already finalized | none; reported as `already_finalized` |
-| `DepositRefused` | voucher confirmation | the bridge could not pay the deposit when its voucher confirmed it (235, 236, 234 or 241) and released the voucher | pending; `finalizeDeposit` is sent again on a later attempt |
+| `DepositRefused` | voucher confirmation | the bridge could not pay the deposit when its voucher confirmed it (236, 234 or 241) and released the voucher | pending; `finalizeDeposit` is sent again on a later attempt |
 
 Settings 222 and 224 do not survive an AN bridge code upgrade. After every deploy or
 upgrade they must be set again before the first deposit can finalize.

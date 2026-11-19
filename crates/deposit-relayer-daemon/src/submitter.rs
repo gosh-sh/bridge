@@ -30,7 +30,7 @@ use std::{
 };
 
 use acki_nacki_interface::{
-    types::TxHash, AckiNackiError, ContractCallRequest, ExtendedAddress, IAckiNacki,
+    types::TxHash, AckiNackiError, ChildOutcome, ContractCallRequest, ExtendedAddress, IAckiNacki,
     TransactionStatus,
 };
 use alloy::primitives::U256;
@@ -302,7 +302,13 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
             .await
             .map_err(RelayerError::from)?;
         debug!(deposit_id = event.deposit_id, voucher = %account, ?info, "voucher pre-check");
-        Ok(info.is_some_and(|i| i.active))
+        if !info.is_some_and(|i| i.active) {
+            return Ok(false);
+        }
+        let verdict = voucher_verdict(self.client.as_ref(), &account.to_string())
+            .await
+            .map_err(RelayerError::from)?;
+        Ok(verdict == Verdict::Paid)
     }
 
     /// Submit a witness directly, without a [`DepositEvent`] to compare it
@@ -601,7 +607,17 @@ async fn settle_finalize<C: IAckiNacki>(
         return Ok(None);
     };
     if deploy.exit_code == Some(EXIT_CONSTRUCTOR_ALREADY_CALLED) {
-        return Ok(Some(SubmitOutcome::AlreadyFinalized));
+        return Ok(Some(match voucher_verdict(client, &voucher.dst).await? {
+            Verdict::Paid => SubmitOutcome::AlreadyFinalized,
+            Verdict::Aborted(c) => aborted_confirm(c, &voucher.dst),
+            Verdict::Released | Verdict::Unknown => SubmitOutcome::Pending {
+                reason: format!(
+                    "voucher {} exists and no payout behind it is visible yet; this deposit is \
+                     looked at again on a later attempt",
+                    voucher.dst
+                ),
+            },
+        }));
     }
     if !deploy.is_success() {
         return Ok(Some(SubmitOutcome::Rejected {
@@ -621,34 +637,77 @@ async fn settle_finalize<C: IAckiNacki>(
     };
     match &confirm.outcome {
         None => Ok(None),
-        Some(c) if c.is_success() => {
-            let released = client
-                .get_internal_children(&c.tx_hash)
-                .await?
-                .iter()
-                .any(|m| m.dst == voucher.dst);
-            if released {
-                return Ok(Some(SubmitOutcome::Pending {
-                    reason: format!(
-                        "the bridge cannot pay this deposit now (TVL cap, NACKL lock, payout cap \
-                         or token registration) and released voucher {}; finalizeDeposit is sent \
-                         again on a later attempt",
-                        voucher.dst
-                    ),
-                }));
-            }
-            Ok(Some(SubmitOutcome::Finalized {
+        Some(c) if c.is_success() => match payout(client, &c.tx_hash, &voucher.dst).await? {
+            Verdict::Paid => Ok(Some(SubmitOutcome::Finalized {
                 tx_hash: Some(*root),
-            }))
+            })),
+            Verdict::Released => Ok(Some(SubmitOutcome::Pending {
+                reason: format!(
+                    "the bridge cannot pay this deposit now (NACKL lock, payout cap or token \
+                     registration) and released voucher {}; finalizeDeposit is sent again on a \
+                     later attempt",
+                    voucher.dst
+                ),
+            })),
+            _ => Ok(None),
         },
-        Some(c) => Ok(Some(SubmitOutcome::Rejected {
-            reason: format!(
-                "confirmDeposit failed (exit_code={:?}, aborted={}) after voucher {} was \
-                 deployed; nothing was minted and the voucher now makes every resubmission report \
-                 already-finalized, so this deposit needs the bridge owner",
-                c.exit_code, c.aborted, voucher.dst,
-            ),
-        })),
+        Some(c) => Ok(Some(aborted_confirm(c.clone(), &voucher.dst))),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    Paid,
+    Released,
+    Aborted(ChildOutcome),
+    Unknown,
+}
+
+fn same_account(a: &str, b: &str) -> bool {
+    let id = |s: &str| s.rsplit(':').next().unwrap_or_default().to_ascii_lowercase();
+    id(a) == id(b)
+}
+
+async fn payout<C: IAckiNacki>(
+    client: &C,
+    confirm: &TxHash,
+    voucher: &str,
+) -> Result<Verdict, AckiNackiError> {
+    let sent = client.get_internal_children(confirm).await?;
+    Ok(if sent.is_empty() {
+        Verdict::Unknown
+    } else if sent.iter().any(|m| same_account(&m.dst, voucher)) {
+        Verdict::Released
+    } else {
+        Verdict::Paid
+    })
+}
+
+async fn voucher_verdict<C: IAckiNacki>(
+    client: &C,
+    voucher: &str,
+) -> Result<Verdict, AckiNackiError> {
+    let id = voucher.rsplit(':').next().unwrap_or_default();
+    let address = ExtendedAddress::parse(&format!("{id}::{id}"))?;
+    let Some(deploy) = client.get_last_deploy(&address).await? else {
+        return Ok(Verdict::Unknown);
+    };
+    let confirms = client.get_internal_children(&deploy).await?;
+    match confirms.first().and_then(|c| c.outcome.clone()) {
+        None => Ok(Verdict::Unknown),
+        Some(c) if c.is_success() => payout(client, &c.tx_hash, voucher).await,
+        Some(c) => Ok(Verdict::Aborted(c)),
+    }
+}
+
+fn aborted_confirm(c: ChildOutcome, voucher: &str) -> SubmitOutcome {
+    SubmitOutcome::Rejected {
+        reason: format!(
+            "confirmDeposit failed (exit_code={:?}, aborted={}) after voucher {voucher} was \
+             deployed; nothing was minted and the voucher stays spent, so this deposit needs the \
+             bridge owner",
+            c.exit_code, c.aborted,
+        ),
     }
 }
 
@@ -859,18 +918,43 @@ mod tests {
     /// `finalizeDeposit` confirmed on a mock chain whose voucher deploy ends
     /// with `voucher` and, when that succeeds, whose `confirmDeposit` ends
     /// with `confirm` (`None` = not executed yet).
+    const VOUCHER: &str = "0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const BRIDGE_AT: &str = "0:1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a";
+    const RECIPIENT: &str = "0:4343434343434343434343434343434343434343434343434343434343434343";
+    const EARLIER_DEPLOY: TxHash = [0x33; 32];
+    const EARLIER_CONFIRM: TxHash = [0x44; 32];
+
+    fn earlier_attempt(client: &acki_nacki_interface::MockAckiNacki, sent: &str) {
+        client.set_deploy(&VOUCHER[2..], EARLIER_DEPLOY);
+        client.set_children(EARLIER_DEPLOY, vec![child(BRIDGE_AT, Some((EARLIER_CONFIRM, 0)))]);
+        client.set_children(EARLIER_CONFIRM, vec![child(sent, None)]);
+    }
+
     async fn submit_with_chain(voucher: Option<i32>, confirm: Option<i32>) -> SubmitOutcome {
+        submit_with(voucher, confirm, &[RECIPIENT], None).await
+    }
+
+    async fn submit_with(
+        voucher: Option<i32>,
+        confirm: Option<i32>,
+        sent: &[&str],
+        earlier: Option<&str>,
+    ) -> SubmitOutcome {
         use acki_nacki_interface::MockAckiNacki;
 
         let client = Arc::new(MockAckiNacki::new());
         client.set_children(MockAckiNacki::CALL_TX_HASH, vec![child(
-            "0:voucher",
+            VOUCHER,
             voucher.map(|c| (VOUCHER_TX, c)),
         )]);
         client.set_children(VOUCHER_TX, vec![child(
-            "0:bridge",
+            BRIDGE_AT,
             confirm.map(|c| (CONFIRM_TX, c)),
         )]);
+        client.set_children(CONFIRM_TX, sent.iter().map(|d| child(d, None)).collect());
+        if let Some(e) = earlier {
+            earlier_attempt(&client, e);
+        }
         let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         let cfg = AnSubmitConfig {
             from: format!(
@@ -899,9 +983,27 @@ mod tests {
     #[tokio::test]
     async fn duplicate_is_read_from_the_voucher_deploy() {
         assert!(matches!(
-            submit_with_chain(Some(51), None).await,
+            submit_with(Some(51), None, &[], Some(RECIPIENT)).await,
             SubmitOutcome::AlreadyFinalized
         ));
+        for earlier in [Some(VOUCHER), None] {
+            match submit_with(Some(51), None, &[], earlier).await {
+                SubmitOutcome::Pending {
+                    reason,
+                } => assert!(reason.contains("no payout behind it"), "{reason}"),
+                other => panic!("expected Pending for {earlier:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_confirmation_whose_messages_are_not_visible_is_not_finalized() {
+        match submit_with(Some(0), Some(0), &[], None).await {
+            SubmitOutcome::Pending {
+                reason,
+            } => assert!(reason.contains("not both visible"), "{reason}"),
+            other => panic!("expected Pending, got {other:?}"),
+        }
     }
 
     /// The 2026-07-02 outage: the bridge exited 0, the voucher constructor hit
@@ -931,29 +1033,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_released_voucher_leaves_the_deposit_pending() {
-        use acki_nacki_interface::MockAckiNacki;
-
-        let client = Arc::new(MockAckiNacki::new());
-        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![child(
-            "0:voucher",
-            Some((VOUCHER_TX, 0)),
-        )]);
-        client.set_children(VOUCHER_TX, vec![child("0:bridge", Some((CONFIRM_TX, 0)))]);
-        client.set_children(CONFIRM_TX, vec![child("0:voucher", None)]);
-        let dapp = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        let cfg = AnSubmitConfig {
-            from: format!(
-                "{dapp}::ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-            ),
-            token_bridge: format!("{dapp}::{dapp}"),
-            confirm_timeout_secs: 1,
-        };
-        let sub = AnInterfaceSubmitter::new(client, cfg);
-        let ev = event(3);
-        match sub.submit(&ev, &witness(&ev)).await.unwrap() {
+        match submit_with(Some(0), Some(0), &[VOUCHER], None).await {
             SubmitOutcome::Pending {
                 reason,
-            } => assert!(reason.contains("released voucher 0:voucher"), "{reason}"),
+            } => assert!(reason.contains("released voucher"), "{reason}"),
             other => panic!("expected Pending, got {other:?}"),
         }
     }
@@ -1166,6 +1249,20 @@ mod tests {
             "a failed deploy leaves no active voucher"
         );
         client.set_account(voucher, info(true));
+        assert!(
+            !sub.is_finalized(&ev).await.unwrap(),
+            "an active voucher with no payout seen is not finalized"
+        );
+        let deploy: TxHash = [0x55; 32];
+        let confirm: TxHash = [0x66; 32];
+        client.set_deploy(voucher, deploy);
+        client.set_children(deploy, vec![child(BRIDGE_AT, Some((confirm, 0)))]);
+        client.set_children(confirm, vec![child(&format!("0:{voucher}"), None)]);
+        assert!(
+            !sub.is_finalized(&ev).await.unwrap(),
+            "a voucher the bridge released is not finalized"
+        );
+        client.set_children(confirm, vec![child(RECIPIENT, None)]);
         assert!(sub.is_finalized(&ev).await.unwrap());
         let other = DepositEvent {
             source_chain_id: 1,

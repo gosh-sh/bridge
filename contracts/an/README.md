@@ -308,14 +308,16 @@ direct token donations do not increase that counter or its capacity.
 `MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the first deposit width guard;
 the lower product ceiling is `MAX_TRANSFER_AMOUNT`.
 
-AN keeps the same 10,000 USDC ceiling separately for every EIP-155 chain id.
-`getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and `outstanding` in
-base units. `confirmDeposit` increases that chain's outstanding amount;
-a successful `initiateWithdrawal` decreases the destination chain's amount.
-A deposit that no longer fits when its voucher confirms it (another deposit
-took the room first) is refused: the bridge emits `DepositRefused` with the
-reason (235, 236, 234 or 241) and calls the voucher's `release`, which deletes
-the voucher, so the same deposit can be finalized again once there is room.
+The USDC TVL cap is checked on the EVM bridge only; AN does not bound
+deposits by `maxTvl`. NACKL is bounded on AN only, by the NACKL locked for its
+chain. `getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and
+`outstanding` in base units. `confirmDeposit` increases that chain's outstanding
+amount; a successful `initiateWithdrawal` decreases the destination chain's
+amount. A deposit that no longer fits when its voucher confirms it (another
+NACKL deposit took the lock first) is refused: the bridge emits `DepositRefused`
+with the reason (236, 234 or 241) and calls the voucher's `release`, which
+deletes the voucher, so the same deposit can be finalized again once there is
+room.
 There are no deposit reservations or permanent voucher registry. A repeated
 finalization deploys the same voucher, whose consumed constructor prevents another
 confirmation. Trust only one funded L1 bridge per chain for this accounting.
@@ -329,10 +331,9 @@ writers of the counter. `setOutstandingByChain` writes it directly with no tie
 to L1, so an owner who writes a figure other than the measured L1 principal
 breaks both — see *Restoring a chain's outstanding amount* below.
 
-AN finalization rejects amounts above 50 USDC with 234 and exhausted capacity
-with 235; the latter is retryable after withdrawals. Both checks follow the
+AN finalization rejects amounts above 50 USDC with 234. The check follows the
 receipt proof, since the amount and token come from it, so the bridge pays for
-the proof of a deposit it refuses; they are repeated on confirmation. A withdrawal to a chain with no
+the proof of a deposit it refuses. A withdrawal to a chain with no
 EVM bridge set, or one that is oversized, that would burn more than bridged
 minted less bridged burned, or that exceeds its destination chain's outstanding
 amount returns the attached ECC without burning it and emits `WithdrawalRefused`
@@ -429,26 +430,14 @@ outstanding = L1 treasuryBalance - unconfirmed deposits - unpaid burns
 
 where unconfirmed deposits are those locked on L1 but not yet credited on AN,
 and unpaid burns are withdrawals burned on AN but not yet paid out on L1. The
-counter is shared between the two directions — it is the withdrawal allowance
-and it is the deposit room, since `finalizeDeposit` and `confirmDeposit` both
-require `outstanding + amount <= MAX_BRIDGE_TVL` — so a counter above that
-figure buys withdrawal room by closing the door on deposits, and the damage is
-not symmetrical:
-
-- a new deposit fails `finalizeDeposit` with 235, which is retryable;
-- a deposit already between finalization and confirmation aborts in
-  `confirmDeposit` with 235 **after** its voucher's constructor has run, so
-  finalizing it again deploys the same voucher and cannot confirm again. That USDC is
-  locked on L1 with nothing minted on AN until the owner lowers the counter;
-- `mintAndSendBridged`, the owner's recovery path for exactly that case, is
-  capped by the same check and throws 235 too.
-
-Writing L1's balance while transfers are in flight is enough to cause this. With
-10,000 USDC on L1 of which 50 is a deposit not yet confirmed on AN, the counter
-belongs at 9,950; write 10,000 and that confirmation aborts with 235 and a spent
-voucher. So pause deposits, let the in-flight transfers on both sides settle,
-and only then measure and write — the same order this section's parent advises
-before rotating a trusted L1 contract.
+counter is the withdrawal allowance, so a counter above that figure lets
+withdrawals burn ECC that the L1 treasury cannot pay out. Writing L1's balance
+while transfers are in flight is enough to cause this: with 10,000 USDC on L1 of
+which 50 is a deposit not yet confirmed on AN, the counter belongs at 9,950.
+So pause deposits, let the in-flight transfers on both sides settle, and only
+then measure and write — the same order this section's parent advises before
+rotating a trusted L1 contract. `mintAndSendBridged` still keeps the counter
+within `MAX_BRIDGE_TVL` (235).
 
 **If in doubt, write less rather than more.** An under-count only refuses
 withdrawals with 236, which return the ECC untouched and which the owner
@@ -607,8 +596,8 @@ network.
     python3 contracts/an/zerostate/test_zerostate_init.py
     scripts/check_zerostate_data_encoder.py
 
-AN `maxTvl` cannot decrease after registration: a lower ceiling could abort a confirmation
-whose voucher has already been consumed. To restrict new deposits, close them on EVM
+AN `maxTvl` cannot decrease after registration, and AN no longer bounds deposits by it.
+To restrict new deposits, close them on EVM
 (`setTokenDepositsEnabled`) or lower the EVM TVL cap; earlier deposits stay payable.
 `finalizeDeposit` reads the AN deposit switch and `maxTransfer` when the receipt arrives,
 not when the deposit was made. Closing the switch or lowering `maxTransfer` therefore also

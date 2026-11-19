@@ -61,6 +61,10 @@ pub trait IAckiNacki: Send + Sync {
     async fn get_account_info(&self, _address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
         Err(AckiNackiError::NotImplemented)
     }
+
+    async fn get_last_deploy(&self, _address: &ExtendedAddress) -> Result<Option<TxHash>> {
+        Err(AckiNackiError::NotImplemented)
+    }
 }
 
 /// Trait for sending transactions with retry logic

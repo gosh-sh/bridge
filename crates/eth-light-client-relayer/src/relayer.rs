@@ -787,11 +787,10 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
 
     /// After a rotate from `from` the contract holds the committees of
     /// periods `from + 2 - KEPT_COMMITTEES` to `from + 1`, and takes a step
-    /// whose header is attested in one of them or in the period before the
-    /// oldest. A queued checkpoint attested earlier could then never go on
-    /// chain, and the head would stand on it for good: a rotate sent while the
-    /// head lagged behind left a whole period of checkpoints that way. The
-    /// proof waits until the head is past them.
+    /// only from one of them. A queued checkpoint signed by an older committee
+    /// could then never go on chain, and the head would stand on it for good:
+    /// a rotate sent while the head lagged behind left a whole period of
+    /// checkpoints that way. The proof waits until the head is past them.
     fn rotate_would_orphan(&self, from: u64) -> Option<String> {
         let recorded = self.state.last_finalized_slot;
         let taken = lock(&self.taken);
@@ -799,7 +798,8 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             .queue
             .iter()
             .find(|u| recorded.is_none_or(|r| u.finalized_slot > r))?;
-        (front.signing_period() + KEPT_COMMITTEES < from + 1).then(|| {
+        let oldest_kept = (from + 2).saturating_sub(KEPT_COMMITTEES);
+        (front.signing_period() < oldest_kept).then(|| {
             format!(
                 "the rotate from period {from} waits for checkpoint {} (signed in period {}): the \
                  committee after it would not take that checkpoint",
@@ -2465,7 +2465,7 @@ mod tests {
             submitter.rotate_submits(),
             0,
             "after a rotate from period 8 the contract holds periods 3 to 9 and takes no step \
-             attested in period 0"
+             signed in period 0"
         );
 
         submitter.set_gateway_error(false);
@@ -2483,7 +2483,7 @@ mod tests {
         assert_eq!(submitter.rotate_submits(), 1);
     }
 
-    /// Inside the window the rotate does not wait: a checkpoint attested six
+    /// Inside the window the rotate does not wait: a checkpoint signed five
     /// periods before the rotate's is still taken after it.
     #[test]
     fn a_checkpoint_inside_the_held_window_does_not_hold_the_rotate() {
@@ -2500,15 +2500,15 @@ mod tests {
         .unwrap();
         lock(&r.taken)
             .queue
-            .push(update(2 * p + 70, 2 * p + 64))
+            .push(update(3 * p + 70, 3 * p + 64))
             .unwrap();
         assert!(
             r.rotate_would_orphan(8).is_none(),
-            "attested in 2, held after 8 -> 9"
+            "signed in 3, held after 8 -> 9"
         );
         assert!(
             r.rotate_would_orphan(9).is_some(),
-            "attested in 2, gone after 9 -> 10"
+            "signed in 3, gone after 9 -> 10"
         );
     }
 

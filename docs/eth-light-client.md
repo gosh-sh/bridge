@@ -241,8 +241,8 @@ flowchart TD
   verification key is not the pinned one
   (`eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256`)
   or whose current committee is not the contract's is refused and logged,
-  not sent. A bundle from P also waits while a queued checkpoint is attested before period
-  P−6: after the rotate the contract holds the committees of P−5 to P+1 only, so sending it
+  not sent. A bundle from P also waits while a queued checkpoint is signed before period
+  P−5: after the rotate the contract holds the committees of P−5 to P+1 only, so sending it
   would leave that checkpoint without a committee for good. It needs the decider of tvm-sdk PR
   #284 in the node VM; on a
   network without it `submitRotate` proves less than it claims (§2), and

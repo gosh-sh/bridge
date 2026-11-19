@@ -497,6 +497,9 @@ contract EthBeaconLightClient {
         // valid hand-off, and the replaced committee can still advance the
         // head for the period it served.
         require(pi.attestedSlot / SLOTS_PER_PERIOD + 1 == pi.period, ERR_BAD_PUBLIC_INPUTS);
+        // The committee chain moves forward: a hand-off filed under a period
+        // not past the one in force would overwrite a held committee.
+        require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
         tvm.accept();
         require(
             gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof),

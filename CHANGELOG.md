@@ -23,14 +23,17 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `EthBeaconLightClient` 1.8.0 (code hash `fe342e32…`) holds the committees of the last seven
+- `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) holds the committees of the last seven
   periods (`getCommittees`) and takes a step from any of them for its own period; `eccBridge`, which
   builds the client's data from its layout, is rebuilt (still 1.17.0, code hash `7c8f12f4…`).
   An existing light client takes the new code with its own `updateCode` and keeps only its
-  committee in force; before any new `deployLightClient`, run `eccBridge.updateCode` and
-  `setLightClientCode` with the new code.
+  committee in force, so upgrade it while the relayer's queue holds no checkpoint signed in an
+  earlier period; before any new `deployLightClient`, run `eccBridge.updateCode` and
+  `setLightClientCode` with the new code. `submitRotate` now refuses a period not past the
+  one in force (`ERR_STALE_PERIOD`).
 - `eth-lc-relayer daemon` expects `EthBeaconLightClient` 1.8.0: it holds a finished `submitRotate`
-  from period P only while a queued checkpoint is attested before P−6.
+  from period P only while a queued checkpoint is signed before P−5, and its owner hop files a
+  committee under the period of the signature slot.
 - `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
   its directories and the Circuit 4 keys in `params/relayer/`, rerun `finalize-params.sh` and set the new
   `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).

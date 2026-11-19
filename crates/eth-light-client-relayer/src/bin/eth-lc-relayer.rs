@@ -918,7 +918,19 @@ async fn set_committee(
     if commitment == [0u8; 32] {
         anyhow::bail!("bundle public inputs carry a zero committee commitment");
     }
-    let period = period.unwrap_or(bundle.parsed.attested_slot / SLOTS_PER_SYNC_PERIOD);
+    // The committee is filed under the period it signs in, which the bundle
+    // does not carry: the signature slot comes after the attested one, and a
+    // header in the last epoch of a period may be signed in the next.
+    let attested = bundle.parsed.attested_slot;
+    let period = match period {
+        Some(period) => period,
+        None if attested % SLOTS_PER_SYNC_PERIOD >= SLOTS_PER_SYNC_PERIOD - 32 => anyhow::bail!(
+            "the bundle's attested slot {attested} is in the last epoch of period {}: its \
+             signature may fall in the next one; pass --period",
+            attested / SLOTS_PER_SYNC_PERIOD
+        ),
+        None => attested / SLOTS_PER_SYNC_PERIOD,
+    };
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
     let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {

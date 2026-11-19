@@ -29,6 +29,7 @@ SLOTS_PER_PERIOD = 8192
 KEPT = 7
 GLOAS = 11_296_768
 ERR_WRONG_COMMITTEE = 242
+ERR_STALE_PERIOD = 245
 FIRST = 100
 
 
@@ -53,6 +54,13 @@ def step_inputs(attested_slot, commitment):
     advance an empty head."""
     words = [attested_slot, attested_slot - 64, 0x11, 0x22, 512, commitment,
              0x33, 0x44, 0x55, 0x66, GLOAS]
+    return b"".join(w.to_bytes(32, "little") for w in words).hex()
+
+
+def rotate_inputs(current, nxt, period):
+    """The 17 rotate public inputs: 12 accumulator limbs, then the current and the next
+    commitment, the period, the Gloas fork slot and an attested slot of the period before."""
+    words = [0] * 12 + [current, nxt, period, GLOAS, slot_in(period - 1)]
     return b"".join(w.to_bytes(32, "little") for w in words).hex()
 
 
@@ -193,6 +201,20 @@ class LightClientCommittees(unittest.TestCase):
         self.call("testUpgrade")
         self.assertEqual(self.held(), {FIRST + 3: committee(FIRST + 3)})
         self.assertEqual(self.state()["currentCommittee"], committee(FIRST + 3))
+
+    def test_a_rotate_to_a_period_not_past_the_one_in_force_is_refused_before_the_proof(self):
+        self.rotate_to(FIRST + 2)
+        for period in (FIRST + 1, FIRST + 2):
+            result = self.call("submitRotate", {
+                "proof": "00",
+                "publicInputs": rotate_inputs(committee(FIRST + 2), 0xD00D, period),
+            }, expect=None)
+            self.assertEqual(result["exit_code"], ERR_STALE_PERIOD, period)
+        result = self.call("submitRotate", {
+            "proof": "00",
+            "publicInputs": rotate_inputs(committee(FIRST + 2), 0xD00D, FIRST + 3),
+        }, expect=None)
+        self.assertNotIn(result["exit_code"], (0, ERR_STALE_PERIOD), "a made-up proof")
 
     def test_a_step_signed_by_a_committee_not_held_is_refused_before_the_proof(self):
         self.rotate_to(FIRST + KEPT)

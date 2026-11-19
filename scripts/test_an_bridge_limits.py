@@ -300,13 +300,15 @@ class BridgeLimits(unittest.TestCase):
             self.set_bridge_token(token, token_id, 100, 1000, expect=242)
             self.assertFalse(self.token_limits(token_id)["listed"])
         self.finalize(token=SECOND_TOKEN, expect=241)
-        self.confirm_token(expect=246)
+        self.assertEqual(self.confirm_token()["messages"], [])
+        self.retry(100, expect=241)
         self.assertTrue(self.token_limits(3)["listed"])
 
     def test_unregistered_proven_token_cannot_mint_usdc(self):
         before = self.call("getTotalBridged", {"tokenId": 3})["response"]
         self.finalize(token=SECOND_TOKEN, expect=241)
-        self.confirm_token(expect=246)
+        self.assertEqual(self.confirm_token()["messages"], [])
+        self.retry(100, expect=241)
         self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"], before)
 
     def test_second_token_has_independent_mint_burn_and_chain_accounting(self):
@@ -443,9 +445,27 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(self.deposit_status(100), 0)
         self.call("testTrust", {"chainId": "1", "l1Bridge": "42"})
         self.deployed(self.finalize(deposit=100, amount=100, token=SECOND_TOKEN), 100)
-        self.retry(100)
-        self.assertEqual(self.deposit_status(100), 2)
+        self.retry(100, expect=246)
+        self.confirm_token(amount=100)
         self.assertEqual(int(self.token_limits()["outstanding"]), 100)
+
+    def test_a_deposit_paid_before_an_upgrade_cannot_be_paid_again(self):
+        # The bridge keeps no record of a paid deposit. After an upgrade from a version
+        # without pending records, a proof of that deposit reaches its existing voucher,
+        # whose constructor does not run again
+        # (test_voucher_constructor_replay_cannot_send_a_second_confirmation), so the
+        # bridge never gets a callback and has nothing to retry.
+        self.finalize(deposit=5, amount=7)
+        self.confirm(deposit=5, amount=7)
+        voucher = self.voucher(5)
+        minted = self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"]
+        self.call("testLegacyUpgrade", {"withRegistry": True})
+        self.call("testTrust", {"chainId": "1", "l1Bridge": "42"})
+        self.assertEqual(self.voucher(5), voucher)
+        self.deployed(self.finalize(deposit=5, amount=7), 5)
+        self.assertEqual(self.deposit_status(5), 0)
+        self.retry(5, expect=246)
+        self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"], minted)
 
     def test_registering_legacy_usdc_with_a_lower_deposit_cap_preserves_payouts(self):
         self.call("setOutstandingByChain", {"chainId": "3", "amount": str(TRANSFER)}, signed=True)
@@ -510,20 +530,27 @@ class BridgeLimits(unittest.TestCase):
         self.retry(0, expect=246)
         self.finalize(deposit=0)
         self.finalize(deposit=1)
-        self.assertEqual(self.deposit_status(0, chain=2), 0)
-        self.call("retryDeposit", dict(self.deposit_identity(1), contractAddr="43"), expect=246)
-        self.assertEqual(self.deposit_status(0), 1)
-        self.assertEqual(self.deposit_status(1), 1)
+        # A proof alone leaves nothing to retry: only the voucher's callback does.
+        for deposit in (0, 1):
+            self.assertEqual(self.deposit_status(deposit), 0)
+            self.retry(deposit, expect=246)
         self.confirm(deposit=0, source=SENDER, expect=207)
-        self.confirm(deposit=0, amount=TRANSFER - 1, expect=219)
-        self.confirm(deposit=0, recipient=44, expect=219)
-        self.confirm_token(deposit=0, amount=TRANSFER, token=SECOND_TOKEN, expect=219)
-        self.assertEqual(self.deposit_status(0), 1)
-        self.confirm(deposit=0)
-        self.assertEqual(self.deposit_status(0), 2)
-        self.confirm(deposit=1, expect=235)
-        self.retry(1, expect=235)
+        self.confirm(deposit=0, source=self.voucher(1), expect=207)
+        self.assertEqual(self.deposit_status(0), 0)
+        paid = self.confirm(deposit=0)["messages"]
+        self.assertEqual([m["destination"] for m in paid], ["0:" + format(43, "064x")])
+        self.assertEqual(self.deposit_status(0), 0)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL)
+        minted = self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"]
+        # No room for the second one: the callback records it and sends nothing.
+        self.assertEqual(self.confirm(deposit=1)["messages"], [])
         self.assertEqual(self.deposit_status(1), 1)
+        self.assertEqual(self.deposit_status(1, chain=2), 0)
+        self.call("retryDeposit", dict(self.deposit_identity(1), contractAddr="43"), expect=246)
+        self.retry(1, expect=235)
+        self.finalize(deposit=1, expect=245)
+        self.assertEqual(self.deposit_status(1), 1)
+        self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"], minted)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
         self.withdraw(TRANSFER)
         payout = self.retry(1)["messages"]
@@ -531,31 +558,32 @@ class BridgeLimits(unittest.TestCase):
         transfer = json.loads(command(["tvm-cli", "-j", "decode", "msg", payout[0]["boc"],
                                        "--abi", str(self.abi)]))["Header"]
         self.assertEqual(int(transfer["value"]["other"]["3"]), TRANSFER)
-        self.assertEqual(self.deposit_status(1), 2)
+        self.assertEqual(self.deposit_status(1), 0)
         self.assertEqual(int(self.limits()["outstanding"]), TVL)
         minted = self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"]
         for deposit in (0, 1):
             self.retry(deposit, expect=246)
-            self.confirm(deposit=deposit, expect=246)
         self.assertEqual(self.call("getTotalBridged", {"tokenId": 3})["response"]["minted"], minted)
 
-    def test_pending_and_paid_deposits_survive_voucher_code_rotation(self):
-        self.finalize(deposit=7, amount=1)
+    def test_pending_deposits_survive_an_upgrade_and_the_voucher_code_cannot_change(self):
+        self.finalize(deposit=7)
         self.finalize(deposit=8, amount=2)
-        self.finalize(deposit=9, amount=3)
-        self.retry(9)
-        old_voucher = self.voucher(7)
-        self.call("updateCode", {"newcode": self.bridge_code, "userCell": self.bridge_code}, signed=True)
-        self.assertNotEqual(self.voucher(7), old_voucher)
-        self.confirm(deposit=7, amount=1, expect=207)
-        self.confirm(deposit=7, amount=1, source=old_voucher)
-        self.retry(8)
-        self.retry(9, expect=246)
-        self.call("testTrust", {"chainId": "1", "l1Bridge": "42"})
-        self.finalize(deposit=9, amount=3, expect=245)
-        for deposit in (7, 8, 9):
-            self.assertEqual(self.deposit_status(deposit), 2)
-        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER + 6)
+        self.confirm(deposit=7)
+        self.assertEqual(self.confirm(deposit=8, amount=2)["messages"], [])
+        voucher = self.voucher(8)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": self.bridge_code},
+                  signed=True, expect=247)
+        self.call("updateCode", {"newcode": self.bridge_code, "userCell": ""}, signed=True)
+        self.assertEqual(self.voucher(8), voucher)
+        self.assertEqual(self.deposit_status(8), 1)
+        self.assertEqual(self.deposit_status(7), 0)
+        self.retry(8, expect=235)
+        self.call("setOutstandingByChain", {"chainId": "1", "amount": str(TVL - TRANSFER)}, signed=True)
+        payout = self.retry(8)["messages"]
+        self.assertEqual([m["destination"] for m in payout], ["0:" + format(43, "064x")])
+        self.retry(8, expect=246)
+        self.assertEqual(self.deposit_status(8), 0)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER + 2)
 
     def test_each_network_has_its_own_balance(self):
         self.seed(TVL, TVL)
@@ -769,11 +797,11 @@ class BridgeLimits(unittest.TestCase):
         self.submit(v, chain=1, log_index=0, expect=224)
         self.deployed(self.submit(v, chain=2, log_index=0), 44, chain=2)
 
-    def test_a_repeated_deposit_id_preserves_the_original_payout(self):
+    def test_a_repeated_deposit_id_reaches_the_same_voucher(self):
         self.deployed(self.finalize(deposit=45, amount=1), 45)
-        self.finalize(deposit=45, amount=2, number=9_000_001, expect=245)
-        self.retry(45)
-        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER + 1)
+        self.deployed(self.finalize(deposit=45, amount=2, number=9_000_001), 45)
+        self.retry(45, expect=246)
+        self.assertEqual(int(self.limits()["outstanding"]), TVL - TRANSFER)
 
     def test_a_tampered_block_receipt_or_proof_is_refused(self):
         v = vectors.synthetic(vectors.receipt([TRANSFER_LOG, vectors.deposit_log(42, 46, 1, 43, USDC_TOKEN)]))

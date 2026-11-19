@@ -23,20 +23,15 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) holds the committees of the last seven
-  periods (`getCommittees`) and takes a step from any of them for its own period. `eccBridge`
-  1.18.0 (code hash `2c2296a5…`) is rebuilt for that layout, from which it builds the client's
-  data in `deployLightClient`; its deposit and withdrawal calls are unchanged.
-- `ackinacki-bridge` knows `eccBridge` 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`); an earlier CLI
-  refuses a 1.18.0 bridge, so upgrade the CLI with the bridge.
-  An existing light client takes the new code with its own `updateCode` and keeps only its
-  committee in force, so upgrade it while the relayer's queue holds no checkpoint signed in an
-  earlier period; before any new `deployLightClient`, run `eccBridge.updateCode` and
-  `setLightClientCode` with the new code. `submitRotate` now refuses a period not past the
-  one in force (`ERR_STALE_PERIOD`).
-- `eth-lc-relayer daemon` expects `EthBeaconLightClient` 1.8.0: it holds a finished `submitRotate`
-  from period P only while a queued checkpoint is signed before P−5, and its owner hop files a
-  committee under the period of the signature slot.
+- `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) keeps the committees of seven periods
+  (`getCommittees`) and refuses a `submitRotate` period not past the current one
+  (`ERR_STALE_PERIOD`): `updateCode` each light client while its relayer queues no checkpoint of an
+  earlier period.
+- `eccBridge` 1.18.0 (code hash `2c2296a5…`) deploys 1.8.0 light clients: run its `updateCode` and
+  `setLightClientCode` before the next `deployLightClient`.
+- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.0: upgrade the two together.
+- `ackinacki-bridge` accepts `eccBridge` 1.18.0, which an earlier CLI refuses: upgrade the CLI with
+  the bridge.
 - `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
   its directories and the Circuit 4 keys in `params/relayer/`, rerun `finalize-params.sh` and set the new
   `PARAMS_MANIFEST_SHA256` in `daemon-live.env` and `withdraw-live.env` (`docker/README.md`).
@@ -46,22 +41,19 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
+- `eth-lc-relayer arbitrum-anchors` `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
+  `eth_getProof` alone, and logs are read only when `depositCounter` moves: point it at the Alchemy
+  node and `ARBITRUM_RPC_URL` at a public one.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.
-- `eth-lc-relayer arbitrum-anchors` reads the bridge's `depositCounter` each tick and its `Deposit`
-  logs only when the counter moved; `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
-  `eth_getProof` alone, so `ARBITRUM_RPC_URL` can be a public node. Set the proof URL to the node
-  that keeps minutes of state (Alchemy) and `ARBITRUM_RPC_URL` to a public one.
 
 ### Fixes
 
-- `eth-lc-relayer daemon` no longer resends a checkpoint that is already on chain for ever: after a
-  `submitUpdate` that does not come back accepted it reads `getHead` and `isProvenExecutionBlockHash`
-  and records the checkpoint. Upgrade `eth-lc-relayer`; its state file needs no edit.
-- Errors of a message the Acki Nacki node refused now carry the contract's `exit_code=N`
-  (`eth-lc-relayer`, `deposit-relayer`): `deposit-relayer` waits out `ERR_PAUSED`, `ERR_TVL_CAP` and
-  the token gates instead of counting them as failed attempts.
+- `eth-lc-relayer daemon` records a checkpoint already on chain after a refused `submitUpdate`
+  instead of resending it for ever.
+- Acki Nacki call errors carry the contract's `exit_code=N`: `deposit-relayer` waits out
+  `ERR_PAUSED`, `ERR_TVL_CAP` and the token gates instead of counting them as failed attempts.
 
 ## [0.9.0]
 

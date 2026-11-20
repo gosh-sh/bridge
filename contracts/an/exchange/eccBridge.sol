@@ -454,7 +454,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
         bool nackl = tokenId == NACKL_ECC_ID;
-        if (nackl && (recipient.toSlice().bits() != 160 || recipient.toSlice().refs() != 0)) {
+        if (recipient.toSlice().bits() != 160 || recipient.toSlice().refs() != 0) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
                               ERR_RECIPIENT_NOT_EVM);
             return;

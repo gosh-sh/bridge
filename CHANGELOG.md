@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `19421806…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
+- `eccBridge` 1.18.0, code hash `8b1f8dc4…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
   with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
   finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
@@ -70,7 +70,10 @@ assigns it when the release is tagged.
 - `eccBridge`: `setBridgeToken` accepts NACKL (id `1`).
 - `eccBridge`: a NACKL `initiateWithdrawal` locks the NACKL on the bridge
   (`getNacklLockedTo(chainId, evmBridge)`), refunded when the chain's locked NACKL would pass the
-  owner's `maxTvl` (235) and for a recipient that is not 20 bytes (246).
+  owner's `maxTvl` (235).
+- `eccBridge`: `initiateWithdrawal` of any token, USDC included, is refunded with 246
+  (`ERR_RECIPIENT_NOT_EVM`) when the recipient is not 20 bytes, the only form Circuit 4 proves.
+  A USDC withdrawal to such a recipient used to be burned with no proof possible.
 - `eccBridge`: `initiateWithdrawal` of USDC and NACKL is refunded with 247 (`ERR_DAILY_LIMIT`) when it
   does not fit the owner's `dailyLimit` for its chain and token over the last 24 hours (25 hourly
   buckets). A refunded withdrawal does not count.

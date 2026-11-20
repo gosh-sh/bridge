@@ -328,8 +328,8 @@ class BridgeLimits(unittest.TestCase):
                          "dappId": "0", "chainId": str(chain), "amount": str(amount),
                          "anAccount": "43"}, source=source or voucher, expect=expect)
 
-    def withdraw(self, amount, chain=1, shell=1_000_000_000):
-        return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": "11" * 20},
+    def withdraw(self, amount, chain=1, shell=1_000_000_000, recipient="11" * 20):
+        return self.call("initiateWithdrawal", {"dstChainId": str(chain), "recipient": recipient},
                          source=SENDER, ecc=amount, shell=shell)
 
     def refund(self, result, amount, shell, reason):
@@ -778,6 +778,17 @@ class BridgeLimits(unittest.TestCase):
         result = self.withdraw(TRANSFER, chain=3)
         self.assertEqual(result["messages"], [])
         self.assertEqual(int(self.limits(chain=3)["outstanding"]), 0)
+
+    def test_usdc_to_a_recipient_that_is_not_20_bytes_is_refunded_with_246(self):
+        outstanding = self.limits()["outstanding"]
+        for recipient in ["11" * 21, "11" * 19, "11" * 64]:
+            self.refund(self.withdraw(TRANSFER, recipient=recipient), TRANSFER, 1_000_000_000, 246)
+        result = self.call("testWithdrawPaddedRecipient", {"dstChainId": "1"},
+                           source=SENDER, ecc=TRANSFER, shell=1_000_000_000)
+        self.refund(result, TRANSFER, 1_000_000_000, 246)
+        self.assertEqual(self.limits()["outstanding"], outstanding)
+        self.assertEqual(self.window(), (DAILY, 0))
+        self.assertEqual(self.withdraw(TRANSFER)["messages"], [])
 
     def test_unregistered_usdc_with_nothing_outstanding_is_refused_with_247(self):
         self.bind(3)

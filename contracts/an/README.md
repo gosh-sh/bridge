@@ -151,6 +151,8 @@ still the chain's USDC counter. Closing or throttling deposits does not touch wi
 `finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
 1.6.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
 burns the attached currency and decrements only that currency's destination-chain inventory.
+A withdrawal of any token whose recipient is not 20 bytes, the only form Circuit 4 proves, is
+refunded with 246 before any burn or lock.
 
 ### NACKL
 
@@ -163,8 +165,7 @@ NACKL is Acki Nacki's own currency, so the bridge never mints or burns it
   chain's NACKL `outstanding` (`getTokenWithdrawalConfig(chainId, 1)`) and to
   `getNacklLockedTo(chainId, evmBridge)`, the total ever locked for the EVM bridge the withdrawal
   is bound to. It is refunded with 235 when the chain's `outstanding` plus the amount would pass
-  the owner's `maxTvl`, with 247 above the daily limit, and when the recipient is not
-  20 bytes, the only form Circuit 4 proves (246).
+  the owner's `maxTvl`, and with 247 above the daily limit.
 - A NACKL deposit unlocks: the bridge sends NACKL it holds from that chain's locks.
   `finalizeDeposit` refuses one above the lock with 236 before accepting it, so the voucher stays
   unspent and the deposit can be finalized later. One that still finds the lock short when its

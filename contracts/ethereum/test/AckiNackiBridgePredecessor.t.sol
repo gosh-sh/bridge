@@ -367,6 +367,25 @@ contract AckiNackiBridgePredecessorTest is Test {
         vm.stopPrank();
     }
 
+    function test_migrateTreasury_refusesLowerUsdcDailyLimit() public {
+        (AckiNackiBridge oldBridge, AckiNackiBridge newBridge) = _cutover();
+        uint256 limit = VerifyBlockConfigLib.USDC_DAILY_LIMIT;
+        newBridge.setTokenLimits(
+            newBridge.usdcTokenId(), VerifyBlockConfigLib.USDC_TVL_CAP, limit - 1
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.SuccessorWithdrawalLimitTooLow.selector, limit - 1, limit
+            )
+        );
+        oldBridge.migrateTreasury(address(newBridge));
+        assertEq(newBridge.treasuryBalance(), 0);
+
+        newBridge.setTokenLimits(newBridge.usdcTokenId(), VerifyBlockConfigLib.USDC_TVL_CAP, limit);
+        oldBridge.migrateTreasury(address(newBridge));
+        assertEq(oldBridge.treasuryBalance(), 0);
+    }
+
     function test_migrateTreasury_twiceHasNothingToMove() public {
         (AckiNackiBridge oldBridge, AckiNackiBridge newBridge) = _cutover();
         vm.startPrank(oldBridge.owner());
@@ -411,8 +430,8 @@ contract AckiNackiBridgePredecessorTest is Test {
     uint32 internal constant SECOND_ID = 4;
     uint256 internal constant SECOND_AMOUNT = 1e18;
 
-    function _listSecond(AckiNackiBridge b, MockERC20 token, uint256 maxTransfer) internal {
-        MultiTokenBridge(address(b)).listToken(address(token), SECOND_ID, 18, maxTransfer, 10e18);
+    function _listSecond(AckiNackiBridge b, MockERC20 token, uint256 dailyLimit) internal {
+        MultiTokenBridge(address(b)).listToken(address(token), SECOND_ID, 18, 10e18, dailyLimit);
     }
 
     function _secondOnOldBridge() internal returns (AckiNackiBridge oldBridge, MockERC20 second) {
@@ -574,19 +593,19 @@ contract AckiNackiBridgePredecessorTest is Test {
         AckiNackiBridge next = _liveBridge(address(oldBridge));
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector, 0, SECOND_AMOUNT
+                AckiNackiBridge.SuccessorWithdrawalLimitTooLow.selector, 0, SECOND_AMOUNT
             )
         );
         oldBridge.migrateToken(SECOND_ID, address(next));
     }
 
-    function test_migrateToken_refusesLowerWithdrawalCap() public {
+    function test_migrateToken_refusesLowerDailyLimit() public {
         (AckiNackiBridge oldBridge, MockERC20 second) = _secondOnOldBridge();
         AckiNackiBridge next = _liveBridge(address(oldBridge));
         _listSecond(next, second, SECOND_AMOUNT - 1);
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector,
+                AckiNackiBridge.SuccessorWithdrawalLimitTooLow.selector,
                 SECOND_AMOUNT - 1,
                 SECOND_AMOUNT
             )

@@ -225,8 +225,8 @@ impl FakeEvm {
         token_id: u32,
         decimals: u8,
         deposits_enabled: bool,
-        max_transfer: u128,
         tvl_cap: u128,
+        daily_limit: u128,
         liabilities: u128,
     ) {
         use alloy::sol_types::SolCall;
@@ -246,8 +246,8 @@ impl FakeEvm {
                 token,
                 decimals,
                 depositsEnabled: deposits_enabled,
-                maxTransfer: U256::from(max_transfer),
                 tvlCap: U256::from(tvl_cap),
+                dailyLimit: U256::from(daily_limit),
                 liabilities: U256::from(liabilities),
             })
             .into(),
@@ -270,11 +270,7 @@ impl FakeEvm {
 
     pub fn set_volume_limits(&self, bridge: Address) {
         use alloy::sol_types::{SolCall, SolValue};
-        for (selector, value) in [
-            (IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR, 50_000_000u64),
-            (IDeposit::MAX_BRIDGE_TVLCall::SELECTOR, 10_000_000_000u64),
-            (IDeposit::treasuryBalanceCall::SELECTOR, 0),
-        ] {
+        for (selector, value) in [(IDeposit::treasuryBalanceCall::SELECTOR, 0)] {
             self.set_call(bridge, selector, U256::from(value).abi_encode().into());
         }
     }
@@ -1751,7 +1747,7 @@ impl World {
         );
         // The bridge's own USDC, listed as the constructor lists it: ECC
         // currency id 3, six decimals, deposits open.
-        evm.set_token_listing(W_BRIDGE, W_USDC, 3, 6, true, 50_000_000, 10_000_000_000, 0);
+        evm.set_token_listing(W_BRIDGE, W_USDC, 3, 6, true, 10_000_000_000, 50_000_000, 0);
         evm.set_call(
             W_USDC,
             IErc20::decimalsCall::SELECTOR,
@@ -1786,10 +1782,10 @@ impl World {
         ]);
         an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
             serde_json::json!({"listed": true, "tokenId": "3", "depositsEnabled": true,
-                "maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
+                "maxTvl": "10000000000", "dailyLimit": "50000000", "outstanding": "0"}),
         ]);
         an.getter(W_BRIDGE_ACC, "getDepositLimits", vec![
-            serde_json::json!({"maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
+            serde_json::json!({"maxTvl": "10000000000", "dailyLimit": "50000000", "outstanding": "0"}),
         ]);
         an.getter(W_BRIDGE_ACC, "isPaused", vec![
             serde_json::json!({ "value0": false }),

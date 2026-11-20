@@ -411,7 +411,7 @@ def test_46_nackl_deposit_sent(run, arb, ctx):
     multisig and ends once it is confirmed."""
     at = arb.block()
     ctx["nackl_supply_before"] = arb.call(ctx["nackl"], "totalSupply()", block=at)
-    ctx["nackl_minted_before"] = arb.words(ctx["bridge"], "nacklState()", block=at)[2]
+    ctx["nackl_minted_before"] = arb.words(ctx["bridge"], "nacklState()", block=at)[0]
     run.job("cli-deposit-nackl", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
             FROM=ctx["address"], TO=ctx["msig"], AMOUNT=str(NACKL_IN // NACKL))
     run.finish("cli-deposit-nackl", 900)
@@ -572,7 +572,7 @@ def test_66_nackl_deposit_delivered(an, arb, ctx):
     the withdrawal locked."""
     assert int(an("ecc", ctx["msig"])["ECC1"]) == NACKL_IN, "the multisig did not receive the 3 NACKL"
     at = arb.block()
-    minted = arb.words(ctx["bridge"], "nacklState()", block=at)[2] - ctx["nackl_minted_before"]
+    minted = arb.words(ctx["bridge"], "nacklState()", block=at)[0] - ctx["nackl_minted_before"]
     assert arb.call(ctx["nackl"], "totalSupply()", block=at) == \
         ctx["nackl_supply_before"] - NACKL_IN + minted, "the deposit did not burn the 3 NACKL"
     assert int(an("nackl", ctx["bridge"])["LOCKED"]) == NACKL_OUT - NACKL_IN
@@ -665,7 +665,7 @@ def test_74_usdc_delivered(arb, an, ctx):
 def test_75_nackl_minted(arb, ctx):
     """The bridge minted the 5 NACKL its proofs paid."""
     state = arb.words(ctx["bridge"], "nacklState()")
-    assert state[2] == NACKL_OUT, f"nacklState: {state}"
+    assert state[0] == NACKL_OUT, f"nacklState: {state}"
 
 
 def test_76_nackl_reconciles(arb, an, ctx):
@@ -673,7 +673,7 @@ def test_76_nackl_reconciles(arb, an, ctx):
     assert arb.call(ctx["nackl"], "totalSupply()") == NACKL_SUPPLY - NACKL_IN + NACKL_OUT
     got = an("nackl", ctx["bridge"])
     assert int(got["LOCKED"]) == NACKL_OUT - NACKL_IN, got
-    assert int(got["LOCKED_TO"]) == arb.words(ctx["bridge"], "nacklState()")[2], got
+    assert int(got["LOCKED_TO"]) == arb.words(ctx["bridge"], "nacklState()")[0], got
 # The timing lines daemon-live and daemon-withdraw-live log for each proof: the attestation
 # (Circuit 1A/1B), the layer-hashes proof (Circuit 2), a rotation's attestation, and every
 # aggregate-proof subprocess (Primary, LayerHashes, BridgeWithdrawal). A withdrawal's whole proof,

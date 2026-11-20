@@ -89,9 +89,10 @@ code and were wrong in the old docs:
 
 * Deposits take **a listed ERC-20**, signature `deposit(address,uint256,bytes32)`: USDC via
   `transferFrom` into custody, NACKL via `burnFrom` with nothing held. The constructor lists USDC;
-  the only owner call that adds a token is `listNackl`, for NACKL under id 1. The per-transaction cap is the owner's per-token
-  `maxTransfer` (USDC is listed with 50 USDC), and `type(uint64).max` is retained as a width
-  guard — it is the ceiling `gosh.mintecc` imposes. Any archive text with `msg.value`, ETH
+  the only owner call that adds a token is `listNackl`, for NACKL under id 1. There is no
+  per-transaction cap (gosh-sh/bridge-audit#161): the owner sets `tvlCap` and a daily withdrawal
+  limit per token, and `type(uint64).max` is retained as a width guard — it is the ceiling
+  `gosh.mintecc` imposes. Any archive text with `msg.value`, ETH
   deposits, a `100 ether` cap or a USDC-only deposit path is dead.
   The contract has no `receive()`/`fallback()` — it cannot hold native ETH at all.
 * Verification is **SHPLONK aggregator Yul** for four circuits. 

@@ -164,14 +164,48 @@ pub(crate) async fn deployed_usdc_bridge_with(
     bridged_minted: u128,
     bridged_burned: u128,
 ) -> (String, String) {
-    deployed_bridge_artifact(
+    let (account_id, boc) = deployed_bridge_artifact(
         USDC_BRIDGE_TVC,
         crate::burn::USDC_BRIDGE_ABI_JSON,
         paused,
         bridged_minted,
         bridged_burned,
     )
+    .await;
+    let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string()),
+        address: Some(format!("0:{account_id}")),
+        call_set: Some(CallSet {
+            function_name: "setBridgeToken".into(),
+            input: Some(json!({"chainId": "11155111", "evmToken": "28656894849625547415758526131691823914822206725",
+                "tokenId": 3, "maxTvl": "10000000000", "dailyLimit": "50000000",
+                "depositsEnabled": true})),
+            ..Default::default()
+        }),
+        signer: Signer::Keys {
+            keys: KeyPair {
+                public: PAIR_PUBLIC.into(),
+                secret: PAIR_SECRET.into(),
+            },
+        },
+        ..Default::default()
+    })
     .await
+    .unwrap();
+    let boc = run_executor(ctx, ParamsOfRunExecutor {
+        message: encoded.message,
+        account: AccountForExecutor::Account {
+            boc,
+            unlimited_balance: Some(true),
+        },
+        return_updated_account: Some(true),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .account;
+    (account_id, boc)
 }
 
 /// Deploy the specified bridge artifact using its unchanged constructor
@@ -361,8 +395,8 @@ async fn bridge_with_token_lane(
         call_set: Some(CallSet {
             function_name: "setBridgeToken".into(),
             input: Some(
-                json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
-                "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true}),
+                json!({"chainId": "11155111", "evmToken": "28656894849625547415758526131691823914822206725", "tokenId": 3,
+                "maxTvl": "10000000000", "dailyLimit": "50000000", "depositsEnabled": true}),
             ),
             ..Default::default()
         }),
@@ -426,9 +460,8 @@ async fn bridge_with_token_lane(
                 panic!("token config");
             };
             for (name, value) in [
-                ("maxTransfer", amount),
                 ("maxTvl", amount * 10),
-                ("maxWithdrawal", amount),
+                ("dailyLimit", amount),
                 ("outstanding", amount),
             ] {
                 config.iter_mut().find(|f| f.name == name).unwrap().value =
@@ -1136,16 +1169,16 @@ pub(crate) async fn fake_world_for_token(
         answers.insert(
             "68fb1109",
             format!(
-                "0x{:064x}{:064x}{:064x}{:064x}{:064x}{:064x}",
-                85u128,
+                "0x{:0>64}{:064x}{:064x}{:064x}{:064x}{:064x}",
+                "05".repeat(20),
                 decimals,
                 1u8,
-                ecc3,
                 ecc3 * 10,
+                ecc3,
                 ecc3
             ),
         );
-        answers.insert("aa407e56", format!("0x{ecc3:064x}"));
+        answers.insert("d8201475", format!("0x{ecc3:064x}{:064x}", 0u8));
     }
     let rpc = mock_rpc_code_for(&full_walk_code(), answers).await;
 
@@ -1365,7 +1398,7 @@ mod tests {
             "1000000"
         );
         let refused = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 4,
-            "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000", "depositsEnabled": true}))
+            "maxTvl": "10000000000000000000", "dailyLimit": "1000000000000000000", "depositsEnabled": true}))
         .await
         .expect("a special account records the refused call")
         .transaction;
@@ -1381,7 +1414,7 @@ mod tests {
             &boc,
             "setBridgeToken",
             json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
-            "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true}),
+            "maxTvl": "10000000000", "dailyLimit": "50000000", "depositsEnabled": true}),
         )
         .await
         .unwrap()
@@ -1483,7 +1516,7 @@ mod tests {
             .as_hex_string();
         assert_eq!(
             &hash[..8],
-            "b4344f9c",
+            "f62c758b",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

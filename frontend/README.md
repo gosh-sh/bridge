@@ -162,6 +162,6 @@ block.
 MIT License - see LICENSE file for details
 
 
-Deposits are limited to 50 USDC. Before approval and deposit, the form reads
-`MAX_TRANSFER_AMOUNT`, `MAX_BRIDGE_TVL` and `treasuryBalance`; failed reads stop
-the request. The 10,000 USDC capacity includes principal supplied to Aave.
+There is no per-deposit limit. Before approval and deposit, the form reads the
+bridge's `tokenInfo` for USDC (`tvlCap` and `liabilities`); failed reads stop
+the request. The TVL cap includes principal supplied to Aave.

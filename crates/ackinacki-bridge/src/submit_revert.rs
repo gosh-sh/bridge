@@ -33,11 +33,11 @@ pub(crate) fn explain(reason: &str) -> String {
             "the deployed verifier rejected the proof: this host's Circuit-4 keys or aggregator \
              do not match it",
         ),
-        "NacklWindowFull" => Some(
-            "the EVM bridge's daily NACKL limit is full: the rolling 24-hour mint window has no \
-             room for this amount yet. Nothing was spent and the proof stays valid; later, re-run \
-             `withdraw` with --allow-retry, or the same `withdraw proof` command, to send it \
-             again; the burn is not repeated",
+        "WithdrawalWindowFull" => Some(
+            "the EVM bridge's daily withdrawal limit for this token is full: its rolling 24-hour \
+             window has no room for this amount yet. Nothing was spent, the nullifier is unspent \
+             and the proof stays valid; later, re-run `withdraw` with --allow-retry, or the same \
+             `withdraw proof` command, to send it again; the burn is not repeated",
         ),
         "NacklNotMinter" => Some(
             "this EVM bridge is not the NACKL minter yet: the minter handover to it has not \
@@ -92,7 +92,7 @@ mod tests {
         assert!(text.starts_with("BridgePaused()"), "{text}");
         assert!(text.contains("--allow-retry"), "{text}");
         for (signature, words) in [
-            ("NacklWindowFull(uint256,uint256,uint256)", 3),
+            ("WithdrawalWindowFull(uint32,uint256,uint256,uint256)", 4),
             ("NacklNotMinter(address)", 1),
         ] {
             let selector = &alloy::primitives::keccak256(signature)[..4];
@@ -114,9 +114,9 @@ mod tests {
             ("UnknownAnchor(uint256)", 1, "not in the bridge's window"),
             ("WithdrawalProofRejected()", 0, "rejected the proof"),
             (
-                "NacklWindowFull(uint256,uint256,uint256)",
-                3,
-                "daily NACKL limit is full",
+                "WithdrawalWindowFull(uint32,uint256,uint256,uint256)",
+                4,
+                "daily withdrawal limit for this token is full",
             ),
             ("NacklNotMinter(address)", 1, "not the NACKL minter yet"),
             ("NacklMinterGone()", 0, "will never pay here"),

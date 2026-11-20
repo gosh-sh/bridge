@@ -5,9 +5,8 @@ import "./errors.sol";
 abstract contract eccBridgeModifiers is eccBridgeErrors {
     struct BridgeTokenConfig {
         uint256 evmToken;
-        uint128 maxTransfer;
         uint128 maxTvl;
-        uint128 maxWithdrawal;
+        uint128 dailyLimit;
         uint128 outstanding;
         bool depositsEnabled;
     }

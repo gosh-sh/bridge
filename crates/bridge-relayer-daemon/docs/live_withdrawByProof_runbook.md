@@ -1154,9 +1154,12 @@ the anchor) and move the old file out of `--proofs-dir`. If the
 re-proven withdrawal was already paid some other way, the scan skips the
 old file instead, as `nullifier already used`.
 
-A NACKL proof refused with `NacklWindowFull` or `NacklNotMinter` stays in
-`--proofs-dir` and is tried again on the next scan; the scan goes on to
-the next file and does not back off. `NacklMinterGone` and
+A proof refused with `WithdrawalWindowFull` (the EVM bridge's owner-set
+rolling 24-hour withdrawal limit for the token, USDC or NACKL, has no room
+for it; the nullifier stays unspent), or a NACKL proof refused with
+`NacklNotMinter`, stays in `--proofs-dir` and is tried again on the next
+scan; the scan goes on to the next file and does not back off.
+`daemon-withdraw-live` keeps such a claim pending and retries it later. `NacklMinterGone` and
 `LayerOutOfRange` park the file.
 
 `daemon-withdraw-live` drops a proof whose anchor left the window

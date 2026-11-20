@@ -115,6 +115,8 @@ the Halo2 circuits themselves, and the Rust prover/relayer crates.
 | `src/AxiomBlockHeaderOracle.sol` | 186 | Axiom V2 Core–backed oracle implementation. |
 | `src/MockBlockHeaderOracle.sol` | 76 | Test/E2E oracle (owner-settable hashes + `blockhash()` fallback). |
 | `src/IAavePool.sol`, `src/IERC20.sol` | 47 / 12 | Minimal external interfaces. |
+| `src/WithdrawalWindow.sol` | 38 | External library linked into the bridge: the per-token rolling 24-hour withdrawal limit (25 hourly buckets) and `WithdrawalWindowFull`. |
+| `src/NacklMint.sol` | 50 | External library linked into the bridge: NACKL listing checks, mint payouts, the `minted` counter and the minter handover. |
 | `verifiers/*.bin` | — | Production SHPLONK Yul **creation** bytecode (4 circuits). |
 | `verifiers/*_calldata.bin` | — | Reference `instances ‖ proof` calldata fixtures. |
 | `verifiers/{Primary,Fallback,LayerHashes}AggregatorVerifier.sol` | 82–92 KB | Generated `Halo2Verifier` Yul-in-Solidity sources (reference; the `.bin` is what deploys). |
@@ -172,9 +174,7 @@ There is **no** `withdraw(depositId, …)` refund path; the withdrawal surface c
 | Constant | Value | Line | Meaning |
 |---|---|---:|---|
 | `USDC_UNIT` | `10**6` | 50 | USDC has 6 decimals. Declared, not used internally. |
-| `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | First deposit width guard (`DepositTooLarge`); the product limit below is lower. |
-| `MAX_TRANSFER_AMOUNT` | `50 * USDC_UNIT` | 57 | Hard upper bound on the USDC deposit cap, and the USDC withdrawal cap (`TransferTooLarge`). `setTokenLimits` can lower the deposit cap only. |
-| `MAX_BRIDGE_TVL` | `10_000 * USDC_UNIT` | 58 | Hard upper bound on the USDC deposit-side cap on `treasuryBalance`, including Aave principal, checked by `deposit` only (`TvlCapReached`); `setTokenLimits` may lower it, and `fundTreasury` can take the book past it. |
+| `MAX_DEPOSIT_AMOUNT` | `type(uint64).max` | 55 | Technical deposit width guard (`DepositTooLarge`): `gosh.mintecc` takes a uint64. There is no per-transfer policy limit on deposits or withdrawals, and no compiled TVL ceiling: the TVL cap and the daily withdrawal limit are owner-set per token (`setTokenLimits`, §6, §7). |
 | `BPS_DENOMINATOR` | `10_000` | 58 | Basis-point denominator. |
 | `MAX_LIQUID_RESERVE_BPS` | `5_000` | 61 | Liquid reserve is capped at 50 %. |
 | `MAX_LAYER_HASHES` | `10` | 65 | Layer slots per AN block (mirrors Circuit 2 `MAX_LAYERS`). |
@@ -218,14 +218,18 @@ relying on them for a storage-level migration.
 | 16 | 0 | `storedPrevBkSetCommitment` | `uint256` | 273 | `applyBkSetUpdate` |
 | 17 | — | `_nullifiers` | `mapping(bytes32 ⇒ bool)` | 369 | `withdrawByProof` |
 | 18 | — | `_layerWindows` | `mapping(uint8 ⇒ HistoryWindow)` | 388 | `_appendLayer` |
-| 19–23 | — | `_nackl` | `NacklMint.State` | 390 | `listNackl`, `deposit` and `withdrawByProof` (NACKL), `migrateToken(1, …)` |
+| 19–20 | — | `_nackl` | `NacklMint.State` (`token` + `handedOver` in 19, `minted` in 20) | 378 | `listNackl`, `withdrawByProof` (NACKL, `minted`), `migrateToken(1, …)` (`handedOver`) |
+| 21 | — | `_withdrawalWindows` | `mapping(uint32 ⇒ WithdrawalWindow.Window)` | 381 | constructor and `listNackl` (through `_listToken`), `setTokenLimits` (`dailyLimit`), `withdrawByProof` (hourly bucket) |
 
-Regenerated from this tree with `forge inspect src/AckiNackiBridge.sol:AckiNackiBridge
-storageLayout`. **The token registry took slots 2–5**, so everything from
-`blockHeaderOracle` on moved four slots down: any tool that reads this contract's storage by
-slot number — an indexer, a fork-state fixture, a hand-written `eth_getStorageAt` — has to be
-regenerated against the new deployment. Nothing upgrades in place: `usdc` and `aUSDC` are
-immutable, so this is a fresh deployment either way.
+Regenerated from this tree with `forge inspect AckiNackiBridge storageLayout`. `TokenInfo` is
+now three words — `token`/`decimals`/`depositsEnabled`, `tvlCap`, `liabilities`; `maxTransfer`
+and `maxWithdrawal` are gone. `NacklMint.State` lost `dailyLimit` and its hourly map and shrank
+from five slots to two, and the per-token withdrawal window (`WithdrawalWindow.Window`:
+`dailyLimit`, then `mapping(uint256 hour ⇒ uint256 paid)`) took slot 21. Slots 0–18 are where
+they were, but the struct layouts behind slots 2 and 19 changed: any tool that reads this
+contract's storage by slot number — an indexer, a fork-state fixture, a hand-written
+`eth_getStorageAt` — has to be regenerated against the new deployment. Nothing upgrades in
+place: `usdc` and `aUSDC` are immutable, so this is a fresh deployment either way.
 
 `blockHeaderOracle` is **write-only in practice**: it is set in the constructor (`:588`) and never
 read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`).
@@ -288,9 +292,13 @@ wired, `bundleStride != 0` is required (else `InvalidBundleStride`, `:714`); whe
 unwired (`verifyBlock` disabled) the field is unused and may be zero.
 
 `BridgeWithdrawConfig` (`:801-837`): `bridgeWithdrawalVerifier`, `dappFr`, `accFr`, `altDstChainId`,
-`altDstHostChainId`, `usdcTokenId`, `predecessor`. `predecessor` is the `AckiNackiBridge` on the same
-chain whose treasury this deployment may take over, or zero. It is the last field, so the
-constructor's ABI signature changed when it was added.
+`altDstHostChainId`, `usdcTokenId`, `predecessor`, `usdcTvlCap`, `usdcDailyLimit`. `predecessor` is
+the `AckiNackiBridge` on the same chain whose treasury this deployment may take over, or zero.
+`usdcTvlCap` and `usdcDailyLimit` are the initial USDC TVL cap and daily withdrawal limit, in USDC
+base units; the constructor lists USDC under `usdcTokenId` with them and deposits open. Neither has
+a compiled ceiling and neither is validated: the owner changes both with `setTokenLimits`. The
+deployment scripts read them from `USDC_TVL_CAP` and `USDC_DAILY_LIMIT` (default `10_000e6` each,
+the former compiled values). Adding the two fields changed the constructor's ABI signature.
 
 Validation performed (and *not* performed):
 
@@ -327,13 +335,16 @@ Sequence (`:906-929`):
 3. `_requireDepositableToken(token)` (`:1118`) resolves the token's id: `TokenNotListed(token)`
    when the owner never listed it, `TokenDepositsDisabled(tokenId)` when deposits are closed for
    it. Withdrawals ignore that switch.
-4. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge` — still `type(uint64).max`, the ceiling
-   `gosh.mintecc` imposes on the AN side — then `amount <= info.maxTransfer` else
-   `TransferTooLarge`. The cap is **per listing**; for USDC it cannot exceed the
-   `MAX_TRANSFER_AMOUNT` ceiling.
+4. `amount <= MAX_DEPOSIT_AMOUNT` else `DepositTooLarge` — `type(uint64).max`, the ceiling
+   `gosh.mintecc` imposes on the AN side. This is the only per-deposit bound: there is no
+   per-transfer policy cap, and deposits have no rate limit.
    NACKL (id 1) leaves the sequence here: `burnFrom` burns `amount` from the sender, no TVL cap,
    custody or liabilities apply, and steps 7–8 follow (§7.3a). Steps 5–6 are for custody tokens.
 5. `liabilitiesOf(tokenId) + amount <= info.tvlCap` else `TvlCapReached`, before any token call.
+   `tvlCap` is set by the owner (constructor config for USDC, then `setTokenLimits`) with no
+   compiled ceiling. It is checked only here, where the token is locked: `fundTreasury`,
+   `fundToken` and withdrawals ignore it. NACKL has no TVL cap (its `tvlCap` is
+   `type(uint256).max`).
    `liabilitiesOf` (`:1055`) answers `treasuryBalance` for `usdcTokenId` and the listing's own
    counter for every other token, so USDC keeps one book and the Aave accounting is untouched.
 6. `_pullExact(IERC20(token), amount)` (`:1911`) calls `transferFrom`; a `false` return ⇒
@@ -382,15 +393,20 @@ Notes that matter downstream:
 
 ## 7. AN → ETH
 
-`withdrawByProof` refuses `pub.amount` above `maxWithdrawalAmount(tokenId)`, with
-`TransferTooLarge`, before proof verification or nullifier consumption. This is the highest
-deposit cap accepted for that listing and never decreases while the listing exists; lowering
-`tokenInfo(tokenId).maxTransfer` throttles new deposits without blocking existing payouts.
-USDC deposit caps cannot exceed 50 USDC per transfer or 10,000 USDC outstanding; its payout cap
-stays 50 USDC. The CLI checks `usdcTokenId() == 3` and reads the payout cap before burning ECC. The outstanding-liability cap applies per listing and per funded L1 bridge separately. Pair it with AN
-1.13.0 chain accounting and complete old transfers before activating a fresh
-pair; see [the deployment procedure](../contracts/an/README.md#deployment).
-No EVM storage slots or deposit/withdrawal argument shapes change with these limits.
+There is no per-transfer limit on withdrawals. Every listed token, USDC and NACKL alike, has an
+owner-set **daily withdrawal limit** (`tokenInfo(tokenId).dailyLimit`,
+`withdrawalWindow(tokenId)`): `withdrawByProof` counts each payout into a rolling window of 25
+hourly buckets (the current hour and the 24 before it, `WithdrawalWindow` library) and refuses a
+payout that would take the window above the limit with
+`WithdrawalWindowFull(tokenId, used, amount, dailyLimit)`. The check runs after the proof
+verifies, in the same transaction as the payout, so the revert rolls everything back: the
+nullifier stays unspent and the same proof pays once the window has room. Any 24 hours therefore
+pay at most `dailyLimit` per token. Lowering the limit below what the window already holds defers
+payouts until it drains; it never strands a proof. The CLI checks `usdcTokenId() == 3` before
+burning ECC. The TVL cap applies per listing on deposit only (§6). Pair the EVM limits with the
+AN bridge's chain accounting and complete old transfers before activating a fresh pair; see
+[the deployment procedure](../contracts/an/README.md#deployment). The storage layout changed with
+these limits (§4.1): this is a fresh deployment, not an in-place upgrade.
 
 ### 7.1 `verifyBlock` — advance the AN state commitment
 
@@ -490,23 +506,23 @@ finalRoot, anchorLayer, dstBridge`.
 |---:|---|---:|---|
 | 1 | C4 verifier wired | 1926-1927 | `WithdrawByProofDisabled` |
 | 2 | `pub.tokenId ≤ type(uint32).max` **and** that id is listed (`_tokens[id].token != 0`) | 1934-1937 | `UnsupportedTokenId` |
-| 3 | `pub.amount ≤ maxWithdrawalAmount(tokenId)` | 1939 | `TransferTooLarge` |
-| 4 | `pub.dstBridge == uint160(address(this))` | 1942-1944 | `WrongDstBridge(dstBridge)` |
-| 5 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1945-1947 | `WithdrawIdentityMismatch` |
-| 6 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1948-1955 | `DstChainIdMismatch` |
-| 7 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1956-1961 | `RecipientHalfOutOfRange` |
-| 8 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1964-1966 | `InvalidRecipient` |
-| 9 | `nullifier`, `finalRoot`, `anchorLayer` are canonical Fr | 1970-1972 | `FieldElementOutOfRange` |
-| 10 | `!_nullifiers[bytes32(pub.nullifier)]` | 1974-1976 | `NullifierAlreadyUsed` |
-| 11 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1977-1981 | `LayerOutOfRange` |
-| 12 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1982-1984 | `UnknownAnchor` |
-| 13 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1990-1991 | `WithdrawalProofRejected` |
+| 3 | `pub.dstBridge == uint160(address(this))` | 1942-1944 | `WrongDstBridge(dstBridge)` |
+| 4 | `pub.dappFr == bridgeWithdrawalDappFr && pub.accFr == bridgeWithdrawalAccFr` | 1945-1947 | `WithdrawIdentityMismatch` |
+| 5 | `pub.dstChainId == block.chainid`, **or** the scoped alias: `altDstChainId != 0 && altDstHostChainId != 0 && block.chainid == altDstHostChainId && pub.dstChainId == altDstChainId` | 1948-1955 | `DstChainIdMismatch` |
+| 6 | `recipientHi ≤ 2^80-1`, `recipientLo ≤ 2^80-1` | 1956-1961 | `RecipientHalfOutOfRange` |
+| 7 | reconstructed recipient `!= address(0)` (WD-Q2: checked *before* the expensive verify) | 1964-1966 | `InvalidRecipient` |
+| 8 | `nullifier`, `finalRoot`, `anchorLayer` are canonical Fr | 1970-1972 | `FieldElementOutOfRange` |
+| 9 | `!_nullifiers[bytes32(pub.nullifier)]` | 1974-1976 | `NullifierAlreadyUsed` |
+| 10 | `1 ≤ pub.anchorLayer ≤ MAX_LAYER_HASHES` | 1977-1981 | `LayerOutOfRange` |
+| 11 | `_isKnownLayerAnchor(uint8(pub.anchorLayer), pub.finalRoot)` | 1982-1984 | `UnknownAnchor` |
+| 12 | `bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub)` | 1990-1991 | `WithdrawalProofRejected` |
+| 13 | `WithdrawalWindow.used + pub.amount ≤ dailyLimit` for `tokenId` (rolling 25-hour-bucket window); the payout is then counted into the current hour | | `WithdrawalWindowFull(tokenId, used, amount, dailyLimit)` — nullifier stays unspent, retry later |
 | 14 | `pub.amount ≤ liabilitiesOf(tokenId)` (custody tokens only; NACKL is minted instead, §7.3a) | 1994-1997 | `WithdrawTreasuryShortfall` |
 
-Read `maxWithdrawalAmount(usdcTokenId())` before burning ECC (`ackinacki-bridge` does through
-`BridgeClient::usdc_payout_cap`). The payout cap is stored in `TokenInfo.maxWithdrawal`; it is
-initialized on listing and can increase with `setTokenLimits`, but lowering deposit limits never
-reduces it. The existing six-value `tokenInfo` getter continues to report deposit limits.
+There is no per-transfer withdrawal cap. Check 13 is the only amount limit besides the custody
+check: it runs after the proof verifies and inside the payout transaction, so its revert also
+rolls back the window and leaves the nullifier unspent. `withdrawalWindow(tokenId)` returns
+`(dailyLimit, used)` for a relayer that wants to wait instead of paying for a reverting call.
 
 For NACKL, after check 13 the bridge marks the nullifier used and mints the payout
 (§7.3a); check 14 and the custody steps below do not apply.
@@ -622,26 +638,33 @@ boundary at or below it — usually just that one bundle.
 ### 7.3a NACKL: minted payouts, the daily limit and the handover
 
 NACKL (ECC id `1`) is minted, not paid from custody
-([`NACKL-bridge-extension.md`](NACKL-bridge-extension.md)). The logic is the external library
-`src/NacklMint.sol`, linked at deployment and run by DELEGATECALL in the bridge's storage
-(`_nackl`, slots 19–23), so the bridge is the minter of `src/NacklToken.sol` and logs its events.
+([`NACKL-bridge-extension.md`](NACKL-bridge-extension.md)). The minting logic is the external
+library `src/NacklMint.sol`, linked at deployment and run by DELEGATECALL in the bridge's storage
+(`_nackl`), so the bridge is the minter of `src/NacklToken.sol` and logs its events. The daily
+limit is not NACKL-specific any more: it is the per-token withdrawal window of §7
+(`src/WithdrawalWindow.sol`, also an external library), which applies to USDC the same way.
 
-- `listNackl(token, maxTransfer, dailyLimit)` (owner) lists the token under id `1` with no TVL
-  cap; its owner must be this bridge or, before a handover, `predecessor`. Called again with the
-  listed token it sets `dailyLimit`, which may not be below `maxWithdrawal`.
-- `deposit` of NACKL burns it from the sender (`burnFrom`) and books no liabilities.
-- `withdrawByProof` of NACKL runs every check of §7.2 up to the proof, spends the nullifier and
-  mints the payout in the same transaction. It reverts instead, leaving the nullifier unspent so
-  the same proof can be sent again: `NacklWindowFull(used, amount, dailyLimit)` when the NACKL
-  minted in the current hour and the 24 before it leaves no room for the payout,
-  `NacklNotMinter(token)` while the bridge is not the token's minter (a successor before
-  `migrateToken(1, …)` on the old bridge), `NacklMinterGone()` after this bridge handed the
-  minter over. There is no payout queue.
-- `migrateToken(1, successor)` (owner, paused, `successor` lists the same token with a withdrawal
-  cap no lower than this one's, `SuccessorWithdrawalCapTooLow`) transfers the
-  token's ownership to `successor` and closes NACKL deposits here; NACKL payouts here then revert
-  `NacklMinterGone`.
-- `nacklState()` returns `dailyLimit`, `windowUsed`, `minted`, `handedOver`.
+- `listNackl(token, dailyLimit)` (owner) lists the token under id `1` with deposits open, no TVL
+  cap (`tvlCap = type(uint256).max`) and the given daily withdrawal limit; its owner must be this
+  bridge or, before a handover, `predecessor`. It lists once: a second call reverts
+  `TokenAlreadyListed` / `TokenIdAlreadyUsed`. `setTokenLimits(1, type(uint256).max, dailyLimit)`
+  changes the limit afterwards; any other `tvlCap` for NACKL reverts
+  `TokenLimitsInvalid(tvlCap, dailyLimit)`.
+- `deposit` of NACKL burns it from the sender (`burnFrom`) and books no liabilities; no TVL cap and
+  no per-transfer cap apply.
+- `withdrawByProof` of NACKL runs every check of §7.2 up to the withdrawal window, spends the
+  nullifier and mints the payout in the same transaction. It reverts instead, leaving the
+  nullifier unspent so the same proof can be sent again:
+  `WithdrawalWindowFull(1, used, amount, dailyLimit)` when the NACKL paid in the current hour and
+  the 24 before it leaves no room for the payout, `NacklNotMinter(token)` while the bridge is not
+  the token's minter (a successor before `migrateToken(1, …)` on the old bridge),
+  `NacklMinterGone()` after this bridge handed the minter over. There is no payout queue.
+- `migrateToken(1, successor)` (owner, paused, `successor` lists the same token with a daily
+  withdrawal limit no lower than this one's, `SuccessorWithdrawalLimitTooLow(successorLimit,
+  limit)`) transfers the token's ownership to `successor` and closes NACKL deposits here; NACKL
+  payouts here then revert `NacklMinterGone`.
+- `nacklState()` returns `(minted, handedOver)`; the limit and the window's usage are in
+  `tokenInfo(1)` and `withdrawalWindow(1)`.
 
 ### 7.4 Read surface for AN state
 
@@ -773,10 +796,12 @@ principal is `L = min(U, B − S)` (`_liquidPrincipal`, `:1963`, `B − S` floor
 | `setLiquidReserveBps(bps)` | 1897 | `MIN_LIQUID_RESERVE_BPS` (10 %, `ReserveBpsTooLow`) to `MAX_LIQUID_RESERVE_BPS` (50 %, `ReserveBpsTooHigh`); `bps × M ≤ 10⁸` (`ReserveBandTooWide(bps, M)`). |
 | `setSupplyMultiplierBps(bps)` | 1907 | Above `10_000` (`MultiplierTooLow`); `r × bps ≤ 10⁸` (`ReserveBandTooWide(r, bps)`). Emits `SupplyMultiplierBpsSet(bps)`. |
 | `setYieldRecipient(addr)` | 1914 | Non-zero. |
-| `fundTreasury(amount)` | 1828 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by `MAX_BRIDGE_TVL`; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
-| `migrateTreasury(successor)` | 1847 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
+| `fundTreasury(amount)` | 1828 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Pulls exactly `amount` USDC from the caller and adds it to `treasuryBalance`, with no `Deposit` event, so nothing is minted on Acki Nacki, and supplies nothing. Zero reverts `InvalidAmount`. Not capped by the USDC `tvlCap`, which gates `deposit` only; works while paused. Emits `TreasuryFunded(from, amount, treasuryBalanceAfter)`. |
+| `migrateTreasury(successor)` | 1847 | Owner only, while paused (`NotPaused`). `successor` must have code and `successor.predecessor()` must return this bridge (`NotSuccessor`); any contract can give that answer, so the check catches a wrong address, not a hostile one; the whole `treasuryBalance` must be liquid USDC (`TreasuryNotLiquid(liquid, book)`) — pull the position back with `withdrawFromAave(type(uint256).max)` first; zero reverts `NothingToMigrate`. The successor's USDC daily withdrawal limit (`successor.withdrawalWindow(usdcTokenId)`) must not be below this bridge's (`SuccessorWithdrawalLimitTooLow(successorLimit, limit)`), so a payout that fits here fits there. Sets `treasuryBalance = 0`, approves and calls `successor.fundTreasury(amount)`, checks the USDC left, emits `TreasuryMigrated(successor, amount)`. USDC above the book and aUSDC stay. |
 | `fundToken(tokenId, token, amount)` | 2204 | Owner or `predecessor` only (`NotOwnerOrPredecessor`). Not for USDC (`CannotMigrateUsdc`). `token` must be what this bridge lists under `tokenId` (`FundedTokenMismatch`). Pulls exactly `amount` from the caller and adds it to the listing's liabilities, with no `Deposit` event, so nothing is minted on Acki Nacki. Zero reverts `InvalidAmount`. Not capped by `tvlCap`, which gates `deposit` only; allowed while paused. |
-| `migrateToken(tokenId, successor)` | 2224 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's `maxWithdrawalAmount(tokenId)` must not be below this listing's (`SuccessorWithdrawalCapTooLow`). The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. For NACKL (id 1) nothing is transferred: it closes NACKL deposits here and hands the token's minter to `successor` (`NacklMint.handOver`; `NacklSuccessorNotReady` unless `successor.tokenInfo(1)` names the same token, and `SuccessorWithdrawalCapTooLow` as for other tokens) and emits only `NacklMinterHandedOver`. |
+| `setTokenLimits(tokenId, tvlCap, dailyLimit)` | 1030 | Owner only; listed id only (`UnsupportedTokenId`). Sets the listing's deposit-side `tvlCap` and its daily withdrawal limit, both in base units, with no compiled ceiling. For NACKL `tvlCap` must be `type(uint256).max` (`TokenLimitsInvalid(tvlCap, dailyLimit)`). Lowering `tvlCap` below the liabilities only stops deposits; lowering `dailyLimit` below the window's usage only defers payouts. Emits `TokenLimitsSet(tokenId, tvlCap, dailyLimit)`. |
+| `listNackl(token, dailyLimit)` | 2262 | Owner only. Lists NACKL once under id `1`, deposits open, `tvlCap = type(uint256).max` (§7.3a). Emits `NacklListed(token)` and `TokenListed`. |
+| `migrateToken(tokenId, successor)` | 2224 | Owner only, while paused (`NotPaused`). The same successor check as `migrateTreasury`, with the same limit: it catches a wrong address, not a hostile one. Not for USDC (`CannotMigrateUsdc`). The successor's daily withdrawal limit for `tokenId` (`successor.withdrawalWindow(tokenId)`) must not be below this listing's (`SuccessorWithdrawalLimitTooLow(successorLimit, limit)`), so a payout that fits here fits there. The whole `liabilities` moves through the successor's `fundToken` (`NothingToMigrate` at zero), and tokens above it stay here. Emits `TokenMigrated`. For NACKL (id 1) nothing is transferred: it closes NACKL deposits here and hands the token's minter to `successor` (`NacklMint.handOver`; `NacklSuccessorNotReady` unless `successor.tokenInfo(1)` names the same token, and `SuccessorWithdrawalLimitTooLow` as for other tokens) and emits only `NacklMinterHandedOver`. |
 | `transferOwnership(addr)` | 1922 | Non-zero; records `pendingOwner`, and the transfer completes only when that address calls `acceptOwnership`. |
 
 Helpers: `_pullFromAave(amount)` (`:2035`), called with `amount ≤ A` only, withdraws exactly `amount` and books it with `_bookPull` (`:2043`), which requires the
@@ -822,10 +847,17 @@ contract and AAVE, and skim `balanceOf(this) − treasuryBalance`. `emergencyWit
 | `TreasuryMigrated(address,uint256)` | `0x8a7c92de40fc5fb3ac08137bd5d6656cae1706c5026efc082c00156a6b25a325` | `successor` |
 | `TokenFunded(address,uint32,uint256,uint256)` | `0x8288ccb0cc01af7847ed27acd88b68b4154cbaa01265d5b5f37d30011d59814d` | `from`, `tokenId` |
 | `TokenMigrated(address,uint32,uint256)` | `0xa511872da658220468d6b3e166bad63e1fa1218e060ae7cf7a6cee10a9ced258` | `successor`, `tokenId` |
+| `TokenListed(uint32,address,uint8,uint256,uint256,bool)` — `(tokenId, token, decimals, tvlCap, dailyLimit, depositsEnabled)` | `0x0ca28dcadf387dea85e6441d645c5ecc6b09b698b9a2b0b80b30d1efd10ae144` | `tokenId`, `token` |
+| `TokenLimitsSet(uint32,uint256,uint256)` — `(tokenId, tvlCap, dailyLimit)` | `0xa855f0a5903aaccf3622cfd46b1784025c832ebfee38cca6ae7237eca0f8ae29` | `tokenId` |
 | `Paused(address)` | `0x62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a258` | `by` |
 | `Unpaused(address)` | `0x5db9ee0a495bf2e6ff9c91a7834c1ba4fdd244a5e8aa4e537bd38aeae4b073aa` | `by` |
 | `AaveSupplyRefused(uint256,bytes)` | `0x863f40a1dc5b5cfdbbea5d5370f509ac7cfa1969a8499bb7479bb1929fec7154` | — |
 | `AaveRefillFailed(uint256,bytes)` | `0x2177c91dd6ccdf39c47c2a67a6fa79f3d9c865779bcab4e2136c0b67b419cfd4` | — |
+
+`TokenListed` and `TokenLimitsSet` keep their topic0: the types did not change, but the fourth
+and fifth `TokenListed` words and the second and third `TokenLimitsSet` words are now
+`tvlCap, dailyLimit` (they were `maxTransfer, tvlCap`). An indexer that decodes them by position
+has to be updated with the deployment.
 
 Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnabledSet`,
 `LiquidReserveBpsSet`, `SupplyMultiplierBpsSet`, `OwnershipTransferred`, `YieldRecipientSet`, `EmergencyWithdrawAll`,
@@ -857,6 +889,13 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 | `0x5100d42b` | `setSupplyMultiplierBps(uint256)` |
 | `0x8ea5da8f` | `supplyMultiplierBps()` |
 | `0x1fc34cd1` | `supplyForSelf(uint256)` |
+| `0x256c9247` | `setTokenLimits(uint32,uint256,uint256)` |
+| `0x68fb1109` | `tokenInfo(uint32)` → `(address token, uint8 decimals, bool depositsEnabled, uint256 tvlCap, uint256 dailyLimit, uint256 liabilities)` |
+| `0xd8201475` | `withdrawalWindow(uint32)` → `(uint256 dailyLimit, uint256 used)` |
+| `0xeed600c2` | `listNackl(address,uint256)` |
+| `0x4faf0225` | `nacklState()` → `(uint256 minted, bool handedOver)` |
+
+`maxWithdrawalAmount(uint32)`, `MAX_TRANSFER_AMOUNT()` and `MAX_BRIDGE_TVL()` no longer exist.
 
 (Computed from the signatures above; `0x26b3293f` and `0xecb3dc88` cross-check against
 `deposit_calldata` and `get_deposit_counter` in `frontend/src/web3.rs`.)
@@ -864,7 +903,7 @@ Also emitted: `SuppliedToAave`, `WithdrawnFromAave`, `YieldHarvested`, `AaveEnab
 ### 11.3 Custom errors
 
 Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositTooLarge`,
-`TransferTooLarge`, `TvlCapReached`,
+`TvlCapReached`,
 `InvalidAnAccount`, `InsufficientTreasury`, `InvalidRecipient`, `InvalidOracle`,
 `InvalidAaveAddress`, `NotOwner`, `Reentrancy`, `ReserveBpsTooHigh`, `ReserveBpsTooLow`,
 `MultiplierTooLow`, `ReserveBandTooWide`, `AaveWithdrawFailed`, `NothingToWriteOff`,
@@ -873,7 +912,7 @@ Deposit/custody: `InvalidAmount`, `InvalidUsdc`, `TransferFromFailed`, `DepositT
 `AaveSupplyRefused`.
 
 Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `NothingToMigrate`,
-`CannotMigrateUsdc`, `FundedTokenMismatch`, `SuccessorWithdrawalCapTooLow`,
+`CannotMigrateUsdc`, `FundedTokenMismatch`, `SuccessorWithdrawalLimitTooLow(uint256 successorLimit, uint256 limit)` (`0x6492767d`),
 `TreasuryNotLiquid`, and `InvalidPredecessor` from the constructor.
 
 `verifyBlock`: `VerifyBlockDisabled`, `AttestationProofRejected`, `LayerHashesProofRejected`,
@@ -886,7 +925,18 @@ Treasury handover: `NotOwnerOrPredecessor`, `NotPaused`, `NotSuccessor`, `Nothin
 `withdrawByProof`: `WithdrawByProofDisabled`, `WithdrawalProofRejected`, `NullifierAlreadyUsed`,
 `DstChainIdMismatch`, `RecipientHalfOutOfRange`, `WithdrawIdentityMismatch`, `UnknownAnchor`,
 `LayerOutOfRange`, `InvalidBridgeWithdrawalIdentity`, `WrongDstBridge`, `UnsupportedTokenId`,
-`WithdrawTransferFailed`, `WithdrawTreasuryShortfall`.
+`WithdrawTransferFailed`, `WithdrawTreasuryShortfall`, and
+`WithdrawalWindowFull(uint32 tokenId, uint256 used, uint256 amount, uint256 dailyLimit)`
+(`0x4653f381`, declared in the `WithdrawalWindow` library, so it is not in the bridge's own ABI
+JSON; the proof stays unspent and can be sent again later). NACKL payouts add `NacklNotMinter` and
+`NacklMinterGone` (`NacklMint` library).
+
+Token registry: `TokenNotListed`, `TokenDepositsDisabled`, `InvalidTokenAddress`,
+`TokenAlreadyListed`, `TokenIdAlreadyUsed`, `CannotListAToken`, and
+`TokenLimitsInvalid(uint256 tvlCap, uint256 dailyLimit)` (`0x56c3a89d`, NACKL with a `tvlCap`
+other than `type(uint256).max`). Removed: `TransferTooLarge`, `TokenLimitExceedsMintCeiling`,
+`SuccessorWithdrawalCapTooLow`, and from `NacklMint` `NacklWindowFull` and
+`NacklLimitBelowWithdrawalCap`.
 
 Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawByProof` while
 `paused`), `AlreadyInThatPauseState` (`pause`, `unpause` that would not change the state).
@@ -923,6 +973,9 @@ Pause: `BridgePaused` (`deposit`, `verifyBlock`, `applyBkSetUpdate`, `withdrawBy
 | `WITHDRAW_ACC_FR` / `WITHDRAW_DAPP_FR` | RealBridge, Shellnet, Reuse | AN-side C4 identity. `ACC_FR` required, `DAPP_FR` may be 0. |
 | `WITHDRAW_ALT_DST_CHAIN_ID`, `WITHDRAW_ALT_DST_HOST_CHAIN_ID` | same | Shellnet destination aliases (§7.2). |
 | `USDC_TOKEN_ID` | same | The ECC currency id USDC is listed under (**was** `WITHDRAW_ALT_TOKEN_ID`); use `3` with the current AN bridge. `DeployRealBridge` defaults to `3`. |
+| `USDC_TVL_CAP` | RealBridge, Shellnet, GenesisCursor | Initial USDC `tvlCap` (`BridgeWithdrawConfig.usdcTvlCap`), USDC base units. Default `10000000000` (10,000 USDC). No ceiling; the owner changes it with `setTokenLimits`. `DeployTestBridge` and `GenDepositSetup` pass `10_000e6`. |
+| `USDC_DAILY_LIMIT` | same | Initial USDC daily withdrawal limit (`BridgeWithdrawConfig.usdcDailyLimit`), USDC base units. Default `10000000000` (10,000 USDC). The owner changes it with `setTokenLimits`. |
+| `NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_INITIAL_HOLDER`, `NACKL_LIST`, `NACKL_DAILY_LIMIT` | DeployNacklToken | Deploy `NacklToken` minted by `NACKL_BRIDGE`; with `NACKL_LIST=true` it also calls `listNackl(token, NACKL_DAILY_LIMIT)`. `NACKL_MAX_TRANSFER` is gone: there is no per-transfer limit. |
 | `PREDECESSOR_BRIDGE` | RealBridge, Shellnet, Reuse, GenesisCursor (optional, zero by default) | Immutable `predecessor`: the bridge on this chain whose treasury the new one may take over (`migrateTreasury` / `fundTreasury`), or zero. It need not be paused, and it plays no part in replay protection (§7.2). All four read it through `script/PredecessorEnv.sol:15-17`. |
 | `SHPLONK_BIN_{PRIMARY,FALLBACK,LAYER_HASHES,WITHDRAWAL}` | ShplonkDeployLib | Override `.bin` paths. |
 | `PRIMARY_VERIFIER`, `FALLBACK_VERIFIER`, `LAYER_HASHES_VERIFIER`, `WITHDRAWAL_VERIFIER` | Reuse, GenesisCursor | Existing verifier addresses. |
@@ -987,6 +1040,8 @@ was written in, so the suite was read, not executed).
 | `AckiNackiBridgeRelayerLoop.t.sol` (6) | 10-block mixed-finType walk, restart, replay, fast-forward, verifier-reject leaves state untouched, anchor mismatch. |
 | `EthAuditQcHardening.t.sol` (5) | QC-A2-3 zero active layer, QC-A4-1 empty Yul code, skim paths, harvest-after-emergency pin. |
 | `FuzzVerifiers.t.sol` (9) | Random/truncated/mutated calldata, field-overflow instance regression, deposit invariants. |
+| `AckiNackiBridgeTokenRegistry.t.sol` | Listing rules, per-token books, the owner-set `tvlCap` (above the former 10,000 USDC too), no per-transfer cap on deposit or withdrawal (`MAX_DEPOSIT_AMOUNT` alone bounds one deposit), the USDC daily window refusing with `WithdrawalWindowFull` and paying the same proof once it frees, one window per token. |
+| `NacklBridge.t.sol`, `NacklBridgeInvariant.t.sol` | NACKL listing, burn on deposit, mint on payout, the daily window (fuzz and invariant: any 24 hours stay within `dailyLimit`, a refused proof stays unspent), `setTokenLimits` for NACKL, the handover and `SuccessorWithdrawalLimitTooLow`. |
 | `ShplonkAggregatorForgery.t.sol` (3) | Groth16-stub proof rejected by the SHPLONK path. |
 | `ShplonkAggregatorVkBinding.t.sol` (16) | Inner-VK Poseidon digest binding: mutated-digest calldata rejected by all four adapters; unmodified calldata rejected when the adapter is deployed with a wrong `vkDigest`; `bytes32(0)` constructor argument rejected with `InvalidVkDigest`; pin at or above the BN254 scalar-field modulus rejected with `VkDigestExceedsFieldModulus` (a chain id is below `r` and is not what this guard catches); pin `r − 1` accepted; calldata one word short of the trailing digest slot rejected without reverting inside `_readInstance` (all four adapters). |
 | `ShplonkVkDigestPinDerivation.t.sol` | Each `*_VK_DIGEST` constant equals word `12 + N` of the matching `<name>_calldata.bin`. |

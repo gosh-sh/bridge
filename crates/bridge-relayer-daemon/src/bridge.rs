@@ -940,7 +940,6 @@ mod sol_bindings {
             /// `decode_withdraw_revert` can name them.
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
-            error TransferTooLarge();
             error NullifierAlreadyUsed(uint256 nullifier);
             error FieldElementOutOfRange(uint256 value);
             error DstChainIdMismatch(uint256 supplied, uint256 expected);
@@ -959,25 +958,18 @@ mod sol_bindings {
             error AaveWithdrawFailed(uint256 requested, uint256 received);
             error WithdrawTransferFailed(address recipient, uint256 amount);
 
-            function nacklState() external view returns (
-                uint256 dailyLimit,
-                uint256 windowUsed,
-                uint256 minted,
-                bool handedOver
-            );
+            function nacklState() external view returns (uint256 minted, bool handedOver);
             error NacklMinterGone();
-            error NacklWindowFull(uint256 used, uint256 amount, uint256 dailyLimit);
+            error WithdrawalWindowFull(uint32 tokenId, uint256 used, uint256 amount, uint256 dailyLimit);
             error NacklNotMinter(address token);
 
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
-            function MAX_TRANSFER_AMOUNT() external view returns (uint256);
-            /// The payout cap remains valid when deposit limits are lowered.
             function usdcTokenId() external view returns (uint32);
-            function maxWithdrawalAmount(uint32 tokenId) external view returns (uint256);
-            function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 maxTransfer, uint256 tvlCap, uint256 liabilities);
+            function withdrawalWindow(uint32 tokenId) external view returns (uint256 dailyLimit, uint256 used);
+            function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 tvlCap, uint256 dailyLimit, uint256 liabilities);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
@@ -1027,7 +1019,7 @@ pub use sol_bindings::AckiNackiBridge;
 pub struct TokenPayoutInfo {
     pub token: Address,
     pub decimals: u8,
-    pub max_withdrawal: U256,
+    pub daily_limit: U256,
     pub liabilities: U256,
 }
 
@@ -1486,8 +1478,6 @@ where
             .await
             .map_err(|e| RelayerError::other(format!("nacklState: {e}")))?;
         Ok(NacklState {
-            daily_limit: r.dailyLimit,
-            window_used: r.windowUsed,
             minted: r.minted,
             handed_over: r.handedOver,
         })
@@ -1664,21 +1654,22 @@ where
             .map_err(map_contract_err)
     }
 
-    /// Maximum amount the bridge pays in one withdrawal, in micro-USDC.
-    ///
-    /// This is the deployment-time constant, not the cap `withdrawByProof`
-    /// enforces. Use [`Self::usdc_payout_cap`] before burning ECC.
-    pub async fn max_transfer_amount(&self) -> Result<U256, RelayerError> {
-        self.contract
-            .MAX_TRANSFER_AMOUNT()
+    /// The rolling 24-hour withdrawal limit of `token_id` and how much of it
+    /// is used: `withdrawByProof` reverts `WithdrawalWindowFull` for a payout
+    /// above `dailyLimit - used`.
+    pub async fn withdrawal_window(&self, token_id: u32) -> Result<(U256, U256), RelayerError> {
+        let r = self
+            .contract
+            .withdrawalWindow(token_id)
             .call()
             .await
-            .map_err(map_contract_err)
+            .map_err(map_contract_err)?;
+        Ok((r.dailyLimit, r.used))
     }
 
     /// Refuse a USDC payout lane that does not match the AN bridge's ECC id,
-    /// then read the withdrawal cap, independently of the mutable deposit cap.
-    pub async fn usdc_payout_cap(&self) -> Result<U256, RelayerError> {
+    /// then read its withdrawal window.
+    pub async fn usdc_withdrawal_window(&self) -> Result<(U256, U256), RelayerError> {
         let token_id = self
             .contract
             .usdcTokenId()
@@ -1690,11 +1681,7 @@ where
                 "USDC token id {token_id} does not match AN ECC id 3"
             )));
         }
-        self.contract
-            .maxWithdrawalAmount(token_id)
-            .call()
-            .await
-            .map_err(map_contract_err)
+        self.withdrawal_window(token_id).await
     }
 
     pub async fn token_payout_info(&self, token_id: u32) -> Result<TokenPayoutInfo, RelayerError> {
@@ -1709,16 +1696,10 @@ where
                 "token id {token_id} is not registered"
             )));
         }
-        let max_withdrawal = self
-            .contract
-            .maxWithdrawalAmount(token_id)
-            .call()
-            .await
-            .map_err(map_contract_err)?;
         Ok(TokenPayoutInfo {
             token: info.token,
             decimals: info.decimals,
-            max_withdrawal,
+            daily_limit: info.dailyLimit,
             liabilities: info.liabilities,
         })
     }
@@ -2273,8 +2254,6 @@ pub const NACKL_TOKEN_ID: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NacklState {
-    pub daily_limit: U256,
-    pub window_used: U256,
     pub minted: U256,
     pub handed_over: bool,
 }
@@ -2404,7 +2383,6 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
     let (name, args) = match e {
         E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
         E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
-        E::TransferTooLarge(_) => ("TransferTooLarge", String::new()),
         E::NullifierAlreadyUsed(x) => (
             "NullifierAlreadyUsed",
             format!("nullifier: {}", word(x.nullifier)),
@@ -2450,11 +2428,11 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
             format!("recipient: {}, amount: {}", x.recipient, x.amount),
         ),
         E::NacklMinterGone(_) => ("NacklMinterGone", String::new()),
-        E::NacklWindowFull(x) => (
-            "NacklWindowFull",
+        E::WithdrawalWindowFull(x) => (
+            "WithdrawalWindowFull",
             format!(
-                "used: {}, amount: {}, dailyLimit: {}",
-                x.used, x.amount, x.dailyLimit
+                "tokenId: {}, used: {}, amount: {}, dailyLimit: {}",
+                x.tokenId, x.used, x.amount, x.dailyLimit
             ),
         ),
         E::NacklNotMinter(x) => ("NacklNotMinter", format!("token: {}", x.token)),
@@ -3069,22 +3047,6 @@ mod tests {
     }
 
     #[test]
-    fn excessive_withdrawal_is_retried_and_names_the_limit() {
-        let reason = format!(
-            "execution reverted: {}",
-            selector_hex_of::<AckiNackiBridge::TransferTooLarge>()
-        );
-        assert_eq!(
-            classify_withdraw_revert(&reason),
-            WithdrawRevertKind::Transient
-        );
-        assert_eq!(
-            decode_withdraw_revert(&reason).unwrap().rendered,
-            "TransferTooLarge()"
-        );
-    }
-
-    #[test]
     fn a_token_listing_change_retries_the_existing_proof() {
         let reason = format!(
             "execution reverted: {}",
@@ -3144,9 +3106,13 @@ mod tests {
     }
 
     #[test]
-    fn a_full_nackl_window_is_retried_and_names_the_limit() {
+    fn a_full_withdrawal_window_is_retried_and_names_the_limit() {
         use alloy::sol_types::SolError;
-        let full = AckiNackiBridge::NacklWindowFull {
+        assert_eq!(AckiNackiBridge::WithdrawalWindowFull::SELECTOR, [
+            0x46, 0x53, 0xf3, 0x81
+        ]);
+        let full = AckiNackiBridge::WithdrawalWindowFull {
+            tokenId: 3,
             used: U256::from(900u64),
             amount: U256::from(200u64),
             dailyLimit: U256::from(1_000u64),
@@ -3159,7 +3125,7 @@ mod tests {
         );
         assert_eq!(
             decode_withdraw_revert(&reason).unwrap().rendered,
-            "NacklWindowFull(used: 900, amount: 200, dailyLimit: 1000)"
+            "WithdrawalWindowFull(tokenId: 3, used: 900, amount: 200, dailyLimit: 1000)"
         );
     }
 

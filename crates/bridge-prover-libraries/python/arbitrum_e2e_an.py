@@ -69,7 +69,7 @@ from helper.bridge_e2e import GIVER_ABI, GIVER_ADDRESS, GIVER_KEY_PATH  # noqa: 
 
 ARB_SEPOLIA = 421614
 NACKL_ID = 1
-NACKL_MAX_TRANSFER = 100_000_000_000
+NACKL_DAILY_LIMIT = 100_000_000_000
 SEPOLIA = 11155111
 PROVER_DIR = os.environ.get("PROVER_DIR", os.path.dirname(_HERE))
 WORK_DIR = os.environ.get("WORK_DIR", os.path.join(PROVER_DIR, "work-local"))
@@ -175,7 +175,7 @@ def main():
         elif cmd == "trust" and len(args) in (1, 2):
             usdc_token = int("75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", 16)
             owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": str(usdc_token),
-                                          "tokenId": 3, "maxTransfer": "50000000", "maxTvl": "10000000000",
+                                          "tokenId": 3, "maxTvl": "10000000000", "dailyLimit": "10000000000",
                                           "depositsEnabled": True})
             listed = until(lambda: truth(getter("getTokenDepositConfig", {
                 "chainId": str(ARB_SEPOLIA), "evmToken": str(usdc_token)}).get("listed")))
@@ -193,8 +193,8 @@ def main():
             if len(args) == 2:
                 nackl = int(args[1], 16)
                 owner_call("setBridgeToken", {"chainId": str(ARB_SEPOLIA), "evmToken": str(nackl),
-                                              "tokenId": NACKL_ID, "maxTransfer": str(NACKL_MAX_TRANSFER),
-                                              "maxTvl": str(NACKL_MAX_TRANSFER * 10), "depositsEnabled": True})
+                                              "tokenId": NACKL_ID, "maxTvl": str(NACKL_DAILY_LIMIT * 10),
+                                              "dailyLimit": str(NACKL_DAILY_LIMIT), "depositsEnabled": True})
                 registered = until(lambda: truth(getter("getTokenDepositConfig", {
                     "chainId": str(ARB_SEPOLIA), "evmToken": str(nackl)}).get("listed")))
                 answer.append(f"NACKL_REGISTERED={str(bool(registered)).lower()}")

@@ -405,7 +405,6 @@ const EXIT_UNSUPPORTED_SRC_CHAIN: i32 = 222;
 const EXIT_UNKNOWN_BLOCK: i32 = 224;
 const EXIT_ZERO_RECIPIENT: i32 = 230;
 const EXIT_PAUSED: i32 = 231;
-const EXIT_TRANSFER_TOO_LARGE: i32 = 234;
 const EXIT_TVL_CAP: i32 = 235;
 const EXIT_CHAIN_BALANCE_EXCEEDED: i32 = 236;
 const EXIT_TOKEN_UNREGISTERED: i32 = 241;
@@ -475,9 +474,6 @@ fn describe_exit_code(code: i32) -> Option<&'static str> {
              Arbitrum",
         ),
         EXIT_ZERO_RECIPIENT => Some("ERR_ZERO_RECIPIENT — the proven AN recipient is zero"),
-        EXIT_TRANSFER_TOO_LARGE => {
-            Some("ERR_TRANSFER_TOO_LARGE — the proven deposit exceeds the per-transfer ceiling")
-        },
         _ => None,
     }
 }
@@ -643,9 +639,8 @@ async fn settle_finalize<C: IAckiNacki>(
             })),
             Verdict::Released => Ok(Some(SubmitOutcome::Pending {
                 reason: format!(
-                    "the bridge cannot pay this deposit now (NACKL lock, payout cap or token \
-                     registration) and released voucher {}; finalizeDeposit is sent again on a \
-                     later attempt",
+                    "the bridge cannot pay this deposit now (NACKL lock or token registration) \
+                     and released voucher {}; finalizeDeposit is sent again on a later attempt",
                     voucher.dst
                 ),
             })),
@@ -1166,7 +1161,7 @@ mod tests {
             }
         }
         assert!(matches!(
-            classify_reverted(Some(234), "Reverted"),
+            classify_reverted(Some(214), "Reverted"),
             SubmitOutcome::Rejected { .. }
         ));
     }

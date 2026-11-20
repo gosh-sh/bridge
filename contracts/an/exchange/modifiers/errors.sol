@@ -22,7 +22,6 @@ abstract contract eccBridgeErrors {
     uint16 constant ERR_PAUSED = 231;
     uint16 constant ERR_ZERO_PUBKEY = 232;
     uint16 constant ERR_BURN_EXCEEDS_BRIDGED = 233;
-    uint16 constant ERR_TRANSFER_TOO_LARGE = 234;
     uint16 constant ERR_TVL_CAP = 235;
     uint16 constant ERR_CHAIN_BALANCE_EXCEEDED = 236;
     uint16 constant ERR_L2_VERIFIER_UNSET = 237;
@@ -37,4 +36,5 @@ abstract contract eccBridgeErrors {
     uint16 constant ERR_TOKEN_DEPOSITS_DISABLED = 243;
     uint16 constant ERR_NOT_DEPOSIT_LOG = 244;
     uint16 constant ERR_RECIPIENT_NOT_EVM = 246;
+    uint16 constant ERR_DAILY_LIMIT = 247;
 }

@@ -138,14 +138,17 @@ pin is moved.
 ### Registering bridged currencies
 
 Before opening deposits from a source chain, call
-`setBridgeToken(chainId, evmToken, tokenId, maxTransfer, maxTvl, depositsEnabled)` as the AN owner.
+`setBridgeToken(chainId, evmToken, tokenId, maxTvl, dailyLimit, depositsEnabled)` as the AN owner.
 USDC is registered under ECC id `3` and NACKL under id `1`; any other id is refused with `242`. Both sides must use the same ECC id and ERC-20 address. Amounts and limits use the token's base units. The association is
-immutable; subsequent calls can raise the TVL ceiling, change the deposit transfer limit and
-the deposit switch, retaining outstanding
-inventory and the highest withdrawal allowance. USDC keeps its 50 USDC / 10,000 USDC bounds.
-`getTokenDepositConfig(chainId, evmToken)` and `getTokenWithdrawalConfig(chainId, tokenId)` expose
-the configuration and per-chain outstanding amount. Closing or throttling deposits does not
-lower the withdrawal allowance. `finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
+immutable; subsequent calls can raise `maxTvl` (lowering it is refused with `242`), change
+`dailyLimit` (it must stay above zero, `242`) and the deposit switch, retaining outstanding
+inventory. There is no per-transfer limit and no protocol constant above the owner's figures.
+`getTokenDepositConfig(chainId, evmToken)` returns `(listed, tokenId, maxTvl, dailyLimit,
+outstanding, depositsEnabled)` and `getTokenWithdrawalConfig(chainId, tokenId)` returns
+`(listed, evmToken, maxTvl, dailyLimit, outstanding, depositsEnabled)`. An unregistered pair reads
+`listed = false`, `maxTvl = 0`, `dailyLimit = 0` and deposits disabled; `outstanding` for id 3 is
+still the chain's USDC counter. Closing or throttling deposits does not touch withdrawals.
+`finalizeDeposit` reads the token from the `Deposit` log, and DepositVoucher
 1.6.0 calls `confirmTokenDeposit` to mint its registered ECC currency. `initiateWithdrawal`
 burns the attached currency and decrements only that currency's destination-chain inventory.
 
@@ -153,13 +156,14 @@ burns the attached currency and decrements only that currency's destination-chai
 
 NACKL is Acki Nacki's own currency, so the bridge never mints or burns it
 ([`docs/NACKL-bridge-extension.md`](../../docs/NACKL-bridge-extension.md)). Register it with
-`setBridgeToken(chainId, <ERC20 NACKL on that chain>, 1, maxTransfer, maxTvl, true)`; the USDC
-bounds do not apply, and `maxTvl` only has to be at least `maxTransfer`.
+`setBridgeToken(chainId, <ERC20 NACKL on that chain>, 1, maxTvl, dailyLimit, true)`. For NACKL
+`maxTvl` is the most NACKL the bridge may hold locked for that chain.
 
 - A NACKL `initiateWithdrawal` keeps the NACKL on the bridge: the lock. It adds the amount to the
   chain's NACKL `outstanding` (`getTokenWithdrawalConfig(chainId, 1)`) and to
   `getNacklLockedTo(chainId, evmBridge)`, the total ever locked for the EVM bridge the withdrawal
-  is bound to. It is refunded above the per-withdrawal cap (234) and when the recipient is not
+  is bound to. It is refunded with 235 when the chain's `outstanding` plus the amount would pass
+  the owner's `maxTvl`, with 247 above the daily limit, and when the recipient is not
   20 bytes, the only form Circuit 4 proves (246).
 - A NACKL deposit unlocks: the bridge sends NACKL it holds from that chain's locks.
   `finalizeDeposit` refuses one above the lock with 236 before accepting it, so the voucher stays
@@ -167,8 +171,12 @@ bounds do not apply, and `maxTvl` only has to be at least `maxTransfer`.
   voucher confirms it — another deposit took the lock first — is refused like any deposit the
   bridge cannot pay at that moment (see below).
 - `mintAndSendTokenBridged` refuses id `1` with 242, and `getTotalBridged(1)` stays `(0, 0)`.
-- `updateCode` carries the locks and the amounts locked for each EVM bridge.
-  From 1.17.0 the bridge starts with none of them.
+- `updateCode` carries the locks, the amounts locked for each EVM bridge and the daily
+  withdrawal windows. From 1.17.0 the bridge starts with none of them.
+- From 1.17.0, each token config keeps `maxTvl`, `outstanding` and the deposit switch, and its
+  `dailyLimit` becomes the old `maxWithdrawal`, the largest payout one withdrawal could make
+  before. `maxTransfer` is dropped. Set the intended `dailyLimit` with `setBridgeToken` after
+  the upgrade.
 
 The owner key can still replace the code with `updateCode`, and the bridge is a special account
 that may mint ECC: only the node refusing `MintToken` and `BurnToken` with id 1 from this address
@@ -299,24 +307,41 @@ minute, and miss many batches; a free Alchemy key keeps it. When an assertion en
 
 ## Transfer and network limits
 
-Deposits and withdrawals are limited to **50 USDC** (50,000,000 base units).
+Acki Nacki sets no per-transfer limit on deposits or withdrawals; an amount only
+has to fit `uint64` (a larger withdrawal is refunded with 214).
 Each L1 bridge refuses a deposit that would take `treasuryBalance` (deposited
 principal minus completed payouts) past **10,000 USDC**, including principal
 supplied to Aave. Owner `fundTreasury` and `migrateTreasury` top-ups are not
 checked against that cap. Yield and
 direct token donations do not increase that counter or its capacity.
-`MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the first deposit width guard;
-the lower product ceiling is `MAX_TRANSFER_AMOUNT`.
+`MAX_DEPOSIT_AMOUNT = type(uint64).max` remains the deposit width guard.
 
-The USDC TVL cap is checked on the EVM bridge only; AN does not bound
-deposits by `maxTvl`. NACKL is bounded on AN only: the NACKL locked for a chain
-stops at 10,000,000 NACKL (`MAX_NACKL_LOCKED`), above it `initiateWithdrawal`
-refunds with 235. `getDepositLimits(chainId)` returns `maxTransfer`, `maxTvl` and
-`outstanding` in base units. `confirmDeposit` increases that chain's outstanding
+The USDC TVL cap is checked on the EVM bridge only; AN stores the USDC `maxTvl`
+but checks it nowhere. NACKL's TVL is checked on AN only, where NACKL is locked:
+`initiateWithdrawal` refunds with 235 when the chain's locked NACKL plus the
+amount would pass the owner's `maxTvl`.
+
+Withdrawals (AN → EVM) of every registered currency have an owner-set daily
+limit per destination chain and currency, the `dailyLimit` of `setBridgeToken`.
+The bridge keeps the amounts withdrawn in hourly buckets (`block.timestamp /
+3600`) and sums the current hour and the 24 before it, as `NacklMint.windowUsed`
+does on EVM. A withdrawal that would take that sum past `dailyLimit` is refunded
+with 247 (`ERR_DAILY_LIMIT`) and counts for nothing; a successful one adds its
+amount to the current hour. An amount leaves the window 25 hours after the hour
+it was withdrawn in. The buckets are a ring of 25 slots per (chain, currency),
+slot `hour % 25`, so storage does not grow with time. Raising or lowering
+`dailyLimit` applies to the next withdrawal; amounts already in the window stay.
+USDC to a chain where USDC is not registered reads `dailyLimit = 0`, so it is
+refunded with 247 until the owner registers it. Deposits (EVM → AN) have no
+rate limit. `getWithdrawalWindow(chainId, tokenId)` returns `(dailyLimit, used)`.
+
+`getDepositLimits(chainId)` returns the USDC `maxTvl`, `dailyLimit` and
+`outstanding` in base units; before USDC is registered for the chain the first
+two read 0. `confirmDeposit` increases that chain's outstanding
 amount; a successful `initiateWithdrawal` decreases the destination chain's
 amount. A deposit that no longer fits when its voucher confirms it (another
 NACKL deposit took the lock first) is refused: the bridge emits `DepositRefused`
-with the reason (236, 234 or 241) and calls the voucher's `release`, which
+with the reason (236 or 241) and calls the voucher's `release`, which
 deletes the voucher, so the same deposit can be finalized again once there is
 room.
 There are no deposit reservations or permanent voucher registry. A repeated
@@ -332,15 +357,16 @@ writers of the counter. `setOutstandingByChain` writes it directly with no tie
 to L1, so an owner who writes a figure other than the measured L1 principal
 breaks both — see *Restoring a chain's outstanding amount* below.
 
-AN finalization rejects amounts above 50 USDC with 234. The check follows the
-receipt proof, since the amount and token come from it, so the bridge pays for
-the proof of a deposit it refuses. A withdrawal to a chain with no
-EVM bridge set, or one that is oversized, that would burn more than bridged
-minted less bridged burned, or that exceeds its destination chain's outstanding
-amount returns the attached ECC without burning it and emits `WithdrawalRefused`
-instead of `WithdrawalInitiated`. That event carries the same fields except
-`dstBridge`, plus `reason` — the error code the call would have thrown had the
-refusal thrown: 239, 234, 233 and 236 for the four cases in that order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
+AN finalization checks the token after the receipt proof, since the amount and
+token come from it, so the bridge pays for the proof of a deposit it refuses. A
+withdrawal to a chain with no EVM bridge set, one that does not fit `uint64`,
+one that would burn more than bridged minted less bridged burned, one that
+exceeds its destination chain's outstanding amount, a NACKL lock past `maxTvl`,
+or one past the daily limit returns the attached ECC without burning it and
+emits `WithdrawalRefused` instead of `WithdrawalInitiated`. That event carries
+the same fields except `dstBridge`, plus `reason` — the error code the call
+would have thrown had the refusal thrown: 239, 214, 233, 236, 235 and 247 for
+these cases in that order. It calls `ensureBalance()` and sends back `min(msg.value, 0.1 vmshell)`;
 it uses no `rawReserve`.
 `ensureBalance()` is free. Dapp 0 contains only system contracts, and mainnet
 has an unlimited dapp configuration deployed for dapp 0. Withdrawal messages
@@ -373,15 +399,15 @@ them once the principal has moved — the order is in `docs/aave-yield.md`,
 
 On the EVM side `migrateTreasury` moves USDC. NACKL (id 1) is not held in custody:
 `migrateToken(1, successor)` hands the NACKL token's minter to the successor. The contract
-checks that the successor lists the same token with a withdrawal cap no lower than the old
-listing's (`NacklSuccessorNotReady`, `SuccessorWithdrawalCapTooLow`); the operator calls it only
+checks that the successor lists the same token with a daily withdrawal limit no lower than the
+old listing's (`NacklSuccessorNotReady`, `SuccessorWithdrawalLimitTooLow`); the operator calls it only
 once `getNacklLockedTo(chainId, oldBridge)` here equals the old bridge's `nacklState().minted`
 (`docs/NACKL-bridge-extension.md`, NB-HO-3). Until then the successor refuses NACKL payouts with
 `NacklNotMinter`, leaving their nullifiers unspent, so they are sent again after the handover; the
 old bridge refuses them with `NacklMinterGone` once it has handed over. For any other listed token
 `migrateToken(tokenId, successor)` moves its custody and liabilities together, with nothing
-minted here, and the new bridge must list the token under the same id, with a withdrawal cap no
-lower than the old listing's (`FundedTokenMismatch`, `SuccessorWithdrawalCapTooLow`). All of them
+minted here, and the new bridge must list the token under the same id, with a daily withdrawal limit no
+lower than the old listing's (`FundedTokenMismatch`, `SuccessorWithdrawalLimitTooLow`). All of them
 run on the paused old bridge, and the registry here does not change. A token left behind strands later burns:
 `setEvmBridge` binds every currency on a chain to one address, so the old bridge
 refuses them with `WrongDstBridge`, and the new one with
@@ -458,8 +484,8 @@ and a `uint64` width guard, so an owner key can already create arbitrary
 ECC[3], and a call that writes a counter without minting is strictly weaker
 than one that mints. The ceiling exists to bound what a bug, a forged proof or a
 compromised L1 contract can extract, and it still does that: every path that is
-not owner-signed stays capped at 50 USDC per transfer and at the destination
-chain's outstanding amount.
+not owner-signed stays capped at the daily withdrawal limit and at the
+destination chain's outstanding amount.
 
 ### Deployment
 
@@ -469,8 +495,8 @@ upgrade tuple adds chain balances and external-message hashes; the previous
 Normal upgrades within this format retain balances and unexpired replay hashes.
 
 `mintAndSendBridged(recipient, value, nonce, chainId)` credits the aborted
-deposit's source chain as well as the global bridged total. It enforces the
-50 USDC transfer limit; the USDC TVL is checked on the EVM bridge only. Match the deposit's recipient,
+deposit's source chain as well as the global bridged total. It has no transfer
+limit, only the `uint64` width guard; the USDC TVL is checked on the EVM bridge only. Match the deposit's recipient,
 amount and EIP-155 chain id exactly, once; this owner call has no deposit-id
 deduplication.
 
@@ -480,8 +506,7 @@ and check `paused() == true` before enabling its replacement. Never run two
 funded payout contracts for the same AN identity and destination chain. Moving
 custody and consumed withdrawal nullifiers is a separate migration: complete it
 before funding a replacement that accepts the same AN history, or use a fresh
-AN identity/history. That migration is not implemented. Amounts above
-50 USDC must settle before switching to the capped contracts.
+AN identity/history. That migration is not implemented.
 
 ## Rebuilding
 
@@ -602,7 +627,7 @@ network.
 AN `maxTvl` cannot decrease after registration, and AN no longer bounds deposits by it.
 To restrict new deposits, close them on EVM
 (`setTokenDepositsEnabled`) or lower the EVM TVL cap; earlier deposits stay payable.
-`finalizeDeposit` reads the AN deposit switch and `maxTransfer` when the receipt arrives,
-not when the deposit was made. Closing the switch or lowering `maxTransfer` therefore also
-refuses deposits already locked on EVM, with 243 or 234, until it is reopened or raised.
-Change them only after those deposits are finalized.
+`finalizeDeposit` reads the AN deposit switch when the receipt arrives,
+not when the deposit was made. Closing the switch therefore also
+refuses deposits already locked on EVM, with 243, until it is reopened.
+Close it only after those deposits are finalized.

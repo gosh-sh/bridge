@@ -97,7 +97,7 @@ def main() -> int:
         run("constructor", {"pubkey": "0x" + keys["public"], "usdcWallet": "0:" + "00" * 32}, *header)
         run("setEvmBridge", {"dstChainId": "1", "evmBridge": EVM_BRIDGE}, *owner)
         run("setBridgeToken", {"chainId": "1", "evmToken": "68", "tokenId": 3,
-                               "maxTransfer": "50000000", "maxTvl": "10000000000",
+                               "maxTvl": "10000000000", "dailyLimit": "50000000",
                                "depositsEnabled": True}, *owner)
         run("mintAndSendBridged", {"recipient": SENDER, "value": "1000000", "nonce": "1",
                                    "chainId": "1"}, *owner)

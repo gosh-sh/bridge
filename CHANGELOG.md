@@ -26,11 +26,29 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `b4344f9c…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
+- `eccBridge` 1.18.0, code hash `f62c758b…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
   with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
   finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
-- `AckiNackiBridge` storage adds `_nackl` at slots 19–23; no earlier slot moves.
+- `AckiNackiBridge` storage: `TokenInfo` is three words (`token`/`decimals`/`depositsEnabled`,
+  `tvlCap`, `liabilities`); `_nackl` takes slots 19–20 and `_withdrawalWindows` slot 21.
+- Bridge limits (gosh-sh/bridge-audit#161): no per-transfer limit on either side; the owner sets
+  TVL where the token is locked and a rolling 24-hour withdrawal limit on both sides; over a limit
+  the transfer is refused, never queued.
+  - `eccBridge`: `setBridgeToken(chainId, evmToken, tokenId, maxTvl, dailyLimit, depositsEnabled)`
+    replaces `maxTransfer` with `dailyLimit`; `getTokenDepositConfig`, `getTokenWithdrawalConfig`
+    and `getDepositLimits` return `dailyLimit` in its place; new `getWithdrawalWindow(chainId,
+    tokenId)` returns `(dailyLimit, used)`. 234 is gone; an amount above uint64 is refunded with
+    214. A USDC withdrawal to a chain without a registered config is refunded with 247: register
+    USDC with `setBridgeToken` after the upgrade. The upgrade sets each config's `dailyLimit` to its
+    old per-withdrawal cap; set the real limit afterwards.
+  - `AckiNackiBridge`: `MAX_TRANSFER_AMOUNT`, `MAX_BRIDGE_TVL`, `maxWithdrawalAmount()` and
+    `TransferTooLarge` are gone; `setTokenLimits(tokenId, tvlCap, dailyLimit)`; `tokenInfo` returns
+    `(token, decimals, depositsEnabled, tvlCap, dailyLimit, liabilities)`; new `withdrawalWindow(tokenId)`
+    returns `(dailyLimit, used)`; `TokenListed` and `TokenLimitsSet` carry `tvlCap, dailyLimit`. The
+    constructor's `BridgeWithdrawConfig` adds `usdcTvlCap` and `usdcDailyLimit` (deploy env
+    `USDC_TVL_CAP`, `USDC_DAILY_LIMIT`, default 10,000 USDC each).
+  - `AckiNackiBridge` links a second external library, `WithdrawalWindow`.
 - `ackinacki-bridge` accepts `eccBridge` up to 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`).
 - `contracts/ethereum` needs `@openzeppelin/contracts` 5.4.0: run `npm install` before `forge
   build`.
@@ -49,54 +67,60 @@ assigns it when the release is tagged.
 
 ### New / Improvements
 
-- `eccBridge`: `setBridgeToken` accepts NACKL (id `1`); the USDC limits and `maxTvl` do not apply to
-  it.
+- `eccBridge`: `setBridgeToken` accepts NACKL (id `1`).
 - `eccBridge`: a NACKL `initiateWithdrawal` locks the NACKL on the bridge
-  (`getNacklLockedTo(chainId, evmBridge)`), refunded above the per-withdrawal cap (234), when the
-  chain's locked NACKL would pass 10,000,000 NACKL (235) and for a recipient that is not 20 bytes
-  (246).
+  (`getNacklLockedTo(chainId, evmBridge)`), refunded when the chain's locked NACKL would pass the
+  owner's `maxTvl` (235) and for a recipient that is not 20 bytes (246).
+- `eccBridge`: `initiateWithdrawal` of USDC and NACKL is refunded with 247 (`ERR_DAILY_LIMIT`) when it
+  does not fit the owner's `dailyLimit` for its chain and token over the last 24 hours (25 hourly
+  buckets). A refunded withdrawal does not count.
 - `eccBridge`: `finalizeDeposit` refuses a NACKL deposit above the chain's locked NACKL with 236.
 - `eccBridge`: the USDC TVL cap is checked on the EVM bridge only; `finalizeDeposit`, the
-  voucher confirmation, `mintAndSendBridged` and `setOutstandingByChain` no longer refuse with 235. NACKL is bounded on Acki Nacki only: the lock of each chain stops at 10,000,000
-  NACKL.
-- `eccBridge`: a deposit the bridge cannot pay when its voucher confirms it (the NACKL lock 236, the
-  payout cap 234, an unregistered token 241) is refused instead of aborting:
+  voucher confirmation, `mintAndSendBridged` and `setOutstandingByChain` no longer refuse with 235.
+  Deposits have no rate limit.
+- `eccBridge`: a deposit the bridge cannot pay when its voucher confirms it (the NACKL lock 236, an
+  unregistered token 241) is refused instead of aborting:
   the bridge emits `DepositRefused` with the reason and calls the voucher's `release`, which
   deletes the voucher. Nothing is paid, and the same deposit can be finalized again.
 - `DepositVoucher` 1.6.0: confirms with `bounce: false`; `release` (only from the bridge) deletes
   it.
 - `eccBridge`: `mintAndSendTokenBridged` refuses id `1` with 242; `getTotalBridged(1)` stays `(0,
   0)`.
-- `AckiNackiBridge`: `listNackl(token, maxTransfer, dailyLimit)` lists the NACKL token under id `1`;
-  called again it sets the daily limit.
+- `AckiNackiBridge`: `listNackl(token, dailyLimit)` lists the NACKL token under id `1`, with no TVL
+  cap (`tvlCap` stays `type(uint256).max`).
+- `AckiNackiBridge`: `withdrawByProof` of every token reverts `WithdrawalWindowFull(tokenId, used,
+  amount, dailyLimit)` when the payout does not fit the token's `dailyLimit` over the last 24
+  hours; the nullifier stays unspent and the same proof pays once the window has room.
 - `AckiNackiBridge`: a NACKL `deposit` burns with `burnFrom`, without a TVL cap.
 - `AckiNackiBridge`: a NACKL `withdrawByProof` mints at once, or reverts without spending the
-  nullifier, so the same proof can be sent again: `NacklWindowFull` when the last 24 hours already
-  minted `dailyLimit`, `NacklNotMinter` on a successor before the handover, `NacklMinterGone` on
-  a bridge that handed the minter over. There is no payout queue.
-- `AckiNackiBridge`: `nacklState()` reports `dailyLimit`, `windowUsed`, `minted` and `handedOver`.
-- `AckiNackiBridge`: new errors `NacklMinterGone`, `NacklWindowFull`, `NacklNotMinter`,
-  `NacklBadDecimals`, `NacklLimitBelowWithdrawalCap`, `NacklSuccessorNotReady`; events
-  `NacklListed`, `NacklLimitsSet`, `NacklMinterHandedOver`.
-- `AckiNackiBridge`: `migrateToken(1, successor)` hands the NACKL minter over while paused, to a
-  successor whose NACKL withdrawal cap is no lower; run it only after `setEvmBridge` to the
+  nullifier, so the same proof can be sent again: `NacklNotMinter` on a successor before the
+  handover, `NacklMinterGone` on a bridge that handed the minter over. There is no payout queue.
+- `AckiNackiBridge`: `nacklState()` reports `minted` and `handedOver`.
+- `AckiNackiBridge`: new errors `WithdrawalWindowFull`, `SuccessorWithdrawalLimitTooLow`,
+  `NacklMinterGone`, `NacklNotMinter`, `NacklBadDecimals`, `NacklSuccessorNotReady`; events
+  `NacklListed`, `NacklMinterHandedOver`.
+- `AckiNackiBridge`: `migrateToken` and `migrateTreasury` refuse a successor whose daily withdrawal
+  limit for the token is lower (`SuccessorWithdrawalLimitTooLow`).
+- `AckiNackiBridge`: `migrateToken(1, successor)` hands the NACKL minter over while paused; run it only after `setEvmBridge` to the
   successor and once `getNacklLockedTo` for the old bridge equals its `nacklState().minted`.
 - `NacklToken`: OpenZeppelin ERC20 `NACKL`, nine decimals, deployed and optionally listed by
   `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_INITIAL_HOLDER`,
-  `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`).
-- `relayer daemon-withdraw`, `daemon-bridge` and `daemon-withdraw-live` retry a NACKL proof refused
-  with `NacklWindowFull` or `NacklNotMinter` later and park one refused with `NacklMinterGone`.
+  `NACKL_LIST`, `NACKL_DAILY_LIMIT`).
+- `relayer daemon-withdraw`, `daemon-bridge` and `daemon-withdraw-live` retry a proof refused with
+  `WithdrawalWindowFull` or `NacklNotMinter` later and park one refused with `NacklMinterGone`.
 - `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --tx-hash <AN tx>
   --token …` proves any burn and sends `withdrawByProof` (JSON `submit` is `null` after `send`).
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
   amount and recipient from the receipt.
 - `ackinacki-bridge deposit` JSON `finalize`: `sent` or `already_finalized` once credited.
-- `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning; it refuses an
-  amount above the EVM bridge's payout cap, and the Acki Nacki bridge's `getTotalBridged` and the
-  chain's limits decide the rest.
-- `ackinacki-bridge withdraw --token nackl` withdraws NACKL; when the EVM bridge's daily NACKL limit
-  is full it exits 13 with nothing spent, and re-running with `--allow-retry` later sends the same proof.
+- `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning. Before the
+  burn or lock it refuses (exit 2) an amount that does not fit the Acki Nacki daily window (247),
+  a NACKL lock above `maxTvl` (235) and an amount above the EVM bridge's `dailyLimit`, which could
+  never be paid; it warns when the EVM window has no room now.
+- `ackinacki-bridge withdraw --token nackl` withdraws NACKL.
+- `ackinacki-bridge withdraw` whose proof the EVM bridge refuses with `WithdrawalWindowFull` exits 13 with
+  nothing spent; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof`.
 - `ackinacki-bridge deposit` exits 38 (`CreditRefused`) when the bridge refuses the deposit for now;
   `--resume` sends `finalizeDeposit` again and confirms the credit.
 - `deposit-relayer` treats a deposit whose voucher the bridge released as pending and sends it

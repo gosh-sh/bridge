@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "./helpers/NacklBridgeFixture.sol";
+import { WithdrawalWindow } from "../src/WithdrawalWindow.sol";
 
 contract EighteenDecimalsToken {
     address public owner;
@@ -28,24 +29,34 @@ contract NacklBridgeTest is NacklBridgeFixture {
     );
 
     function test_NB_EVM_LIST_listsNacklUnderIdOne() public view {
-        (address token, uint8 decimals, bool open, uint256 maxTransfer,,) = bridge.tokenInfo(1);
+        (
+            address token,
+            uint8 decimals,
+            bool open,
+            uint256 tvlCap,
+            uint256 dailyLimit,
+            uint256 liabilities
+        ) = bridge.tokenInfo(1);
         assertEq(token, address(nackl));
         assertEq(decimals, 9);
         assertTrue(open);
-        assertEq(maxTransfer, MAX_TRANSFER);
-        (uint256 limit,,,) = bridge.nacklState();
+        assertEq(tvlCap, type(uint256).max);
+        assertEq(dailyLimit, DAILY_LIMIT);
+        assertEq(liabilities, 0);
+        (uint256 limit, uint256 used) = bridge.withdrawalWindow(1);
         assertEq(limit, DAILY_LIMIT);
+        assertEq(used, 0);
     }
 
     function test_NB_EVM_LIST_refusesATokenTheBridgeCannotMint() public {
         AckiNackiBridge b = _newBridge(address(0));
         NacklToken foreign = new NacklToken(address(this), address(0), 0);
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklNotMinter.selector, address(foreign)));
-        b.listNackl(foreign, MAX_TRANSFER, DAILY_LIMIT);
+        b.listNackl(foreign, DAILY_LIMIT);
 
         EighteenDecimalsToken wide = new EighteenDecimalsToken(address(b));
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklBadDecimals.selector, uint8(18)));
-        b.listNackl(NacklToken(address(wide)), MAX_TRANSFER, DAILY_LIMIT);
+        b.listNackl(NacklToken(address(wide)), DAILY_LIMIT);
     }
 
     function test_NB_EVM_LIST_onceAndOwnerOnly() public {
@@ -53,13 +64,19 @@ contract NacklBridgeTest is NacklBridgeFixture {
         vm.expectRevert(
             abi.encodeWithSelector(AckiNackiBridge.TokenIdAlreadyUsed.selector, 1, address(nackl))
         );
-        bridge.listNackl(other, MAX_TRANSFER, DAILY_LIMIT);
+        bridge.listNackl(other, DAILY_LIMIT);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.TokenAlreadyListed.selector, address(nackl), uint32(1)
+            )
+        );
+        bridge.listNackl(nackl, DAILY_LIMIT);
 
         AckiNackiBridge b = _newBridge(address(0));
         NacklToken t = new NacklToken(address(b), address(0), 0);
         vm.prank(user);
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
-        b.listNackl(t, MAX_TRANSFER, DAILY_LIMIT);
+        b.listNackl(t, DAILY_LIMIT);
     }
 
     function test_NB_EVM_DEPOSIT_burnsAndEmitsTheSameDeposit() public {
@@ -78,12 +95,12 @@ contract NacklBridgeTest is NacklBridgeFixture {
         assertEq(bridge.liabilitiesOf(1), 0);
     }
 
-    function test_NB_EVM_DEPOSIT_capAndAllowance() public {
-        _fund(user, 2 * MAX_TRANSFER);
+    function test_NB_EVM_DEPOSIT_noPerTransferCapButAllowance() public {
+        _fund(user, 2 * DAILY_LIMIT + 1);
         vm.startPrank(user);
-        nackl.approve(address(bridge), 2 * MAX_TRANSFER);
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.deposit(address(nackl), MAX_TRANSFER + 1, bytes32(uint256(7)));
+        nackl.approve(address(bridge), 2 * DAILY_LIMIT);
+        bridge.deposit(address(nackl), 2 * DAILY_LIMIT, bytes32(uint256(7)));
+        assertEq(nackl.totalSupply(), 1);
         nackl.approve(address(bridge), 0);
         vm.expectRevert();
         bridge.deposit(address(nackl), 1, bytes32(uint256(7)));
@@ -91,22 +108,22 @@ contract NacklBridgeTest is NacklBridgeFixture {
     }
 
     function test_NB_EVM_DEPOSIT_noTvlCap() public {
-        _fund(user, 20 * MAX_TRANSFER);
+        _fund(user, 20 * LARGE_AMOUNT);
         vm.startPrank(user);
         nackl.approve(address(bridge), type(uint256).max);
         for (uint256 i = 0; i < 20; i++) {
-            bridge.deposit(address(nackl), MAX_TRANSFER, bytes32(uint256(7)));
+            bridge.deposit(address(nackl), LARGE_AMOUNT, bytes32(uint256(7)));
         }
         vm.stopPrank();
         assertEq(nackl.totalSupply(), 0);
     }
 
     function test_NB_EVM_WITHDRAW_payoutIsMintedAtOnce() public {
-        uint256 n = _withdraw(MAX_TRANSFER);
-        assertEq(nackl.balanceOf(RECIPIENT), MAX_TRANSFER);
+        uint256 n = _withdraw(LARGE_AMOUNT);
+        assertEq(nackl.balanceOf(RECIPIENT), LARGE_AMOUNT);
         assertTrue(bridge.isNullifierUsed(n));
-        assertEq(_minted(bridge), MAX_TRANSFER);
-        assertEq(_windowUsed(), MAX_TRANSFER);
+        assertEq(_minted(bridge), LARGE_AMOUNT);
+        assertEq(_windowUsed(), LARGE_AMOUNT);
     }
 
     function test_NB_EVM_WITHDRAW_overTheLimitIsRefusedAndCanBeSentAgain() public {
@@ -117,7 +134,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory late =
             _pub(bridge, 1, 700, RECIPIENT);
         vm.expectRevert(
-            abi.encodeWithSelector(NacklMint.NacklWindowFull.selector, DAILY_LIMIT, 1, DAILY_LIMIT)
+            abi.encodeWithSelector(
+                WithdrawalWindow.WithdrawalWindowFull.selector, 1, DAILY_LIMIT, 1, DAILY_LIMIT
+            )
         );
         bridge.withdrawByProof(hex"00", late);
         assertFalse(bridge.isNullifierUsed(700));
@@ -125,7 +144,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
         vm.warp(block.timestamp + 24 hours);
         vm.expectRevert(
-            abi.encodeWithSelector(NacklMint.NacklWindowFull.selector, DAILY_LIMIT, 1, DAILY_LIMIT)
+            abi.encodeWithSelector(
+                WithdrawalWindow.WithdrawalWindowFull.selector, 1, DAILY_LIMIT, 1, DAILY_LIMIT
+            )
         );
         bridge.withdrawByProof(hex"00", late);
 
@@ -172,33 +193,42 @@ contract NacklBridgeTest is NacklBridgeFixture {
         }
     }
 
-    function test_NB_EVM_WITHDRAW_capStillApplies() public {
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.withdrawByProof(hex"00", _pub(bridge, MAX_TRANSFER + 1, 99, RECIPIENT));
+    function test_NB_EVM_WITHDRAW_noPerTransferCap() public {
+        _withdraw(DAILY_LIMIT);
+        assertEq(nackl.balanceOf(RECIPIENT), DAILY_LIMIT);
+        assertEq(_windowUsed(), DAILY_LIMIT);
     }
 
-    function test_NB_EVM_LIMITS_ownerSetsTheLimitNotBelowTheCap() public {
-        bridge.listNackl(nackl, 0, 2 * MAX_TRANSFER);
-        (uint256 limit,,,) = bridge.nacklState();
-        assertEq(limit, 2 * MAX_TRANSFER);
+    function test_NB_EVM_LIMITS_ownerSetsTheDailyLimitAndNoTvlCap() public {
+        bridge.setTokenLimits(1, type(uint256).max, 2 * LARGE_AMOUNT);
+        (uint256 limit,) = bridge.withdrawalWindow(1);
+        assertEq(limit, 2 * LARGE_AMOUNT);
+        (,,,, uint256 dailyLimit,) = bridge.tokenInfo(1);
+        assertEq(dailyLimit, 2 * LARGE_AMOUNT);
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                NacklMint.NacklLimitBelowWithdrawalCap.selector, MAX_TRANSFER - 1, MAX_TRANSFER
+                AckiNackiBridge.TokenLimitsInvalid.selector, LARGE_AMOUNT, DAILY_LIMIT
             )
         );
-        bridge.listNackl(nackl, 0, MAX_TRANSFER - 1);
+        bridge.setTokenLimits(1, LARGE_AMOUNT, DAILY_LIMIT);
 
+        _withdraw(2 * LARGE_AMOUNT);
+        bridge.setTokenLimits(1, type(uint256).max, LARGE_AMOUNT);
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory p = _pub(bridge, 1, 800, RECIPIENT);
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.TokenLimitsInvalid.selector, 2 * MAX_TRANSFER + 1, type(uint256).max
+                WithdrawalWindow.WithdrawalWindowFull.selector, 1, 2 * LARGE_AMOUNT, 1, LARGE_AMOUNT
             )
         );
-        bridge.setTokenLimits(1, 2 * MAX_TRANSFER + 1, type(uint256).max);
+        bridge.withdrawByProof(hex"00", p);
+        vm.warp(block.timestamp + 25 hours);
+        bridge.withdrawByProof(hex"00", p);
+        assertTrue(bridge.isNullifierUsed(800));
 
         vm.prank(user);
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
-        bridge.listNackl(nackl, 0, DAILY_LIMIT);
+        bridge.setTokenLimits(1, type(uint256).max, DAILY_LIMIT);
     }
 
     function test_NB_EVM_PAUSE_stopsDepositAndWithdrawal() public {
@@ -216,7 +246,7 @@ contract NacklBridgeTest is NacklBridgeFixture {
     }
 
     function _listOnSuccessor(AckiNackiBridge s) internal {
-        s.listNackl(nackl, MAX_TRANSFER, DAILY_LIMIT);
+        s.listNackl(nackl, DAILY_LIMIT);
     }
 
     function test_NB_EVM_HANDOVER_refusedUnlessPausedAndReady() public {
@@ -238,12 +268,12 @@ contract NacklBridgeTest is NacklBridgeFixture {
         bridge.migrateToken(1, address(stranger));
 
         AckiNackiBridge narrow = _successor();
-        narrow.listNackl(nackl, MAX_TRANSFER - 1, DAILY_LIMIT);
+        narrow.listNackl(nackl, DAILY_LIMIT - 1);
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector,
-                MAX_TRANSFER - 1,
-                MAX_TRANSFER
+                AckiNackiBridge.SuccessorWithdrawalLimitTooLow.selector,
+                DAILY_LIMIT - 1,
+                DAILY_LIMIT
             )
         );
         bridge.migrateToken(1, address(narrow));
@@ -261,12 +291,12 @@ contract NacklBridgeTest is NacklBridgeFixture {
 
         AckiNackiBridge stranger = _newBridge(address(0));
         vm.expectRevert(abi.encodeWithSelector(NacklMint.NacklNotMinter.selector, address(nackl)));
-        stranger.listNackl(nackl, MAX_TRANSFER, DAILY_LIMIT);
+        stranger.listNackl(nackl, DAILY_LIMIT);
 
         bridge.pause();
         bridge.migrateToken(1, address(s));
         assertEq(nackl.owner(), address(s));
-        (,,, bool handedOver) = bridge.nacklState();
+        (, bool handedOver) = bridge.nacklState();
         assertTrue(handedOver);
         (,, bool open,,,) = bridge.tokenInfo(1);
         assertFalse(open);

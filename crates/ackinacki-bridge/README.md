@@ -5,7 +5,10 @@
 is full, refuses it with nothing spent, and the run exits 13; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof` command.
 A NACKL deposit is refused above the NACKL the AN bridge holds locked for its chain. The amount is read in that token's registered decimals,
 without rounding. Preflight refuses mismatched token addresses, missing registrations,
-insufficient per-chain inventory and payout limits before burning. Records and locks are
+insufficient per-chain inventory and owner limits before burning: an amount that does not fit the
+AN bridge's rolling 24-hour withdrawal limit for the token and chain (`getWithdrawalWindow`;
+`initiateWithdrawal` would refund it with 247, `ERR_DAILY_LIMIT`), and a NACKL lock past the
+owner's `maxTvl` for the chain (235). There is no per-transfer limit. Records and locks are
 separate for each ECC id; existing USDC records retain their original keys. The JSON burn
 summary includes `token_id` and displays the token amount at its own precision.
 
@@ -17,8 +20,10 @@ Each direction runs whole, or in two steps, each a run of its own:
 `finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet. The proof is
 always built; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
 proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "already_paid"`,
-`finalize: "already_finalized"`. A NACKL proof the EVM bridge refuses because its daily limit is
-full (`NacklWindowFull`) exits 13 with nothing spent; re-running `withdraw` with `--allow-retry`, or the same `withdraw proof` command, later sends the same proof.
+`finalize: "already_finalized"`. A USDC or NACKL proof the EVM bridge refuses because the owner's
+rolling 24-hour withdrawal limit for the token is full (`WithdrawalWindowFull`) exits 13 with
+nothing spent and the nullifier unspent; later, re-running `withdraw` with `--allow-retry`, or the
+same `withdraw proof` command, sends the same proof.
 `deposit proof` takes a deposit made through a contract wallet too: the `Deposit` event decides, not
 the transaction's calldata. A transaction with several deposits to the bridge is refused (the
 deposit relayer's `finalize-one` takes it). One operation holds one deposit: `deposit proof` of a transaction an operation in
@@ -78,8 +83,10 @@ pipeline:
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy — not only AN-side ones.** How much may be withdrawn
    is the Acki Nacki bridge's answer (`getTotalBridged`, the chain's
-   limits), and no more than the EVM bridge's payout cap; its treasury is
-   not read.
+   limits); an amount above the EVM bridge's daily withdrawal limit for
+   the token (`withdrawalWindow`) is refused, and one that does not fit the
+   window's room right now is only a warning (`WithdrawalWindowFull`, exit
+   13 at submit, retried later). Its treasury is not read.
 
    *Real runs only*, because these need the submit-only flags: the burner
    key parses, the KZG ceremony resolves at k=20 **and** k=21, the
@@ -667,7 +674,7 @@ claiming there is no record — it never opened one to find out.
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the EVM bridge's daily NACKL limit is full (`NacklWindowFull`; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof`); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
+| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the EVM bridge's daily withdrawal limit for the token is full (`WithdrawalWindowFull`, USDC or NACKL; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof`); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
 **Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went
@@ -890,7 +897,7 @@ The refusal names the bridge's error and its arguments first — for example
 `NullifierAlreadyUsed(nullifier: 0x2f01…)` or
 `WithdrawTreasuryShortfall(requested: 1000000, available: 20)` — and for
 `NullifierAlreadyUsed`, `BridgePaused`, `WithdrawTreasuryShortfall`,
-`UnknownAnchor` and `WithdrawalProofRejected` says what to do. The node's
+`UnknownAnchor`, `WithdrawalProofRejected` and `WithdrawalWindowFull` says what to do. The node's
 own text follows on a `node said:` line.
 
 Exit 13 also comes before any proof, when the captured
@@ -1549,7 +1556,7 @@ without them it is refused with exit 2.
 | 34 | `finalizeDeposit` was sent and the credit was not confirmed in time; or step 8 ran out of time with a send in doubt; or a `--resume` could not open the state directory or read the operation's record | unknown | `--resume <op-id>`; never make a new deposit instead |
 | **35** | **The deposit is on chain but the Acki Nacki bridge cannot finalize it from its receipt, or it is not the deposit that was requested** | **in the EVM bridge** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
 | **37** | **The voucher exists and the bridge transaction that should have minted (USDC) or unlocked (NACKL) the credit aborted** | **USDC: in the EVM bridge, beyond a retry; only the operator can pay it out. NACKL: burned on the EVM chain and still locked on the AN bridge; no call in this version pays it out** | [hand it to the operator](#handing-a-deposit-to-the-operator) |
-| **38** | **The deposit is proven, but the AN bridge could not pay it when its voucher confirmed it: less NACKL was locked for its chain (236), it is above the payout cap (234), or the token is not registered (241)** | **nothing paid; the bridge released the voucher** | `--resume <op-id>` once the bridge has room sends `finalizeDeposit` again and confirms the credit |
+| **38** | **The deposit is proven, but the AN bridge could not pay it when its voucher confirmed it: less NACKL was locked for its chain (236) or the token is not registered (241)** | **nothing paid; the bridge released the voucher** | `--resume <op-id>` once the bridge has room sends `finalizeDeposit` again and confirms the credit |
 
 `--resume <op-id>` continues 30–34 and 38. 22, 35 and 37 close the operation for
 good, and it blocks no new deposit. The withdrawal codes 10–13 never come from

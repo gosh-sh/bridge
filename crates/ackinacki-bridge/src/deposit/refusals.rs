@@ -17,8 +17,6 @@ pub const ERR_UNKNOWN_BLOCK: i32 = 224;
 pub const ERR_ZERO_RECIPIENT: i32 = 230;
 /// Deposits are paused.
 pub const ERR_PAUSED: i32 = 231;
-/// The proven amount exceeds the per-transfer ceiling.
-pub const ERR_TRANSFER_TOO_LARGE: i32 = 234;
 /// The source chain has no remaining deposit capacity.
 pub const ERR_TVL_CAP: i32 = 235;
 pub const ERR_CHAIN_BALANCE_EXCEEDED: i32 = 236;
@@ -107,11 +105,6 @@ fn by_code(code: i32) -> Reaction {
             code,
             hint: "message expiry is outside the bridge's five-minute window; check clock \
                    synchronization, then resume with the same work directory",
-        },
-        ERR_TRANSFER_TOO_LARGE => Reaction::Refused {
-            code,
-            hint: "the proven deposit exceeds the per-transfer ceiling; keep the work directory \
-                   and contact the bridge operator",
         },
         ERR_UNKNOWN_BLOCK => Reaction::BackToAnchor,
         ERR_UNSUPPORTED_SRC_CHAIN => Reaction::Refused {

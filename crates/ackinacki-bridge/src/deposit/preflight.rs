@@ -182,12 +182,6 @@ pub async fn check(
     // precision — not USDC's six places — decides the base units the
     // bridge is asked for.
     let amount = base_units(typed, listing.decimals, token)?;
-    if U256::from(amount) > listing.max_transfer {
-        return Err(refuse(format!(
-            "deposit exceeds the bridge's per-token maxTransfer for {token} ({} base units)",
-            listing.max_transfer
-        )));
-    }
     if listing.liabilities > listing.tvl_cap
         || U256::from(amount) > listing.tvl_cap - listing.liabilities
     {
@@ -226,12 +220,6 @@ pub async fn check(
     )
     .await?;
     let requested = U256::from(amount);
-    if requested > limits.max_transfer {
-        return Err(refuse(format!(
-            "deposit exceeds the AN token maxTransfer ({} base units)",
-            limits.max_transfer
-        )));
-    }
     if listing.token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID
         && requested > limits.outstanding
     {
@@ -1215,8 +1203,8 @@ mod tests {
                         3,
                         6,
                         false,
-                        50_000_000,
                         10_000_000_000,
+                        50_000_000,
                         0,
                     )
                 }),
@@ -1230,23 +1218,8 @@ mod tests {
                         3,
                         6,
                         true,
-                        u128::from(W_AMOUNT) - 1,
                         10_000_000_000,
-                        0,
-                    )
-                }),
-                "maxTransfer",
-            ),
-            (
-                Box::new(|w: &World| {
-                    w.evm.set_token_listing(
-                        W_BRIDGE,
-                        W_USDC,
-                        3,
-                        6,
-                        true,
                         50_000_000,
-                        10_000_000_000,
                         10_000_000_000 - u128::from(W_AMOUNT) + 1,
                     )
                 }),
@@ -1316,7 +1289,7 @@ mod tests {
         let world = World::healthy();
         world
             .evm
-            .set_token_listing(W_BRIDGE, DAI, 1, 9, true, ONE * 50, ONE * 10_000, 0);
+            .set_token_listing(W_BRIDGE, DAI, 1, 9, true, ONE * 10_000, ONE * 50, 0);
         world.evm.set_call(
             DAI,
             IErc20::decimalsCall::SELECTOR,
@@ -1356,7 +1329,7 @@ mod tests {
         let world = World::healthy();
         world
             .evm
-            .set_token_listing(W_BRIDGE, DAI, 1, 9, true, ONE * 50, ONE * 10_000, 0);
+            .set_token_listing(W_BRIDGE, DAI, 1, 9, true, ONE * 10_000, ONE * 50, 0);
         world.evm.set_call(
             DAI,
             IErc20::decimalsCall::SELECTOR,
@@ -1374,7 +1347,7 @@ mod tests {
         );
         world.an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
             serde_json::json!({"listed": true, "tokenId": "1", "depositsEnabled": true,
-                "maxTransfer": ONE.to_string(), "maxTvl": (ONE * 10).to_string(),
+                "maxTvl": (ONE * 10).to_string(), "dailyLimit": ONE.to_string(),
                 "outstanding": (ONE * 10).to_string()}),
         ]);
         let mut p = world.params(RunMode::DryRun);

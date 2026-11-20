@@ -9,7 +9,7 @@ contract NacklHandler is Test {
     uint256 internal immutable anchor;
     uint256 internal immutable dappFr;
     uint256 internal immutable accFr;
-    uint256 internal immutable maxTransfer;
+    uint256 internal immutable maxAmount;
 
     uint256 public nextNullifier = 1_000;
     uint256 public paidByProofs;
@@ -23,18 +23,18 @@ contract NacklHandler is Test {
         uint256 anchor_,
         uint256 dapp,
         uint256 acc,
-        uint256 cap
+        uint256 maxAmount_
     ) {
         bridge = b;
         nackl = t;
         anchor = anchor_;
         dappFr = dapp;
         accFr = acc;
-        maxTransfer = cap;
+        maxAmount = maxAmount_;
     }
 
     function withdraw(uint256 amount) external {
-        amount = bound(amount, 1, maxTransfer);
+        amount = bound(amount, 1, maxAmount);
         uint256 before = nackl.totalSupply();
         uint256 a = uint256(uint160(address(0x1111111111111111111111111111111111111111)));
         uint256 nullifier = nextNullifier++;
@@ -79,7 +79,7 @@ contract NacklBridgeInvariantTest is NacklBridgeFixture {
 
     function setUp() public override {
         super.setUp();
-        handler = new NacklHandler(bridge, nackl, seedAnchor, DAPP_FR, ACC_FR, MAX_TRANSFER);
+        handler = new NacklHandler(bridge, nackl, seedAnchor, DAPP_FR, ACC_FR, DAILY_LIMIT);
         targetContract(address(handler));
     }
 

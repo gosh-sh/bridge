@@ -795,6 +795,11 @@ fn refusal(reason: &str) -> Result<Outcome, StepError> {
                 r.rendered
             ),
         })),
+        Some(r) if r.name == "WithdrawalWindowFull" => Err(StepError::Retry(anyhow::anyhow!(
+            "withdrawByProof reverts {}: the EVM bridge's rolling 24-hour withdrawal limit has no \
+             room for this payout yet; the nullifier is unspent and the claim is retried later",
+            r.rendered
+        ))),
         Some(r) if r.name == "UnknownAnchor" => Err(StepError::AnchorGone(format!(
             "withdrawByProof reverts {}: the anchor has left the bridge's window; the next proof \
              picks the layer itself",
@@ -1040,8 +1045,9 @@ mod tests {
             Ok(Outcome::Final(ClaimState::Parked { .. }))
         ));
         let full = format!(
-            "execution reverted: 0x{}{:064x}{:064x}{:064x}",
-            selector("NacklWindowFull(uint256,uint256,uint256)"),
+            "execution reverted: 0x{}{:064x}{:064x}{:064x}{:064x}",
+            selector("WithdrawalWindowFull(uint32,uint256,uint256,uint256)"),
+            1,
             900,
             200,
             1000

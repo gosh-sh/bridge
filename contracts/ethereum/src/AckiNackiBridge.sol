@@ -11,6 +11,7 @@ import "./IBridgeWithdrawalVerifier.sol";
 import "./IPredecessorBridge.sol";
 import { NacklToken } from "./NacklToken.sol";
 import { NacklMint } from "./NacklMint.sol";
+import { WithdrawalWindow } from "./WithdrawalWindow.sol";
 
 /// @title AckiNackiBridge
 /// @notice Bridge contract for depositing tokens to Acki Nacki blockchain.
@@ -57,18 +58,7 @@ contract AckiNackiBridge {
 
     /// @notice Amount-width ceiling for every token, not an AN policy limit.
     ///         `gosh.mintecc` takes a uint64 (~18.44 tokens at 18 decimals).
-    ///         The current AN bridge additionally enforces 50 USDC per transfer
-    ///         and credits USDC alone.
     uint256 public constant MAX_DEPOSIT_AMOUNT = type(uint64).max;
-
-    /// @notice Default per-tx cap applied to USDC when the constructor lists
-    ///         it. The owner can change it afterwards with `setTokenLimits`;
-    ///         the constructor lists no other token.
-    uint256 public constant MAX_TRANSFER_AMOUNT = 50 * USDC_UNIT;
-
-    /// @notice Default outstanding-liability cap applied to USDC when the
-    ///         constructor lists it. See `MAX_TRANSFER_AMOUNT`.
-    uint256 public constant MAX_BRIDGE_TVL = 10_000 * USDC_UNIT;
 
     /// @notice Basis-point denominator
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -146,15 +136,13 @@ contract AckiNackiBridge {
         ///         ignores it, so closing deposits never strands funds that
         ///         are already paid in.
         bool depositsEnabled;
-        /// @notice Per-deposit cap, token base units.
-        uint256 maxTransfer;
         /// @notice Cap on outstanding liabilities for this token, base units.
+        ///         Set by the owner; `deposit` refuses what would exceed it.
+        ///         `type(uint256).max` for NACKL, which is minted, not held.
         uint256 tvlCap;
         /// @notice Outstanding liabilities, base units. Unused for USDC,
         ///         whose liabilities live in `treasuryBalance`.
         uint256 liabilities;
-        /// @notice Highest deposit cap accepted for this listing; never decreases.
-        uint256 maxWithdrawal;
     }
 
     /// @notice ECC currency id → listing.
@@ -389,6 +377,9 @@ contract AckiNackiBridge {
 
     NacklMint.State private _nackl;
 
+    /// @notice ECC currency id → rolling 24-hour withdrawal limit and usage.
+    mapping(uint32 => WithdrawalWindow.Window) private _withdrawalWindows;
+
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
@@ -416,12 +407,13 @@ contract AckiNackiBridge {
         uint32 indexed tokenId,
         address indexed token,
         uint8 decimals,
-        uint256 maxTransfer,
         uint256 tvlCap,
+        uint256 dailyLimit,
         bool depositsEnabled
     );
-    /// @notice Owner changed the caps on an already listed id.
-    event TokenLimitsSet(uint32 indexed tokenId, uint256 maxTransfer, uint256 tvlCap);
+    /// @notice Owner changed the TVL cap and daily withdrawal limit of an
+    ///         already listed id.
+    event TokenLimitsSet(uint32 indexed tokenId, uint256 tvlCap, uint256 dailyLimit);
     /// @notice Owner opened or closed deposits for a listed id. Withdrawals
     ///         are unaffected either way.
     event TokenDepositsEnabledSet(uint32 indexed tokenId, bool enabled);
@@ -524,7 +516,6 @@ contract AckiNackiBridge {
     ///         by `amount` (fee-on-transfer / rebasing). Fail closed.
     error TransferAmountMismatch();
     error DepositTooLarge();
-    error TransferTooLarge();
     error TvlCapReached();
     /// @notice Acki Nacki destination account was zero. A valid AN recipient
     ///         (256-bit TVM account) must be supplied at deposit time.
@@ -598,9 +589,10 @@ contract AckiNackiBridge {
     error CannotMigrateUsdc();
     /// @notice `fundToken`: this bridge lists another token under `tokenId`.
     error FundedTokenMismatch(uint32 tokenId, address token);
-    /// @notice `migrateToken`: the successor would refuse a withdrawal this
-    ///         listing accepts. Raise the successor's limits first.
-    error SuccessorWithdrawalCapTooLow(uint256 cap, uint256 required);
+    /// @notice `migrateToken` / `migrateTreasury`: the successor's daily
+    ///         withdrawal limit for the token is below this bridge's, so a
+    ///         payout that fits here might not fit there. Raise it first.
+    error SuccessorWithdrawalLimitTooLow(uint256 successorLimit, uint256 limit);
 
     // applyBkSetUpdate errors
     error BkUpdateDisabled();
@@ -707,12 +699,9 @@ contract AckiNackiBridge {
     error TokenAlreadyListed(address token, uint32 existingTokenId);
     /// @notice That id is already taken by `existingToken`.
     error TokenIdAlreadyUsed(uint32 tokenId, address existingToken);
-    /// @notice `maxTransfer` must be non-zero and must not exceed `tvlCap`.
-    error TokenLimitsInvalid(uint256 maxTransfer, uint256 tvlCap);
-    /// @notice `maxTransfer` exceeds `MAX_DEPOSIT_AMOUNT`, the uint64 ceiling
-    ///         the Acki Nacki mint instruction accepts. Per-token policy limits
-    ///         must also match the receiving AN deployment.
-    error TokenLimitExceedsMintCeiling(uint256 maxTransfer, uint256 ceiling);
+    /// @notice NACKL is minted, not held: its `tvlCap` must be
+    ///         `type(uint256).max`.
+    error TokenLimitsInvalid(uint256 tvlCap, uint256 dailyLimit);
     /// @notice The AAVE aToken cannot be listed for deposits. Its balance is
     ///         the yield book's own measure (`aUsdcBalance`, `_backedPrincipal`,
     ///         `accruedYield`), so deposits of it would read back as interest
@@ -841,6 +830,12 @@ contract AckiNackiBridge {
         ///         `InvalidPredecessor`. Requires `bridgeWithdrawalVerifier`
         ///         to be non-zero.
         IPredecessorBridge predecessor;
+        /// @notice Initial USDC `tvlCap`, base units. The owner changes it
+        ///         with `setTokenLimits`; there is no compiled ceiling.
+        uint256 usdcTvlCap;
+        /// @notice Initial USDC daily withdrawal limit, base units. The owner
+        ///         changes it with `setTokenLimits`.
+        uint256 usdcDailyLimit;
     }
 
     /// @param _blockHeaderOracle  Oracle for canonical Ethereum block hashes.
@@ -942,10 +937,7 @@ contract AckiNackiBridge {
         }
         predecessor = _bw.predecessor;
 
-        // List USDC up front so a deployment that never makes an owner call
-        // behaves exactly as the single-token bridge did: the same per-tx cap,
-        // the same TVL cap, deposits open.
-        _listToken(_bw.usdcTokenId, _usdc, 6, MAX_TRANSFER_AMOUNT, MAX_BRIDGE_TVL, true);
+        _listToken(_bw.usdcTokenId, _usdc, 6, _bw.usdcTvlCap, _bw.usdcDailyLimit, true);
 
         owner = msg.sender;
         yieldRecipient = msg.sender;
@@ -1010,7 +1002,6 @@ contract AckiNackiBridge {
         TokenInfo storage info = _tokens[tokenId];
 
         if (amount > MAX_DEPOSIT_AMOUNT) revert DepositTooLarge();
-        if (amount > info.maxTransfer) revert TransferTooLarge();
         if (token == address(_nackl.token)) {
             if (_nackl.handedOver) revert TokenDepositsDisabled(tokenId);
             NacklToken(token).burnFrom(msg.sender, amount);
@@ -1030,27 +1021,25 @@ contract AckiNackiBridge {
     // Token registry
     // ---------------------------------------------------------------------
 
-    /// @notice Change the deposit caps on an already listed id.
+    /// @notice Set the TVL cap and the daily withdrawal limit of a listed id.
     /// @dev Lowering `tvlCap` below the current liabilities is allowed: it
     ///      stops new deposits without touching what is already owed.
-    function setTokenLimits(uint32 tokenId, uint256 maxTransfer, uint256 tvlCap)
-        external
-        onlyOwner
-    {
-        TokenInfo storage info = _requireListedId(tokenId);
-        _requireSaneLimits(maxTransfer, tvlCap);
-        if (
-            tokenId == usdcTokenId && (maxTransfer > MAX_TRANSFER_AMOUNT || tvlCap > MAX_BRIDGE_TVL)
-        ) {
-            revert TokenLimitsInvalid(maxTransfer, tvlCap);
+    ///      Lowering `dailyLimit` below the window's usage defers payouts
+    ///      until the window drains. NACKL takes `tvlCap = type(uint256).max`
+    ///      only (`TokenLimitsInvalid`).
+    function setTokenLimits(uint32 tokenId, uint256 tvlCap, uint256 dailyLimit) external onlyOwner {
+        _requireListedId(tokenId);
+        _setLimits(tokenId, tvlCap, dailyLimit);
+        emit TokenLimitsSet(tokenId, tvlCap, dailyLimit);
+    }
+
+    function _setLimits(uint32 tokenId, uint256 tvlCap, uint256 dailyLimit) private {
+        TokenInfo storage info = _tokens[tokenId];
+        if (info.token == address(_nackl.token) && tvlCap != type(uint256).max) {
+            revert TokenLimitsInvalid(tvlCap, dailyLimit);
         }
-        if (tokenId == NACKL_TOKEN_ID && maxTransfer > _nackl.dailyLimit) {
-            revert TokenLimitsInvalid(maxTransfer, tvlCap);
-        }
-        if (maxTransfer > info.maxWithdrawal) info.maxWithdrawal = maxTransfer;
-        info.maxTransfer = maxTransfer;
         info.tvlCap = tvlCap;
-        emit TokenLimitsSet(tokenId, maxTransfer, tvlCap);
+        _withdrawalWindows[tokenId].dailyLimit = dailyLimit;
     }
 
     /// @notice Open or close deposits for a listed id.
@@ -1073,8 +1062,8 @@ contract AckiNackiBridge {
             address token,
             uint8 decimals,
             bool depositsEnabled,
-            uint256 maxTransfer,
             uint256 tvlCap,
+            uint256 dailyLimit,
             uint256 liabilities
         )
     {
@@ -1083,15 +1072,22 @@ contract AckiNackiBridge {
             info.token,
             info.decimals,
             info.depositsEnabled,
-            info.maxTransfer,
             info.tvlCap,
+            _withdrawalWindows[tokenId].dailyLimit,
             liabilitiesOf(tokenId)
         );
     }
 
-    /// @notice Per-withdrawal cap in base units. Lowering deposit limits leaves this unchanged.
-    function maxWithdrawalAmount(uint32 tokenId) external view returns (uint256) {
-        return _tokens[tokenId].maxWithdrawal;
+    /// @notice The daily withdrawal limit of `tokenId` and what
+    ///         `withdrawByProof` paid in it over the current hour and the 24
+    ///         before it, in base units.
+    function withdrawalWindow(uint32 tokenId)
+        external
+        view
+        returns (uint256 dailyLimit, uint256 used)
+    {
+        WithdrawalWindow.Window storage w = _withdrawalWindows[tokenId];
+        return (w.dailyLimit, WithdrawalWindow.used(w));
     }
 
     /// @notice The ECC currency id `token` is listed under.
@@ -1122,8 +1118,8 @@ contract AckiNackiBridge {
         uint32 tokenId,
         address token,
         uint8 decimals,
-        uint256 maxTransfer,
         uint256 tvlCap,
+        uint256 dailyLimit,
         bool depositsEnabled
     ) internal {
         if (token == address(0)) revert InvalidTokenAddress();
@@ -1140,32 +1136,20 @@ contract AckiNackiBridge {
         }
         address taken = _tokens[tokenId].token;
         if (taken != address(0)) revert TokenIdAlreadyUsed(tokenId, taken);
-        _requireSaneLimits(maxTransfer, tvlCap);
 
         _tokens[tokenId] = TokenInfo({
             token: token,
             decimals: decimals,
             depositsEnabled: depositsEnabled,
-            maxTransfer: maxTransfer,
-            tvlCap: tvlCap,
-            liabilities: 0,
-            maxWithdrawal: maxTransfer
+            tvlCap: 0,
+            liabilities: 0
         });
+        _setLimits(tokenId, tvlCap, dailyLimit);
         _tokenIdOf[token] = tokenId;
         _tokenRegistered[token] = true;
         _listedTokenIds.push(tokenId);
 
-        emit TokenListed(tokenId, token, decimals, maxTransfer, tvlCap, depositsEnabled);
-    }
-
-    /// @dev Caps must be usable and must not promise more than AN can mint.
-    function _requireSaneLimits(uint256 maxTransfer, uint256 tvlCap) internal pure {
-        if (maxTransfer == 0 || maxTransfer > tvlCap) {
-            revert TokenLimitsInvalid(maxTransfer, tvlCap);
-        }
-        if (maxTransfer > MAX_DEPOSIT_AMOUNT) {
-            revert TokenLimitExceedsMintCeiling(maxTransfer, MAX_DEPOSIT_AMOUNT);
-        }
+        emit TokenListed(tokenId, token, decimals, tvlCap, dailyLimit, depositsEnabled);
     }
 
     /// @dev The listing behind an id, or revert `UnsupportedTokenId`.
@@ -1834,12 +1818,17 @@ contract AckiNackiBridge {
     ///      the explicit `WithdrawIdentityMismatch` error surfaces before
     ///      the more opaque `WithdrawalProofRejected`).
     ///   5. `pub.nullifier` has not been used before (replay protection).
-    ///   6. `pub.tokenId` names a listed ERC-20 and the amount fits its withdrawal cap.
+    ///   6. `pub.tokenId` names a listed ERC-20.
     ///   7. `pub.recipientHi` and `pub.recipientLo` both fit in 80 bits
     ///      (well-formedness check against malformed split inputs).
+    ///   8. After the proof verifies, the amount fits the token's rolling
+    ///      24-hour withdrawal limit (`WithdrawalWindowFull` otherwise; the
+    ///      revert leaves the nullifier unspent, so the same proof pays
+    ///      once the window has room).
     ///
     /// State updates (CEI):
-    ///   - **Effects**: mark `nullifier` used; debit the listing's liabilities
+    ///   - **Effects**: count the amount into the token's withdrawal window;
+    ///     mark `nullifier` used; debit the listing's liabilities
     ///     (and `treasuryBalance` for USDC), or for NACKL mint the payout.
     ///   - **Interactions**: for a USDC payout whose liquid principal is short,
     ///     a pull from AAVE (`_refillFromAave`) — required for what the USDC on
@@ -1871,8 +1860,6 @@ contract AckiNackiBridge {
         uint32 payoutTokenId = uint32(pub.tokenId);
         TokenInfo storage payoutInfo = _tokens[payoutTokenId];
         if (payoutInfo.token == address(0)) revert UnsupportedTokenId(pub.tokenId);
-
-        if (pub.amount > payoutInfo.maxWithdrawal) revert TransferTooLarge();
 
         // ---- Checks: identity, chain, replay, shape, anchor ----
         if (pub.dstBridge != uint256(uint160(address(this)))) {
@@ -1925,6 +1912,8 @@ contract AckiNackiBridge {
         //      cannot bind to the bridge's view of AN state.
         bool ok = bridgeWithdrawalVerifier.verifyWithdrawal(proof, pub);
         if (!ok) revert WithdrawalProofRejected();
+
+        WithdrawalWindow.consume(_withdrawalWindows[payoutTokenId], payoutTokenId, pub.amount);
 
         address recipient = _reconstructRecipient(pub.recipientHi, pub.recipientLo);
         if (payoutInfo.token == address(_nackl.token)) {
@@ -2173,7 +2162,7 @@ contract AckiNackiBridge {
     ///         a predecessor's treasury: `predecessor` calls it from
     ///         `migrateTreasury`, and the owner calls it for a predecessor
     ///         that cannot migrate. Caller must `approve` first. Not capped by
-    ///         `MAX_BRIDGE_TVL` (that cap gates `deposit` only) and allowed
+    ///         the USDC `tvlCap` (that cap gates `deposit` only) and allowed
     ///         while paused.
     function fundTreasury(uint256 amount) external nonReentrant {
         if (msg.sender != owner && msg.sender != address(predecessor)) {
@@ -2187,7 +2176,9 @@ contract AckiNackiBridge {
     /// @notice Hand the whole `treasuryBalance` to `successor`, the bridge
     ///         that names this one as its `predecessor`. Leaves this bridge
     ///         with nothing to pay withdrawals from; USDC above the book
-    ///         (`excessUsdc`, aUSDC yield) stays here for the owner.
+    ///         (`excessUsdc`, aUSDC yield) stays here for the owner. The
+    ///         successor's USDC daily withdrawal limit must be no lower than
+    ///         this bridge's (`SuccessorWithdrawalLimitTooLow`).
     /// @dev Paused only: a live bridge would keep paying from the book it
     ///      just gave away. AAVE-supplied principal must be pulled back first.
     ///      The `predecessor()` check catches a wrong address, not a hostile
@@ -2196,6 +2187,7 @@ contract AckiNackiBridge {
     ///      power over the whole book.
     function migrateTreasury(address successor) external onlyOwner nonReentrant {
         _requirePausedForSuccessor(successor);
+        _requireSuccessorLimit(successor, usdcTokenId);
         uint256 amount = treasuryBalance;
         if (amount == 0) revert NothingToMigrate();
         uint256 liquid = usdc.balanceOf(address(this));
@@ -2231,8 +2223,8 @@ contract AckiNackiBridge {
     /// @notice Hand a non-USDC listing's whole liabilities and the tokens behind
     ///         them to `successor`, the bridge that names this one as its
     ///         `predecessor`. The successor must list the same token under the
-    ///         same id, with a withdrawal cap no lower than this listing's.
-    ///         Tokens above the liabilities stay here.
+    ///         same id, with a daily withdrawal limit no lower than this
+    ///         listing's. Tokens above the liabilities stay here.
     /// @dev Paused only, for the same reason as `migrateTreasury`. The same
     ///      `predecessor()` caveat applies: this is an owner power over the
     ///      listing's whole custody.
@@ -2243,18 +2235,12 @@ contract AckiNackiBridge {
         if (info.token == address(_nackl.token)) {
             info.depositsEnabled = false;
             NacklMint.handOver(_nackl, successor);
-            uint256 nacklCap = AckiNackiBridge(successor).maxWithdrawalAmount(tokenId);
-            if (nacklCap < info.maxWithdrawal) {
-                revert SuccessorWithdrawalCapTooLow(nacklCap, info.maxWithdrawal);
-            }
+            _requireSuccessorLimit(successor, tokenId);
             return;
         }
         uint256 amount = info.liabilities;
         if (amount == 0) revert NothingToMigrate();
-        uint256 cap = AckiNackiBridge(successor).maxWithdrawalAmount(tokenId);
-        if (cap < info.maxWithdrawal) {
-            revert SuccessorWithdrawalCapTooLow(cap, info.maxWithdrawal);
-        }
+        _requireSuccessorLimit(successor, tokenId);
         IERC20 token = IERC20(info.token);
         uint256 liquid = token.balanceOf(address(this));
         if (liquid < amount) revert TreasuryNotLiquid(liquid, amount);
@@ -2270,25 +2256,22 @@ contract AckiNackiBridge {
         emit TokenMigrated(successor, tokenId, amount);
     }
 
-    function listNackl(NacklToken token, uint256 maxTransfer, uint256 dailyLimit)
-        external
-        onlyOwner
-    {
-        if (address(token) == address(_nackl.token)) {
-            NacklMint.setLimit(_nackl, dailyLimit, _tokens[NACKL_TOKEN_ID].maxWithdrawal);
-            return;
-        }
-        NacklMint.list(_nackl, token, dailyLimit, maxTransfer, address(predecessor));
-        _listToken(NACKL_TOKEN_ID, address(token), 9, maxTransfer, type(uint256).max, true);
+    /// @notice List NACKL under `NACKL_TOKEN_ID` with deposits open, no TVL
+    ///         cap and a daily withdrawal limit of `dailyLimit`. Once only;
+    ///         `setTokenLimits` changes the limit afterwards.
+    function listNackl(NacklToken token, uint256 dailyLimit) external onlyOwner {
+        NacklMint.list(_nackl, token, address(predecessor));
+        _listToken(NACKL_TOKEN_ID, address(token), 9, type(uint256).max, dailyLimit, true);
     }
 
-    function nacklState()
-        external
-        view
-        returns (uint256 dailyLimit, uint256 windowUsed, uint256 minted, bool handedOver)
-    {
-        NacklMint.State storage s = _nackl;
-        return (s.dailyLimit, NacklMint.windowUsed(s), s.minted, s.handedOver);
+    function nacklState() external view returns (uint256 minted, bool handedOver) {
+        return (_nackl.minted, _nackl.handedOver);
+    }
+
+    function _requireSuccessorLimit(address successor, uint32 tokenId) private view {
+        uint256 limit = _withdrawalWindows[tokenId].dailyLimit;
+        (uint256 successorLimit,) = AckiNackiBridge(successor).withdrawalWindow(tokenId);
+        if (successorLimit < limit) revert SuccessorWithdrawalLimitTooLow(successorLimit, limit);
     }
 
     function _requirePausedForSuccessor(address successor) private view {

@@ -1753,6 +1753,7 @@ struct WithdrawScanState {
 
 enum TransientWithdrawRevert {
     Configuration,
+    WithdrawalWindow,
     NacklMint,
     UnknownAnchor,
     Stop,
@@ -1786,8 +1787,9 @@ async fn shutdown_signal() {
 
 fn transient_withdraw_revert(reason: &str) -> TransientWithdrawRevert {
     match bridge_relayer_daemon::bridge::decode_withdraw_revert(reason).map(|error| error.name) {
-        Some("TransferTooLarge" | "UnsupportedTokenId") => TransientWithdrawRevert::Configuration,
-        Some("NacklWindowFull" | "NacklNotMinter") => TransientWithdrawRevert::NacklMint,
+        Some("UnsupportedTokenId") => TransientWithdrawRevert::Configuration,
+        Some("WithdrawalWindowFull") => TransientWithdrawRevert::WithdrawalWindow,
+        Some("NacklNotMinter") => TransientWithdrawRevert::NacklMint,
         Some("UnknownAnchor") => TransientWithdrawRevert::UnknownAnchor,
         _ => TransientWithdrawRevert::Stop,
     }
@@ -1815,11 +1817,11 @@ fn warn_unknown_anchor(proof_path: &Path, pub_inputs: &WithdrawalPublicInputs, r
 /// Permanent per-proof problems (parse errors, bad public inputs, proofs
 /// that fail the SHPLONK aggregator shape gate) park the proof in `st.done`
 /// and the scan drains the rest of the directory. A revert on the token's
-/// listing or transfer cap (`TransferTooLarge`, `UnsupportedTokenId`) keeps the
-/// proof for the next scan, moves on to the next proof and does not count as
-/// transient: it would otherwise slow every other payout and `verifyBlock` for
-/// as long as it lasts. Lower-level infra failures (RPC down during
-/// dry-run/submit) propagate as `Err`.
+/// listing (`UnsupportedTokenId`) or its rolling 24-hour withdrawal limit
+/// (`WithdrawalWindowFull`) keeps the proof for the next scan, moves on to the
+/// next proof and does not count as transient: it would otherwise slow every
+/// other payout and `verifyBlock` for as long as it lasts. Lower-level infra
+/// failures (RPC down during dry-run/submit) propagate as `Err`.
 async fn withdraw_scan_once<B>(
     bridge: &B,
     proofs_dir: &Path,
@@ -1942,7 +1944,10 @@ where
                         },
                         WithdrawRevertKind::Transient => match transient_withdraw_revert(&reason) {
                             TransientWithdrawRevert::Configuration => {
-                                warn!(proof = %proof_path.display(), %reason, "dry-run reverted on the token's listing or transfer cap; retrying on the next scan");
+                                warn!(proof = %proof_path.display(), %reason, "dry-run reverted on the token's listing; retrying on the next scan");
+                            },
+                            TransientWithdrawRevert::WithdrawalWindow => {
+                                warn!(proof = %proof_path.display(), %reason, "dry-run: the EVM bridge's rolling 24-hour withdrawal limit has no room for this payout; the nullifier is unspent, retrying on the next scan");
                             },
                             TransientWithdrawRevert::NacklMint => {
                                 warn!(proof = %proof_path.display(), %reason, "dry-run: the bridge cannot mint this NACKL payout now; retrying on the next scan");
@@ -1999,7 +2004,10 @@ where
                 permanent: false,
             } => match transient_withdraw_revert(&reason) {
                 TransientWithdrawRevert::Configuration => {
-                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted on the token's listing or transfer cap; retrying on the next scan");
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted on the token's listing; retrying on the next scan");
+                },
+                TransientWithdrawRevert::WithdrawalWindow => {
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof: the EVM bridge's rolling 24-hour withdrawal limit has no room for this payout; the nullifier is unspent, retrying on the next scan");
                 },
                 TransientWithdrawRevert::NacklMint => {
                     warn!(proof = %proof_path.display(), %reason, "withdrawByProof: the bridge cannot mint this NACKL payout now; retrying on the next scan");
@@ -3247,11 +3255,10 @@ mod withdraw_scan_tests {
     #[tokio::test]
     async fn configuration_reverts_retry_without_backoff_or_blocking_the_next_payout() {
         for (signature, argument) in [
-            ("TransferTooLarge()", String::new()),
             ("UnsupportedTokenId(uint256)", format!("{:064x}", 3)),
             (
-                "NacklWindowFull(uint256,uint256,uint256)",
-                format!("{:064x}{:064x}{:064x}", 900, 200, 1000),
+                "WithdrawalWindowFull(uint32,uint256,uint256,uint256)",
+                format!("{:064x}{:064x}{:064x}{:064x}", 3, 900, 200, 1000),
             ),
             ("NacklNotMinter(address)", format!("{:064x}", 0x11)),
         ] {

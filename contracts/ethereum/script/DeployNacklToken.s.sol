@@ -16,8 +16,7 @@ contract DeployNacklToken is Script {
         vm.startBroadcast(key);
         token = new NacklToken(bridge, holder, supply);
         if (vm.envOr("NACKL_LIST", false)) {
-            AckiNackiBridge(bridge)
-                .listNackl(token, vm.envUint("NACKL_MAX_TRANSFER"), vm.envUint("NACKL_DAILY_LIMIT"));
+            AckiNackiBridge(bridge).listNackl(token, vm.envUint("NACKL_DAILY_LIMIT"));
         }
         vm.stopBroadcast();
         console.log("NacklToken: %s", address(token));

@@ -574,8 +574,8 @@ pub async fn confirm(
                         format!(
                             "the deposit is proven, but the Acki Nacki bridge cannot pay it now \
                              (transaction {bridge_tx}, reason {reason}: 236 it holds less NACKL \
-                             locked for chain {} than {} base units, 234 above the payout cap, \
-                             241 the token is not registered). Nothing was paid and nothing is lost: the bridge told \
+                             locked for chain {} than {} base units, 241 the token is not \
+                             registered). Nothing was paid and nothing is lost: the bridge told \
                              the deposit voucher to delete itself, so the same deposit can be \
                              finalized again. Continue with --resume {op_id} once the bridge has \
                              room for it.",

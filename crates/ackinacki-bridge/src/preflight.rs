@@ -408,36 +408,82 @@ pub async fn run_for_token(
                 source: None,
             });
         }
-        let (max_transfer, outstanding) = if let Some((cap, outstanding, _)) = token_config {
-            (cap, outstanding)
+        let (max_tvl, outstanding) = if let Some((max_tvl, outstanding, _)) = token_config {
+            (max_tvl, outstanding)
         } else {
-            let (cap, _, outstanding) =
+            let (max_tvl, _, outstanding) =
                 call_get_deposit_limits(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id)
                     .await?;
-            (cap, outstanding)
+            (max_tvl, outstanding)
         };
-        if amount.0 > max_transfer || (!nackl && amount.0 > outstanding) {
+        if !nackl && amount.0 > outstanding {
             return Err(CliError::Preflight {
                 reason: format!(
-                    "getDepositLimits({}) reports maxTransfer={max_transfer}, \
-                     outstanding={outstanding} micro-USDC; withdrawal of {} would be refunded \
-                     without a burn",
+                    "the Acki Nacki bridge accounts outstanding={outstanding} micro-USDC for \
+                     chain {}; withdrawal of {} would be refunded with 236 without a burn",
                     to.chain_id, amount.0
                 ),
                 source: None,
             });
         }
-        let lock_cap: u128 = 10_000_000_000_000_000;
-        if nackl && (outstanding > lock_cap || amount.0 > lock_cap - outstanding) {
+        if nackl && (outstanding > max_tvl || amount.0 > max_tvl - outstanding) {
             return Err(CliError::Preflight {
                 reason: format!(
                     "the Acki Nacki bridge already holds {outstanding} nanoNACKL locked toward \
-                     chain {}; locking {} more would pass 10,000,000 NACKL and initiateWithdrawal \
-                     would return the NACKL with 235. Nothing was sent.",
+                     chain {}; locking {} more would pass the owner's maxTvl of {max_tvl} \
+                     nanoNACKL and initiateWithdrawal would return the NACKL with 235. Nothing \
+                     was sent.",
                     to.chain_id, amount.0
                 ),
                 source: None,
             });
+        }
+        if version >= crate::deposit::an_preflight::BridgeVersion(1, 18, 0) {
+            let window = call_bridge_getter(
+                &context,
+                &usdc_bridge_legacy,
+                &bridge_boc,
+                "getWithdrawalWindow",
+                json!({"chainId": to.chain_id.to_string(), "tokenId": token_id}),
+            )
+            .await?;
+            let (Some(daily_limit), Some(used)) =
+                (json_u128(&window["dailyLimit"]), json_u128(&window["used"]))
+            else {
+                return Err(CliError::Preflight {
+                    reason: format!("getWithdrawalWindow: invalid answer: {window}"),
+                    source: None,
+                });
+            };
+            if amount.0 > daily_limit || used > daily_limit - amount.0 {
+                let detail = if daily_limit == 0 {
+                    "has no daily withdrawal limit set (0): it refuses every withdrawal until the \
+                     owner sets one with setBridgeToken"
+                        .to_string()
+                } else if amount.0 > daily_limit {
+                    format!(
+                        "is {daily_limit} base units per rolling 24 hours, so this amount can \
+                         never fit; withdraw at most {daily_limit} at a time"
+                    )
+                } else {
+                    format!(
+                        "is {daily_limit} base units and {used} were withdrawn in the current \
+                         hour and the 24 before it (getWithdrawalWindow); {} fits now. The window \
+                         frees as each hour's withdrawals age out, at most 25 hours after they \
+                         were made; re-run then",
+                        daily_limit.saturating_sub(used)
+                    )
+                };
+                return Err(CliError::Preflight {
+                    reason: format!(
+                        "the Acki Nacki bridge's daily withdrawal limit for ECC[{token_id}] to \
+                         chain {} {detail}. initiateWithdrawal of {} would be refunded with 247 \
+                         (ERR_DAILY_LIMIT, AN daily withdrawal limit). Nothing was sent.",
+                        to.chain_id, amount.0
+                    ),
+                    source: None,
+                });
+            }
         }
         // 6c. The EVM bridge the burn will be bound to.
         let bound =
@@ -873,7 +919,8 @@ async fn call_get_total_bridged_for_token(
     Ok((minted, burned))
 }
 
-/// Read the deployed bridge's transfer ceiling and destination-chain inventory.
+/// Read the deployed bridge's USDC `maxTvl`, daily withdrawal limit and
+/// destination-chain inventory.
 async fn call_get_deposit_limits(
     ctx: &Arc<ClientContext>,
     bridge_legacy: &str,
@@ -895,13 +942,13 @@ async fn call_get_deposit_limits(
         })
     };
     Ok((
-        field("maxTransfer")?,
         field("maxTvl")?,
+        field("dailyLimit")?,
         field("outstanding")?,
     ))
 }
 
-/// Read the immutable token address, payout ceiling and destination-chain
+/// Read the immutable token address, `maxTvl` and destination-chain
 /// inventory.
 async fn call_get_token_withdrawal_limits(
     ctx: &Arc<ClientContext>,
@@ -942,7 +989,7 @@ async fn call_get_token_withdrawal_limits(
             source: None,
         })?;
     Ok(Some((
-        field("maxWithdrawal")?,
+        field("maxTvl")?,
         field("outstanding")?,
         Address::from_slice(&token.to_be_bytes::<32>()[12..]),
     )))
@@ -2782,8 +2829,8 @@ async fn require_code<P: Provider>(provider: &P, at: Address, label: &str) -> Cl
 /// Preflight the destination *deploy*: something is there, its withdrawal
 /// verifier stack is real and is the one this build proves against, its
 /// pinned AN-side identity is ours, it pays this token under the id Acki
-/// Nacki assigns, it is not paused, and its payout cap covers the amount.
-/// Its treasury is not read.
+/// Nacki assigns, it is not paused, and its daily withdrawal limit can hold
+/// the amount. Its treasury is not read.
 ///
 /// Key-free, so `--dry-run` exercises all of it.
 ///
@@ -3016,12 +3063,12 @@ pub async fn check_bridge_deploy_for_token(
     // The token the EVM bridge pays this id in is the one Acki Nacki
     // assigns to it. How much may be withdrawn is the Acki Nacki bridge's
     // answer (`getTotalBridged`, the chain's limits), checked before the
-    // burn, and the EVM bridge's payout cap; its treasury is not read.
+    // burn, and the EVM bridge's rolling 24-hour withdrawal limit; its
+    // treasury is not read.
     let payout_info = |e: bridge_relayer_daemon::RelayerError| CliError::Preflight {
         reason: format!("cannot read payout registry for ECC[{token_id}]: {e}"),
         source: None,
     };
-    let mut cap = None;
     if let Some(expected_token) = expected_token {
         let info = client
             .token_payout_info(token_id)
@@ -3033,42 +3080,54 @@ pub async fn check_bridge_deploy_for_token(
                 source: None,
             });
         }
-        cap = Some(info.max_withdrawal);
     }
     // The EVM bridge's USDC is ECC id 3, as on Acki Nacki.
-    let cap = if token_id == 3 {
+    let (daily_limit, used) = if token_id == 3 {
         client
-            .usdc_payout_cap()
+            .usdc_withdrawal_window()
             .await
             .map_err(|e| CliError::Preflight {
                 reason: format!(
                     "--bridge-address {bridge}: cannot confirm it pays USDC under ECC id 3 \
-                     (usdcTokenId()): {e}"
+                     (usdcTokenId()) and read its withdrawalWindow(3): {e}"
                 ),
                 source: None,
             })?
     } else {
-        match cap {
-            Some(c) => c,
-            None => {
-                client
-                    .token_payout_info(token_id)
-                    .await
-                    .map_err(payout_info)?
-                    .max_withdrawal
-            },
+        if expected_token.is_none() {
+            client
+                .token_payout_info(token_id)
+                .await
+                .map_err(payout_info)?;
         }
+        client
+            .withdrawal_window(token_id)
+            .await
+            .map_err(payout_info)?
     };
-    if U256::from(amount.0) > cap {
+    let needed = U256::from(amount.0);
+    if needed > daily_limit {
         return Err(CliError::Preflight {
             reason: format!(
-                "the amount is above the EVM bridge's payout cap for ECC[{token_id}] ({cap} base \
-                 units): withdrawByProof would revert TransferTooLarge, and nothing could pay it \
-                 out until the EVM owner raises the cap. Nothing was burnt or locked; withdraw \
-                 at most {cap}."
+                "the amount is above the EVM bridge's daily withdrawal limit for ECC[{token_id}] \
+                 ({daily_limit} base units per rolling 24 hours): withdrawByProof would revert \
+                 WithdrawalWindowFull on every attempt, and nothing could pay it out until the \
+                 EVM owner raises the limit. Nothing was burnt or locked; withdraw at most \
+                 {daily_limit}."
             ),
             source: None,
         });
+    }
+    if used > daily_limit - needed {
+        tracing::warn!(
+            amount = amount.0,
+            used = %used,
+            daily_limit = %daily_limit,
+            "the EVM bridge's daily withdrawal limit for this token has no room for this amount \
+             now: withdrawByProof reverts WithdrawalWindowFull until the rolling 24-hour window \
+             has room (exit 13). The proof is not spent by that revert; later, re-run `withdraw` \
+             with --allow-retry, or the same `withdraw proof` command, to send it again"
+        );
     }
     if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
         let nackl = client
@@ -3090,17 +3149,6 @@ pub async fn check_bridge_deploy_for_token(
                 ),
                 source: None,
             });
-        }
-        let needed = U256::from(amount.0);
-        if nackl.window_used + needed > nackl.daily_limit {
-            tracing::warn!(
-                amount = amount.0,
-                window_used = %nackl.window_used,
-                daily_limit = %nackl.daily_limit,
-                "the EVM bridge's daily NACKL limit is nearly spent: withdrawByProof reverts \
-                 NacklWindowFull until the rolling 24-hour window has room. The proof is not \
-                 spent by that revert; re-run with --allow-retry later to send it again"
-            );
         }
     }
 
@@ -3373,6 +3421,59 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn preflight_refuses_an_amount_over_the_an_daily_withdrawal_limit_with_247() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(100_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_usdc_bridge_with(false, 100_000_000, 0).await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let over = crate::args::parse_amount("50.000001").unwrap();
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
+            &over,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("the AN bridge would refund it with 247");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("247") && msg.contains("never fit"), "{msg}");
+
+        let limit = crate::args::parse_amount("50.000000").unwrap();
+        run(
+            &from,
+            &keys,
+            &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
+            &limit,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect("the whole daily limit fits an empty window");
+    }
+
+    #[tokio::test]
     async fn preflight_refuses_a_bridge_address_the_an_bridge_does_not_bind() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
         let (usdc_bridge_account_id, usdc_bridge_boc) =
@@ -3467,13 +3568,13 @@ pub(crate) mod tests {
             call_get_deposit_limits(&ctx, &format!("0:{id}"), &boc, 11155111)
                 .await
                 .unwrap(),
-            (50_000_000, 10_000_000_000, 50_000_000)
+            (10_000_000_000, 50_000_000, 50_000_000)
         );
         assert_eq!(
             call_get_deposit_limits(&ctx, &format!("0:{id}"), &boc, 8453)
                 .await
                 .unwrap(),
-            (50_000_000, 10_000_000_000, 0)
+            (0, 0, 0)
         );
     }
 
@@ -3903,9 +4004,8 @@ pub(crate) mod tests {
     /// it does not recognise, so a stale selector here makes a test fail
     /// loudly on an empty decode rather than silently pass.
     const SEL_TREASURY: &str = "313dab20"; // treasuryBalance()
-    const SEL_MAX_TRANSFER: &str = "fc1b3113";
     const SEL_USDC_TOKEN_ID: &str = "11bd3c3d"; // usdcTokenId()
-    const SEL_PAYOUT_CAP: &str = "aa407e56"; // maxWithdrawalAmount(uint32)
+    const SEL_WINDOW: &str = "d8201475"; // withdrawalWindow(uint32)
     const SEL_TOKEN_INFO: &str = "68fb1109"; // tokenInfo(uint32)
     const SEL_VERIFIER: &str = "1792b9fe"; // bridgeWithdrawalVerifier()
     pub(crate) const SEL_DAPP_FR: &str = "e20b7f65"; // bridgeWithdrawalDappFr()
@@ -4148,11 +4248,10 @@ pub(crate) mod tests {
             (SEL_DAPP_FR, ZERO_WORD.to_string()),
             (SEL_ACC_FR, ZERO_WORD.to_string()),
             (SEL_TREASURY, MAX_WORD.to_string()),
-            (SEL_MAX_TRANSFER, format!("0x{:064x}", 50_000_000u64)),
-            // Deposit limits and the independent payout cap.
+            // The token listing and its rolling 24-hour withdrawal window.
             (SEL_USDC_TOKEN_ID, format!("0x{:064x}", 3u64)),
             (SEL_TOKEN_INFO, token_info_word(50_000_000)),
-            (SEL_PAYOUT_CAP, format!("0x{:064x}", 50_000_000u64)),
+            (SEL_WINDOW, format!("0x{:064x}{:064x}", 50_000_000u64, 0u64)),
             // Not paused: the last check `check_bridge_deploy` makes.
             (SEL_PAUSED, ZERO_WORD.to_string()),
             // Matches the zero digest tests write into their tempdir's
@@ -4175,15 +4274,15 @@ pub(crate) mod tests {
     }
 
     /// `tokenInfo(uint32)` as six ABI words: token, decimals, deposits
-    /// switch, `maxTransfer`, `tvlCap`, liabilities.
-    pub(crate) fn token_info_word(max_transfer: u64) -> String {
+    /// switch, `tvlCap`, `dailyLimit`, liabilities.
+    pub(crate) fn token_info_word(daily_limit: u64) -> String {
         format!(
             "0x{}{:064x}{:064x}{:064x}{:064x}{:064x}",
             &word_addr(5)[2..],
             6u64,
             1u64,
-            max_transfer,
             u64::from(u32::MAX),
+            daily_limit,
             0u64,
         )
     }
@@ -5400,6 +5499,36 @@ pub(crate) mod tests {
             msg.contains("3 680"),
             "must name the size of the previous build: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_amount_over_the_evm_daily_limit_is_refused_and_a_full_window_only_warns() {
+        let window = |used: u64| format!("0x{:064x}{:064x}", 1_000_000u64, used);
+        let url = mock_rpc_code_for(&full_walk_code(), full_walk(&[(SEL_WINDOW, window(0))])).await;
+        let err = check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_001),
+        )
+        .await
+        .expect_err("withdrawByProof would revert WithdrawalWindowFull on every attempt");
+        assert!(err.to_string().contains("WithdrawalWindowFull"), "{err}");
+        let url = mock_rpc_code_for(
+            &full_walk_code(),
+            full_walk(&[(SEL_WINDOW, window(999_999))]),
+        )
+        .await;
+        check_bridge_deploy(
+            &url,
+            Address::repeat_byte(1),
+            None,
+            (U256::ZERO, U256::ZERO),
+            &UsdcAmount(1_000_000),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

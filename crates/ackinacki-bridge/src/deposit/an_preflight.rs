@@ -68,8 +68,8 @@ pub async fn read_volume_limits(
             .ok_or_else(|| refuse(format!("getDepositLimits: invalid {name}: {out}")))
     };
     Ok(crate::deposit::evm::VolumeLimits {
-        max_transfer: field("maxTransfer")?,
         max_tvl: field("maxTvl")?,
+        daily_limit: field("dailyLimit")?,
         outstanding: field("outstanding")?,
     })
 }
@@ -125,8 +125,8 @@ fn token_deposit_limits(
         ));
     }
     Ok(crate::deposit::evm::VolumeLimits {
-        max_transfer: number("maxTransfer")?,
         max_tvl: number("maxTvl")?,
+        daily_limit: number("dailyLimit")?,
         outstanding: number("outstanding")?,
     })
 }
@@ -955,14 +955,14 @@ mod token_listing_tests {
 
     fn listing() -> serde_json::Value {
         json!({"listed": true, "tokenId": "4", "depositsEnabled": true,
-               "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000",
+               "maxTvl": "10000000000000000000", "dailyLimit": "1000000000000000000",
                "outstanding": "5000000000000000000"})
     }
 
     #[test]
     fn token_listing_keeps_eighteen_decimal_base_units() {
         let limits = token_deposit_limits(&listing(), 4).unwrap();
-        assert_eq!(limits.max_transfer, U256::from(10u128.pow(18)));
+        assert_eq!(limits.daily_limit, U256::from(10u128.pow(18)));
         assert_eq!(limits.outstanding, U256::from(5 * 10u128.pow(18)));
     }
 
@@ -973,8 +973,8 @@ mod token_listing_tests {
             "listed",
             "tokenId",
             "depositsEnabled",
-            "maxTransfer",
             "maxTvl",
+            "dailyLimit",
             "outstanding",
         ] {
             let mut out = listing();

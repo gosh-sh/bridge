@@ -39,7 +39,7 @@ abstract contract NacklBridgeFixture is Test {
     uint256 internal constant RECIPIENT_HALF_MASK = (1 << 80) - 1;
 
     uint256 internal constant NACKL_UNIT = 1e9;
-    uint256 internal constant MAX_TRANSFER = 1_000 * NACKL_UNIT;
+    uint256 internal constant LARGE_AMOUNT = 1_000 * NACKL_UNIT;
     uint256 internal constant DAILY_LIMIT = 10_000 * NACKL_UNIT;
     uint256 internal constant PAYOUT = 500 * NACKL_UNIT;
 
@@ -63,7 +63,7 @@ abstract contract NacklBridgeFixture is Test {
 
         bridge = _newBridge(address(0));
         nackl = new NacklToken(address(bridge), address(0), 0);
-        bridge.listNackl(nackl, MAX_TRANSFER, DAILY_LIMIT);
+        bridge.listNackl(nackl, DAILY_LIMIT);
         seedAnchor = _seedFirstBlock(bridge);
     }
 
@@ -138,10 +138,10 @@ abstract contract NacklBridgeFixture is Test {
     }
 
     function _minted(AckiNackiBridge b) internal view returns (uint256 minted) {
-        (,, minted,) = b.nacklState();
+        (minted,) = b.nacklState();
     }
 
     function _windowUsed() internal view returns (uint256 used) {
-        (, used,,) = bridge.nacklState();
+        (, used) = bridge.withdrawalWindow(1);
     }
 }

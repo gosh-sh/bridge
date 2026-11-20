@@ -6,7 +6,7 @@ load genesis.env
 export PRIVATE_KEY; PRIVATE_KEY=$(tr -d '[:space:]' </run/input)
 export GENESIS_LAST_SEEN_BLOCK_SEQNO=$GENESIS_SEED_SEQNO
 export WITHDRAW_ACC_FR=0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a WITHDRAW_DAPP_FR=0
-export USDC_TOKEN_ID=3 USDC_ADDRESS=$ARB_USDC
+export USDC_TOKEN_ID=3 USDC_ADDRESS=$ARB_USDC USDC_TVL_CAP=10000000000 USDC_DAILY_LIMIT=10000000000
 # This run's local network has paid nothing through an earlier bridge.
 export PREDECESSOR_BRIDGE=0x0000000000000000000000000000000000000000
 rm -rf "$WORK/evm" && cp -r /bin-ci/evm "$WORK/evm" && cd "$WORK/evm"
@@ -28,8 +28,7 @@ for name, addr in re.findall(r"^\s+([A-Za-z]+): (0x[0-9a-fA-F]{40})$", open(sys.
 PY
 export NACKL_BRIDGE; NACKL_BRIDGE=$(sed -n 's/^BRIDGE_ADDRESS=//p' "$OUT/evm.env")
 export NACKL_INITIAL_HOLDER; NACKL_INITIAL_HOLDER=$(cast wallet address --private-key "$PRIVATE_KEY")
-export NACKL_INITIAL_SUPPLY=1000000000000 NACKL_LIST=true NACKL_MAX_TRANSFER=100000000000 \
-  NACKL_DAILY_LIMIT=1000000000000
+export NACKL_INITIAL_SUPPLY=1000000000000 NACKL_LIST=true NACKL_DAILY_LIMIT=1000000000000
 forge script script/DeployNacklToken.s.sol:DeployNacklToken --rpc-url "$ARB_RPC" --broadcast --slow \
   | tee "$WORK/forge-nackl.out"
 nackl=$(sed -n 's/^ *NacklToken: \(0x[0-9a-fA-F]\{40\}\)$/\1/p' "$WORK/forge-nackl.out" | tail -n 1)

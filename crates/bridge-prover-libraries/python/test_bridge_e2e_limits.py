@@ -22,7 +22,10 @@ class WithdrawalChainLimits(unittest.TestCase):
     def test_only_selected_chains_inventory_can_cover_withdrawal(self):
         def getter(address, abi, name, params):
             if name == "getDepositLimits":
-                return {"maxTransfer": "50000000", "outstanding": "1000000" if params["chainId"] == "11155111" else "0"}
+                return {"maxTvl": "10000000000", "dailyLimit": "50000000",
+                        "outstanding": "1000000" if params["chainId"] == "11155111" else "0"}
+            if name == "getWithdrawalWindow":
+                return {"dailyLimit": "50000000", "used": "0"}
             if name == "getEvmBridge":
                 return {"value0": "0x" + "42" * 20}
             return {"minted": "1000000", "burned": "0"}
@@ -39,8 +42,10 @@ class WithdrawalChainLimits(unittest.TestCase):
             self.assertEqual(send.call_args.args[4]["cc"], {"3": "1000000"})
 
     def test_oversized_and_unavailable_limits_stop_before_ecc_transfer(self):
-        for payload in (None, {}, {"maxTransfer": "bad", "outstanding": "1000000"},
-                        {"maxTransfer": "999999", "outstanding": "1000000"}):
+        for payload in (None, {}, {"outstanding": "bad"},
+                        {"outstanding": "1000000", "dailyLimit": "bad", "used": "0"},
+                        {"outstanding": "1000000", "dailyLimit": "999999", "used": "0"},
+                        {"outstanding": "1000000", "dailyLimit": "50000000", "used": "49000001"}):
             with self.subTest(payload=payload), \
                     patch.object(bridge.common, "run_getter", return_value=payload), \
                     patch.object(bridge, "encode_initiate_withdrawal_body") as encode, \
@@ -54,7 +59,9 @@ class WithdrawalChainLimits(unittest.TestCase):
         for bound in ({"value0": "0"}, {"value0": "0x0"}, {}, None):
             def getter(address, abi, name, params, bound=bound):
                 if name == "getDepositLimits":
-                    return {"maxTransfer": "50000000", "outstanding": "1000000"}
+                    return {"maxTvl": "10000000000", "dailyLimit": "50000000", "outstanding": "1000000"}
+                if name == "getWithdrawalWindow":
+                    return {"dailyLimit": "50000000", "used": "0"}
                 if name == "getEvmBridge":
                     return bound
                 return {"minted": "1000000", "burned": "0"}

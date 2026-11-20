@@ -323,8 +323,8 @@ reopen on the new bridge once the principal is there. Deposits stay open through
    prove those burns with the `ackinacki-bridge` release that bridge was deployed for. This step
    takes as long as anchoring and proving the last of those burns, and withdrawals to the chain stay
    closed for all of it. For NACKL, the old bridge has paid once `getNacklLockedTo(<chainId>, <old>)`
-   on `eccBridge` equals its `nacklState().minted`. A NACKL proof that does not fit the daily limit
-   is refused (`NacklWindowFull`) and sent again later, so there is no fixed upper bound
+   on `eccBridge` equals its `nacklState().minted`. A proof that does not fit the daily limit
+   is refused (`WithdrawalWindowFull`) and sent again later, so there is no fixed upper bound
    (`docs/NACKL-bridge-extension.md`, NB-HO-3).
 4. **Retire the old bridge and move the principal.** `pause()` it and pull its AAVE position back
    (`withdrawFromAave` or `emergencyWithdrawAll`) so its whole `treasuryBalance` is liquid USDC.

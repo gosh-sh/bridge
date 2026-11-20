@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `f62c758b…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
+- `eccBridge` 1.18.0, code hash `19421806…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
   with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
   finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
@@ -120,7 +120,7 @@ assigns it when the release is tagged.
   never be paid; it warns when the EVM window has no room now.
 - `ackinacki-bridge withdraw --token nackl` withdraws NACKL.
 - `ackinacki-bridge withdraw` whose proof the EVM bridge refuses with `WithdrawalWindowFull` exits 13 with
-  nothing spent; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof`.
+  nothing spent; later, re-run the same `withdraw proof` as it is, or a `withdraw` with `--allow-retry`.
 - `ackinacki-bridge deposit` exits 38 (`CreditRefused`) when the bridge refuses the deposit for now;
   `--resume` sends `finalizeDeposit` again and confirms the credit.
 - `deposit-relayer` treats a deposit whose voucher the bridge released as pending and sends it
@@ -129,7 +129,10 @@ assigns it when the release is tagged.
   for NACKL).
 - `ackinacki-bridge deposit` summary shows the token's currency and decimals and its balance; the
   JSON `tx` carries `token_id`.
-- `deposit-relayer` retries a deposit refused with 236.
+- `deposit-relayer` retries a deposit refused with 236; when the deposit's voucher shows a payout,
+  it counts the deposit as already finalised instead.
+- The frontend no longer refuses a deposit above 50 USDC; only the `uint64` bound and the EVM
+  bridge's USDC `tvlCap` apply.
 - `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
   sends nothing.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge

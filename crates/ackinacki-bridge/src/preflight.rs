@@ -416,6 +416,59 @@ pub async fn run_for_token(
                     .await?;
             (max_tvl, outstanding)
         };
+        let window = if version >= crate::deposit::an_preflight::BridgeVersion(1, 18, 0) {
+            let window = call_bridge_getter(
+                &context,
+                &usdc_bridge_legacy,
+                &bridge_boc,
+                "getWithdrawalWindow",
+                json!({"chainId": to.chain_id.to_string(), "tokenId": token_id}),
+            )
+            .await?;
+            let (Some(daily_limit), Some(used)) =
+                (json_u128(&window["dailyLimit"]), json_u128(&window["used"]))
+            else {
+                return Err(CliError::Preflight {
+                    reason: format!("getWithdrawalWindow: invalid answer: {window}"),
+                    source: None,
+                });
+            };
+            Some((daily_limit, used))
+        } else {
+            None
+        };
+        let window_refusal = |daily_limit: u128, used: u128| {
+            let detail = if daily_limit == 0 {
+                "has no daily withdrawal limit set (0): it refuses every withdrawal until the \
+                 owner sets one with setBridgeToken"
+                    .to_string()
+            } else if amount.0 > daily_limit {
+                format!(
+                    "is {daily_limit} base units per rolling 24 hours, so this amount can \
+                     never fit; withdraw at most {daily_limit} at a time"
+                )
+            } else {
+                format!(
+                    "is {daily_limit} base units and {used} were withdrawn in the current \
+                     hour and the 24 before it (getWithdrawalWindow); {} fits now. The window \
+                     frees as each hour's withdrawals age out, at most 25 hours after they \
+                     were made; re-run then",
+                    daily_limit.saturating_sub(used)
+                )
+            };
+            CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge's daily withdrawal limit for ECC[{token_id}] to \
+                     chain {} {detail}. initiateWithdrawal of {} would be refunded with 247 \
+                     (ERR_DAILY_LIMIT, AN daily withdrawal limit). Nothing was sent.",
+                    to.chain_id, amount.0
+                ),
+                source: None,
+            }
+        };
+        if let Some((0, used)) = window {
+            return Err(window_refusal(0, used));
+        }
         if !nackl && amount.0 > outstanding {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -438,51 +491,9 @@ pub async fn run_for_token(
                 source: None,
             });
         }
-        if version >= crate::deposit::an_preflight::BridgeVersion(1, 18, 0) {
-            let window = call_bridge_getter(
-                &context,
-                &usdc_bridge_legacy,
-                &bridge_boc,
-                "getWithdrawalWindow",
-                json!({"chainId": to.chain_id.to_string(), "tokenId": token_id}),
-            )
-            .await?;
-            let (Some(daily_limit), Some(used)) =
-                (json_u128(&window["dailyLimit"]), json_u128(&window["used"]))
-            else {
-                return Err(CliError::Preflight {
-                    reason: format!("getWithdrawalWindow: invalid answer: {window}"),
-                    source: None,
-                });
-            };
+        if let Some((daily_limit, used)) = window {
             if amount.0 > daily_limit || used > daily_limit - amount.0 {
-                let detail = if daily_limit == 0 {
-                    "has no daily withdrawal limit set (0): it refuses every withdrawal until the \
-                     owner sets one with setBridgeToken"
-                        .to_string()
-                } else if amount.0 > daily_limit {
-                    format!(
-                        "is {daily_limit} base units per rolling 24 hours, so this amount can \
-                         never fit; withdraw at most {daily_limit} at a time"
-                    )
-                } else {
-                    format!(
-                        "is {daily_limit} base units and {used} were withdrawn in the current \
-                         hour and the 24 before it (getWithdrawalWindow); {} fits now. The window \
-                         frees as each hour's withdrawals age out, at most 25 hours after they \
-                         were made; re-run then",
-                        daily_limit.saturating_sub(used)
-                    )
-                };
-                return Err(CliError::Preflight {
-                    reason: format!(
-                        "the Acki Nacki bridge's daily withdrawal limit for ECC[{token_id}] to \
-                         chain {} {detail}. initiateWithdrawal of {} would be refunded with 247 \
-                         (ERR_DAILY_LIMIT, AN daily withdrawal limit). Nothing was sent.",
-                        to.chain_id, amount.0
-                    ),
-                    source: None,
-                });
+                return Err(window_refusal(daily_limit, used));
             }
         }
         // 6c. The EVM bridge the burn will be bound to.

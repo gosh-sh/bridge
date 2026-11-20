@@ -459,6 +459,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                               ERR_RECIPIENT_NOT_EVM);
             return;
         }
+        if (config.dailyLimit == 0) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_DAILY_LIMIT);
+            return;
+        }
         if (!nackl) {
             uint128 minted = _totalMintedBridgeByToken[tokenId];
             uint128 burned = _totalBurnedBridgeByToken[tokenId];

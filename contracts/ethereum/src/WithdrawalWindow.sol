@@ -6,9 +6,14 @@ pragma solidity ^0.8.20;
 library WithdrawalWindow {
     uint256 internal constant WINDOW_HOURS = 25;
 
+    struct Bucket {
+        uint256 hour;
+        uint256 paid;
+    }
+
     struct Window {
         uint256 dailyLimit;
-        mapping(uint256 => uint256) paidInHour;
+        Bucket[WINDOW_HOURS] buckets;
     }
 
     /// @notice Paying `amount` would take the window of `tokenId` above
@@ -24,15 +29,24 @@ library WithdrawalWindow {
         if (used_ > limit || amount > limit - used_) {
             revert WithdrawalWindowFull(tokenId, used_, amount, limit);
         }
-        w.paidInHour[block.timestamp / 1 hours] += amount;
+        uint256 hour = block.timestamp / 1 hours;
+        Bucket storage b = w.buckets[hour % WINDOW_HOURS];
+        if (b.hour != hour) {
+            b.hour = hour;
+            b.paid = amount;
+        } else {
+            b.paid += amount;
+        }
     }
 
     /// @notice Paid out in the current hour and the 24 before it.
     function used(Window storage w) public view returns (uint256 total) {
         uint256 hour = block.timestamp / 1 hours;
-        uint256 first = hour >= WINDOW_HOURS - 1 ? hour - (WINDOW_HOURS - 1) : 0;
-        for (uint256 h = first; h <= hour; h++) {
-            total += w.paidInHour[h];
+        for (uint256 i = 0; i < WINDOW_HOURS; i++) {
+            Bucket storage b = w.buckets[i];
+            if (b.hour <= hour && b.hour + WINDOW_HOURS > hour) {
+                total += b.paid;
+            }
         }
     }
 }

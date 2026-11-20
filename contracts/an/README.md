@@ -242,8 +242,8 @@ assertion is what posting it costs, read from each rollup on 2026-10-26:
 | Arbitrum Sepolia | whitelisted validators only | 36 of a test token (`0xefb383126640fe4a760010c6e59c397d2b6c7141`) | 20 blocks, about 4 minutes |
 
 On Arbitrum One a false assertion locks 3 600 ETH, none has ever been posted,
-and the 10 000 USDC per-chain ceiling bounds what one could take. That holds
-only while the ceiling stays below the stake and a challenged assertion loses
+and the owner's USDC `tvlCap` of that chain's bridge bounds what one could
+take. That holds only while the cap stays below the stake and a challenged assertion loses
 it. On Arbitrum Sepolia nothing of value backs an assertion, only the
 whitelist: use its verifier on test networks only.
 
@@ -310,7 +310,8 @@ minute, and miss many batches; a free Alchemy key keeps it. When an assertion en
 Acki Nacki sets no per-transfer limit on deposits or withdrawals; an amount only
 has to fit `uint64` (a larger withdrawal is refunded with 214).
 Each L1 bridge refuses a deposit that would take `treasuryBalance` (deposited
-principal minus completed payouts) past **10,000 USDC**, including principal
+principal minus completed payouts) past the owner's USDC `tvlCap` (set with
+`setTokenLimits`, `USDC_TVL_CAP` at deploy), including principal
 supplied to Aave. Owner `fundTreasury` and `migrateTreasury` top-ups are not
 checked against that cap. Yield and
 direct token donations do not increase that counter or its capacity.

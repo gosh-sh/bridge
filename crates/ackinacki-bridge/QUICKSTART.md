@@ -231,9 +231,11 @@ export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 ```
 
-Transfers are limited to 50 USDC. Each L1 bridge caps deposited principal minus
-completed payouts at 10,000 USDC; AN tracks the same capacity separately per
-chain. Limit reads must succeed before an approval, deposit or burn is requested.
+There is no per-transfer limit; an amount only has to fit `uint64`. Each EVM
+bridge caps deposited principal minus completed payouts at the owner's USDC
+`tvlCap`; AN does not check the USDC TVL. Withdrawals have an owner-set rolling
+24-hour limit per token on both sides. Limit reads must succeed before an
+approval, deposit or burn is requested.
 
 `--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
 mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits

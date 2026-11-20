@@ -213,10 +213,12 @@ pub struct AnSubmitConfig {
 /// safe: a duplicate `finalizeDeposit` still exits 0, but its voucher deploy
 /// fails with exit 51, which [`settle_finalize`] reports as
 /// [`SubmitOutcome::AlreadyFinalized`]. A duplicate NACKL one above the NACKL
-/// now locked for its chain is refused with 236 instead and reads as
-/// [`SubmitOutcome::Pending`]; only the voucher check tells it is paid. A
-/// deposit the bridge cannot pay yet is released: the bridge tells its voucher
-/// to delete itself, and it reads as [`SubmitOutcome::Pending`].
+/// now locked for its chain is refused with 236 instead; with the voucher
+/// check, a refusal whose voucher exists reads as
+/// [`SubmitOutcome::AlreadyFinalized`], otherwise as
+/// [`SubmitOutcome::Pending`]. A deposit the bridge cannot pay yet is released:
+/// the bridge tells its voucher to delete itself, and it reads as
+/// [`SubmitOutcome::Pending`].
 pub struct AnInterfaceSubmitter<C: IAckiNacki> {
     client: Arc<C>,
     config: AnSubmitConfig,
@@ -774,7 +776,11 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         witness: &DepositWitness,
     ) -> Result<SubmitOutcome, RelayerError> {
         check_witness_matches(event, witness)?;
-        self.submit_witness(witness).await
+        let outcome = self.submit_witness(witness).await?;
+        if matches!(outcome, SubmitOutcome::Pending { .. }) && self.is_finalized(event).await? {
+            return Ok(SubmitOutcome::AlreadyFinalized);
+        }
+        Ok(outcome)
     }
 }
 
@@ -1221,6 +1227,35 @@ mod tests {
         } else {
             sub.with_voucher_check(Abi::Json("{}".to_string())).unwrap()
         }
+    }
+
+    #[tokio::test]
+    async fn a_pending_submit_whose_voucher_was_paid_reads_as_already_finalized() {
+        use acki_nacki_interface::{AccountInfo, MockAckiNacki};
+
+        let voucher = "ffd5c4e7770b73e67ad8a44c828c0d2ee2e642cbbff53096ffd0c68ed0f9a80e";
+        let ev = shellnet_deposit();
+        let client = Arc::new(MockAckiNacki::new());
+        client.set_children(MockAckiNacki::CALL_TX_HASH, vec![]);
+        let sub = voucher_submitter(client.clone(), true);
+        assert!(matches!(
+            sub.submit(&ev, &witness(&ev)).await.unwrap(),
+            SubmitOutcome::Pending { .. }
+        ));
+        client.set_account(voucher, AccountInfo {
+            active: true,
+            code_hash: None,
+            data: None,
+        });
+        let deploy: TxHash = [0x55; 32];
+        let confirm: TxHash = [0x66; 32];
+        client.set_deploy(voucher, deploy);
+        client.set_children(deploy, vec![child(BRIDGE_AT, Some((confirm, 0)))]);
+        client.set_children(confirm, vec![child(RECIPIENT, None)]);
+        assert!(matches!(
+            sub.submit(&ev, &witness(&ev)).await.unwrap(),
+            SubmitOutcome::AlreadyFinalized
+        ));
     }
 
     #[tokio::test]

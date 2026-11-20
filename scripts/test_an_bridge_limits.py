@@ -779,6 +779,11 @@ class BridgeLimits(unittest.TestCase):
         self.assertEqual(result["messages"], [])
         self.assertEqual(int(self.limits(chain=3)["outstanding"]), 0)
 
+    def test_unregistered_usdc_with_nothing_outstanding_is_refused_with_247(self):
+        self.bind(3)
+        self.assertEqual(self.limits(3)["outstanding"], "0")
+        self.refund(self.withdraw(TRANSFER, chain=3), TRANSFER, 1_000_000_000, 247)
+
     def test_tvl_reduction_cannot_invalidate_an_accepted_deposit(self):
         amount = 10**18
         self.register(SECOND_TOKEN, 4, amount * 10, amount)

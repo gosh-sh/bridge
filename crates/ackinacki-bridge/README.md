@@ -2,7 +2,7 @@
 
 `--token usdc|nackl` names the token on `withdraw` and on `deposit`, and is required. NACKL
 (`docs/NACKL-bridge-extension.md`): the AN bridge locks it, and the EVM bridge mints the payout at once or, when its daily limit
-is full, refuses it with nothing spent, and the run exits 13; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof` command.
+is full, refuses it with nothing spent, and the run exits 13; later, re-run the same `withdraw proof` command as it is, or a `withdraw` with `--allow-retry`.
 A NACKL deposit is refused above the NACKL the AN bridge holds locked for its chain. The amount is read in that token's registered decimals,
 without rounding. Preflight refuses mismatched token addresses, missing registrations,
 insufficient per-chain inventory and owner limits before burning: an amount that does not fit the
@@ -674,7 +674,7 @@ claiming there is no record — it never opened one to find out.
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the EVM bridge's daily withdrawal limit for the token is full (`WithdrawalWindowFull`, USDC or NACKL; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof`); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
+| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the EVM bridge's daily withdrawal limit for the token is full (`WithdrawalWindowFull`, USDC or NACKL; later, re-run the same `withdraw proof` as it is, or a `withdraw` with `--allow-retry`); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
 **Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went

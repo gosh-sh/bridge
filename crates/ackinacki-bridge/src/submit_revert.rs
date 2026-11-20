@@ -36,14 +36,14 @@ pub(crate) fn explain(reason: &str) -> String {
         "WithdrawalWindowFull" => Some(
             "the EVM bridge's daily withdrawal limit for this token is full: its rolling 24-hour \
              window has no room for this amount yet. Nothing was spent, the nullifier is unspent \
-             and the proof stays valid; later, re-run `withdraw` with --allow-retry, or the same \
-             `withdraw proof` command, to send it again; the burn is not repeated",
+             and the proof stays valid. Later, send it again: re-run the same `withdraw proof` \
+             command as it is, or re-run a `withdraw` with --allow-retry; the burn is not repeated",
         ),
         "NacklNotMinter" => Some(
             "this EVM bridge is not the NACKL minter yet: the minter handover to it has not \
-             happened. Nothing was spent and the proof stays valid; later, re-run `withdraw` with \
-             --allow-retry, or the same `withdraw proof` command, to send it again; the burn is \
-             not repeated",
+             happened. Nothing was spent and the proof stays valid. Later, send it again: re-run \
+             the same `withdraw proof` command as it is, or re-run a `withdraw` with \
+             --allow-retry; the burn is not repeated",
         ),
         "NacklMinterGone" => Some(
             "this EVM bridge has handed NACKL minting to its successor, and the proof is bound to \

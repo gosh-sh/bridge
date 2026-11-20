@@ -19,4 +19,14 @@ cmp -s "$PY" "$RUST" || {
   diff -u "$PY" "$RUST" || true
   exit 1
 }
-echo "ok: python and Rust CLI USDCBridge.abi.json are byte-identical"
+for copy in "$REPO/crates/bridge-circuits/TokenBridge.abi.json" \
+            "$REPO/contracts/an/0.80.1_compiled/exchange/eccBridge.abi.json"; do
+  cmp -s "$RUST" "$copy" || {
+    echo "eccBridge ABI drift between:"
+    echo "  $RUST"
+    echo "  $copy"
+    diff -u "$RUST" "$copy" || true
+    exit 1
+  }
+done
+echo "ok: the python, Rust CLI and bridge-circuits eccBridge ABI copies match the compiled ABI"

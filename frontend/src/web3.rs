@@ -344,7 +344,7 @@ fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
 
 fn validate_transfer_amount(amount: u128) -> Result<(), String> {
     if amount > MAX_TRANSFER_USDC_UNITS {
-        return Err("Amount exceeds the 50 USDC per-transfer limit".into());
+        return Err("Amount exceeds the bridge's uint64 amount bound".into());
     }
     Ok(())
 }
@@ -530,8 +530,10 @@ mod deposit_tests {
     #[test]
     fn excessive_transfers_are_rejected_before_approval_or_deposit() {
         let recipient = "a3".repeat(32);
-        rejects_before_wallet_access(super::approve_usdc(50_000_001), "50 USDC");
-        rejects_before_wallet_access(super::make_deposit(50_000_001, &recipient), "50 USDC");
+        let over = u64::MAX as u128 + 1;
+        rejects_before_wallet_access(super::approve_usdc(over), "uint64");
+        rejects_before_wallet_access(super::make_deposit(over, &recipient), "uint64");
+        assert!(super::validate_transfer_amount(50_000_001).is_ok());
     }
 }
 

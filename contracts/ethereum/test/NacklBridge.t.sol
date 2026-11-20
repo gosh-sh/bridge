@@ -237,6 +237,16 @@ contract NacklBridgeTest is NacklBridgeFixture {
         );
         bridge.migrateToken(1, address(stranger));
 
+        AckiNackiBridge narrow = _successor();
+        narrow.listNackl(nackl, MAX_TRANSFER - 1, DAILY_LIMIT);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector, MAX_TRANSFER - 1, MAX_TRANSFER
+            )
+        );
+        bridge.migrateToken(1, address(narrow));
+        assertEq(nackl.owner(), address(bridge));
+
         bridge.migrateToken(1, address(s));
         assertEq(nackl.owner(), address(s));
     }

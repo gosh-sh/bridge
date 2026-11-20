@@ -1142,14 +1142,37 @@ up if there is none, or if it cannot land before its anchor goes.
    and for good, if the bridge never verifies `T₃` itself — there is no
    fallback: prove and submit inside the ~8 d window.
 
-**An evicted proof blocks the withdraw queue.** `daemon-withdraw` and
+**An evicted proof in the withdraw queue.** `daemon-withdraw` and
 `daemon-bridge` retry `UnknownAnchor` as transient, because it also
 means "covering bundle not on-chain yet" (`classify_withdraw_revert` in
 `src/bridge.rs`): the scan stops at that file and backs off, and every
-`proof_event_*.json` that sorts after it waits. Move the evicted file
-out of `--proofs-dir`. If the re-proven withdrawal was already paid some
-other way, the scan skips the old file instead, as `nullifier already
-used`.
+`proof_event_*.json` that sorts after it waits. The scan parks the file,
+with an error-level log line, once it knows the anchor was evicted: the
+same process saw the anchor in the window before (a NACKL proof refused
+with `NacklWindowFull` or `NacklNotMinter` has passed the anchor check),
+or the layer's ring (`layerWindowWriteCursor`) has taken a full window of
+128 appends since the first `UnknownAnchor` without the anchor showing
+up. After a restart only the second rule applies, so an evicted file can
+hold the queue for up to one window turnover of its layer. Re-prove the
+withdrawal with `--anchor-layer auto` (the nullifier does not depend on
+the anchor) and move the old file out of `--proofs-dir`. If the
+re-proven withdrawal was already paid some other way, the scan skips the
+old file instead, as `nullifier already used`.
+
+A NACKL proof refused with `NacklWindowFull` or `NacklNotMinter` stays in
+`--proofs-dir` and is tried again on the next scan; the scan goes on to
+the next file and does not back off. `NacklMinterGone` and
+`LayerOutOfRange` park the file.
+
+`daemon-withdraw-live` drops a proof whose anchor left the window
+(`UnknownAnchor`, or a witness whose anchor rolled out) and builds the
+next one with `--anchor-layer auto`, recorded as `"anchor_auto": true` on
+the claim in `withdraw-claims.json`. A claim that no active layer covers
+any more, once every active layer's boundary for the burn has been
+verified, and a NACKL claim refused with `NacklMinterGone`, go to
+`"state": "parked"` with the reason, keep their event BOC and are logged
+at error level. A parked claim is not tried again; to retry it, set its
+state back to `"pending"` and restart the claimer.
 
 **Past the last layer.** A payout whose anchor has left every active
 layer cannot be paid. No function in `AckiNackiBridge` pays out without

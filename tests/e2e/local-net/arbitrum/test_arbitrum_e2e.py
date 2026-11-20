@@ -411,7 +411,7 @@ def test_46_nackl_deposit_sent(run, arb, ctx):
     multisig and ends once it is confirmed."""
     at = arb.block()
     ctx["nackl_supply_before"] = arb.call(ctx["nackl"], "totalSupply()", block=at)
-    ctx["nackl_minted_before"] = arb.words(ctx["bridge"], "nacklState()", block=at)[4]
+    ctx["nackl_minted_before"] = arb.words(ctx["bridge"], "nacklState()", block=at)[2]
     run.job("cli-deposit-nackl", stdin=env("ARBITRUM_SEPOLIA_E2E_PRIVATE_KEY"),
             FROM=ctx["address"], TO=ctx["msig"], AMOUNT=str(NACKL_IN // NACKL))
     run.finish("cli-deposit-nackl", 900)
@@ -572,7 +572,7 @@ def test_66_nackl_deposit_delivered(an, arb, ctx):
     the withdrawal locked."""
     assert int(an("ecc", ctx["msig"])["ECC1"]) == NACKL_IN, "the multisig did not receive the 3 NACKL"
     at = arb.block()
-    minted = arb.words(ctx["bridge"], "nacklState()", block=at)[4] - ctx["nackl_minted_before"]
+    minted = arb.words(ctx["bridge"], "nacklState()", block=at)[2] - ctx["nackl_minted_before"]
     assert arb.call(ctx["nackl"], "totalSupply()", block=at) == \
         ctx["nackl_supply_before"] - NACKL_IN + minted, "the deposit did not burn the 3 NACKL"
     assert int(an("nackl", ctx["bridge"])["LOCKED"]) == NACKL_OUT - NACKL_IN

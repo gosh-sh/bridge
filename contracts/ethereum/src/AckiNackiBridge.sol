@@ -2243,6 +2243,10 @@ contract AckiNackiBridge {
         if (info.token == address(_nackl.token)) {
             info.depositsEnabled = false;
             NacklMint.handOver(_nackl, successor);
+            uint256 nacklCap = AckiNackiBridge(successor).maxWithdrawalAmount(tokenId);
+            if (nacklCap < info.maxWithdrawal) {
+                revert SuccessorWithdrawalCapTooLow(nacklCap, info.maxWithdrawal);
+            }
             return;
         }
         uint256 amount = info.liabilities;

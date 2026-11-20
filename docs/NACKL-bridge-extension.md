@@ -86,7 +86,7 @@ NB-AN-8 hold for the code in this repository.
 | NB-EVM-7 | When the owner calls `listNackl` again with the listed token, the EVM bridge shall set the daily limit for payouts after the call. It shall refuse a daily limit below the NACKL per-withdrawal cap, so that every payout can fit an empty window. |
 | NB-EVM-8 | The EVM bridge shall keep no payout pending: every NACKL proof it accepts is minted in the same transaction. |
 | NB-EVM-9 | While the EVM bridge is paused, `deposit` and `withdrawByProof` shall revert. |
-| NB-EVM-10 | When the owner calls `migrateToken(1, successor)`, the EVM bridge shall close NACKL deposits on itself and make `successor` the minter. It shall be refused unless this bridge is paused, `successor` names it as `predecessor` and lists the same NACKL token. |
+| NB-EVM-10 | When the owner calls `migrateToken(1, successor)`, the EVM bridge shall close NACKL deposits on itself and make `successor` the minter. It shall be refused unless this bridge is paused, `successor` names it as `predecessor` and lists the same NACKL token with a withdrawal cap no lower than this bridge's. |
 | NB-EVM-11 | After a handover, a NACKL `withdrawByProof` on the old EVM bridge shall revert with `NacklMinterGone`, and `deposit` of NACKL into it shall revert with `TokenDepositsDisabled`, whatever `setTokenDepositsEnabled` says. |
 | NB-EVM-12 | The USDC paths shall be unchanged: a USDC deposit and a USDC withdrawal move the same balances and emit the same events as on `40090b6c`. |
 

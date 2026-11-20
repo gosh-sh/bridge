@@ -25,7 +25,8 @@
 //! round. A burn that fails otherwise (a proof the bridge rejects, a witness
 //! that cannot be built, a prover that dies) is tried again later and later
 //! ([`retry_delay`]: one minute, doubling, at most [`MAX_RETRY_DELAY`]), with
-//! the reason in the file: no burn is ever given up.
+//! the reason in the file. A burn the bridge can no longer pay is parked
+//! ([`ClaimState::Parked`]) and keeps its event BOC.
 
 use std::{
     collections::HashMap,
@@ -44,7 +45,7 @@ use bridge_event_witness::AnchorLayerMode;
 use bridge_gql_fetcher::gql_client::GqlClient;
 use bridge_prover_lib::bridge_state::BridgeState;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     bridge::{
@@ -120,6 +121,7 @@ pub enum ClaimState {
     /// else paid it, or an earlier send of this relayer whose receipt it
     /// did not see.
     AlreadyPaid,
+    Parked { reason: String },
 }
 
 /// One `WithdrawalInitiated` the claimer saw.
@@ -145,6 +147,8 @@ pub struct Claim {
     pub recipient: Option<String>,
     #[serde(flatten)]
     pub state: ClaimState,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anchor_auto: bool,
     /// Failures in a row that were not the network's ([`retry_delay`]).
     #[serde(default)]
     pub failures: u32,
@@ -234,6 +238,7 @@ impl ClaimsFile {
                 token_id: None,
                 recipient: None,
                 state: ClaimState::Pending,
+                anchor_auto: false,
                 failures: 0,
                 retry_at: None,
                 last_error: None,
@@ -273,6 +278,7 @@ enum StepError {
     Retry(anyhow::Error),
     /// Anything else: the next try waits [`retry_delay`].
     Refused(String),
+    AnchorGone(String),
 }
 
 impl From<anyhow::Error> for StepError {
@@ -375,8 +381,23 @@ where
             match self.advance(&mut claim).await {
                 Ok(Outcome::Wait) => {},
                 Ok(Outcome::Final(state)) => {
+                    if let ClaimState::Parked {
+                        reason,
+                    } = &state
+                    {
+                        error!(
+                            message_id = %id,
+                            %reason,
+                            amount = claim.amount.as_deref().unwrap_or("?"),
+                            recipient = claim.recipient.as_deref().unwrap_or("?"),
+                            "withdraw claimer: parked; not tried again until its state is set \
+                             back to \"pending\" in {} and the claimer restarted",
+                            self.cfg.state_dir.join(CLAIMS_FILE).display(),
+                        );
+                    } else {
+                        claim.boc = None;
+                    }
                     claim.state = state;
-                    claim.boc = None;
                     claim.failures = 0;
                     claim.retry_at = None;
                     claim.last_error = None;
@@ -388,20 +409,10 @@ where
                     warn!(message_id = %id, error = %text, "withdraw claimer: will try again next round");
                     claim.last_error = Some(text);
                 },
-                Err(StepError::Refused(reason)) => {
-                    claim.failures += 1;
-                    let wait = retry_delay(claim.failures);
-                    claim.retry_at = Some(unix_now() + wait.as_secs());
-                    self.proofs.remove(&id);
-                    let _ = std::fs::remove_dir_all(self.work_dir_for(&id));
-                    warn!(
-                        message_id = %id,
-                        failures = claim.failures,
-                        retry_in_s = wait.as_secs(),
-                        %reason,
-                        "withdraw claimer: failed; will try again",
-                    );
-                    claim.last_error = Some(reason);
+                Err(StepError::Refused(reason)) => self.back_off(&mut claim, reason),
+                Err(StepError::AnchorGone(reason)) => {
+                    claim.anchor_auto = true;
+                    self.back_off(&mut claim, reason);
                 },
             }
             if claim != before {
@@ -410,6 +421,23 @@ where
             }
         }
         Ok(())
+    }
+
+    fn back_off(&mut self, claim: &mut Claim, reason: String) {
+        claim.failures += 1;
+        let wait = retry_delay(claim.failures);
+        claim.retry_at = Some(unix_now() + wait.as_secs());
+        self.proofs.remove(&claim.message_id);
+        let _ = std::fs::remove_dir_all(self.work_dir_for(&claim.message_id));
+        warn!(
+            message_id = %claim.message_id,
+            failures = claim.failures,
+            retry_in_s = wait.as_secs(),
+            anchor_auto = claim.anchor_auto,
+            %reason,
+            "withdraw claimer: failed; will try again",
+        );
+        claim.last_error = Some(reason);
     }
 
     /// Every ExtOut after the cursor, page by page.
@@ -576,10 +604,12 @@ where
                     message_id: claim.message_id.clone(),
                     key_block: block.key_block,
                 };
-                let e2e_cfg = self.e2e_config(&claim.message_id, block.seq_no);
-                let enriched = enrich_captured_with(&self.gql, &e2e_cfg, &state, &captured)
-                    .await
-                    .map_err(|e| StepError::Refused(format!("the witness: {e:#}")))?;
+                let e2e_cfg = self.e2e_config(&claim.message_id, block.seq_no, claim.anchor_auto);
+                let enriched =
+                    match enrich_captured_with(&self.gql, &e2e_cfg, &state, &captured).await {
+                        Ok(enriched) => enriched,
+                        Err(e) => return witness_failure(&format!("{e:#}"), block.seq_no, &state),
+                    };
 
                 // Paid already?
                 let nullifier = nullifier_of(&enriched.witness)
@@ -700,7 +730,7 @@ where
         nullifier: U256,
         outcome: Result<Outcome, StepError>,
     ) -> Result<Outcome, StepError> {
-        if matches!(outcome, Ok(Outcome::Final(_))) {
+        if matches!(outcome, Ok(Outcome::Final(ClaimState::AlreadyPaid))) {
             return outcome;
         }
         match self.bridge.is_nullifier_used(nullifier).await {
@@ -716,7 +746,12 @@ where
         }
     }
 
-    fn e2e_config(&self, message_id: &str, burn_seq_no: u64) -> WithdrawE2EConfig {
+    fn e2e_config(
+        &self,
+        message_id: &str,
+        burn_seq_no: u64,
+        anchor_auto: bool,
+    ) -> WithdrawE2EConfig {
         let work_dir = self.work_dir_for(message_id);
         WithdrawE2EConfig {
             gql_endpoint: self.cfg.gql_endpoint.clone(),
@@ -727,7 +762,7 @@ where
             event_dst_filter: WITHDRAWAL_EVENT_DST.to_string(),
             event_wait: Duration::ZERO,
             event_poll_interval: Duration::ZERO,
-            anchor_mode: AnchorLayerMode::Explicit(self.cfg.anchor_level),
+            anchor_mode: anchor_mode(anchor_auto, self.cfg.anchor_level),
             i_know_the_wait: true,
             snark_dir: work_dir.join("shplonk-snark"),
             work_dir,
@@ -753,15 +788,21 @@ where
 fn refusal(reason: &str) -> Result<Outcome, StepError> {
     match decode_withdraw_revert(reason) {
         Some(r) if r.name == "NullifierAlreadyUsed" => Ok(Outcome::Final(ClaimState::AlreadyPaid)),
-        Some(r)
-            if r.name == "UnknownAnchor"
-                || classify_withdraw_revert(reason) == WithdrawRevertKind::Permanent =>
-        {
-            Err(StepError::Refused(format!(
-                "withdrawByProof reverts {}",
+        Some(r) if r.name == "NacklMinterGone" => Ok(Outcome::Final(ClaimState::Parked {
+            reason: format!(
+                "withdrawByProof reverts {}: this bridge handed the NACKL minter over and can no \
+                 longer mint this payout; settle it outside the claimer",
                 r.rendered
-            )))
-        },
+            ),
+        })),
+        Some(r) if r.name == "UnknownAnchor" => Err(StepError::AnchorGone(format!(
+            "withdrawByProof reverts {}: the anchor has left the bridge's window; the next proof \
+             picks the layer itself",
+            r.rendered
+        ))),
+        Some(r) if classify_withdraw_revert(reason) == WithdrawRevertKind::Permanent => Err(
+            StepError::Refused(format!("withdrawByProof reverts {}", r.rendered)),
+        ),
         Some(r) => Err(StepError::Retry(anyhow::anyhow!(
             "withdrawByProof reverts {} for now",
             r.rendered
@@ -770,6 +811,51 @@ fn refusal(reason: &str) -> Result<Outcome, StepError> {
             "withdrawByProof: {reason}"
         ))),
     }
+}
+
+fn anchor_mode(anchor_auto: bool, anchor_level: u8) -> AnchorLayerMode {
+    if anchor_auto {
+        AnchorLayerMode::Auto
+    } else {
+        AnchorLayerMode::Explicit(anchor_level)
+    }
+}
+
+fn witness_failure(
+    text: &str,
+    burn_seq_no: u64,
+    state: &BridgeState,
+) -> Result<Outcome, StepError> {
+    if text.contains("Event is older than") {
+        let top = (state.num_active_layers() as u8).max(2);
+        let pending_boundary = (2..=top).find_map(|n| {
+            let boundary = *bridge_prover_lib::real_chain_builder::l_n_anchor_boundaries(
+                burn_seq_no,
+                bridge_event_witness::HISTORY_WINDOW_SIZE,
+                n,
+            )
+            .last()?;
+            (boundary > state.stored_last_seen_block_seq_no).then_some((n, boundary))
+        });
+        return match pending_boundary {
+            Some((n, boundary)) => Err(StepError::Refused(format!(
+                "the witness: no layer covers the burn yet; the L{n} boundary {boundary} is not \
+                 verified (bridge at {}): {text}",
+                state.stored_last_seen_block_seq_no
+            ))),
+            None => Ok(Outcome::Final(ClaimState::Parked {
+                reason: format!(
+                    "no active layer of the bridge covers the burn any more; the bridge cannot \
+                     pay it until it verifies a higher layer's boundary for it, then set the \
+                     claim back to pending: {text}"
+                ),
+            })),
+        };
+    }
+    if text.contains("rolled out of the L") {
+        return Err(StepError::AnchorGone(format!("the witness: {text}")));
+    }
+    Err(StepError::Refused(format!("the witness: {text}")))
 }
 
 /// The nullifier the proof of `witness` will carry, computed natively from
@@ -936,12 +1022,120 @@ mod tests {
             selector("UnknownAnchor(uint256)"),
             5
         );
-        assert!(matches!(refusal(&evicted), Err(StepError::Refused(_))));
+        assert!(matches!(refusal(&evicted), Err(StepError::AnchorGone(_))));
         let paused = format!("execution reverted: 0x{}", selector("BridgePaused()"));
         assert!(matches!(refusal(&paused), Err(StepError::Retry(_))));
         assert!(matches!(
             refusal("connection reset"),
             Err(StepError::Retry(_))
         ));
+    }
+
+    #[test]
+    fn a_minter_handed_over_parks_the_claim_and_a_full_window_waits() {
+        let selector = |sig: &str| hex::encode(&alloy::primitives::keccak256(sig.as_bytes())[..4]);
+        let gone = format!("execution reverted: 0x{}", selector("NacklMinterGone()"));
+        assert!(matches!(
+            refusal(&gone),
+            Ok(Outcome::Final(ClaimState::Parked { .. }))
+        ));
+        let full = format!(
+            "execution reverted: 0x{}{:064x}{:064x}{:064x}",
+            selector("NacklWindowFull(uint256,uint256,uint256)"),
+            900,
+            200,
+            1000
+        );
+        assert!(matches!(refusal(&full), Err(StepError::Retry(_))));
+        let not_minter = format!(
+            "execution reverted: 0x{}{:064x}",
+            selector("NacklNotMinter(address)"),
+            0x11
+        );
+        assert!(matches!(refusal(&not_minter), Err(StepError::Retry(_))));
+    }
+
+    #[test]
+    fn a_retry_after_the_anchor_left_lets_the_proof_pick_the_layer() {
+        assert!(matches!(
+            anchor_mode(false, 2),
+            AnchorLayerMode::Explicit(2)
+        ));
+        assert!(matches!(anchor_mode(true, 2), AnchorLayerMode::Auto));
+    }
+
+    fn state_at(last_seen: u64, active_layers: u8) -> BridgeState {
+        let mut state = BridgeState::new(HISTORY_PROOF_WINDOW);
+        state.stored_last_seen_block_seq_no = last_seen;
+        for layer in 1..=active_layers {
+            state.append_layer(layer, [layer; 32], last_seen);
+        }
+        state
+    }
+
+    #[test]
+    fn a_witness_past_every_active_layer_parks_the_claim() {
+        let rolled = "anchor key block height 9 not found in L1 window [] — block has rolled out \
+                      of the L1 rolling window. Re-run with `--anchor-layer auto`";
+        assert!(matches!(
+            witness_failure(rolled, 100, &state_at(5_000_000, 2)),
+            Err(StepError::AnchorGone(_))
+        ));
+        let older = "auto: L1 (K=1024, height=9) and all higher active layers rolled out of their \
+                     rolling windows. Event is older than verifier coverage.";
+        assert!(matches!(
+            witness_failure(older, 100, &state_at(5_000_000, 2)),
+            Ok(Outcome::Final(ClaimState::Parked { .. }))
+        ));
+        assert!(matches!(
+            witness_failure(older, 100, &state_at(10_000, 2)),
+            Err(StepError::Refused(_))
+        ));
+        assert!(matches!(
+            witness_failure(older, 100, &state_at(1_000_000, 3)),
+            Err(StepError::Refused(_))
+        ));
+        assert!(matches!(
+            witness_failure("GraphQL timed out", 100, &state_at(5_000_000, 2)),
+            Err(StepError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn a_parked_claim_round_trips_and_older_files_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = ClaimsFile::default();
+        file.take_page(vec![
+            ("c1".into(), msg("a", WITHDRAWAL_EVENT_DST, Some("h1"))),
+            ("c2".into(), msg("b", WITHDRAWAL_EVENT_DST, Some("h2"))),
+        ]);
+        file.withdrawals[0].state = ClaimState::Parked {
+            reason: "NacklMinterGone()".into(),
+        };
+        file.withdrawals[1].anchor_auto = true;
+        file.save(dir.path()).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join(CLAIMS_FILE)).unwrap()).unwrap();
+        assert_eq!(raw["withdrawals"][0]["state"], "parked");
+        assert_eq!(raw["withdrawals"][0]["reason"], "NacklMinterGone()");
+        assert_eq!(raw["withdrawals"][0]["boc"], "boc-a");
+        assert!(raw["withdrawals"][0].get("anchor_auto").is_none());
+        assert_eq!(raw["withdrawals"][1]["anchor_auto"], true);
+        assert_eq!(
+            ClaimsFile::load(dir.path()).unwrap().withdrawals,
+            file.withdrawals
+        );
+
+        let old = r#"{"cursor":"c1","withdrawals":[{"message_id":"a","block_hash":"h1",
+            "created_at":1,"boc":"boc-a","state":"pending","failures":3},
+            {"message_id":"b","block_hash":"h2","boc":"boc-b","state":"pending",
+            "reason":"NacklMinterGone()"}]}"#;
+        std::fs::write(dir.path().join(CLAIMS_FILE), old).unwrap();
+        let back = ClaimsFile::load(dir.path()).unwrap();
+        assert_eq!(back.withdrawals[0].state, ClaimState::Pending);
+        assert!(!back.withdrawals[0].anchor_auto);
+        assert_eq!(back.withdrawals[0].failures, 3);
+        assert_eq!(back.withdrawals[1].state, ClaimState::Pending);
+        assert_eq!(back.withdrawals[1].boc.as_deref(), Some("boc-b"));
     }
 }

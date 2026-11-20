@@ -373,10 +373,12 @@ them once the principal has moved — the order is in `docs/aave-yield.md`,
 
 On the EVM side `migrateTreasury` moves USDC. NACKL (id 1) is not held in custody:
 `migrateToken(1, successor)` hands the NACKL token's minter to the successor. The contract
-checks only that the old bridge has nothing queued and that the successor lists the same token;
-the operator calls it only once `getNacklLockedTo(chainId, oldBridge)` here equals the old
-bridge's `nacklState().accepted` (`docs/NACKL-bridge-extension.md`, NB-HO-3). Until then the
-successor queues NACKL payouts and executes none. For any other listed token
+checks that the successor lists the same token with a withdrawal cap no lower than the old
+listing's (`NacklSuccessorNotReady`, `SuccessorWithdrawalCapTooLow`); the operator calls it only
+once `getNacklLockedTo(chainId, oldBridge)` here equals the old bridge's `nacklState().minted`
+(`docs/NACKL-bridge-extension.md`, NB-HO-3). Until then the successor refuses NACKL payouts with
+`NacklNotMinter`, leaving their nullifiers unspent, so they are sent again after the handover; the
+old bridge refuses them with `NacklMinterGone` once it has handed over. For any other listed token
 `migrateToken(tokenId, successor)` moves its custody and liabilities together, with nothing
 minted here, and the new bridge must list the token under the same id, with a withdrawal cap no
 lower than the old listing's (`FundedTokenMismatch`, `SuccessorWithdrawalCapTooLow`). All of them

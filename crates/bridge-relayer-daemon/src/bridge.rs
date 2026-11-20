@@ -495,6 +495,7 @@ pub trait WithdrawBridge: Send + Sync {
         proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError>;
+    async fn layer_write_cursor(&self, layer: u8) -> Result<u16, RelayerError>;
 }
 
 #[async_trait]
@@ -525,6 +526,14 @@ where
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
         EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
+    }
+
+    async fn layer_write_cursor(&self, layer: u8) -> Result<u16, RelayerError> {
+        self.contract
+            .layerWindowWriteCursor(layer)
+            .call()
+            .await
+            .map_err(map_contract_err)
     }
 }
 
@@ -904,6 +913,7 @@ mod sol_bindings {
             }
 
             function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory);
+            function layerWindowWriteCursor(uint8 layer) external view returns (uint16);
 
             event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
 
@@ -2324,7 +2334,7 @@ pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmi
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 10] = [
+    let permanent_selectors: [[u8; 4]; 11] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
@@ -2335,6 +2345,7 @@ pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
         AckiNackiBridge::InvalidNumLayers::SELECTOR,
         AckiNackiBridge::NullifierAlreadyUsed::SELECTOR,
         AckiNackiBridge::NacklMinterGone::SELECTOR,
+        AckiNackiBridge::LayerOutOfRange::SELECTOR,
     ];
     let lowered = reason.to_ascii_lowercase();
     for sel in permanent_selectors {
@@ -3109,6 +3120,24 @@ mod tests {
         assert_eq!(
             classify_withdraw_revert(&reason),
             WithdrawRevertKind::Transient,
+        );
+    }
+
+    #[test]
+    fn classify_layer_out_of_range_is_permanent() {
+        use alloy::sol_types::SolError;
+        let out_of_range = AckiNackiBridge::LayerOutOfRange {
+            layer: 255,
+        }
+        .abi_encode();
+        let reason = format!("execution reverted: 0x{}", hex::encode(out_of_range));
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent,
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "LayerOutOfRange(layer: 255)"
         );
     }
 

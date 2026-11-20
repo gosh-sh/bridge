@@ -78,9 +78,9 @@ assigns it when the release is tagged.
 - `AckiNackiBridge`: new errors `NacklMinterGone`, `NacklWindowFull`, `NacklNotMinter`,
   `NacklBadDecimals`, `NacklLimitBelowWithdrawalCap`, `NacklSuccessorNotReady`; events
   `NacklListed`, `NacklLimitsSet`, `NacklMinterHandedOver`.
-- `AckiNackiBridge`: `migrateToken(1, successor)` hands the NACKL minter over while paused; run it
-  only after `setEvmBridge` to the successor and once `getNacklLockedTo` for the old bridge equals
-  its `nacklState().minted`.
+- `AckiNackiBridge`: `migrateToken(1, successor)` hands the NACKL minter over while paused, to a
+  successor whose NACKL withdrawal cap is no lower; run it only after `setEvmBridge` to the
+  successor and once `getNacklLockedTo` for the old bridge equals its `nacklState().minted`.
 - `NacklToken`: OpenZeppelin ERC20 `NACKL`, nine decimals, deployed and optionally listed by
   `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_INITIAL_HOLDER`,
   `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`).

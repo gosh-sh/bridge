@@ -12,7 +12,8 @@ every checkpoint it finalizes into a queue on disk as it appears
 waits for a better signed one. The daemon proves the oldest queued
 checkpoints in the background, `--parallel-proofs` at once (default 2), and
 sends them oldest first. A checkpoint that fails is tried again until it is
-on chain; each failed try adds one to
+on chain, and one the contract already has (its send ran, the answer was
+lost) is recorded from `getHead` and `isProvenExecutionBlockHash`; each failed try adds one to
 `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}` at
 `GET /metrics` (`--metrics-addr`, `ETH_LC_RELAYER_METRICS_ADDR`). Ancestry
 admits the blocks behind a proven one, headers oldest first, up to 32 per
@@ -31,7 +32,9 @@ Committee rotate: once the contract holds period P and the beacon serves
 background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
 `--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
 and sends `submitRotate` when the bundle passes its checks against the
-contract (`docs/eth-light-client.md` §3.3). `--no-rotate` turns it off;
+contract (`docs/eth-light-client.md` §3.3) and no queued checkpoint is
+signed before period P−5, which the contract stops taking after the
+rotate (`EthBeaconLightClient` 1.8.0 holds seven committees). `--no-rotate` turns it off;
 `--owner-hop` is the fallback at the boundary when no rotate was sent.
 The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).
 

@@ -238,7 +238,7 @@ chain. Limit reads must succeed before an approval, deposit or burn is requested
 `--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
 mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits
 35–75 minutes for its block to be anchored. The new EVM deployment must expose `deposit(address,uint256,bytes32)`
-and be paired with an AN bridge at version 1.17.0, which finalizes a deposit
+and be paired with an AN bridge at version 1.18.0, which finalizes a deposit
 from its receipt proof. Older deployment addresses are incompatible. The RPC,
 Acki Nacki endpoint and state directory come from the profile. When reusing a
 profile, replace its old deployment values before running this build.

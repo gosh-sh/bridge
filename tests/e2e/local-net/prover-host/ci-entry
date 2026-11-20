@@ -99,7 +99,15 @@ case "$verb" in
     mkdir -p "$CI/build" && exec 8>"$CI/build/$s.lock" && flock 8
     checkout "$s"
     mkdir -p "$b/out" "$CI/cache"
-    if [ -f "$b/out/.complete" ]; then echo "built already: $s"; exit 0; fi
+    # `clean` removes every ci-* image, this commit's too, and leaves the files: a commit
+    # run again after a clean has to build its images again. Built means both.
+    built=true
+    [ -f "$b/out/.complete" ] || built=false
+    for t in bridge-relayer bridge-eth-lc-relayer bridge-deposit-relayer; do
+      docker image inspect "ci-$t:$s" >/dev/null 2>&1 || built=false
+    done
+    if $built; then echo "built already: $s"; exit 0; fi
+    rm -f "$b/out/.complete"
     # One build of the commit's docker/Dockerfile: every binary as plain files (/bin-ci,
     # for the one-shot jobs and the CLI) and the three service images the service jobs run
     # from, so the e2e exercises what a host deploys. BuildKit's cache mounts keep the

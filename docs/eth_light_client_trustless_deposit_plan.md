@@ -6,7 +6,7 @@
 > The team has **not** accepted an attester/oracle trust assumption; this plan removes
 > it entirely by proving Ethereum finality in-circuit.
 >
-> **Since bridge-audit#139** there is no deposit circuit: `eccBridge` 1.17.0 checks the deposit's
+> **Since bridge-audit#139** there is no deposit circuit: `eccBridge` checks the deposit's
 > receipt-trie proof itself in `finalizeDeposit(chainId, header, txIndex, receiptProof, logIndex)`
 > (`contracts/an/exchange/eccBridge.sol:949-993`, `contracts/an/exchange/EthTrie.sol`), and
 > `deposit-prover/` is gone. Where this plan describes the deposit side, it has been updated to

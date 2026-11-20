@@ -1143,17 +1143,12 @@ up if there is none, or if it cannot land before its anchor goes.
    fallback: prove and submit inside the ~8 d window.
 
 **An evicted proof in the withdraw queue.** `daemon-withdraw` and
-`daemon-bridge` retry `UnknownAnchor` as transient, because it also
-means "covering bundle not on-chain yet" (`classify_withdraw_revert` in
-`src/bridge.rs`): the scan stops at that file and backs off, and every
-`proof_event_*.json` that sorts after it waits. The scan parks the file,
-with an error-level log line, once it knows the anchor was evicted: the
-same process saw the anchor in the window before (a NACKL proof refused
-with `NacklWindowFull` or `NacklNotMinter` has passed the anchor check),
-or the layer's ring (`layerWindowWriteCursor`) has taken a full window of
-128 appends since the first `UnknownAnchor` without the anchor showing
-up. After a restart only the second rule applies, so an evicted file can
-hold the queue for up to one window turnover of its layer. Re-prove the
+`daemon-bridge` cannot tell an anchor that has left the bridge's window
+from one whose covering bundle is not on-chain yet: both revert
+`UnknownAnchor`. The scan keeps such a file in `--proofs-dir`, logs a
+warning, goes on to the next file and tries it again on the next scan,
+without backing off; it never parks it. A file whose anchor was evicted
+is therefore tried on every scan and never paid. Re-prove the
 withdrawal with `--anchor-layer auto` (the nullifier does not depend on
 the anchor) and move the old file out of `--proofs-dir`. If the
 re-proven withdrawal was already paid some other way, the scan skips the

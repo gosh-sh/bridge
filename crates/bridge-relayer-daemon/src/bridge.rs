@@ -495,7 +495,6 @@ pub trait WithdrawBridge: Send + Sync {
         proof: &alloy::primitives::Bytes,
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError>;
-    async fn layer_write_cursor(&self, layer: u8) -> Result<u16, RelayerError>;
 }
 
 #[async_trait]
@@ -526,14 +525,6 @@ where
         pub_inputs: &WithdrawalPublicInputs,
     ) -> Result<WithdrawSubmitOutcome, RelayerError> {
         EthBridgeClient::submit_withdraw(self, proof, pub_inputs).await
-    }
-
-    async fn layer_write_cursor(&self, layer: u8) -> Result<u16, RelayerError> {
-        self.contract
-            .layerWindowWriteCursor(layer)
-            .call()
-            .await
-            .map_err(map_contract_err)
     }
 }
 
@@ -913,7 +904,6 @@ mod sol_bindings {
             }
 
             function getLayerWindow(uint8 layer) external view returns (HistoryWindow memory);
-            function layerWindowWriteCursor(uint8 layer) external view returns (uint16);
 
             event LayerAnchorAppended(uint8 indexed layer, uint256 hashValue, uint64 blockHeight);
 

@@ -84,8 +84,8 @@ assigns it when the release is tagged.
 - `NacklToken`: OpenZeppelin ERC20 `NACKL`, nine decimals, deployed and optionally listed by
   `script/DeployNacklToken.s.sol` (`NACKL_BRIDGE`, `NACKL_INITIAL_SUPPLY`, `NACKL_INITIAL_HOLDER`,
   `NACKL_LIST`, `NACKL_MAX_TRANSFER`, `NACKL_DAILY_LIMIT`).
-- `relayer daemon-live`, `daemon-withdraw` and `daemon-bridge` retry a NACKL proof refused with
-  `NacklWindowFull` or `NacklNotMinter` later and park one refused with `NacklMinterGone`.
+- `relayer daemon-withdraw`, `daemon-bridge` and `daemon-withdraw-live` retry a NACKL proof refused
+  with `NacklWindowFull` or `NacklNotMinter` later and park one refused with `NacklMinterGone`.
 - `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --tx-hash <AN tx>
   --token …` proves any burn and sends `withdrawByProof` (JSON `submit` is `null` after `send`).
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;

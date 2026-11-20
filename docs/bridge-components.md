@@ -1,6 +1,6 @@
 # Bridge components
 
-> **Verified against `5f209734`** (bridge-audit#152: the NACKL bridge and the CLI's `send` and
+> **Verified against `af8b2c92`** (bridge-audit#152: the NACKL bridge and the CLI's `send` and
 > `proof` steps). Every connection and every state file below is drawn from the code that makes or
 > names it, not from prose; the tables give each one's `file:line` at that commit.
 
@@ -30,7 +30,7 @@ three chains, the relayers and the end-user CLI between them, and the interfaces
   for `applyBkSetUpdate`), `verifyWithdrawal` for `withdrawByProof`. `transfer*` — `transferFrom` on deposit, `transfer` on payout. The bridge
   also calls USDC's `approve`: for the AAVE pool before `supply`, for the successor bridge in
   `migrateTreasury`. On NACKL the bridge calls `burnFrom` on deposit and `mint` on payout; it is the
-  token's owner and hands the ownership over with `transferOwnership` in `migrateTreasury`.
+  token's owner and hands the ownership over with `transferOwnership` in `migrateToken`.
 - **test market** — the AAVE V3 deployment on Arbitrum Sepolia. The bridge is deployed with its
   pool and aUSDC (`contracts/ethereum/script/ArbitrumSepoliaAave.sol:12`, `:13`), never a mock.
 
@@ -40,43 +40,43 @@ Paths are relative to the repository root.
 
 | From | To | Interface | Call site |
 |---|---|---|---|
-| `ackinacki-bridge` (CLI) | USDC, NACKL | `approve` | `crates/ackinacki-bridge/src/deposit/evm.rs:290` |
-| `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `deposit` | `crates/ackinacki-bridge/src/deposit/evm.rs:279` |
-| `ackinacki-bridge` (CLI) | `deposit-receipt` | library: `fetch` | `crates/ackinacki-bridge/src/deposit/evm.rs:815` |
+| `ackinacki-bridge` (CLI) | USDC, NACKL | `approve` | `crates/ackinacki-bridge/src/deposit/evm.rs:288` |
+| `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `deposit` | `crates/ackinacki-bridge/src/deposit/evm.rs:277` |
+| `ackinacki-bridge` (CLI) | `deposit-receipt` | library: `fetch` | `crates/ackinacki-bridge/src/deposit/evm.rs:809` |
 | `ackinacki-bridge` (CLI) | `eccBridge` | `finalizeDeposit` | `crates/ackinacki-bridge/src/deposit/an.rs:770` |
 | `ackinacki-bridge` (CLI) | user multisig | `sendTransaction` carrying `initiateWithdrawal` | `crates/ackinacki-bridge/src/burn.rs:267`, payload `burn.rs:497` |
 | `ackinacki-bridge` (CLI) | Block Manager | `REST /v2/account`, `/v2/messages`: getters, `finalizeDeposit`, `sendTransaction` | getters `crates/ackinacki-bridge/src/deposit/an.rs:498`, `deposit/an_preflight.rs:87`, `:330`, `:381`, `:509`; messages `deposit/an.rs:844`, `burn.rs:359` |
-| `ackinacki-bridge` (CLI) | Block Manager | GraphQL: `account`, its `messages` and `transactions`, `transaction`, `block`, `blockByHeight` | deposit `crates/ackinacki-bridge/src/deposit/an.rs:524`, `:587`, `:607`, `:619`, `:632`; withdrawal `crates/bridge-relayer-daemon/src/withdraw_e2e/capture.rs:73`, `:142`, `:236`, `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs:541`, client at `crates/ackinacki-bridge/src/orchestrator.rs:285` (`withdraw proof`) and `:1072` |
+| `ackinacki-bridge` (CLI) | Block Manager | GraphQL: `account`, its `messages` and `transactions`, `message`, `transaction`, `block`, `blockByHeight` | deposit `crates/ackinacki-bridge/src/deposit/an.rs:524`, `:587`, `:607`, `:619`, `:632`; withdrawal `crates/bridge-relayer-daemon/src/withdraw_e2e/capture.rs:73`, `:142`, `:236`, `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs:541`, client at `crates/ackinacki-bridge/src/orchestrator.rs:279` (`withdraw proof`) and `:1066` |
 | `ackinacki-bridge` (CLI) | WalletConnect relay | wss | `crates/ackinacki-bridge/src/deposit/args.rs:407`, `deposit/wc/mod.rs:168` |
-| `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1459`, called from `crates/ackinacki-bridge/src/orchestrator.rs:1604` |
-| `ackinacki-bridge` (CLI), `relayer daemon-live`, `relayer daemon-withdraw-live` | `aggregate-proof` | process | started at `crates/bridge-relayer-daemon/src/aggregator.rs:621`; the CLI hands it the binary at `crates/ackinacki-bridge/src/orchestrator.rs:1300`, `daemon-live` at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2795`, `daemon-withdraw-live` at `:2909` |
+| `ackinacki-bridge` (CLI) | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1435`, called from `crates/ackinacki-bridge/src/orchestrator.rs:1597` |
+| `ackinacki-bridge` (CLI), `relayer daemon-live`, `relayer daemon-withdraw-live` | `aggregate-proof` | process | started at `crates/bridge-relayer-daemon/src/aggregator.rs:621`; the CLI hands it the binary at `crates/ackinacki-bridge/src/orchestrator.rs:1294`, `daemon-live` at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2787`, `daemon-withdraw-live` at `:2898` |
 | `deposit-relayer daemon` | `deposit-receipt` | library: `fetch` | `crates/deposit-relayer-daemon/src/witness.rs:127` |
 | `deposit-receipt` | Arbitrum RPC node | JSON-RPC: `eth_getTransactionReceipt`, `eth_getBlockByHash`, `eth_getBlockReceipts` | `crates/deposit-receipt/src/lib.rs:330`, `:337`, `:350`; through the caller's provider, so the same RPC node the CLI or the daemon uses |
 | `deposit-relayer daemon` | `eccBridge` | `finalizeDeposit` | `crates/acki-nacki-interface/src/tvm_client.rs:128` |
-| `deposit-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: `isAcceptedBlockHash`, `finalizeDeposit`; GraphQL: `account` (the bridge and the deposit's voucher) | `crates/deposit-relayer-daemon/src/submitter.rs:669`; GraphQL `submitter.rs:271`, `:299`; through `crates/acki-nacki-interface/src/tvm_client.rs:109` (`get_account`), `:157` (`process_message`), `:346` (`account`) |
-| `relayer daemon-withdraw-live` | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1459`, called from `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:655` |
-| `relayer daemon-withdraw-live` | Block Manager | GraphQL: the bridge account's `messages`, `block`, `blockByHeight` | `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:429`, the witness through `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs:540`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2857` |
-| `relayer daemon-live` | `AckiNackiBridge` | `verifyBlock` | `crates/bridge-relayer-daemon/src/bridge.rs:1415` |
-| `relayer daemon-live` | `AckiNackiBridge` | `applyBkSetUpdate` | `crates/bridge-relayer-daemon/src/bridge.rs:1620` |
-| `relayer daemon-live` | Block Manager | GraphQL: `blocks`, `blockByHeight`, `bkSetUpdates` | `crates/bridge-prover-libraries/bridge-prover-lib/src/live_driver/mod.rs:768`, `live_driver/bundle.rs:261`, `live_driver/bk_update.rs:116`, `crates/bridge-prover-libraries/bridge-gql-fetcher/src/bk_set_fetcher.rs:59`; the BK set at startup `crates/bridge-prover-libraries/bridge-prover-lib/src/bk_set_history.rs:71`, `:98`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2557` |
+| `deposit-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: `isAcceptedBlockHash`, `finalizeDeposit`; GraphQL: `account` (the bridge and the deposit's voucher) | `crates/deposit-relayer-daemon/src/submitter.rs:744`; GraphQL `submitter.rs:275`, `:303`; through `crates/acki-nacki-interface/src/tvm_client.rs:109` (`get_account`), `:157` (`process_message`), `:346` (`account`) |
+| `relayer daemon-withdraw-live` | `AckiNackiBridge` | `withdrawByProof` | `crates/bridge-relayer-daemon/src/bridge.rs:1435`, called from `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:676` |
+| `relayer daemon-withdraw-live` | Block Manager | GraphQL: the bridge account's `messages`, `block`, `blockByHeight` | `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:448`, the witness through `crates/bridge-prover-libraries/bridge-event-witness/src/enrich.rs:540`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2846` |
+| `relayer daemon-live` | `AckiNackiBridge` | `verifyBlock` | `crates/bridge-relayer-daemon/src/bridge.rs:1391` |
+| `relayer daemon-live` | `AckiNackiBridge` | `applyBkSetUpdate` | `crates/bridge-relayer-daemon/src/bridge.rs:1545` |
+| `relayer daemon-live` | Block Manager | GraphQL: `blocks`, `blockByHeight`, `bkSetUpdates` | `crates/bridge-prover-libraries/bridge-prover-lib/src/live_driver/mod.rs:768`, `live_driver/bundle.rs:261`, `live_driver/bk_update.rs:116`, `crates/bridge-prover-libraries/bridge-gql-fetcher/src/bk_set_fetcher.rs:59`; the BK set at startup `crates/bridge-prover-libraries/bridge-prover-lib/src/bk_set_history.rs:71`, `:98`; client at `crates/bridge-relayer-daemon/src/bin/relayer.rs:2553` |
 | `eth-lc-relayer arbitrum-anchors` | `ArbitrumBlockVerifier` | `proveBlock` | `crates/eth-light-client-relayer/src/arbitrum.rs:1512` |
 | `eth-lc-relayer arbitrum-anchors` | `EthBeaconLightClient` | `submitAncestry` | `crates/eth-light-client-relayer/src/arbitrum.rs:1548` |
 | `eth-lc-relayer arbitrum-anchors` | Block Manager | `REST /v2/account`, `/v2/messages`: `getL2Verifier`, `getConfig`, `getLightClient`, `isAcceptedBlockHash`, light-client `getHead`, `proveBlock`, `submitAncestry` | `crates/eth-light-client-relayer/src/arbitrum.rs:1379`, `:1402`, `:1461`, `:1490`, `:1525`, `:1512`, `:1548`; through `crates/acki-nacki-interface/src/tvm_client.rs:109` (`get_account`), `:157` (`process_message`) |
 | `eth-lc-relayer daemon` | `EthBeaconLightClient` | `submitUpdate`, `submitAncestry`, `submitRotate` | `crates/eth-light-client-relayer/src/submitter.rs:901`, `:924`, `:912` |
 | `eth-lc-relayer daemon` | Block Manager | `REST /v2/account`, `/v2/messages`: light-client and bridge getters, `submitUpdate`, `submitAncestry`, `submitRotate` | `crates/eth-light-client-relayer/src/submitter.rs:953`, `:973`, `:1000`, `:1056`, `:1069`, `:901`, `:924`, `:912`; through `crates/acki-nacki-interface/src/tvm_client.rs:109` (`get_account`), `:157` (`process_message`) |
 | `eth-lc-relayer daemon` | `eth-light-client-prover` | process: step (`export_step_vk_blob`); the rotate in three stages, `export_shard_snark`, `export_step_snark`, `rotate_tree_n8` | `crates/eth-light-client-relayer/src/prover.rs:207`; `crates/eth-light-client-relayer/src/rotate.rs:537`, `:543`, `:550` |
-| `AckiNackiBridge` | verifiers | `verify*` | `verifyBlock`: `contracts/ethereum/src/AckiNackiBridge.sol:1340`, `:1348`, `:1360`; `applyBkSetUpdate`: `:1492`, `:1500`; `withdrawByProof`: `:1926` |
-| `AckiNackiBridge` | USDC | `approve` | `contracts/ethereum/src/AckiNackiBridge.sol:2456` (the AAVE pool), `:2205` (the successor bridge) |
-| `AckiNackiBridge` | NACKL | `burnFrom`, `mint`, `transferOwnership` | `burnFrom`: `contracts/ethereum/src/AckiNackiBridge.sol:1016`, in `deposit`. `mint`: `contracts/ethereum/src/NacklMint.sol:58`, from `withdrawByProof` (`AckiNackiBridge.sol:1932`). `transferOwnership`: `NacklMint.sol:69`, from `migrateToken` (`AckiNackiBridge.sol:2245`) |
-| `AckiNackiBridge` | Pool (AAVE V3) | `supply`, `withdraw` | `supply`: `contracts/ethereum/src/AckiNackiBridge.sol:2458`, from `deposit` at `:1026`. `withdraw`: `:2473`, `:2496`, from `withdrawByProof` at `:1960`; and from the owner's `withdrawFromAave` (`:2062` → `:2496`), `harvestYield` (`:2129`) and `emergencyWithdrawAll` (`:2074`) |
-| `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2515` |
+| `AckiNackiBridge` | verifiers | `verify*` | `verifyBlock`: `contracts/ethereum/src/AckiNackiBridge.sol:1324`, `:1332`, `:1344`; `applyBkSetUpdate`: `:1476`, `:1484`; `withdrawByProof`: `:1913` |
+| `AckiNackiBridge` | USDC | `approve` | `contracts/ethereum/src/AckiNackiBridge.sol:2415` (the AAVE pool), `:2197` (the successor bridge) |
+| `AckiNackiBridge` | NACKL | `burnFrom`, `mint`, `transferOwnership` | `burnFrom`: `contracts/ethereum/src/AckiNackiBridge.sol:1007`, in `deposit`. `mint`: `contracts/ethereum/src/NacklMint.sol:36`, from `withdrawByProof` (`AckiNackiBridge.sol:1921`). `transferOwnership`: `NacklMint.sol:47`, from `migrateToken` (`AckiNackiBridge.sol:2237`) |
+| `AckiNackiBridge` | Pool (AAVE V3) | `supply`, `withdraw` | `supply`: `contracts/ethereum/src/AckiNackiBridge.sol:2417`, from `deposit` at `:1017`. `withdraw`: `:2432`, `:2455`, from `withdrawByProof` at `:1949`; and from the owner's `withdrawFromAave` (`:2051` → `:2455`), `harvestYield` (`:2118`) and `emergencyWithdrawAll` (`:2063`) |
+| `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2474` |
 | `ArbitrumBlockVerifier` | `eccBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
 | `EthBeaconLightClient` | `eccBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:683` |
-| `DepositVoucher` | `eccBridge` | `confirmTokenDeposit` | `contracts/an/exchange/DepositVoucher.sol:53` |
+| `DepositVoucher` | `eccBridge` | `confirmTokenDeposit` | `contracts/an/exchange/DepositVoucher.sol:54` |
 
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is
 a no-op, because the `DepositVoucher` address is derived from the deposit's identity
-(`contracts/an/exchange/eccBridge.sol:1025`) and a voucher is deployed once.
+(`contracts/an/exchange/eccBridge.sol:1072`) and a voucher is deployed once.
 
 ## Executables and state files
 
@@ -115,12 +115,12 @@ container layout is in [`docker/README.md`](../docker/README.md).
 
 | File | Holds | Default path | Code |
 |---|---|---|---|
-| `~/.bridge-deposit-state/` | `{op}.json`, the record of one deposit; `{op}.lock`, held while a run works on that deposit; `deposit.lock`, held from asking the wallet until the deposit is on chain, so one run does that at a time | `crates/ackinacki-bridge/src/deposit/args.rs:713` | `crates/ackinacki-bridge/src/deposit/store.rs:298`, `deposit/locks.rs:158`, `:129` |
-| `~/.bridge-withdraw-state/` | `<key>.json`, the record of one withdrawal; `<key>.lock`, held while a run works on it | `crates/ackinacki-bridge/src/orchestrator.rs:2941` | `crates/ackinacki-bridge/src/idempotency.rs:1008`, `:1168` |
+| `~/.bridge-deposit-state/` | `{op}.json`, the record of one deposit; `{op}.lock`, held while a run works on that deposit; `deposit.lock`, held from asking the wallet until the deposit is on chain, so one run does that at a time | `crates/ackinacki-bridge/src/deposit/args.rs:713` | `crates/ackinacki-bridge/src/deposit/store.rs:300`, `deposit/locks.rs:158`, `:129` |
+| `~/.bridge-withdraw-state/` | `<key>.json`, the record of one withdrawal; `<key>.lock`, held while a run works on it | `crates/ackinacki-bridge/src/orchestrator.rs:2894` | `crates/ackinacki-bridge/src/idempotency.rs:991`, `:1151` |
 | `deposit-relayer-state.json` | deposit ids processed and finalized (or parked), the outstanding ones, the scan cursor | none, `--state-dir` is required: `crates/deposit-relayer-daemon/src/bin/deposit-relayer.rs:79` | `crates/deposit-relayer-daemon/src/dirs.rs:17`, `state.rs:107` |
 | `deposit-relayer-state.json.lock` | an exclusive lock held while the daemon runs; a second one refuses to start | in the state directory | `crates/deposit-relayer-daemon/src/state.rs:585` |
 | `./state/` (`daemon-live`) | `prover_state.json`: the layer windows, the BK-set commitment, the last key block applied; `prover_bk_set.json`, the BK set the prover holds, written before `prover_state.json`; `relayer-state.json`, the daemon's cursor, which `daemon-live` keeps only here and refuses another `--state-dir` for | `crates/bridge-relayer-daemon/src/bin/relayer.rs:419` | `crates/bridge-prover-libraries/bridge-prover-lib/src/bridge_state.rs:157`; `crates/bridge-relayer-daemon/src/live_source.rs:49`, `:50`; `crates/bridge-relayer-daemon/src/bin/relayer.rs:95`, `:1045` |
-| `withdraw-claims.json` | every `WithdrawalInitiated` `daemon-withdraw-live` saw and where it stands: pending (waiting for the bundle that covers it, or for the next round after a failure, or for room in the daily withdrawal limit), paid, paid by someone else, or not for this bridge | `./state`, `--withdraw-state-dir`: `crates/bridge-relayer-daemon/src/bin/relayer.rs:505` | `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:65`, `:179`, `:213` |
+| `withdraw-claims.json` | every `WithdrawalInitiated` `daemon-withdraw-live` saw and where it stands: pending (waiting for the bundle that covers it, or for the next round after a failure, or for room in the daily withdrawal limit), paid, paid by someone else, or not for this bridge | `./state`, `--withdraw-state-dir`: `crates/bridge-relayer-daemon/src/bin/relayer.rs:505` | `crates/bridge-relayer-daemon/src/withdraw_claimer.rs:66`, `:174`, `:208` |
 | `eth-lc-relayer-state.json` | the last finalized slot, the committee period, the header spans still owed, a rotation in flight | none, `--state-dir` is required: `crates/eth-light-client-relayer/src/bin/eth-lc-relayer.rs:76` | `crates/eth-light-client-relayer/src/dirs.rs:21`, `state.rs:56` |
 | `eth-lc-relayer-state.json.lock` | an exclusive lock held while the daemon runs; a second one refuses to start | in the state directory | `crates/eth-light-client-relayer/src/state.rs:153` |
 | `eth-lc-relayer-state.json.steps/` | the checkpoints taken from the beacon node and not yet on the light client, one `<finalized slot>.json` each: the beacon answer, the committee, the signing domain; a file that does not parse is renamed `.unreadable` | beside the state file: `crates/eth-light-client-relayer/src/step_queue.rs:100` | `crates/eth-light-client-relayer/src/step_queue.rs:108`, `:142`; opened at `crates/eth-light-client-relayer/src/relayer.rs:316` |

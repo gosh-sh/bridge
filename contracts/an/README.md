@@ -325,8 +325,8 @@ amount would pass the owner's `maxTvl`.
 Withdrawals (AN → EVM) of every registered currency have an owner-set daily
 limit per destination chain and currency, the `dailyLimit` of `setBridgeToken`.
 The bridge keeps the amounts withdrawn in hourly buckets (`block.timestamp /
-3600`) and sums the current hour and the 24 before it, as `NacklMint.windowUsed`
-does on EVM. A withdrawal that would take that sum past `dailyLimit` is refunded
+3600`) and sums the current hour and the 24 before it, as `WithdrawalWindow.used`
+does on EVM for every token. A withdrawal that would take that sum past `dailyLimit` is refunded
 with 247 (`ERR_DAILY_LIMIT`) and counts for nothing; a successful one adds its
 amount to the current hour. An amount leaves the window 25 hours after the hour
 it was withdrawn in. The buckets are a ring of 25 slots per (chain, currency),

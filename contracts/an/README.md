@@ -439,8 +439,8 @@ while transfers are in flight is enough to cause this: with 10,000 USDC on L1 of
 which 50 is a deposit not yet confirmed on AN, the counter belongs at 9,950.
 So pause deposits, let the in-flight transfers on both sides settle, and only
 then measure and write — the same order this section's parent advises before
-rotating a trusted L1 contract. `mintAndSendBridged` still keeps the counter
-within `MAX_BRIDGE_TVL` (235).
+rotating a trusted L1 contract. Neither call checks the counter against a TVL
+cap: the USDC TVL is checked on the EVM bridge only.
 
 **If in doubt, write less rather than more.** An under-count only refuses
 withdrawals with 236, which return the ECC untouched and which the owner
@@ -470,7 +470,7 @@ Normal upgrades within this format retain balances and unexpired replay hashes.
 
 `mintAndSendBridged(recipient, value, nonce, chainId)` credits the aborted
 deposit's source chain as well as the global bridged total. It enforces the
-50 USDC transfer and 10,000 USDC chain limits. Match the deposit's recipient,
+50 USDC transfer limit; the USDC TVL is checked on the EVM bridge only. Match the deposit's recipient,
 amount and EIP-155 chain id exactly, once; this owner call has no deposit-id
 deduplication.
 

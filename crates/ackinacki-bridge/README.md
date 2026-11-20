@@ -2,7 +2,7 @@
 
 `--token usdc|nackl` names the token on `withdraw` and on `deposit`, and is required. NACKL
 (`docs/NACKL-bridge-extension.md`): the AN bridge locks it, and the EVM bridge mints the payout at once or, when its daily limit
-is full, refuses it with nothing spent, and the run exits 13; re-run it with `--allow-retry` later.
+is full, refuses it with nothing spent, and the run exits 13; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof` command.
 A NACKL deposit is refused above the NACKL the AN bridge holds locked for its chain. The amount is read in that token's registered decimals,
 without rounding. Preflight refuses mismatched token addresses, missing registrations,
 insufficient per-chain inventory and payout limits before burning. Records and locks are
@@ -18,7 +18,7 @@ Each direction runs whole, or in two steps, each a run of its own:
 always built; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
 proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "already_paid"`,
 `finalize: "already_finalized"`. A NACKL proof the EVM bridge refuses because its daily limit is
-full (`NacklWindowFull`) exits 13 with nothing spent; re-running with `--allow-retry` later sends the same proof.
+full (`NacklWindowFull`) exits 13 with nothing spent; re-running `withdraw` with `--allow-retry`, or the same `withdraw proof` command, later sends the same proof.
 `deposit proof` takes a deposit made through a contract wallet too: the `Deposit` event decides, not
 the transaction's calldata. A transaction with several deposits to the bridge is refused (the
 deposit relayer's `finalize-one` takes it). One operation holds one deposit: `deposit proof` of a transaction an operation in
@@ -667,7 +667,7 @@ claiming there is no record — it never opened one to find out.
 | 10   | This run must not act as if the withdrawal were untouched | ✗ **a burn may be on the wire** | § "Burn broadcast, outcome unknown" |
 | 11   | Burn confirmed, `WithdrawalInitiated` capture timed out | ✗ AN burn done | § "Capture timeout" |
 | 12   | Capture succeeded, Circuit-4 proof failed | ✗ AN burn done, no ETH tx | § "Prover failed" |
-| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the EVM bridge's daily NACKL limit is full (`NacklWindowFull`, re-run with `--allow-retry` later); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
+| 13   | Proof succeeded, `withdrawByProof` reverted / dry-run reverted; the EVM bridge's daily NACKL limit is full (`NacklWindowFull`; later, re-run `withdraw` with `--allow-retry`, or the same `withdraw proof`); or, before proving, the captured event is bound to another EVM bridge than `--bridge-address` | ✗ AN burn done, no ETH tx | § "On-chain submit reverted" |
 
 **Exit 10 covers seven situations, and only the first two involve this
 run broadcasting anything.** The first is the send itself: a burn went

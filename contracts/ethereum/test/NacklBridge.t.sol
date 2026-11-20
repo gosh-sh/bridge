@@ -241,7 +241,9 @@ contract NacklBridgeTest is NacklBridgeFixture {
         narrow.listNackl(nackl, MAX_TRANSFER - 1, DAILY_LIMIT);
         vm.expectRevert(
             abi.encodeWithSelector(
-                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector, MAX_TRANSFER - 1, MAX_TRANSFER
+                AckiNackiBridge.SuccessorWithdrawalCapTooLow.selector,
+                MAX_TRANSFER - 1,
+                MAX_TRANSFER
             )
         );
         bridge.migrateToken(1, address(narrow));

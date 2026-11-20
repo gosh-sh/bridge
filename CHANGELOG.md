@@ -26,7 +26,7 @@ assigns it when the release is tagged.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `90829c07…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
+- `eccBridge` 1.18.0, code hash `b4344f9c…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
   with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
   finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
@@ -56,8 +56,8 @@ assigns it when the release is tagged.
   chain's locked NACKL would pass 10,000,000 NACKL (235) and for a recipient that is not 20 bytes
   (246).
 - `eccBridge`: `finalizeDeposit` refuses a NACKL deposit above the chain's locked NACKL with 236.
-- `eccBridge`: the USDC TVL cap is checked on the EVM bridge only; `finalizeDeposit` and the
-  voucher confirmation no longer refuse with 235. NACKL is bounded on Acki Nacki only: the lock of each chain stops at 10,000,000
+- `eccBridge`: the USDC TVL cap is checked on the EVM bridge only; `finalizeDeposit`, the
+  voucher confirmation, `mintAndSendBridged` and `setOutstandingByChain` no longer refuse with 235. NACKL is bounded on Acki Nacki only: the lock of each chain stops at 10,000,000
   NACKL.
 - `eccBridge`: a deposit the bridge cannot pay when its voucher confirms it (the NACKL lock 236, the
   payout cap 234, an unregistered token 241) is refused instead of aborting:

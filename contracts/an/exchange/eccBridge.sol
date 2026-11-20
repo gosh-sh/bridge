@@ -336,7 +336,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(value > 0, ERR_ZERO_AMOUNT);
         require(value <= uint128(type(uint64).max), ERR_OVERFLOW);
         require(value <= MAX_TRANSFER_AMOUNT, ERR_TRANSFER_TOO_LARGE);
-        require(_outstandingByChain[chainId] + value <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
         _mintNonce = nonce;
 
         gosh.mintecc(uint64(value), USDC_ECC_ID);
@@ -838,12 +837,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         See `contracts/an/README.md`, *Restoring a chain's outstanding
     ///         amount*.
     /// @param chainId — EIP-155 chain id of the destination L1/L2.
-    /// @param amount  — principal outstanding to that chain, in token units,
-    ///                  at most `MAX_BRIDGE_TVL`.
+    /// @param amount  — principal outstanding to that chain, in token units.
     function setOutstandingByChain(uint256 chainId, uint128 amount)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
-        require(amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
         ensureBalance();
         _outstandingByChain[chainId] = amount;
     }

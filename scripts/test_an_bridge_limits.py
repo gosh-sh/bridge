@@ -781,21 +781,24 @@ class BridgeLimits(unittest.TestCase):
         self.assertTrue(self.withdraw(1_000_000, chain=1)["vm_success"])
         self.assertEqual(int(self.limits(1)["outstanding"]), TVL - TRANSFER - 1_000_000)
 
-    def test_owner_recovery_credits_only_the_source_chain_and_enforces_limits(self):
+    def test_owner_recovery_credits_only_the_source_chain_without_a_tvl_cap(self):
         self.seed(0, TVL)
         args = {"recipient": SENDER, "value": str(TRANSFER), "nonce": "1", "chainId": "2"}
-        self.call("mintAndSendBridged", args, signed=True, expect=235)
-        args.update(chainId="1", value=str(TRANSFER + 1))
+        self.call("mintAndSendBridged", args, signed=True)
+        self.assertEqual(int(self.limits(2)["outstanding"]), TVL + TRANSFER)
+        args.update(chainId="1", value=str(TRANSFER + 1), nonce="2")
         self.call("mintAndSendBridged", args, signed=True, expect=234)
         args["value"] = str(TRANSFER)
         self.call("mintAndSendBridged", args, signed=True)
         self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
-        self.assertEqual(int(self.limits(2)["outstanding"]), TVL)
+        self.assertEqual(int(self.limits(2)["outstanding"]), TVL + TRANSFER)
         self.withdraw(TRANSFER, chain=1)
         self.assertEqual(int(self.limits(1)["outstanding"]), 0)
-        args["nonce"] = "2"
+        args["nonce"] = "3"
         self.call("mintAndSendBridged", args, signed=True)
         self.assertEqual(int(self.limits(1)["outstanding"]), TRANSFER)
+        self.call("setOutstandingByChain", {"chainId": "2", "amount": str(2 * TVL)}, signed=True)
+        self.assertEqual(int(self.limits(2)["outstanding"]), 2 * TVL)
 
     def test_refund_preserves_large_ecc_amount_and_limits_shell(self):
         for amount in (TRANSFER + 1, (1 << 64) + 1, (1 << 128) + 1):

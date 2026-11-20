@@ -35,13 +35,15 @@ pub(crate) fn explain(reason: &str) -> String {
         ),
         "NacklWindowFull" => Some(
             "the EVM bridge's daily NACKL limit is full: the rolling 24-hour mint window has no \
-             room for this amount yet. Nothing was spent and the proof stays valid; re-run with \
-             --allow-retry later to send it again; the burn is not repeated",
+             room for this amount yet. Nothing was spent and the proof stays valid; later, re-run \
+             `withdraw` with --allow-retry, or the same `withdraw proof` command, to send it \
+             again; the burn is not repeated",
         ),
         "NacklNotMinter" => Some(
             "this EVM bridge is not the NACKL minter yet: the minter handover to it has not \
-             happened. Nothing was spent and the proof stays valid; re-run with --allow-retry \
-             later to send it again; the burn is not repeated",
+             happened. Nothing was spent and the proof stays valid; later, re-run `withdraw` with \
+             --allow-retry, or the same `withdraw proof` command, to send it again; the burn is \
+             not repeated",
         ),
         "NacklMinterGone" => Some(
             "this EVM bridge has handed NACKL minting to its successor, and the proof is bound to \

@@ -357,27 +357,26 @@ pub async fn run_for_token(
                 source: None,
             })?;
         let nackl = token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID;
-        if nackl && version < crate::deposit::an_preflight::BridgeVersion(1, 18, 0) {
+        let min_version = crate::deposit::an_preflight::MIN_BRIDGE_VERSION;
+        if min_version.is_none_or(|min| version < min) {
+            let needs = min_version.map_or("a pinned minimum".to_string(), |min| min.to_string());
             return Err(CliError::Preflight {
                 reason: format!(
-                    "the Acki Nacki bridge {usdc_bridge_extended} predates NACKL (it locks NACKL \
-                     from 1.18.0 on); initiateWithdrawal would return the NACKL. Nothing was sent."
+                    "the Acki Nacki bridge {usdc_bridge_extended} is {version}; this build needs \
+                     {needs} or newer, whose limit getters it reads (getWithdrawalWindow, the \
+                     six-field token configs). Upgrade the bridge first. Nothing was sent."
                 ),
                 source: None,
             });
         }
-        if token_id != BRIDGED_USDC_TOKEN_ID
-            || version >= crate::deposit::an_preflight::BridgeVersion(1, 16, 0)
-        {
-            token_config = call_get_token_withdrawal_limits(
-                &context,
-                &usdc_bridge_legacy,
-                &bridge_boc,
-                to.chain_id,
-                token_id,
-            )
-            .await?;
-        }
+        token_config = call_get_token_withdrawal_limits(
+            &context,
+            &usdc_bridge_legacy,
+            &bridge_boc,
+            to.chain_id,
+            token_id,
+        )
+        .await?;
         if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -416,7 +415,7 @@ pub async fn run_for_token(
                     .await?;
             (max_tvl, outstanding)
         };
-        let window = if version >= crate::deposit::an_preflight::BridgeVersion(1, 18, 0) {
+        let window = {
             let window = call_bridge_getter(
                 &context,
                 &usdc_bridge_legacy,
@@ -433,9 +432,7 @@ pub async fn run_for_token(
                     source: None,
                 });
             };
-            Some((daily_limit, used))
-        } else {
-            None
+            (daily_limit, used)
         };
         let window_refusal = |daily_limit: u128, used: u128| {
             let detail = if daily_limit == 0 {
@@ -466,7 +463,7 @@ pub async fn run_for_token(
                 source: None,
             }
         };
-        if let Some((0, used)) = window {
+        if let (0, used) = window {
             return Err(window_refusal(0, used));
         }
         if !nackl && amount.0 > outstanding {
@@ -491,10 +488,9 @@ pub async fn run_for_token(
                 source: None,
             });
         }
-        if let Some((daily_limit, used)) = window {
-            if amount.0 > daily_limit || used > daily_limit - amount.0 {
-                return Err(window_refusal(daily_limit, used));
-            }
+        let (daily_limit, used) = window;
+        if amount.0 > daily_limit || used > daily_limit - amount.0 {
+            return Err(window_refusal(daily_limit, used));
         }
         // 6c. The EVM bridge the burn will be bound to.
         let bound =

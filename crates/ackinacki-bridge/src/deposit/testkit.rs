@@ -1724,7 +1724,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.17.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.18.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1778,7 +1778,7 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
             serde_json::json!({"listed": true, "tokenId": "3", "depositsEnabled": true,
@@ -1911,7 +1911,7 @@ impl World {
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.18.0", "value1": "eccBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),

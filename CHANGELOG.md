@@ -49,7 +49,9 @@ assigns it when the release is tagged.
     constructor's `BridgeWithdrawConfig` adds `usdcTvlCap` and `usdcDailyLimit` (deploy env
     `USDC_TVL_CAP`, `USDC_DAILY_LIMIT`, default 10,000 USDC each).
   - `AckiNackiBridge` links a second external library, `WithdrawalWindow`.
-- `ackinacki-bridge` accepts `eccBridge` up to 1.18.0 (`NEWEST_KNOWN_BRIDGE_VERSION`).
+- `ackinacki-bridge` needs `eccBridge` 1.18.0 (`MIN_BRIDGE_VERSION` and
+  `NEWEST_KNOWN_BRIDGE_VERSION`): deposit and `withdraw` preflight refuse a 1.17.0 bridge, whose limit
+  getters answer in the old shape. Upgrade the AN bridge before the CLI.
 - `contracts/ethereum` needs `@openzeppelin/contracts` 5.4.0: run `npm install` before `forge
   build`.
 - `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,

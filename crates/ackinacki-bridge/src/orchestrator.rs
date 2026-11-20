@@ -333,6 +333,7 @@ pub async fn run_proof(args: WithdrawProofArgs) -> CliResult<WithdrawSuccess> {
         &amount,
         args.token_id,
         None,
+        true,
     )
     .await?;
     crate::preflight::check_window_scan(
@@ -684,6 +685,7 @@ pub async fn run(args: WithdrawArgs, part: Part, skip_prompt: bool) -> CliResult
         &amount,
         args.token_id,
         preflight.evm_token,
+        false,
     )
     .await
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;

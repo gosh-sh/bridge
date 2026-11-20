@@ -113,7 +113,8 @@ assigns it when the release is tagged.
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
   amount and recipient from the receipt.
-- `ackinacki-bridge deposit` JSON `finalize`: `sent` or `already_finalized` once credited.
+- `ackinacki-bridge deposit` JSON `finalize`, once credited: `sent` when this run's `finalizeDeposit` was
+  accepted, otherwise `already_finalized`.
 - `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning. Before the
   burn or lock it refuses (exit 2) an amount that does not fit the Acki Nacki daily window (247),
   a NACKL lock above `maxTvl` (235) and an amount above the EVM bridge's `dailyLimit`, which could

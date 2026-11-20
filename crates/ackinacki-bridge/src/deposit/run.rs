@@ -1871,7 +1871,7 @@ pub fn summary(
         })),
         abandoned: false,
         finalize: rec.credit.as_ref().map(|_| match &rec.finalize {
-            Some(f) if f.sends > 0 => "sent",
+            Some(f) if f.accepted => "sent",
             _ => "already_finalized",
         }),
     }
@@ -3317,6 +3317,27 @@ mod tests {
             "the receipt proof for the same block is reused"
         );
         assert_eq!(*w.an.sent.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn the_summary_says_sent_only_for_a_send_of_this_run_that_was_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut rec = record(&store, OpStage::Proved);
+        rec.credit = Some(crate::deposit::store::CreditInfo {
+            confirm_tx: "c".into(),
+            delivery_tx: "d".into(),
+            via_events: false,
+        });
+        for (accepted, expected) in [(false, "already_finalized"), (true, "sent")] {
+            rec.finalize = Some(crate::deposit::store::FinalizeInfo {
+                voucher_code_hash: "bd44".into(),
+                voucher_account: String::new(),
+                sends: 2,
+                accepted,
+            });
+            assert_eq!(summary(&rec, None, (None, None)).finalize, Some(expected));
+        }
     }
 
     /// `deposit proof --tx-hash` of a deposit the relayer finalized: an

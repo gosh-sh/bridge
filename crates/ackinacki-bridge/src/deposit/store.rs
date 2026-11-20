@@ -97,6 +97,8 @@ pub struct FinalizeInfo {
     pub voucher_code_hash: String,
     pub voucher_account: String,
     pub sends: u32,
+    #[serde(default)]
+    pub accepted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -595,6 +597,7 @@ mod tests {
             voucher_code_hash: "bd44".into(),
             voucher_account: String::new(),
             sends: 1,
+            accepted: true,
         });
         assert!(!r.is_unresolved(), "Finalizing does not block new deposits");
     }

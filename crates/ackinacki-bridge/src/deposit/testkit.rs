@@ -2508,6 +2508,7 @@ impl World {
             voucher_code_hash: r.voucher_code_hash.clone(),
             voucher_account: info.voucher_account.clone(),
             sends: 1,
+            accepted: true,
         });
         r.deposit = Some(info);
         r.anchor_writer = Some("owner".into());

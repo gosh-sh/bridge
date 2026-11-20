@@ -336,6 +336,7 @@ async fn attempts(
                 voucher_code_hash: hex::encode(cx.stored_code_hash),
                 voucher_account: hex::encode(cx.voucher),
                 sends: 0,
+                accepted: false,
             });
         }
         if let Some(f) = rec.finalize.as_mut() {
@@ -354,9 +355,12 @@ async fn attempts(
         let outcome = send.send_finalize(cx.bridge, cx.bridge_dapp, witness).await;
         match react(&outcome) {
             Reaction::ToCredit => {
+                if let Some(f) = rec.finalize.as_mut() {
+                    f.accepted = true;
+                }
                 return Ok(FinalizeExit::ToCredit {
                     via_events,
-                })
+                });
             },
             Reaction::BackToAnchor => return Ok(FinalizeExit::BackToAnchor),
             Reaction::WaitCapacity => {
@@ -1192,6 +1196,7 @@ mod tests {
             voucher_code_hash: hex::encode(H),
             voucher_account: hex::encode([0xee; 32]),
             sends: 1,
+            accepted: true,
         });
         store.write(&mut rec).unwrap();
         rec

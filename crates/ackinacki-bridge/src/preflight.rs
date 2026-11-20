@@ -2873,6 +2873,7 @@ pub async fn check_bridge_deploy(
         amount,
         3,
         None,
+        false,
     )
     .await
 }
@@ -2887,6 +2888,7 @@ pub async fn check_bridge_deploy_for_token(
     amount: &UsdcAmount,
     token_id: u32,
     expected_token: Option<Address>,
+    burn_done: bool,
 ) -> CliResult<()> {
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
@@ -3118,13 +3120,19 @@ pub async fn check_bridge_deploy_for_token(
     };
     let needed = U256::from(amount.0);
     if needed > daily_limit {
+        let outcome = if burn_done {
+            "The burn on Acki Nacki is already done; its proof stays valid and pays once the EVM \
+             owner raises the limit."
+                .to_string()
+        } else {
+            format!("Nothing was burnt or locked; withdraw at most {daily_limit}.")
+        };
         return Err(CliError::Preflight {
             reason: format!(
                 "the amount is above the EVM bridge's daily withdrawal limit for ECC[{token_id}] \
                  ({daily_limit} base units per rolling 24 hours): withdrawByProof would revert \
                  WithdrawalWindowFull on every attempt, and nothing could pay it out until the \
-                 EVM owner raises the limit. Nothing was burnt or locked; withdraw at most \
-                 {daily_limit}."
+                 EVM owner raises the limit. {outcome}"
             ),
             source: None,
         });
@@ -3136,18 +3144,24 @@ pub async fn check_bridge_deploy_for_token(
             daily_limit = %daily_limit,
             "the EVM bridge's daily withdrawal limit for this token has no room for this amount \
              now: withdrawByProof reverts WithdrawalWindowFull until the rolling 24-hour window \
-             has room (exit 13). The proof is not spent by that revert; later, re-run `withdraw` \
-             with --allow-retry, or the same `withdraw proof` command, to send it again"
+             has room (exit 13). The proof is not spent by that revert; later, re-run the same \
+             `withdraw proof` command as it is, or a `withdraw` with --allow-retry, to send it \
+             again"
         );
     }
     if token_id == bridge_relayer_daemon::bridge::NACKL_TOKEN_ID {
+        let nothing_moved = if burn_done {
+            "The NACKL lock on Acki Nacki is already done and this bridge cannot pay it."
+        } else {
+            "Nothing was burnt."
+        };
         let nackl = client
             .nackl_state()
             .await
             .map_err(|e| CliError::Preflight {
                 reason: format!(
                     "--bridge-address {bridge}: nacklState() failed: {e}. The bridge does not \
-                     carry NACKL; nothing was burnt."
+                     carry NACKL. {nothing_moved}"
                 ),
                 source: None,
             })?;
@@ -3156,7 +3170,7 @@ pub async fn check_bridge_deploy_for_token(
                 reason: format!(
                     "--bridge-address {bridge} has handed NACKL minting to its successor \
                      (nacklState().handedOver): withdrawByProof would revert NacklMinterGone. \
-                     Nothing was burnt."
+                     {nothing_moved}"
                 ),
                 source: None,
             });
@@ -5589,6 +5603,7 @@ pub(crate) mod tests {
                 &UsdcAmount(1_000_000),
                 4,
                 expected,
+                false,
             )
             .await;
             match result {

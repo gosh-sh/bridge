@@ -474,7 +474,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             }
         }
 
-        let period = update.period();
+        let period = update.signing_period();
         if let Some(last_p) = self.state.last_committee_period {
             if period > last_p {
                 // A manual `submit-rotate` lands on chain without writing
@@ -854,7 +854,8 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         let rotate = self.rotate.as_ref().expect("drive_rotate checked");
         // Past the boundary the owner hop takes the period, unless the
         // contract refused it; then the rotate is the only way on.
-        let hop_takes_it = self.config.owner_hop && !rotate.hop_refused && update.period() > period;
+        let hop_takes_it =
+            self.config.owner_hop && !rotate.hop_refused && update.signing_period() > period;
         if update.signing_period() < period
             || hop_takes_it
             || rotate.refused == Some(period)
@@ -1509,7 +1510,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 let before = self.state.clone();
                 self.state.record_update(
                     update.finalized_slot,
-                    update.period(),
+                    update.signing_period(),
                     update.execution_block_hash,
                     update.attested_slot,
                 );
@@ -1537,7 +1538,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 let before = self.state.clone();
                 self.state.record_update(
                     update.finalized_slot,
-                    update.period(),
+                    update.signing_period(),
                     update.execution_block_hash,
                     update.attested_slot,
                 );
@@ -2275,6 +2276,33 @@ mod tests {
         }
         assert_eq!(r.state().rotate_pending_period, Some(1));
     }
+    /// The first slot of the period has no block, so the checkpoint is on the
+    /// last slot of the old one; the new committee signed it.
+    #[tokio::test]
+    async fn a_checkpoint_signed_across_the_boundary_is_a_period_jump() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let src = InMemoryBeaconSource::new(vec![update(100, 96), update(p + 64, p - 1)]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("s.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(src),
+            Arc::new(MockProofGenerator::new()),
+            Arc::new(MockAnSubmitter::accepting()),
+        )
+        .unwrap();
+        r.tick().await.unwrap();
+        assert!(matches!(
+            r.tick().await.unwrap(),
+            TickOutcome::RotateRequired {
+                from_period: 0,
+                to_period: 1,
+            }
+        ));
+    }
+
     /// `/updates?start_period=P` answer with an update attested at `slot`.
     fn period_update(slot: u64) -> String {
         format!(

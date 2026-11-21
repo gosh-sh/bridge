@@ -380,7 +380,7 @@ impl BeaconSource for HttpBeaconSource {
         );
         let body = self.get_text(&url).await?;
         let mut update = parse_finality_update(&body)?;
-        let prev = update.period().saturating_sub(1);
+        let prev = update.committee_update_period();
         update.committee_json = self.fetch_period_update(prev).await?;
         update.chain = Some(self.chain_params_at(update.signature_slot).await?);
         Ok(update)

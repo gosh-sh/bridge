@@ -284,6 +284,14 @@ class Soak:
         return any((m.get("dst") or "").endswith(sender) and holds_usdc(m, self.cfg.units)
                    for m in out)
 
+    def indexed_through(self) -> int:
+        """The time the index has certainly reached: the finalized time, never
+        past the newest block it holds, so a stalled index writes nothing off."""
+        data = self.gql("query{blockchain{finalizedTimestamp "
+                        "blocks(last:1){edges{node{gen_utime}}}}}")
+        edges = data["blocks"]["edges"]
+        return min(data["finalizedTimestamp"], edges[0]["node"]["gen_utime"]) if edges else 0
+
     def resolve_current(self):
         """Settles the open send from what the chain shows."""
         ledger = self.ledger
@@ -294,14 +302,13 @@ class Soak:
             message = self.find_burn(current["started"])
             run_done = bool(message and message.get("dst_transaction"))
             refused = self.refused_by_bridge(message) if run_done else False
-            finalized = 0 if message else self.gql(
-                "query{blockchain{finalizedTimestamp}}")["finalizedTimestamp"]
+            indexed = 0 if message else self.indexed_through()
         except READ_ERRORS as e:
             self.last_error = f"burn check: {type(e).__name__}"
             return
         if message is None:
-            # Only a chain finalized past the message's expiry shows it never landed.
-            if finalized > current["started"] + SEND_WINDOW_S:
+            # Only an index past the message's expiry shows it never landed.
+            if indexed > current["started"] + SEND_WINDOW_S:
                 ledger["current"] = None
                 ledger["in_flight_units"] = 0
                 self.save_ledger()

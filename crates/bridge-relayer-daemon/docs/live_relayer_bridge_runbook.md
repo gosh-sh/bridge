@@ -183,11 +183,9 @@ endpoint whose key is not set is left out.
   restart while a transaction is stuck stalls the bridge. The replaced
   transaction can be anyone's: the relayer's key must be its own, and
   nobody sends from it by hand while a daemon runs.
-- `BRIDGE_GET_LOGS_PAUSE_MS=600` in `shellnet.common` paces the startup scan
-  for Infura's free tier (500 credits a second, 255 per `eth_getLogs`).
 
 To check a list of endpoints without starting the daemon (read-only: chain
-id, then the bridge's full state with the startup scan):
+id, then the bridge's full state):
 
 ```bash
 cd crates/bridge-prover-libraries
@@ -201,7 +199,7 @@ Check before every launch:
 for v in RPC_URL BRIDGE_ADDRESS RELAYER_PRIVATE_KEY BRIDGE_GQL_ENDPOINT \
          BRIDGE_AGGREGATE_PROOF_BIN BRIDGE_VERIFIERS_DIR BRIDGE_PARAMS_DIR \
          BRIDGE_CONFIG_DIR BRIDGE_STATE_DIR \
-         BRIDGE_BOOTSTRAP_SEQNO BRIDGE_DEPLOY_BLOCK; do
+         BRIDGE_BOOTSTRAP_SEQNO; do
   [ -n "${!v:-}" ] && echo "  ok  $v" || echo "  FAIL $v"
 done
 [ "${BRIDGE_ANCHOR_LEVEL:-}" = 2 ] && echo "  ok  BRIDGE_ANCHOR_LEVEL=2" \
@@ -295,8 +293,7 @@ BRIDGE_SEED_SEQNO="$S" \
   rotation at or below S — the contract's rotation counter starts there),
   `GENESIS_PREV_MAX_LEVEL_LAYER_HASH` (block S's layer-2 hash) and the seed.
   It then deploys the bundle with forge (14 transactions), rewrites
-  `L2_config/env` (new `BRIDGE_ADDRESS`, `BRIDGE_DEPLOY_BLOCK`,
-  `BRIDGE_BOOTSTRAP_SEQNO=S`) and archives `L2_config/state/*.json`.
+  `L2_config/env` (new `BRIDGE_ADDRESS`, `BRIDGE_BOOTSTRAP_SEQNO=S`) and archives `L2_config/state/*.json`.
 - **Not idempotent**: every run deploys new contracts. After a timeout or a
   partial broadcast, inspect
   `contracts/ethereum/broadcast/DeployShellnetE2EBridge.s.sol/11155111/run-latest.json`

@@ -47,8 +47,8 @@ pub const THINNING_FACTOR_P: u64 = bridge_prover_lib::THINNING_FACTOR_P;
 /// Anchor-layer selection mode. See the `bin/build.rs` module docblock
 /// for the full semantics of each variant.
 ///
-/// * `Explicit(n)` — strict: use L(n), error out if the anchor's height
-///   has rolled out of `layer_windows[n-1]`.
+/// * `Explicit(n)` — strict: use L(n), error out if the proof's root is
+///   not in `layer_windows[n-1]`.
 /// * `Auto` — try L1 first; if L1's K has rolled out of the L1 window,
 ///   escalate through L2, L3, …, L(num_active_layers) and take the first
 ///   layer whose window still covers the event. Implies opt-in to the
@@ -240,8 +240,25 @@ pub async fn enrich_witness(
         hex::encode(chain_result.final_chain_root),
     );
 
-    // Look up the verifier's mirrored layer hash.
+    // `withdrawByProof` accepts the proof only if its final root is in the
+    // anchor layer's window (`_isKnownLayerAnchor`): the same test, here.
     let anchor_key_block_seq = chain_result.anchor_kb_seqno;
+    let chosen_layer_hash = chain_result.final_chain_root;
+    if !bridge_state
+        .window(anchor_layer)
+        .contains_hash(&chosen_layer_hash)
+    {
+        bail!(
+            "proof root {} for anchor key block {} not found in L{} window — the block has \
+             rolled out of the L{} rolling window, or the root rebuilt here is not the one the \
+             node published. Re-run with `--anchor-layer auto` (probes L1 then L2) or explicitly \
+             pick a higher layer if the state has progressed to it.",
+            hex::encode(chosen_layer_hash),
+            anchor_key_block_seq,
+            anchor_layer,
+            anchor_layer,
+        );
+    }
     let key_block_height = fetch_block_observed_height(gql, anchor_key_block_seq)
         .await
         .with_context(|| {
@@ -252,56 +269,9 @@ pub async fn enrich_witness(
             )
         })?;
     info!(
-        "anchor key block {} observed_height = {}",
-        anchor_key_block_seq, key_block_height,
+        "anchor key block {} observed_height = {}, root in the L{} window",
+        anchor_key_block_seq, key_block_height, anchor_layer,
     );
-
-    let target_layer_idx0 = (anchor_layer - 1) as usize;
-    let slot = bridge_state
-        .slot_for_event_height(anchor_layer, key_block_height)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "anchor key block height {} not found in L{} window {:?} \
-                 — block has rolled out of the L{} rolling window. \
-                 Re-run with `--anchor-layer auto` (probes L1 then L2) or \
-                 explicitly pick a higher layer if the state has progressed \
-                 to it.",
-                key_block_height,
-                anchor_layer,
-                bridge_state.layer_windows[target_layer_idx0]
-                    .iter_chronological()
-                    .map(|(_, h)| h)
-                    .collect::<Vec<_>>(),
-                anchor_layer,
-            )
-        })?;
-    info!(
-        "L{} slot for this anchor key block: {}",
-        anchor_layer, slot,
-    );
-
-    let chosen_layer_hash = bridge_state.layer_windows[target_layer_idx0]
-        .iter_chronological()
-        .nth(slot)
-        .map(|(h, _)| h)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "internal: L{} slot {} found but not present when iterating chronologically",
-                anchor_layer,
-                slot,
-            )
-        })?;
-
-    if chosen_layer_hash != chain_result.final_chain_root {
-        warn!(
-            "final chain root mismatch — verifier mirror (L{} root @ anchor KB) = {}, \
-             locally rebuilt = {}. The proof will not satisfy the circuit until \
-             every tree along the chain matches the node's construction byte-for-byte.",
-            anchor_layer,
-            hex::encode(chosen_layer_hash),
-            hex::encode(chain_result.final_chain_root),
-        );
-    }
 
     // Assemble MAX_CHAIN_LEN links.
     let inactive_depth = block_tree_proof.siblings_hex.len();
@@ -366,16 +336,15 @@ pub async fn enrich_witness(
 /// layer number (1 = L1, 2 = L2, …, up to `MAX_LAYERS`).
 ///
 /// * `Explicit(n)` — returns `n` unchanged. Rollout detection is left to
-///   the downstream `slot_for_event_height` lookup so the error carries
-///   the exact window contents.
+///   the check of the proof's root against the window.
 /// * `Auto` — probes the verifier state, cheapest layer first:
 ///   1. Compute `K` via [`real_chain_builder::l1_anchor_boundaries`] and
-///      fetch its observed_height. If `K`'s height is in `layer_windows[0]`,
-///      pick L1 (cheapest wait budget).
+///      fetch the L1 root it published. If that root is in
+///      `layer_windows[0]`, pick L1 (cheapest wait budget).
 ///   2. Otherwise, loop `n = 2..=num_active_layers` (capped at `MAX_LAYERS`).
 ///      For each `n`, compute `T_n` via
-///      [`real_chain_builder::l_n_anchor_boundaries`], fetch its
-///      observed_height, and check `layer_windows[n-1]`. First match wins.
+///      [`real_chain_builder::l_n_anchor_boundaries`], fetch the L(n) root
+///      it published, and check `layer_windows[n-1]`. First match wins.
 ///   3. Otherwise fail — event is older than the verifier's coverage.
 ///
 /// Returns `(anchor_layer, escalated_from_auto)`.
@@ -394,67 +363,57 @@ pub(crate) async fn resolve_anchor_layer(
 
     // Probe L1.
     let (_h_e, k, _hops) = real_chain_builder::l1_anchor_boundaries(event_seq, w, p);
-    let k_height = fetch_block_observed_height(gql, k)
+    let k_root = published_layer_root(gql, k, 1)
         .await
-        .with_context(|| format!("auto-probe: fetching observed_height for L1 anchor K={k}"))?;
-    if bridge_state.slot_for_event_height(1, k_height).is_some() {
-        info!("auto: L1 slot present for K={} (height={}); using L1", k, k_height);
+        .with_context(|| format!("auto-probe: fetching the L1 root of anchor K={k}"))?;
+    if k_root.is_some_and(|root| bridge_state.window(1).contains_hash(&root)) {
+        info!("auto: L1 root of K={} is in the window; using L1", k);
         return Ok((1, false));
     }
-    info!(
-        "auto: L1 slot for K={} (height={}) rolled out of L1 window — probing L2+",
-        k, k_height,
-    );
+    info!("auto: L1 root of K={} is not in the L1 window — probing L2+", k);
 
     // Escalate L2 → … → L(min(num_active_layers, MAX_LAYERS)).
     let num_active = bridge_state.num_active_layers() as u8;
     if num_active < 2 {
         bail!(
-            "auto: L1 anchor K={} (height={}) rolled out of the L1 rolling window \
-             and the verifier state has only {} active layer(s) — no higher layer \
-             to escalate to. Event is older than L1 coverage; L(N≥2) escalation \
-             requires the verifier to have observed at least one L(N) boundary.",
+            "auto: L1 root of anchor K={} is not in the L1 rolling window and the verifier state \
+             has only {} active layer(s) — no higher layer to escalate to. Event is older than \
+             L1 coverage; L(N≥2) escalation requires the verifier to have observed at least one \
+             L(N) boundary.",
             k,
-            k_height,
             num_active,
         );
     }
     let max_probe = num_active.min(MAX_LAYERS as u8);
-    let mut probes: Vec<(u8, u64, u64)> = Vec::with_capacity((max_probe - 1) as usize);
+    let mut probes: Vec<(u8, u64)> = Vec::with_capacity((max_probe - 1) as usize);
     for n in 2..=max_probe {
         let boundaries = real_chain_builder::l_n_anchor_boundaries(event_seq, w, n);
         let t_n = *boundaries.last().expect("l_n_anchor_boundaries returns ≥ 1 entry");
-        let t_n_height = fetch_block_observed_height(gql, t_n)
+        let t_n_root = published_layer_root(gql, t_n, n)
             .await
-            .with_context(|| {
-                format!("auto-probe: fetching observed_height for L{n} anchor T_{n}={t_n}")
-            })?;
-        if bridge_state.slot_for_event_height(n, t_n_height).is_some() {
+            .with_context(|| format!("auto-probe: fetching the L{n} root of anchor T_{n}={t_n}"))?;
+        if t_n_root.is_some_and(|root| bridge_state.window(n).contains_hash(&root)) {
             info!(
-                "auto: escalating L1 → L{} for event_seq={} (K={} rolled out; \
-                 T_{}={} in L{} window at height={})",
-                n, event_seq, k, n, t_n, n, t_n_height,
+                "auto: escalating L1 → L{} for event_seq={} (K={} not in the L1 window; L{} root \
+                 of T_{}={} is in its window)",
+                n, event_seq, k, n, n, t_n,
             );
             return Ok((n, true));
         }
-        info!(
-            "auto: L{} slot for T_{}={} (height={}) also rolled out — probing next layer",
-            n, n, t_n, t_n_height,
-        );
-        probes.push((n, t_n, t_n_height));
+        info!("auto: L{} root of T_{}={} is not in its window — probing next layer", n, n, t_n);
+        probes.push((n, t_n));
     }
 
     let probes_str = probes
         .iter()
-        .map(|(n, t, h)| format!("L{n}: T_{n}={t}(height={h})"))
+        .map(|(n, t)| format!("L{n}: T_{n}={t}"))
         .collect::<Vec<_>>()
         .join(", ");
     bail!(
-        "auto: L1 (K={}, height={}) and all higher active layers rolled out of \
-         their rolling windows. Event is older than verifier coverage. Probed: {}. \
+        "auto: L1 (K={}) and all higher active layers rolled out of their rolling \
+         windows. Event is older than verifier coverage. Probed: {}. \
          num_active_layers={}, MAX_LAYERS={}.",
         k,
-        k_height,
         probes_str,
         num_active,
         MAX_LAYERS,
@@ -635,6 +594,13 @@ pub(crate) async fn build_block_tree_proof(
         },
         root,
     ))
+}
+
+/// The root block `seq` published for `layer`, `None` if it published none:
+/// such a block cannot be the anchor of that layer.
+async fn published_layer_root(gql: &GqlClient, seq: u64, layer: u8) -> Result<Option<[u8; 32]>> {
+    let block = gql.query_proof_block_by_seqno(seq).await?;
+    Ok(block.history_proofs.get(&layer).copied())
 }
 
 /// Resolve a block's `observed_height` (= `common_section.block_height.height()`).

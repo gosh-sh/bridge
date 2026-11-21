@@ -227,6 +227,7 @@ COPY contracts/ethereum/verifiers/PrimaryAggregatorVerifier.bin \
      contracts/ethereum/verifiers/FallbackAggregatorVerifier.bin \
      contracts/ethereum/verifiers/LayerHashesAggregatorVerifier.bin \
      contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier.bin \
+     contracts/ethereum/verifiers/BridgeWithdrawalAggregatorVerifier_calldata.bin \
      contracts/ethereum/verifiers/PrimaryAggregatorVerifier.sol \
      contracts/ethereum/verifiers/FallbackAggregatorVerifier.sol \
      contracts/ethereum/verifiers/LayerHashesAggregatorVerifier.sol \

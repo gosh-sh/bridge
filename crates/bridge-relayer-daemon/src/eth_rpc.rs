@@ -927,11 +927,8 @@ mod tests {
     }
 
     /// Read-only check of the endpoints an operator configured: the chain id
-    /// check, then the bridge's full state with the startup
-    /// `LayerAnchorAppended` scan. Reads `RPC_URL`, `RPC_FAILOVER_URLS`,
-    /// `BRIDGE_ADDRESS`, `BRIDGE_DEPLOY_BLOCK` and the scan's
-    /// `BRIDGE_GET_LOGS_CHUNK_BLOCKS` / `BRIDGE_GET_LOGS_PAUSE_MS`, as
-    /// `daemon-live` does:
+    /// check, then the bridge's full state. Reads `RPC_URL`,
+    /// `RPC_FAILOVER_URLS` and `BRIDGE_ADDRESS`, as `daemon-live` does:
     ///
     /// ```text
     /// cd crates/bridge-prover-libraries
@@ -951,21 +948,7 @@ mod tests {
         let urls = endpoint_urls(&primary, &failover).unwrap();
         let (provider, chain_id) = read_provider(&urls).await.unwrap();
         let address = std::env::var("BRIDGE_ADDRESS").expect("BRIDGE_ADDRESS");
-        let number = |name: &str| -> u64 {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0)
-        };
-        let bridge = crate::EthBridgeClient::with_scan_config(
-            address.parse().unwrap(),
-            provider,
-            crate::LogScanConfig {
-                deploy_block: number("BRIDGE_DEPLOY_BLOCK"),
-                chunk_blocks: number("BRIDGE_GET_LOGS_CHUNK_BLOCKS"),
-                pause: Duration::from_millis(number("BRIDGE_GET_LOGS_PAUSE_MS")),
-            },
-        );
+        let bridge = crate::EthBridgeClient::new(address.parse().unwrap(), provider);
         let state = bridge.read_full_state().await.unwrap();
         println!(
             "chain {chain_id}: bridge last seen {}, anchors held per layer {:?}",

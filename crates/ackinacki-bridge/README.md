@@ -54,10 +54,7 @@ pipeline:
    must hold code, the withdrawal verifier stack must walk (adapter →
    `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
    pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
-   `treasuryBalance` must already cover the amount, and the window-heights
-   read stage 4b will need must succeed now (one `LayerAnchorAppended` scan
-   back from the head, plus one probe `eth_getLogs` over the configured
-   span). **So a dry run can
+   and `treasuryBalance` must already cover the amount. **So a dry run can
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy, a drained treasury — not only AN-side ones.**
 
@@ -84,8 +81,7 @@ pipeline:
    on the deployed `AckiNackiBridge` at `--bridge-address` (one call per
    round) until it has advanced past the covering L2 bundle boundary
    (`W² = 16 384` seq_nos) for the burn's block, then read the full state
-   via `EthBridgeClient::read_full_state` (ten windows plus the
-   `LayerAnchorAppended` scan). Once the covering bundle has landed
+   via `EthBridgeClient::read_full_state` (ten windows). Once the covering bundle has landed
    on-chain (fed by the server-side bundle relayer),
    `BridgeState::from_contract` builds a byte-for-byte mirror.
 6. **Prove + submit** — enrich the resurrected `BridgeState`
@@ -167,9 +163,8 @@ export BRIDGE_CONFIG=./config/bridge_config.mainnet   # placeholder (unfilled)
 | `--usdc-bridge-account` | `USDC_BRIDGE_ACCOUNT_ID`    | On-chain USDCBridge acc id (required in profile) |
 | `--anchor-layer`        | `BRIDGE_ANCHOR_LAYER`       | `auto` (default), `1`, or `2` — must match the deploy's anchoring mode |
 | `--i-know-the-wait`     | `BRIDGE_I_KNOW_THE_WAIT`    | Acknowledge L2's ~91 min chain-time budget when `--anchor-layer 2` |
-| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, the window-heights read and submitting `withdrawByProof`; must serve `eth_getLogs` back to the bridge's oldest held anchor (publicnode keeps only the newest ~10 000 blocks; the profile's endpoint serves full history and the `eth_getBlockReceipts` `deposit` needs) |
+| `--rpc-url`             | `RPC_URL`                   | EVM JSON-RPC — used for polling coverage, reading the bridge's windows and submitting `withdrawByProof`; `deposit` also needs `eth_getBlockReceipts`, which the profile's endpoint serves |
 | `--bridge-address`      | `BRIDGE_ADDRESS`            | Deployed `AckiNackiBridge` — the sole source of prover state |
-| `--bridge-deploy-block` | `BRIDGE_DEPLOY_BLOCK`       | Block the bridge was deployed in: where the `LayerAnchorAppended` scan (preflight, then stage 4b) stops when a window is not covered yet; changes together with `BRIDGE_ADDRESS` (unset = genesis). `--get-logs-chunk-blocks` / `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and `--get-logs-pause-ms` / `BRIDGE_GET_LOGS_PAUSE_MS` fit the scan to a capped, rate-limited RPC |
 | `--eth-private-key`     | `BURNER_PRIVATE_KEY`        | Signer for `withdrawByProof` (distinct from `--from-keys`) |
 | `--aggregator-dir`      | `BRIDGE_AGGREGATOR_DIR`     | Circuit-4 aggregator artifacts |
 | `--verifiers-dir`       | `BRIDGE_VERIFIERS_DIR`      | Committed withdrawal verifier: `BridgeWithdrawalAggregatorVerifier.bin` (compared with the chain), `.sol` (the proof self-check) and `_calldata.bin` (word 24 is the adapter `vkDigest` pin) |
@@ -199,7 +194,6 @@ paths in the CLI invocation are relative to that directory.
 cd crates/ackinacki-bridge
 export BRIDGE_CONFIG=./config/bridge_config              # symlink → bridge_config.shellnet
 export BRIDGE_ADDRESS='0x<new-bridge-address>'
-export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 # The CLI auto-sources this. We ALSO source it into the current shell
 # so the `cast call $BRIDGE_ADDRESS …` steps below can reach it.
 set -a && source "$BRIDGE_CONFIG" && set +a
@@ -224,8 +218,8 @@ For it to resolve, two things must be true, and neither is visible in the
 command itself:
 
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and state dirs.
-   Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
-   the shipped profile leaves them unset. Deposits require `deposit(address,uint256,bytes32)`
+   Set `BRIDGE_ADDRESS` for the new paired deployment;
+   the shipped profile leaves it unset. Deposits require `deposit(address,uint256,bytes32)`
    on EVM and `eccBridge` 1.18.0 on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
@@ -698,12 +692,6 @@ specific reason. Common causes:
   more via Step 2 (bump the amount inside `deploy_msig_and_mint.py`
   if you need more than the 1 USDC default)
 - USDCBridge account_id does not resolve via GQL
-- the window-heights read fails: a wrong `BRIDGE_DEPLOY_BLOCK` (above the
-  chain head, or after the oldest anchor the bridge's windows still hold),
-  an `eth_getLogs` span your RPC rejects (`BRIDGE_GET_LOGS_CHUNK_BLOCKS`), or
-  an RPC without log history back to the deploy block (publicnode keeps only
-  the newest ~10 000 blocks; the refusal says so when the deploy block
-  itself answers with no logs)
 - a bridge is paused: `AckiNackiBridge.paused()` is true, or the Acki
   Nacki bridge's `isPaused()` is. Nothing is sent; re-run once the owner
   lifts the pause. A `--dry-run` checks both too. On a resume over a

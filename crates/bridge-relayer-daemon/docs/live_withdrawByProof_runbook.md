@@ -1004,11 +1004,12 @@ ago (L2 deploy) now fails in one of three ways:
   `withdraw-e2e`, `submit-withdraw`, `daemon-withdraw` or the withdraw
   leg of `daemon-bridge`;
 - `withdraw-e2e --anchor-layer auto` stops in the enricher, before
-  proving: `auto: L1 (K=…, height=…) and all higher active layers rolled
-  out of their rolling windows. Event is older than verifier coverage.`;
-- `withdraw-e2e --anchor-layer <n>` stops with `anchor key block height
-  … not found in L<n> window … — block has rolled out of the L<n>
-  rolling window`.
+  proving: `auto: L1 (K=…) and all higher active layers rolled out of
+  their rolling windows. Event is older than verifier coverage.`;
+- `withdraw-e2e --anchor-layer <n>` stops with `proof root … for anchor
+  key block … not found in L<n> window — the block has rolled out of the
+  L<n> rolling window, or the root rebuilt here is not the one the node
+  published`.
 
 **Why this happens.** `AckiNackiBridge` keeps one ring of
 `HISTORY_PROOF_WINDOW = 128` anchors per layer. Every successful

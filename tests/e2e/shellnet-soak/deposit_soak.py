@@ -12,7 +12,8 @@ The run ends at a limit (the bridge's TVL cap, the wallet's USDC or gas), after
 repeated failures that spend gas, on a deposit only a person can settle, or
 when the recipient stays short of the finalized total: sending more would only
 leave more USDC behind. It survives restarts: the CLI's operation records say
-what is already on chain. SOAK_TO must not be spent from during a run.
+what is already on chain. SOAK_TO must not be spent from during a run, except
+by the withdrawal test, whose total comes from SOAK_SPENT_FILE.
 
 The settings come from the environment. The wallet key stays in the CLI's own
 `BRIDGE_DEPOSIT_PRIVATE_KEY`, next to `BRIDGE_DEPOSIT_FROM`; this script does
@@ -33,6 +34,7 @@ not read it.
   SOAK_SHORTFALL_S     how long the balance may lag the vouchers (1800)
   SOAK_RPC_URL         EVM RPC for the wallet's gas check (optional)
   SOAK_MIN_GAS_WEI     stop below this much gas in BRIDGE_DEPOSIT_FROM (10^14)
+  SOAK_SPENT_FILE      the withdrawal test's spent.json (optional)
 
 Exit codes: 0 on SIGTERM, SIGINT or a credited `--once`; 10 when it stopped at
 a limit or for a person. A supervisor must not restart it after 10.
@@ -90,6 +92,8 @@ SEND_TIMEOUT_S = 3600
 KILL_AFTER_S = 180
 GQL_TIMEOUT_S = 30
 GQL_BATCH = 50
+# A shortfall has to last this long: a refund or a delivery may be on its way.
+SHORTFALL_CONFIRM_S = 300
 READ_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException)
 HEX32 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -111,6 +115,7 @@ class Config:
     rpc_url: Optional[str]
     wallet: Optional[str]
     min_gas_wei: int
+    spent_file: Optional[Path]
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -135,6 +140,7 @@ class Config:
             rpc_url=env("SOAK_RPC_URL"),
             wallet=env("BRIDGE_DEPOSIT_FROM"),
             min_gas_wei=int(env("SOAK_MIN_GAS_WEI", str(10**14))),
+            spent_file=Path(env("SOAK_SPENT_FILE")) if env("SOAK_SPENT_FILE") else None,
         )
 
     def command(self, resume: Optional[str]) -> list:
@@ -183,6 +189,7 @@ class Soak:
         self.recipient_delta: Optional[int] = None
         # (time, finalized units): what the recipient must have by now.
         self.finalized_history = collections.deque()
+        self.short_since: Optional[float] = None
         self.halt: Optional[str] = None
 
     # --- files ---------------------------------------------------------
@@ -321,16 +328,33 @@ class Soak:
         ledger = self.ledger
         try:
             if ledger["baseline_units"] is None:
+                # In this order: a burn between the two reads is counted twice
+                # at worst, which can only hide a shortfall for one amount.
+                ledger["baseline_spent"] = self.spent_units()
                 ledger["baseline_units"] = self.recipient_units()
                 self.save_ledger()
             checkable = [(op, p) for op, p in ledger["pending"].items()
                          if HEX32.match(p.get("voucher") or "")]
             for start in range(0, len(checkable), GQL_BATCH):
                 self.check_vouchers(checkable[start:start + GQL_BATCH])
-            self.recipient_delta = self.recipient_units() - ledger["baseline_units"]
+            # The balance first: the spent total is written before a burn, so
+            # read after the balance it can only count a burn early.
+            balance = self.recipient_units()
+            spent = self.spent_units() - ledger.get("baseline_spent", 0)
+            self.recipient_delta = balance - ledger["baseline_units"] + spent
             self.check_balance()
         except READ_ERRORS as e:
             self.last_error = f"credit check: {type(e).__name__}"
+
+    def spent_units(self) -> int:
+        """What the withdrawal test took from the recipient, in flight included."""
+        if not self.cfg.spent_file:
+            return 0
+        try:
+            spent = json.loads(self.cfg.spent_file.read_text())
+        except FileNotFoundError:
+            return 0
+        return int(spent["burned_units"]) + int(spent["in_flight_units"])
 
     def check_vouchers(self, batch: list):
         ledger = self.ledger
@@ -367,7 +391,11 @@ class Soak:
             return
         history.appendleft((now - self.cfg.shortfall_s, due))
         missing = due - self.recipient_delta
-        if missing > 0:
+        if missing <= 0:
+            self.short_since = None
+            return
+        self.short_since = self.short_since or now
+        if now - self.short_since >= min(SHORTFALL_CONFIRM_S, self.cfg.shortfall_s):
             self.last_error = f"recipient is short of {missing} units"
             self.record({"status": "credit_shortfall", "missing_units": missing})
             self.halt = "credit_shortfall"

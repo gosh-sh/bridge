@@ -25,16 +25,9 @@
 # (tests/e2e/local-net/prover-host/jobs/deploy.sh is the worked example).
 # RPC_URL is the primary Ethereum endpoint; the relayer falls back to the
 # RPC_FAILOVER_URLS entries in order when it fails
-# (crates/bridge-relayer-daemon/src/eth_rpc.rs). Together they must serve
-# `eth_getLogs` back to the bridge's oldest held anchor (`daemon-live`
-# rebuilds the window heights from `LayerAnchorAppended` at every start) and
-# accept the relayer's transactions. Measured 2026-10-19:
-#   * Infura (key): eth_getLogs up to 10 000 blocks, full history, archive.
-#   * Alchemy free tier (key): eth_getLogs up to 10 blocks only.
-#   * EF DevOps: up to 10 000 blocks with history; unstable.
-#   * publicnode: keeps only the newest ~10 000 blocks of logs.
-#   * Tenderly's public gateway: history and wide spans, but answered
-#     applyBkSetUpdate sends with -32005 (rate limit), even one at a time.
+# (crates/bridge-relayer-daemon/src/eth_rpc.rs). Together they must accept
+# the relayer's transactions. Measured 2026-10-19: Tenderly's public gateway
+# answered applyBkSetUpdate sends with -32005 (rate limit), even one at a time.
 # API keys go in the untracked .env next to this file (matched by .gitignore):
 #   ALCHEMY_API_KEY=...
 #   INFURA_API_KEY=...
@@ -53,10 +46,6 @@ if [ -z "${RELAYER_PRIVATE_KEY:-}" ]; then
   echo "shellnet.common: RELAYER_PRIVATE_KEY is not set; put the key of a Sepolia EOA of your own into $_shellnet_common_dir/.env" >&2
 fi
 unset _shellnet_common_dir
-# Pace the startup LayerAnchorAppended scan for Infura's free tier: 500
-# credits a second, 255 per eth_getLogs. Back to back, the scan drew HTTP 429
-# for the next half minute, even on eth_chainId.
-BRIDGE_GET_LOGS_PAUSE_MS=600
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
 BRIDGE_GQL_ENDPOINT=https://shellnet.ackinacki.org/graphql

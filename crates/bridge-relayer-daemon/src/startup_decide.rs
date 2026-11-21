@@ -171,30 +171,29 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState, anchor_lev
         // Do NOT compare `last_height` directly — on a layer whose only
         // populated entry is a genesis prepend (chain layer empty,
         // local layer has one entry at seed height), local.last_height
-        // is the seed height and chain.last_height is 0. The
-        // chronological tuple comparison below still covers height
-        // equality on every populated slot.
+        // is the seed height and chain.last_height is 0. Per-slot heights
+        // are not compared either: the contract stores none.
 
         // Walk each ring oldest → newest. Both sides are already LE
         // (see comparator rustdoc: `read_full_state` normalises chain
         // slots at construction, so no reversal here).
-        let local_chrono: Vec<([u8; 32], u64)> = {
+        let local_chrono: Vec<[u8; 32]> = {
             let len = lw.data_len;
             let start = if len < w { 0 } else { lw.write_cursor };
             (0..len)
                 .map(|k| {
                     let p = (start + k) % w;
-                    (lw.data[p], lw.heights[p])
+                    lw.data[p]
                 })
                 .collect()
         };
-        let chain_chrono: Vec<([u8; 32], u64)> = {
+        let chain_chrono: Vec<[u8; 32]> = {
             let len = cw.data_len;
             let start = if len < w { 0 } else { cw.write_cursor };
             (0..len)
                 .map(|k| {
                     let p = (start + k) % w;
-                    (cw.data[p], cw.heights[p])
+                    cw.data[p]
                 })
                 .collect()
         };
@@ -224,7 +223,7 @@ fn windows_match(local: &BridgeState, chain: &EthBridgeContractState, anchor_lev
         // anchor layer never carry a seed entry (bridge-audit#122), so a
         // prepend there is a divergence.
         if i <= anchor_index && local_chrono.len() == chain_chrono.len() + 1 {
-            if i == anchor_index && local_chrono[0].0 != chain.genesis_prev_max_level_layer_hash {
+            if i == anchor_index && local_chrono[0] != chain.genesis_prev_max_level_layer_hash {
                 return false;
             }
             if local_chrono[1..] != chain_chrono[..] {
@@ -719,6 +718,29 @@ mod tests {
                 reason,
             } => assert!(reason.contains("genesis BK set"), "{reason}"),
             d => panic!("expected Stop, got {d:?}"),
+        }
+    }
+
+    /// The contract stores no per-slot heights, so the ones the local
+    /// mirror recorded are not a divergence.
+    #[test]
+    fn warm_resume_when_only_the_local_window_has_heights() {
+        let local = advanced_state(8);
+        let mut chain = snapshot_as_chain(&local);
+        chain.layer_windows[0].heights.fill(0);
+        assert_ne!(
+            local.layer_windows[0].heights,
+            chain.layer_windows[0].heights
+        );
+        match decide(DecideInputs {
+            local: &local,
+            chain: &chain,
+            bootstrap_seqno: None,
+            window_size: W,
+            anchor_level: 1,
+        }) {
+            StartupDecision::WarmResume => {},
+            d => panic!("expected WarmResume, got {d:?}"),
         }
     }
 

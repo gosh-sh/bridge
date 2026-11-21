@@ -34,9 +34,7 @@ use alloy::{
 };
 use bridge_gql_fetcher::gql_client::{create_client, GqlClient};
 use bridge_prover_lib::keys::{leaked_keygen_temp_files, probe_ceremony, KeyCacheState};
-use bridge_relayer_daemon::{
-    bridge::EthBridgeClient, withdrawal::WITHDRAWAL_CALLDATA_LEN, LogScanConfig,
-};
+use bridge_relayer_daemon::{bridge::EthBridgeClient, withdrawal::WITHDRAWAL_CALLDATA_LEN};
 use serde_json::{json, Value};
 use tvm_block::{Account, AccountStatus, Deserializable};
 use tvm_client::{
@@ -3070,68 +3068,32 @@ pub async fn check_bridge_deploy_for_token(
     Ok(())
 }
 
-/// The read stage 4b performs after the burn, performed now: pin a head,
-/// read the ten windows and scan `LayerAnchorAppended` back from it with
-/// the scan settings the run will use. What fails here would otherwise
-/// fail after the burn and the coverage wait, with the same error: a
-/// `BRIDGE_DEPLOY_BLOCK` that is not the deploy block (fewer logs than
-/// entries), an `eth_getLogs` span the RPC rejects, an RPC that serves no
-/// log history. The snapshot itself is discarded; stage 4b re-reads it once
-/// coverage is observed.
-pub async fn check_window_scan(
-    rpc_url: &str,
-    bridge: Address,
-    scan: LogScanConfig,
-) -> CliResult<()> {
+/// The read stage 4b performs after the burn, performed now: the bridge's
+/// scalars and ten windows, pinned to one block. What fails here would
+/// otherwise fail after the burn and the coverage wait, with the same error.
+/// The snapshot itself is discarded; stage 4b re-reads it once coverage is
+/// observed.
+pub async fn check_window_read(rpc_url: &str, bridge: Address) -> CliResult<()> {
     let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
         flag: "rpc-url",
         expected: "an http(s) JSON-RPC URL".into(),
         got: crate::errors::Redacted::rendered(format!("{} ({e})", crate::args::redact(rpc_url))),
     })?;
     let provider = ProviderBuilder::new().connect_http(url);
-    // What the scan will actually use: a span of 0 is the library default.
-    let scan = scan.normalized();
-    let client = EthBridgeClient::with_scan_config(bridge, provider, scan);
-    let state = client
+    let state = EthBridgeClient::new(bridge, provider)
         .read_full_state()
         .await
         .map_err(|e| CliError::Preflight {
             reason: format!(
-                "--bridge-address {bridge}: the window-heights read that stage 4b runs after the \
-                 burn failed now: {e}.\n\x20 Check BRIDGE_DEPLOY_BLOCK (the block this bridge was \
-                 deployed in; now {}), BRIDGE_GET_LOGS_CHUNK_BLOCKS (your RPC's eth_getLogs span \
-                 cap; now {}) and that --rpc-url serves logs back to the deploy block (public \
-                 endpoints such as publicnode keep only the newest ~10 000 blocks).",
-                scan.deploy_block, scan.chunk_blocks,
+                "--bridge-address {bridge}: the read of the bridge's windows that stage 4b runs \
+                 after the burn failed now: {e}.\n\x20 Check that --rpc-url answers calls pinned \
+                 to a recent block and that --bridge-address is an AckiNackiBridge."
             ),
             source: Some(anyhow::Error::new(e)),
         })?;
-    // The read above sends no `eth_getLogs` on a bridge without anchors, and
-    // on one younger than the span its only call is clamped to the deploy
-    // block; a span the RPC rejects would then surface only in stage 4b,
-    // after the burn. Send the scan's first full-span call once.
-    let logs = client
-        .probe_log_span()
-        .await
-        .map_err(|e| CliError::Preflight {
-            reason: format!(
-                "--bridge-address {bridge}: the eth_getLogs call stage 4b will send over the \
-                 configured span failed: {e}.\n\x20 Check BRIDGE_GET_LOGS_CHUNK_BLOCKS (your \
-                 RPC's eth_getLogs span cap; now {}) and that --rpc-url serves logs.",
-                scan.chunk_blocks,
-            ),
-            source: Some(anyhow::Error::new(e)),
-        })?;
-    tracing::info!(
-        chunk_blocks = scan.chunk_blocks,
-        logs,
-        "one eth_getLogs over the newest span answered"
-    );
     tracing::info!(
         last_seen = state.last_seen_block_seq_no,
-        deploy_block = scan.deploy_block,
-        chunk_blocks = scan.chunk_blocks,
-        "window-heights scan ok"
+        "bridge windows read ok"
     );
     Ok(())
 }
@@ -3961,16 +3923,13 @@ pub(crate) mod tests {
                         let result: serde_json::Value =
                             match v.get("method").and_then(|m| m.as_str()) {
                                 Some("eth_chainId") => serde_json::json!("0xaa36a7"), // 11155111
-                                // The head `check_window_scan` pins its reads to.
+                                // The head `read_full_state` pins its reads to.
                                 Some("eth_blockNumber") => serde_json::json!("0x10"),
                                 // Its hash, compared before and after the read.
                                 Some("eth_getBlockByNumber") => serde_json::json!({
                                     "number": "0x10",
                                     "hash": format!("0x{}", "11".repeat(32)),
                                 }),
-                                // An empty log set: the window-scan probe on a
-                                // bridge without anchors.
-                                Some("eth_getLogs") => serde_json::json!([]),
                                 Some("eth_getCode") => {
                                     let at = v["params"][0].as_str().unwrap_or("");
                                     serde_json::json!(code.for_address(at))
@@ -4100,8 +4059,8 @@ pub(crate) mod tests {
             // `_calldata.bin` (24 words of `0x00`). Callers overriding
             // this pair must override both sides.
             (SEL_VK_DIGEST, ZERO_WORD.to_string()),
-            // The pinned snapshot `check_window_scan` reads: five scalars
-            // and ten empty windows, so no `eth_getLogs` follows.
+            // The pinned snapshot `read_full_state` reads: five scalars
+            // and ten empty windows.
             (SEL_LAST_SEEN, ZERO_WORD.to_string()),
             (SEL_BK_SET, ZERO_WORD.to_string()),
             (SEL_PREV_BK_SET, ZERO_WORD.to_string()),
@@ -4142,46 +4101,23 @@ pub(crate) mod tests {
         format!("0x{}", "00".repeat(32 * (128 + 128 + 3)))
     }
 
-    /// The pre-burn window-heights read passes on empty windows (and sends
-    /// the scan's first full-span `eth_getLogs` as a probe), refuses a
-    /// deploy block above the head, and a node that cannot serve it refuses
-    /// naming the two knobs to check.
+    /// The pre-burn read of the bridge's windows passes on empty windows and
+    /// refuses a node that cannot serve it, naming the read.
     #[tokio::test]
-    async fn window_scan_passes_on_empty_windows_and_names_the_knobs_on_failure() {
+    async fn window_read_passes_on_empty_windows_and_refuses_a_node_that_cannot_serve_it() {
         let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
-        check_window_scan(&url, Address::repeat_byte(1), LogScanConfig::default())
+        check_window_read(&url, Address::repeat_byte(1))
             .await
             .unwrap();
 
-        // A deploy block above the mock's head (0x10): refused before any
-        // scan, even though the bridge has no anchors yet.
-        let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
-        let above_head = LogScanConfig {
-            deploy_block: 100,
-            ..LogScanConfig::default()
-        };
-        let err = check_window_scan(&url, Address::repeat_byte(1), above_head)
-            .await
-            .unwrap_err();
-        match err {
-            CliError::Preflight {
-                reason, ..
-            } => assert!(reason.contains("above the chain head"), "{reason}"),
-            other => panic!("expected a preflight refusal, got {other:?}"),
-        }
-
         let url = mock_rpc(SOME_CODE, std::collections::HashMap::new()).await;
-        let err = check_window_scan(&url, Address::repeat_byte(1), LogScanConfig::default())
+        let err = check_window_read(&url, Address::repeat_byte(1))
             .await
             .unwrap_err();
         match err {
             CliError::Preflight {
                 reason, ..
-            } => assert!(
-                reason.contains("BRIDGE_DEPLOY_BLOCK")
-                    && reason.contains("BRIDGE_GET_LOGS_CHUNK_BLOCKS"),
-                "{reason}"
-            ),
+            } => assert!(reason.contains("stage 4b"), "{reason}"),
             other => panic!("expected a preflight refusal, got {other:?}"),
         }
     }

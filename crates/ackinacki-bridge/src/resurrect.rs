@@ -54,8 +54,8 @@ pub fn stride_for(anchor: AnchorLayerMode) -> u64 {
         AnchorLayerMode::Explicit(2) => AnchorMode::L2.stride(),
         // `ackinacki-bridge`'s CLI refuses `> 2`; `bridge-relayer-daemon`
         // accepts any `n ≥ 1`. Safety does not depend on this arm: the daemon
-        // never calls `stride_for`, and an explicit 3 dies in enrich at
-        // `slot_for_event_height`. Kept total, and L1 for the reason above.
+        // never calls `stride_for`, and an explicit 3 dies in enrich when the
+        // proof's root is not in that window. Kept total, and L1 for the reason above.
         AnchorLayerMode::Explicit(_) => AnchorMode::L1.stride(),
     }
 }
@@ -141,10 +141,9 @@ where
     loop {
         attempt += 1;
         // One `storedLastSeenBlockSeqNo` call per poll. The full snapshot
-        // (10 windows plus the `LayerAnchorAppended` scan from the deploy
-        // block) is read once, below, after coverage is reached. An RPC
-        // error here costs a round, not the run: the burn is already on
-        // the wire, and the deadline bounds the retries.
+        // (10 windows) is read once, below, after coverage is reached. An
+        // RPC error here costs a round, not the run: the burn is already
+        // on the wire, and the deadline bounds the retries.
         match client.stored_last_seen_block_seq_no().await {
             Err(e) => {
                 failed_in_a_row += 1;

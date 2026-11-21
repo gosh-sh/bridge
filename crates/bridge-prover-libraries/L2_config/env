@@ -4,7 +4,6 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../shellnet.common"
 
 BRIDGE_ADDRESS=0xb733a57c393214254506bde7e9950a1b57e06fb4
-BRIDGE_DEPLOY_BLOCK=11910592
 BRIDGE_BOOTSTRAP_SEQNO=23887872
 BRIDGE_ANCHOR_LEVEL=2
 # Historical bk-update cursor used at deploy (constructor arg

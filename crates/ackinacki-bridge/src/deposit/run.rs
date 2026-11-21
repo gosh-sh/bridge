@@ -1296,6 +1296,9 @@ async fn walk(
         },
         OpStage::Proved | OpStage::Finalizing => Phase::Finalize,
     };
+    if let Some(f) = rec.finalize.as_mut() {
+        f.accepted = false;
+    }
     let to = AnTarget::parse(&rec.params.to).map_err(|e| after_request(store, &op, e))?;
     let from = rec.from.ok_or_else(|| damaged(store, &op, "no sender"))?;
     let exp = Expect {
@@ -3703,6 +3706,23 @@ mod tests {
             1,
             "the proof is built whoever finalizes"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_that_finds_the_deposit_finalized_by_another_says_already_finalized() {
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        w.voucher_deployed();
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert!(s.confirmation.is_some());
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        assert_eq!(s.finalize, Some("already_finalized"), "{s:?}");
     }
 
     #[tokio::test(start_paused = true)]

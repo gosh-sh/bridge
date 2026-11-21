@@ -23,12 +23,20 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
+- `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) keeps the committees of seven periods
+  (`getCommittees`) and refuses a `submitRotate` period not past the current one
+  (`ERR_STALE_PERIOD`): `updateCode` each light client while its relayer queues no checkpoint of an
+  earlier period.
+- `eccBridge` 1.18.0 (code hash `2c2296a5…`) deploys 1.8.0 light clients: run its `updateCode` and
+  `setLightClientCode` before the next `deployLightClient`.
+- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.0: upgrade the two together.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.18.0, code hash `8b1f8dc4…`, with `DepositVoucher` 1.6.0: upgrade a 1.17.0 bridge
-  with `updateCode` and the 1.6.0 voucher code in `userCell`. That moves every voucher address:
-  finish the old EVM bridge's deposits first, and afterwards trust only the new EVM bridge.
+- `eccBridge` 1.19.0, code hash `4d8ed160…`, with `DepositVoucher` 1.6.0 and the 1.8.0 light
+  clients: upgrade a 1.17.0 or 1.18.0 bridge with `updateCode` and the 1.6.0 voucher code in
+  `userCell`. That moves every voucher address: finish the old EVM bridge's deposits first, and
+  afterwards trust only the new EVM bridge.
 - `AckiNackiBridge` links the external library `NacklMint`: deploy with `forge script --broadcast`.
 - `AckiNackiBridge` storage: `TokenInfo` is three words (`token`/`decimals`/`depositsEnabled`,
   `tvlCap`, `liabilities`); `_nackl` takes slots 19–20 and `_withdrawalWindows` slot 21.
@@ -49,9 +57,9 @@ assigns it when the release is tagged.
     constructor's `BridgeWithdrawConfig` adds `usdcTvlCap` and `usdcDailyLimit` (deploy env
     `USDC_TVL_CAP`, `USDC_DAILY_LIMIT`, default 10,000 USDC each).
   - `AckiNackiBridge` links a second external library, `WithdrawalWindow`.
-- `ackinacki-bridge` needs `eccBridge` 1.18.0 (`MIN_BRIDGE_VERSION` and
-  `NEWEST_KNOWN_BRIDGE_VERSION`): deposit and `withdraw` preflight refuse a 1.17.0 bridge, whose limit
-  getters answer in the old shape. Upgrade the AN bridge before the CLI.
+- `ackinacki-bridge` needs `eccBridge` 1.19.0 (`MIN_BRIDGE_VERSION` and
+  `NEWEST_KNOWN_BRIDGE_VERSION`): deposit and `withdraw` preflight refuse a 1.18.0 or older bridge,
+  whose limit getters answer in the old shape. Upgrade the AN bridge before the CLI.
 - `contracts/ethereum` needs `@openzeppelin/contracts` 5.4.0: run `npm install` before `forge
   build`.
 - `docker compose up` also starts `withdraw-live`: give it its own funded EOA, `env/withdraw-live.env`,
@@ -141,9 +149,23 @@ assigns it when the release is tagged.
   bridge's USDC `tvlCap` apply.
 - `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
   sends nothing.
+- `eth-lc-relayer arbitrum-anchors` `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
+  `eth_getProof` alone, and logs are read only when `depositCounter` moves: point it at the Alchemy
+  node and `ARBITRUM_RPC_URL` at a public one.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.
+
+### Fixes
+
+- `eth-lc-relayer` proves a checkpoint with the committee of its signature slot: a checkpoint
+  finalized in one sync period and signed in the next no longer stops the light client. Before
+  upgrading, check `<state file>.steps/`: such an entry keeps the wrong `committee_json` and fails
+  with `live committee+bits+signature do not verify` until it is replaced by hand.
+- `eth-lc-relayer daemon` records a checkpoint already on chain after a refused `submitUpdate`
+  instead of resending it for ever.
+- Acki Nacki call errors carry the contract's `exit_code=N`: `deposit-relayer` waits out
+  `ERR_PAUSED`, `ERR_TVL_CAP` and the token gates instead of counting them as failed attempts.
 
 ## [0.9.0]
 

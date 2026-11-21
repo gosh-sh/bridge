@@ -54,7 +54,7 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.18.0";
+    string constant version = "1.19.0";
 
     uint32 constant WITHDRAWAL_WINDOW_HOURS = 25;
     uint8 constant REGISTRY_FORMAT = 1;
@@ -1241,10 +1241,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///                  mapping(uint32 => mapping(uint256 => bool)) messages)
     ///         `depositVoucherCode` supplies the zerostate voucher code.
     ///         A non-empty `userCell` contains abi.encode(voucherCode,
-    ///         bridgeTokens, bridgeTokenIds) and, from 1.18.0, a further
+    ///         bridgeTokens, bridgeTokenIds) and, from 1.19.0, a further
     ///         reference with abi.encode(nacklLockedTo, REGISTRY_FORMAT,
     ///         withdrawalWindow). Without `REGISTRY_FORMAT` the token
-    ///         configs are the 1.17.0 ones (`LegacyBridgeTokenConfig`):
+    ///         configs are the 1.17.0 and 1.18.0 ones (`LegacyBridgeTokenConfig`):
     ///         `maxTvl`, `outstanding` and `depositsEnabled` are kept, and
     ///         `dailyLimit` is set to the old `maxWithdrawal`, the largest
     ///         payout one withdrawal could make before.

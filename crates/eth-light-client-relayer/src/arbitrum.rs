@@ -94,6 +94,8 @@ pub const NODE_INTERFACE: Address = address!("0000000000000000000000000000000000
 sol! {
     #[allow(missing_docs)]
     function findBatchContainingBlock(uint64 blockNum) external view returns (uint64 batch);
+    #[allow(missing_docs)]
+    function depositCounter() external view returns (uint256);
 }
 
 /// An Arbitrum chain the bridge can prove blocks of.
@@ -256,6 +258,13 @@ pub struct AnchorState {
     pub parent_cursor: u64,
     /// Last Arbitrum block scanned for deposits.
     pub deposit_cursor: u64,
+    /// Deposits the bridge made up to `deposit_cursor`: the next `depositId`
+    /// after the last one the scan found. While the bridge's `depositCounter`
+    /// equals it, nothing past the cursor is a deposit and no logs are read.
+    /// `None` until a scan finds a deposit, or finds none on a bridge that
+    /// has made none.
+    #[serde(default)]
+    pub deposits_seen: Option<u64>,
     /// Deposit blocks the bridge does not accept yet: number → hash.
     pub pending: BTreeMap<u64, B256>,
     /// Batch ends with proofs, by block number, waiting for an assertion.
@@ -365,8 +374,11 @@ impl ParentEvent {
 #[async_trait]
 pub trait ArbitrumView: Send + Sync {
     async fn arbitrum_head(&self) -> Result<u64, RelayerError>;
-    /// Blocks in `from..=to` with a `Deposit` from the bridge: number, hash.
-    async fn deposit_blocks(&self, from: u64, to: u64) -> Result<Vec<(u64, B256)>, RelayerError>;
+    /// Blocks in `from..=to` with a `Deposit` from the bridge (number,
+    /// hash), and the `depositId` after the last deposit among them.
+    async fn deposit_blocks(&self, from: u64, to: u64) -> Result<DepositScan, RelayerError>;
+    /// The bridge's `depositCounter` in Arbitrum block `at`.
+    async fn deposit_count(&self, at: u64) -> Result<u64, RelayerError>;
     async fn parent_head(&self) -> Result<u64, RelayerError>;
     /// Batches and assertions in `from..=to`, in chain order.
     async fn parent_events(&self, from: u64, to: u64) -> Result<Vec<ParentEvent>, RelayerError>;
@@ -391,6 +403,15 @@ pub trait ArbitrumView: Send + Sync {
     ) -> Result<(B256, Bytes, Vec<Bytes>), RelayerError>;
     /// A parent-chain block's header; `None` past the head.
     async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError>;
+}
+
+/// The bridge's `Deposit`s in a range of Arbitrum blocks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DepositScan {
+    /// The blocks holding them, by number, with their hashes.
+    pub blocks: Vec<(u64, B256)>,
+    /// The `depositId` after the last deposit found; `None` when none was.
+    pub next_id: Option<u64>,
 }
 
 /// A parent-chain block header: what a `submitAncestry` span is made of.
@@ -510,20 +531,35 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
 
     // Deposits, up to `arbitrum_lag` blocks behind the head. A batch seen below
     // may end past that point; a deposit there is waiting by the next batch.
-    let head = view.arbitrum_head().await?.saturating_sub(cfg.arbitrum_lag);
+    let latest = view.arbitrum_head().await?;
+    let head = latest.saturating_sub(cfg.arbitrum_lag);
     if head > state.deposit_cursor {
         let head = head.min(
             state
                 .deposit_cursor
                 .saturating_add(cfg.deposit_scan_window.max(1)),
         );
-        for (n, hash) in view.deposit_blocks(state.deposit_cursor + 1, head).await? {
-            if state.pending.contains_key(&n) || an.is_accepted(chain.chain_id, hash).await? {
-                continue;
+        // The counter is read in the block just named: its state is seconds
+        // old, which any node keeps, and a node that does not have the block
+        // yet fails the call instead of answering an older count. Deposit ids
+        // follow block order, so a count equal to the deposits behind the
+        // cursor leaves no deposit up to `latest`, past `head`.
+        let made = view.deposit_count(latest).await?;
+        if state.deposits_seen != Some(made) {
+            let scan = view.deposit_blocks(state.deposit_cursor + 1, head).await?;
+            state.deposits_seen = match (scan.next_id, state.deposits_seen) {
+                (Some(next), seen) => Some(seen.map_or(next, |s| s.max(next))),
+                (None, None) if made == 0 => Some(0),
+                (None, seen) => seen,
+            };
+            for (n, hash) in scan.blocks {
+                if state.pending.contains_key(&n) || an.is_accepted(chain.chain_id, hash).await? {
+                    continue;
+                }
+                info!(block = n, %hash, "deposit block waits for an Arbitrum anchor");
+                state.pending.insert(n, hash);
+                report.new_deposit_blocks += 1;
             }
-            info!(block = n, %hash, "deposit block waits for an Arbitrum anchor");
-            state.pending.insert(n, hash);
-            report.new_deposit_blocks += 1;
         }
         state.deposit_cursor = head;
     }
@@ -1029,6 +1065,9 @@ fn unix_now() -> u64 {
 pub struct RpcArbitrumView<P, A> {
     pub parent: P,
     pub arbitrum: A,
+    /// Where `eth_getProof` goes: a node that keeps minutes of state. Every
+    /// other Arbitrum call goes to `arbitrum`, which a public node serves.
+    pub arbitrum_proofs: A,
     pub chain: ArbitrumChain,
     /// `AckiNackiBridge` on the Arbitrum chain, whose `Deposit`s are anchored.
     pub evm_bridge: Address,
@@ -1100,7 +1139,7 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
             .map_err(eth("Arbitrum eth_blockNumber"))
     }
 
-    async fn deposit_blocks(&self, from: u64, to: u64) -> Result<Vec<(u64, B256)>, RelayerError> {
+    async fn deposit_blocks(&self, from: u64, to: u64) -> Result<DepositScan, RelayerError> {
         let filter = Filter::new()
             .address(self.evm_bridge)
             .event_signature(DEPOSIT);
@@ -1110,7 +1149,32 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
             .filter_map(|l| Some((l.block_number?, l.block_hash?)))
             .collect();
         blocks.dedup();
-        Ok(blocks)
+        // `depositId` is the first indexed argument.
+        let next_id = logs
+            .iter()
+            .filter_map(|l| l.topics().get(1))
+            .map(|id| u64::try_from(U256::from_be_bytes(id.0)).unwrap_or(u64::MAX))
+            .max()
+            .map(|id| id.saturating_add(1));
+        Ok(DepositScan {
+            blocks,
+            next_id,
+        })
+    }
+
+    async fn deposit_count(&self, at: u64) -> Result<u64, RelayerError> {
+        let call = TransactionRequest::default()
+            .to(self.evm_bridge)
+            .input(depositCounterCall {}.abi_encode().into());
+        let out = self
+            .arbitrum
+            .call(call)
+            .block(at.into())
+            .await
+            .map_err(eth("Arbitrum depositCounter"))?;
+        let count = depositCounterCall::abi_decode_returns(&out)
+            .map_err(|e| RelayerError::Eth(format!("depositCounter answered {out}: {e}")))?;
+        Ok(u64::try_from(count).unwrap_or(u64::MAX))
     }
 
     async fn parent_head(&self) -> Result<u64, RelayerError> {
@@ -1237,7 +1301,7 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
             .map(|&n| B256::from(U256::from(n % HISTORY_WINDOW)))
             .collect();
         let proof = self
-            .arbitrum
+            .arbitrum_proofs
             .get_proof(HISTORY_ADDRESS, keys)
             .block_id(m.into())
             .await
@@ -1590,13 +1654,20 @@ impl<V: ArbitrumView> ArbitrumView for OneBlockBehind<V> {
     async fn arbitrum_head(&self) -> Result<u64, RelayerError> {
         self.inner.arbitrum_head().await
     }
-    async fn deposit_blocks(&self, _from: u64, to: u64) -> Result<Vec<(u64, B256)>, RelayerError> {
+    async fn deposit_blocks(&self, _from: u64, to: u64) -> Result<DepositScan, RelayerError> {
         if self.taken.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            return Ok(vec![]);
+            return Ok(DepositScan::default());
         }
         let n = to.saturating_sub(self.behind);
         let (hash, _) = self.inner.arbitrum_header(n).await?;
-        Ok(vec![(n, hash)])
+        Ok(DepositScan {
+            blocks: vec![(n, hash)],
+            next_id: Some(1),
+        })
+    }
+    /// The one made-up deposit, so that the first scan runs.
+    async fn deposit_count(&self, _at: u64) -> Result<u64, RelayerError> {
+        Ok(1)
     }
     async fn parent_head(&self) -> Result<u64, RelayerError> {
         self.inner.parent_head().await
@@ -1782,6 +1853,8 @@ mod tests {
         arbitrum_head: u64,
         parent_head: u64,
         deposits: Vec<(u64, B256)>,
+        /// `deposit_blocks` calls: the `eth_getLogs` scans a tick made.
+        deposit_scans: u32,
         events: Vec<ParentEvent>,
         /// batch → its last block
         batch_ends: BTreeMap<u64, u64>,
@@ -1804,17 +1877,25 @@ mod tests {
         async fn arbitrum_head(&self) -> Result<u64, RelayerError> {
             Ok(self.lock().unwrap().arbitrum_head)
         }
-        async fn deposit_blocks(
-            &self,
-            from: u64,
-            to: u64,
-        ) -> Result<Vec<(u64, B256)>, RelayerError> {
+        async fn deposit_blocks(&self, from: u64, to: u64) -> Result<DepositScan, RelayerError> {
+            let mut c = self.lock().unwrap();
+            c.deposit_scans += 1;
+            // Deposit `i` in block order has id `i`.
+            let mut all = c.deposits.clone();
+            all.sort();
+            let found: Vec<(usize, (u64, B256))> = all
+                .into_iter()
+                .enumerate()
+                .filter(|(_, (n, _))| (from..=to).contains(n))
+                .collect();
+            Ok(DepositScan {
+                next_id: found.last().map(|(i, _)| *i as u64 + 1),
+                blocks: found.into_iter().map(|(_, d)| d).collect(),
+            })
+        }
+        async fn deposit_count(&self, at: u64) -> Result<u64, RelayerError> {
             let c = self.lock().unwrap();
-            Ok(c.deposits
-                .iter()
-                .copied()
-                .filter(|(n, _)| (from..=to).contains(n))
-                .collect())
+            Ok(c.deposits.iter().filter(|(n, _)| *n <= at).count() as u64)
         }
         async fn parent_head(&self) -> Result<u64, RelayerError> {
             Ok(self.lock().unwrap().parent_head)
@@ -2272,6 +2353,84 @@ mod tests {
         tick(ARB, &chain, &an, &mut state, &window).await.unwrap();
         assert_eq!(state.deposit_cursor, 120);
         assert!(state.pending.contains_key(&100));
+    }
+
+    /// A bridge that has made no deposit since the cursor costs one
+    /// `depositCounter` read a tick and no `eth_getLogs`.
+    #[tokio::test]
+    async fn a_quiet_bridge_reads_no_logs() {
+        let chain = Mutex::new(FakeChain {
+            arbitrum_head: 200,
+            ..FakeChain::default()
+        });
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        assert_eq!(state.deposits_seen, Some(0), "a bridge with no deposit");
+        assert_eq!(chain.lock().unwrap().deposit_scans, 1);
+        chain.lock().unwrap().arbitrum_head = 400;
+        run(&chain, &an, &mut state).await;
+        assert_eq!(state.deposit_cursor, 400);
+        assert_eq!(
+            chain.lock().unwrap().deposit_scans,
+            1,
+            "nothing to scan for"
+        );
+    }
+
+    /// A deposit after a quiet stretch raises the counter: the window is
+    /// scanned, the deposit found, and the next quiet tick reads no logs.
+    #[tokio::test]
+    async fn a_new_deposit_raises_the_counter_and_is_scanned_for() {
+        let chain = Mutex::new(FakeChain {
+            arbitrum_head: 200,
+            ..FakeChain::default()
+        });
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        {
+            let mut c = chain.lock().unwrap();
+            c.deposits.push((300, h(300)));
+            c.arbitrum_head = 400;
+        }
+        let report = run(&chain, &an, &mut state).await;
+        assert_eq!(report.new_deposit_blocks, 1);
+        assert!(state.pending.contains_key(&300));
+        assert_eq!(state.deposits_seen, Some(1));
+        assert_eq!(chain.lock().unwrap().deposit_scans, 2);
+        chain.lock().unwrap().arbitrum_head = 600;
+        run(&chain, &an, &mut state).await;
+        assert_eq!(chain.lock().unwrap().deposit_scans, 2);
+    }
+
+    /// A deposit inside the lag is counted before the scan may reach it: the
+    /// window behind it is scanned without finding it, and the scan goes on
+    /// until the cursor passes it.
+    #[tokio::test]
+    async fn a_deposit_inside_the_lag_keeps_the_scan_going_until_it_is_found() {
+        let chain = Mutex::new(FakeChain {
+            arbitrum_head: 200,
+            deposits: vec![(180, h(180))],
+            ..FakeChain::default()
+        });
+        let an = FakeBridge::default();
+        let mut state = AnchorState {
+            deposits_seen: Some(0),
+            ..AnchorState::default()
+        };
+        let behind = TickConfig {
+            arbitrum_lag: 50,
+            ..cfg()
+        };
+        tick(ARB, &chain, &an, &mut state, &behind).await.unwrap();
+        assert_eq!(state.deposit_cursor, 150);
+        assert!(state.pending.is_empty());
+        assert_eq!(state.deposits_seen, Some(0), "not found yet");
+        chain.lock().unwrap().arbitrum_head = 260;
+        tick(ARB, &chain, &an, &mut state, &behind).await.unwrap();
+        assert!(state.pending.contains_key(&180));
+        assert_eq!(state.deposits_seen, Some(1));
     }
 
     #[tokio::test]
@@ -2768,6 +2927,7 @@ mod tests {
             chain_id: 421_614,
             parent_cursor: 9,
             deposit_cursor: 8,
+            deposits_seen: Some(1),
             pending: BTreeMap::from([(100, h(100))]),
             batch_ends: BTreeMap::from([(150, BatchEnd {
                 number: 150,

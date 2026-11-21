@@ -1,8 +1,8 @@
 # Acki Nacki contracts
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
-`exchange/` — `eccBridge` at version 1.18.0, `DepositVoucher` at 1.6.0,
-`EthBeaconLightClient` at 1.6.1 and `ArbitrumBlockVerifier` at 1.0.0:
+`exchange/` — `eccBridge` at version 1.19.0, `DepositVoucher` at 1.6.0,
+`EthBeaconLightClient` at 1.8.0 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -591,9 +591,9 @@ going through.** The restriction ships in the upgraded code itself: a block
 cutoff, where deposits from blocks older than the upgrade are refused. What is
 rejected is the deposit, not the shape of its receipt.
 
-**1.18.0 changes the voucher's code** (`DepositVoucher` 1.6.0 adds `release`),
-and a 1.17.0 voucher cannot be released: a deposit the bridge refuses would stay
-spent. An upgrade from 1.17.0 therefore passes the 1.6.0 voucher code in
+**1.19.0 changes the voucher's code** (`DepositVoucher` 1.6.0 adds `release`),
+and a 1.5.0 voucher cannot be released: a deposit the bridge refuses would stay
+spent. An upgrade from 1.17.0 or 1.18.0 therefore passes the 1.6.0 voucher code in
 `userCell`, and every past deposit gets a new address. The restriction here is
 the source allowlist, which `updateCode` empties: after the upgrade trust only
 the new EVM bridge (`setTrustedL1Bridge`), whose deposits were never finalized

@@ -424,10 +424,17 @@ enum Cmd {
         /// Arbitrum One. Must serve `eth_getBlockReceipts`.
         #[arg(long, env = "PARENT_RPC_URL", hide_env_values = true)]
         parent_rpc_url: String,
-        /// Arbitrum RPC. No archive node: proofs are taken as each batch
-        /// lands, while its state is seconds old.
+        /// Arbitrum RPC for everything but `eth_getProof`: the head, the
+        /// bridge's `depositCounter` and `Deposit` logs, blocks and
+        /// NodeInterface. A public node serves it.
         #[arg(long, env = "ARBITRUM_RPC_URL", hide_env_values = true)]
         arbitrum_rpc_url: String,
+        /// Arbitrum RPC for `eth_getProof` alone, read for each batch that
+        /// ends past a deposit: one that keeps minutes of state (Alchemy
+        /// keeps 20 000 blocks; a public node about 128, half a minute).
+        /// Unset, `--arbitrum-rpc-url` serves it and has to keep that state.
+        #[arg(long, env = "ARBITRUM_PROOF_RPC_URL", hide_env_values = true)]
+        arbitrum_proof_rpc_url: Option<String>,
         /// `AckiNackiBridge` on the Arbitrum chain, whose `Deposit`s are
         /// anchored.
         #[arg(long, env = "BRIDGE_ADDRESS")]
@@ -779,6 +786,7 @@ async fn real_main() -> anyhow::Result<()> {
         Cmd::ArbitrumAnchors {
             parent_rpc_url,
             arbitrum_rpc_url,
+            arbitrum_proof_rpc_url,
             bridge_address,
             from_block,
             an_graphql_url,
@@ -808,6 +816,7 @@ async fn real_main() -> anyhow::Result<()> {
             arbitrum_anchors(
                 &parent_rpc_url,
                 &arbitrum_rpc_url,
+                arbitrum_proof_rpc_url.as_deref(),
                 bridge_address,
                 resolve_from_block(from_block),
                 AnchorsAn {
@@ -909,7 +918,19 @@ async fn set_committee(
     if commitment == [0u8; 32] {
         anyhow::bail!("bundle public inputs carry a zero committee commitment");
     }
-    let period = period.unwrap_or(bundle.parsed.attested_slot / SLOTS_PER_SYNC_PERIOD);
+    // The committee is filed under the period it signs in, which the bundle
+    // does not carry: the signature slot comes after the attested one, and a
+    // header in the last epoch of a period may be signed in the next.
+    let attested = bundle.parsed.attested_slot;
+    let period = match period {
+        Some(period) => period,
+        None if attested % SLOTS_PER_SYNC_PERIOD >= SLOTS_PER_SYNC_PERIOD - 32 => anyhow::bail!(
+            "the bundle's attested slot {attested} is in the last epoch of period {}: its \
+             signature may fall in the next one; pass --period",
+            attested / SLOTS_PER_SYNC_PERIOD
+        ),
+        None => attested / SLOTS_PER_SYNC_PERIOD,
+    };
     let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&an_keys_path)?)?;
     let abi = light_client_abi();
     let tvm = TvmAckiNacki::connect(TvmClientConfig {
@@ -1233,7 +1254,7 @@ async fn prove_one(
     if update.committee_json.is_empty() {
         if let Some(url) = &beacon_url {
             let src = HttpBeaconSource::new(url.clone())?;
-            let prev = update.period().saturating_sub(1);
+            let prev = update.committee_update_period();
             update.committee_json = src.fetch_period_update(prev).await?;
         }
     }
@@ -1835,6 +1856,7 @@ const ARBITRUM_RPC_TIMEOUT: Duration = Duration::from_secs(60);
 async fn arbitrum_view(
     parent_rpc_url: &str,
     arbitrum_rpc_url: &str,
+    arbitrum_proof_rpc_url: Option<&str>,
     evm_bridge: Address,
     parent_log_span: u64,
     arbitrum_log_span: u64,
@@ -1843,8 +1865,17 @@ async fn arbitrum_view(
         .timeout(ARBITRUM_RPC_TIMEOUT)
         .build()?;
     let parent = ProviderBuilder::new().connect_reqwest(http.clone(), parent_rpc_url.parse()?);
-    let arb = ProviderBuilder::new().connect_reqwest(http, arbitrum_rpc_url.parse()?);
+    let arb = ProviderBuilder::new().connect_reqwest(http.clone(), arbitrum_rpc_url.parse()?);
+    let arbitrum_proofs = ProviderBuilder::new().connect_reqwest(
+        http,
+        arbitrum_proof_rpc_url.unwrap_or(arbitrum_rpc_url).parse()?,
+    );
     let id = arb.get_chain_id().await?;
+    let proofs_id = arbitrum_proofs.get_chain_id().await?;
+    anyhow::ensure!(
+        proofs_id == id,
+        "--arbitrum-proof-rpc-url is chain {proofs_id}, --arbitrum-rpc-url chain {id}"
+    );
     let chain = *arbitrum::arbitrum_chain(id).ok_or_else(|| {
         anyhow::anyhow!(
             "chain {id} behind --arbitrum-rpc-url is not an Arbitrum chain the bridge proves"
@@ -1866,6 +1897,7 @@ async fn arbitrum_view(
     Ok(arbitrum::RpcArbitrumView {
         parent,
         arbitrum: arb,
+        arbitrum_proofs,
         chain,
         evm_bridge,
         parent_log_span,
@@ -1888,6 +1920,7 @@ struct AnchorsAn {
 async fn arbitrum_anchors(
     _parent_rpc_url: &str,
     _arbitrum_rpc_url: &str,
+    _arbitrum_proof_rpc_url: Option<&str>,
     _evm_bridge: Address,
     _from_block: u64,
     _an: AnchorsAn,
@@ -1904,6 +1937,7 @@ async fn arbitrum_anchors(
 async fn arbitrum_anchors(
     parent_rpc_url: &str,
     arbitrum_rpc_url: &str,
+    arbitrum_proof_rpc_url: Option<&str>,
     evm_bridge: Address,
     from_block: u64,
     an: AnchorsAn,
@@ -1919,6 +1953,7 @@ async fn arbitrum_anchors(
     let view = arbitrum_view(
         parent_rpc_url,
         arbitrum_rpc_url,
+        arbitrum_proof_rpc_url,
         evm_bridge,
         parent_log_span,
         arbitrum_log_span,
@@ -2037,6 +2072,7 @@ async fn arbitrum_vector(
     let view = arbitrum_view(
         parent_rpc_url,
         arbitrum_rpc_url,
+        None,
         Address::ZERO,
         parent_log_span,
         1,
@@ -2327,6 +2363,8 @@ mod tests {
             want(&[
                 ("parent-rpc-url", Some("PARENT_RPC_URL"), &[]),
                 ("arbitrum-rpc-url", Some("ARBITRUM_RPC_URL"), &[]),
+                ("arbitrum-proof-rpc-url", Some("ARBITRUM_PROOF_RPC_URL"), &[
+                ]),
                 ("bridge-address", Some("BRIDGE_ADDRESS"), &[]),
                 ("from-block", None, &["0"]),
                 ("an-graphql-url", Some("AN_GRAPHQL_URL"), &[]),

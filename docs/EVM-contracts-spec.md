@@ -61,7 +61,7 @@ note here calling out the drift.
 >
 > **Drift note, 2026-11-06 (deposits without a ZK proof, gosh-sh/bridge-audit#139).** The
 > Solidity side is unchanged. The deposit prover and its public inputs are gone: AN `eccBridge`
-> 1.17.0 proves the `Deposit` receipt itself. §2's diagram and ETH → AN paragraph, the `Deposit`
+> proves the `Deposit` receipt itself. §2's diagram and ETH → AN paragraph, the `Deposit`
 > notes in §6 and the deposit rows of §14 describe that flow and cite
 > `contracts/an/exchange/eccBridge.sol`, `crates/deposit-receipt/src/lib.rs`,
 > `crates/deposit-relayer-daemon/src/source.rs` and `crates/deposit-chain-ids/src/lib.rs` as of

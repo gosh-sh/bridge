@@ -154,7 +154,7 @@ interval. Per-deposit retry deadlines and age-based delays (§3) still apply.
 - it exited 0, but its voucher deploy and `confirmDeposit` were not both visible within
   that time (`AnInterfaceSubmitter::settle`);
 - the lane is paused, `ERR_PAUSED` (231), or source-chain capacity is full (235, from an AN bridge
-  older than 1.18.0);
+  older than 1.19.0);
 - the token is not registered for the source chain (241), or its deposits are closed on AN (243).
   Both clear once the owner calls `setBridgeToken`;
 - an external message was already recorded or expired (400 / 402). Observe the
@@ -224,8 +224,8 @@ deposit, so parking will not help; fix the setting, and parked deposits then fin
 | 304 `ERR_INLINE` (`EthTrie`) | `finalizeDeposit` | the block's receipt trie has a node under 32 bytes, which the bridge cannot walk | cannot be finalized by the relayer; contact the operator |
 | 307 `ERR_NO_LOG` (`EthTrie`) | `finalizeDeposit` | the proven receipt has no log at `logIndex` | `logIndex` counts within the receipt, not the block; the relayer computes it from the receipt, so this points at a relayer bug |
 | 308 `ERR_RECEIPT_STATUS` (`EthTrie`) | `finalizeDeposit` | the deposit transaction failed on the source chain | no deposit was made; the relayer refuses a failed transaction itself (`unprovable`) |
-| 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | AN bridge before 1.18.0 only: the proven amount exceeds its per-transfer cap | contact the operator; from 1.18.0 there is no per-transfer cap and 234 is not raised |
-| 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full (AN bridge before 1.18.0; from 1.18.0 the EVM bridge bounds it) | retried without counting a failed attempt; wait for withdrawals |
+| 234 `ERR_TRANSFER_TOO_LARGE` | `finalizeDeposit` | AN bridge before 1.19.0 only: the proven amount exceeds its per-transfer cap | contact the operator; from 1.19.0 there is no per-transfer cap and 234 is not raised |
+| 235 `ERR_TVL_CAP` | `finalizeDeposit` | chain capacity is full (AN bridge before 1.19.0; from 1.19.0 the EVM bridge bounds it) | retried without counting a failed attempt; wait for withdrawals |
 | 236 `ERR_CHAIN_BALANCE_EXCEEDED` | `finalizeDeposit` | a NACKL deposit above the NACKL locked for its chain | retried without counting a failed attempt; wait for NACKL withdrawals to that chain |
 | 400 / 402 | message header | identical recorded message / expired message | pending; observe the voucher before retrying |
 | 231 `ERR_PAUSED` | `finalizeDeposit` | the lane is paused | pending until `setPaused(false)` |
@@ -330,7 +330,8 @@ bridge operator.
 | Setting | Value | Why |
 |---|---|---|
 | `PARENT_RPC_URL` | Sepolia for Arbitrum Sepolia, Ethereum for Arbitrum One; must serve `eth_getBlockReceipts` | The assertion and its receipt are on the parent chain. Checked against the Arbitrum chain at start-up. |
-| `ARBITRUM_RPC_URL` | a node that serves `eth_getProof` on blocks a few minutes old, such as a free Alchemy key (which allows 10 blocks per `eth_getLogs`: add `--arbitrum-log-span 10`) | The proofs are taken when each batch lands, 40–60 s after its last block. `sepolia-rollup.arbitrum.io` and publicnode keep about 128 blocks of state, half a minute on Arbitrum, and miss many batches; a missed batch waits for the next one. |
+| `ARBITRUM_RPC_URL` | any Arbitrum node, a public one included (`sepolia-rollup.arbitrum.io`, publicnode); `--arbitrum-log-span` within its `eth_getLogs` range | The head, the bridge's `depositCounter`, its `Deposit` logs, blocks and NodeInterface. The counter is read each tick, and the logs only when it moved. |
+| `ARBITRUM_PROOF_RPC_URL` | a node that serves `eth_getProof` on blocks a few minutes old, such as an Alchemy key | Only `eth_getProof`, read when a batch lands past a deposit, 40–60 s after its last block. Public nodes keep about 128 blocks of state, half a minute on Arbitrum, and miss many batches; a missed batch waits for the next one. Unset, `ARBITRUM_RPC_URL` serves the proofs and has to keep that state. |
 | `--bridge-address`, `--from-block` | `AckiNackiBridge` on the Arbitrum chain and its deploy block | Its `Deposit` logs are the blocks to anchor. Without a state file the relayer refuses to start without `--from-block`. |
 | `AN_GRAPHQL_URL`, `AN_KEYS_PATH`, `AN_TOKEN_BRIDGE` | as for `daemon` | Any key signs: `proveBlock` is permissionless. The bridge and verifier ABIs are built in; the verifier's address comes from the bridge (`getL2Verifier`), and the relayer refuses to start before `deployL2Verifier` or when the verifier's `getConfig()` names another chain, parent chain or rollup. |
 | `ARBITRUM_ANCHORS_STATE_DIR`, `ARBITRUM_ANCHORS_WORK_DIR`, `ARBITRUM_ANCHORS_LOG_DIR` | three absolute directories on persistent disk (`--state-dir`, `--work-dir`, `--log-dir`) | The state directory holds `arbitrum-anchors-state.json`, backed up like the deposit relayer's: it keeps the proofs taken at batch time until their assertion lands, 30–60 min later, and they cannot be fetched again. The work directory stays empty (the command starts no prover); the log directory holds its own log. |

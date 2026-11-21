@@ -446,6 +446,16 @@ fn format_tvm_client_error(e: tvm_client::error::ClientError) -> AckiNackiError 
             msg.push_str(&format!(" (exit_code={code})"));
         }
     }
+    // A message the node refused before accepting it: the SDK files the
+    // node's answer under `node_error.extensions.details`
+    // (`send_message_server_error`), and the node puts the compute-phase exit
+    // code there. Read from nowhere else, the code never reached the message,
+    // and callers took a contract refusal for one that carries no code.
+    if let Some(code) = crate::node_error::node_exit_code(data) {
+        if !msg.contains("exit_code=") {
+            msg.push_str(&format!(" (exit_code={code})"));
+        }
+    }
     if let Some(addr) = data.get("account_address").and_then(|v| v.as_str()) {
         msg.push_str(&format!(" (account={addr})"));
     }

@@ -11,7 +11,7 @@ description: >-
 # EVM → Acki Nacki deposit e2e
 
 There is no deposit circuit and no deposit proof to generate (bridge-audit#139). The AN-side
-`eccBridge` (version 1.17.0) checks the deposit's Ethereum receipt itself, with the VM's
+`eccBridge` checks the deposit's Ethereum receipt itself, with the VM's
 `KECCAK256` instruction and a Merkle-Patricia walk in `contracts/an/exchange/EthTrie.sol`. Off
 chain, the only work is collecting the witness from an RPC node.
 

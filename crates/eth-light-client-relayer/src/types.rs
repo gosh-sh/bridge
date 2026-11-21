@@ -95,9 +95,16 @@ impl FinalityUpdate {
     }
 
     /// Period of the committee that signed the attested header (the one whose
-    /// commitment the step proof exposes as public input 5).
+    /// commitment the step proof exposes as public input 5): the period of
+    /// the signature slot, the next one for the last header of a period.
     pub fn signing_period(&self) -> u64 {
-        self.attested_slot / SLOTS_PER_SYNC_PERIOD
+        self.signature_slot / SLOTS_PER_SYNC_PERIOD
+    }
+
+    /// The period whose `/updates` answer carries the signing committee as
+    /// its `next_sync_committee`.
+    pub fn committee_update_period(&self) -> u64 {
+        self.signing_period().saturating_sub(1)
     }
 }
 
@@ -425,6 +432,32 @@ mod tests {
         let u = parse_finality_update(&with).unwrap();
         assert_eq!(u.signature_slot, 11);
         assert_eq!(u.signing_period(), 0);
+    }
+
+    /// The last header of a period is signed in the next one, by that
+    /// period's committee.
+    #[test]
+    fn the_signing_period_is_the_signature_slots() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let at_the_edge = sample_json(p - 1, p - 64).replacen(
+            "\"sync_aggregate\"",
+            &format!("\"signature_slot\":\"{p}\",\"sync_aggregate\""),
+            1,
+        );
+        let u = parse_finality_update(&at_the_edge).unwrap();
+        assert_eq!(u.attested_slot / p, 0);
+        assert_eq!(u.signing_period(), 1);
+    }
+
+    /// The first slot of a period has no block: the checkpoint stays on the
+    /// last slot of the old period, and the new committee signs it.
+    #[test]
+    fn a_checkpoint_on_the_period_edge_takes_the_signers_committee() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let u = parse_finality_update(&sample_json(2 * p + 64, 2 * p - 1)).unwrap();
+        assert_eq!(u.period(), 1);
+        assert_eq!(u.signing_period(), 2);
+        assert_eq!(u.committee_update_period(), 1);
     }
 
     #[test]

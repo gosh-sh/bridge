@@ -253,7 +253,7 @@ command itself:
 1. `$BRIDGE_CONFIG` points at a profile file for endpoints and state dirs.
    Set `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK` for the new paired deployment;
    the shipped profile leaves them unset. Deposits require `deposit(address,uint256,bytes32)`
-   on EVM and `eccBridge` 1.18.0 on AN.
+   on EVM and `eccBridge` 1.19.0 on AN.
 2. The working directory is `crates/ackinacki-bridge/`, because every path
    in every shipped profile is relative to it.
 
@@ -1663,11 +1663,12 @@ version is the build constant `MIN_BRIDGE_VERSION`
 (`src/deposit/an_preflight.rs`). Preflight reads the bridge's `getVersion()`
 and refuses an older bridge with exit 2. `--resume` refuses it as well, with
 the exit code of the operation's stage, since the deposit may be on chain
-already. The minimum is `1.18.0`, the first bridge whose limit getters this
+already. The minimum is `1.19.0`, the first bridge whose limit getters this
 build reads (`getWithdrawalWindow`, six-field token configs, `getDepositLimits`
-as `(maxTvl, dailyLimit, outstanding)`); 1.17.0 answers them in another shape.
-`withdraw` preflight refuses an older bridge as well. A bridge newer than the newest this build was checked against
-(`1.18.0`) is refused by a released CLI too, since its `finalizeDeposit` may
+as `(maxTvl, dailyLimit, outstanding)`); 1.18.0 and older answer them in another
+shape. `withdraw` preflight refuses an older bridge as well. A bridge newer than
+the newest this build was checked against (`NEWEST_KNOWN_BRIDGE_VERSION`,
+`1.19.0`) is refused by a released CLI too, since its `finalizeDeposit` may
 take other arguments. A source build with `--features dev-unfixed-bridge`
 turns the refusal of a newer bridge into a warning.
 

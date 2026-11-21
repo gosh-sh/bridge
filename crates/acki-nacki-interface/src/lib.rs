@@ -9,6 +9,8 @@ pub mod address;
 mod children;
 pub mod error;
 pub mod mock;
+#[cfg_attr(not(feature = "tvm-sdk"), allow(dead_code))]
+mod node_error;
 pub mod traits;
 #[cfg(feature = "tvm-sdk")]
 pub mod tvm_client;

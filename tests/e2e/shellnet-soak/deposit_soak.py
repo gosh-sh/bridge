@@ -24,7 +24,8 @@ not read it.
   SOAK_CLI             command that runs the CLI (`ackinacki-bridge`)
   SOAK_NETWORK         EVM network (`arbitrum-sepolia`)
   SOAK_AMOUNT          USDC per deposit (`0.001`)
-  SOAK_INTERVAL_S      time between deposits (300)
+  SOAK_INTERVAL_S      from the start of one deposit to the next (600); it does
+                       not wait for earlier deposits to be credited
   SOAK_POLL_S          time between credit checks (60)
   SOAK_RETRY_S         wait after a failed send (300)
   SOAK_MAX_FAILURES    failures in a row before stopping (10)
@@ -122,7 +123,7 @@ class Config:
             cli=shlex.split(env("SOAK_CLI", "ackinacki-bridge")),
             network=env("SOAK_NETWORK", "arbitrum-sepolia"),
             amount=env("SOAK_AMOUNT", "0.001"),
-            interval_s=float(env("SOAK_INTERVAL_S", "300")),
+            interval_s=float(env("SOAK_INTERVAL_S", "600")),
             poll_s=float(env("SOAK_POLL_S", "60")),
             retry_s=float(env("SOAK_RETRY_S", "300")),
             max_failures=int(env("SOAK_MAX_FAILURES", "10")),
@@ -466,7 +467,9 @@ class Soak:
         return False, None
 
     def run(self, once: bool) -> int:
-        next_send = 0.0
+        # By the wall clock and on file: a restart does not add a deposit.
+        last = self.ledger.get("last_send_at")
+        next_send = 0.0 if once or last is None else last + self.cfg.interval_s
         sent_here = False
         while not self.stop.is_set():
             self.sync()
@@ -476,18 +479,24 @@ class Soak:
                 and self.recipient_delta >= self.ledger["finalized_units"]
             if once and sent_here and settled:
                 return 0
-            if (not once or not sent_here) and time.monotonic() >= next_send:
+            if (not once or not sent_here) and time.time() >= next_send:
+                started = time.time()
                 delivered, reason = self.send()
                 if reason:
                     self.record({"status": "stopped", "reason": reason,
                                  "message": self.last_error[:500]})
                     self.write_status()
                     return EXIT_STOPPED
-                sent_here = sent_here or delivered
-                wait = self.cfg.interval_s if delivered else self.cfg.retry_s
-                next_send = time.monotonic() + wait
+                if delivered:
+                    sent_here = True
+                    self.ledger["last_send_at"] = started
+                    self.save_ledger()
+                    next_send = started + self.cfg.interval_s
+                else:
+                    next_send = time.time() + self.cfg.retry_s
                 continue
-            self.stop.wait(self.cfg.poll_s)
+            until_send = next_send - time.time()
+            self.stop.wait(max(0.0, min(self.cfg.poll_s, until_send)) if not once else self.cfg.poll_s)
         return 0
 
     def on_signal(self, signum, _frame):

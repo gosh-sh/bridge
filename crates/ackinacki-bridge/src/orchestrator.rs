@@ -513,6 +513,13 @@ pub async fn run(
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(bridge = %args.bridge_address, "bridge deploy ok");
 
+    // The read of the bridge's windows stage 4b performs after the burn,
+    // performed now: an RPC that cannot serve it refuses here, before any
+    // money moves.
+    crate::preflight::check_window_read(&args.rpc_url, args.bridge_address)
+        .await
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
+
     // Signer + prover artifacts — real runs only (a dry-run has no
     // plumbing, never submits and never proves).
     //

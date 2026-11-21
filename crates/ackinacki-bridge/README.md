@@ -54,7 +54,8 @@ pipeline:
    must hold code, the withdrawal verifier stack must walk (adapter →
    `shplonkVerifier` → `yulVerifier`, code at every level), the bridge's
    pinned `(dappFr, accFr)` must be the pair this withdrawal will prove,
-   and `treasuryBalance` must already cover the amount. **So a dry run can
+   `treasuryBalance` must already cover the amount, and the read of the
+   bridge's windows stage 4b will need must succeed now. **So a dry run can
    fail for EVM reasons — a wrong RPC, a wrong `--bridge-address`, a
    half-wired deploy, a drained treasury — not only AN-side ones.**
 
@@ -692,6 +693,8 @@ specific reason. Common causes:
   more via Step 2 (bump the amount inside `deploy_msig_and_mint.py`
   if you need more than the 1 USDC default)
 - USDCBridge account_id does not resolve via GQL
+- the bridge's windows cannot be read: `--rpc-url` does not answer calls
+  pinned to a recent block, or `--bridge-address` is not an `AckiNackiBridge`
 - a bridge is paused: `AckiNackiBridge.paused()` is true, or the Acki
   Nacki bridge's `isPaused()` is. Nothing is sent; re-run once the owner
   lifts the pause. A `--dry-run` checks both too. On a resume over a

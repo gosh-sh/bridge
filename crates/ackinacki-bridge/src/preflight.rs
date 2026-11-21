@@ -3068,6 +3068,36 @@ pub async fn check_bridge_deploy_for_token(
     Ok(())
 }
 
+/// The read stage 4b performs after the burn, performed now: the bridge's
+/// scalars and ten windows, pinned to one block. What fails here would
+/// otherwise fail after the burn and the coverage wait, with the same error.
+/// The snapshot itself is discarded; stage 4b re-reads it once coverage is
+/// observed.
+pub async fn check_window_read(rpc_url: &str, bridge: Address) -> CliResult<()> {
+    let url = rpc_url.parse().map_err(|e| CliError::ArgInvalid {
+        flag: "rpc-url",
+        expected: "an http(s) JSON-RPC URL".into(),
+        got: crate::errors::Redacted::rendered(format!("{} ({e})", crate::args::redact(rpc_url))),
+    })?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    let state = EthBridgeClient::new(bridge, provider)
+        .read_full_state()
+        .await
+        .map_err(|e| CliError::Preflight {
+            reason: format!(
+                "--bridge-address {bridge}: the read of the bridge's windows that stage 4b runs \
+                 after the burn failed now: {e}.\n\x20 Check that --rpc-url answers calls pinned \
+                 to a recent block and that --bridge-address is an AckiNackiBridge."
+            ),
+            source: Some(anyhow::Error::new(e)),
+        })?;
+    tracing::info!(
+        last_seen = state.last_seen_block_seq_no,
+        "bridge windows read ok"
+    );
+    Ok(())
+}
+
 // `pub(crate)` so `test_chain` can build the EVM half of a fake world
 // out of `mock_rpc_code_for` + `full_walk`. That pair is the only answer
 // set in this crate that gets `check_bridge_deploy` all the way to `Ok`,
@@ -4069,6 +4099,27 @@ pub(crate) mod tests {
     /// static arrays and three scalars, all zero, encoded inline.
     fn empty_window_word() -> String {
         format!("0x{}", "00".repeat(32 * (128 + 128 + 3)))
+    }
+
+    /// The pre-burn read of the bridge's windows passes on empty windows and
+    /// refuses a node that cannot serve it, naming the read.
+    #[tokio::test]
+    async fn window_read_passes_on_empty_windows_and_refuses_a_node_that_cannot_serve_it() {
+        let url = mock_rpc(SOME_CODE, full_walk(&[])).await;
+        check_window_read(&url, Address::repeat_byte(1))
+            .await
+            .unwrap();
+
+        let url = mock_rpc(SOME_CODE, std::collections::HashMap::new()).await;
+        let err = check_window_read(&url, Address::repeat_byte(1))
+            .await
+            .unwrap_err();
+        match err {
+            CliError::Preflight {
+                reason, ..
+            } => assert!(reason.contains("stage 4b"), "{reason}"),
+            other => panic!("expected a preflight refusal, got {other:?}"),
+        }
     }
 
     // -- Disk headroom ---------------------------------------------------

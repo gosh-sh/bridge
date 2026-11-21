@@ -9,9 +9,10 @@ deposit counts as finalized when its voucher is deployed on Acki Nacki, and as
 credited once the recipient's balance has grown by the finalized total.
 
 The run ends at a limit (the bridge's TVL cap, the wallet's USDC or gas), after
-repeated failures that spend gas, or on a deposit whose outcome only a person
-can settle. It survives restarts: the CLI's operation records say what is
-already on chain.
+repeated failures that spend gas, on a deposit only a person can settle, or
+when the recipient stays short of the finalized total: sending more would only
+leave more USDC behind. It survives restarts: the CLI's operation records say
+what is already on chain. SOAK_TO must not be spent from during a run.
 
 The settings come from the environment. The wallet key stays in the CLI's own
 `BRIDGE_DEPOSIT_PRIVATE_KEY`, next to `BRIDGE_DEPOSIT_FROM`; this script does
@@ -61,7 +62,8 @@ USDC_ECC_ID = 3
 
 # The CLI's stages of an operation (`OpStage`).
 UNRESOLVED = {"requested", "signed"}
-ON_CHAIN = {"confirmed", "anchored", "proved", "finalizing", "credited"}
+# `credited` is not here: the test never takes a deposit that far itself.
+ON_CHAIN = {"confirmed", "anchored", "proved", "finalizing"}
 CLOSED = {"failed", "abandoned"}
 
 # Refusals that mean a limit was reached, not that something broke.
@@ -75,6 +77,8 @@ LIMIT_MARKERS = (
 # The `approve` or the `deposit` failed on chain or on the way there: these
 # are the failures that can cost gas.
 GAS_FAILURES = {21, 22}
+# The deposit is in the EVM bridge and no retry will finalize it.
+NEEDS_PERSON = {33, 35, 37}
 
 # The CLI proves only after this long with the block anchored and no voucher.
 # It is stopped before that; this keeps the proof out of reach regardless.
@@ -178,7 +182,7 @@ class Soak:
         self.last_error = ""
         self.recipient_delta: Optional[int] = None
         self.short_since: Optional[float] = None
-        self.short_reported = False
+        self.halt: Optional[str] = None
 
     # --- files ---------------------------------------------------------
 
@@ -252,18 +256,24 @@ class Soak:
                 continue
             stage = rec.get("stage")
             deposit = rec.get("deposit")
-            if stage in UNRESOLVED:
+            if (rec.get("params") or {}).get("to") != self.cfg.to or stage == "credited":
+                # Not a deposit of this run: the directory may have older ones.
+                ledger["done"].append(op)
+                done.add(op)
+                changed = True
+            elif stage in UNRESOLVED:
                 self.unresolved = op
             elif stage in ON_CHAIN and deposit:
                 ledger["pending"][op] = {
                     "deposit_id": deposit.get("deposit_id"),
                     "tx_hash": (rec.get("tx") or {}).get("tx_hash"),
                     "voucher": deposit.get("voucher_account"),
-                    "dapp": rec.get("an_bridge_dapp"),
                     "units": (rec.get("params") or {}).get("amount_units", 0),
                     "sent_at": parse_time(rec.get("updated_at")),
                 }
                 ledger["sent"] += 1
+                ledger["last_send_at"] = max(ledger.get("last_send_at") or 0,
+                                             parse_time(rec.get("created_at")))
                 changed = True
                 self.record({"status": "sent", "op_id": op,
                              "deposit_id": deposit.get("deposit_id"),
@@ -313,7 +323,7 @@ class Soak:
                 ledger["baseline_units"] = self.recipient_units()
                 self.save_ledger()
             checkable = [(op, p) for op, p in ledger["pending"].items()
-                         if HEX32.match(p.get("voucher") or "") and HEX32.match(p.get("dapp") or "")]
+                         if HEX32.match(p.get("voucher") or "")]
             for start in range(0, len(checkable), GQL_BATCH):
                 self.check_vouchers(checkable[start:start + GQL_BATCH])
             self.recipient_delta = self.recipient_units() - ledger["baseline_units"]
@@ -324,7 +334,8 @@ class Soak:
     def check_vouchers(self, batch: list):
         ledger = self.ledger
         fields = " ".join(
-            f'a{i}:account(account_id:"{p["voucher"]}",dapp_id:"{p["dapp"]}")'
+            # A voucher is deployed by an external message: its own dapp.
+            f'a{i}:account(account_id:"{p["voucher"]}",dapp_id:"{p["voucher"]}")'
             "{info{acc_type_name}}"
             for i, (_, p) in enumerate(batch)
         )
@@ -346,14 +357,13 @@ class Soak:
         missing = self.ledger["finalized_units"] - self.recipient_delta
         if missing <= 0:
             self.short_since = None
-            self.short_reported = False
             return
         now = time.monotonic()
         self.short_since = self.short_since or now
-        if now - self.short_since >= self.cfg.shortfall_s and not self.short_reported:
-            self.short_reported = True
+        if now - self.short_since >= self.cfg.shortfall_s:
             self.last_error = f"recipient is short of {missing} units"
             self.record({"status": "credit_shortfall", "missing_units": missing})
+            self.halt = "credit_shortfall"
 
     def gas_is_low(self) -> bool:
         """False too when the balance cannot be read: the send finds out."""
@@ -431,6 +441,13 @@ class Soak:
         if child.poll() is None:
             child.send_signal(signal.SIGTERM)
 
+    def record_readable(self, op: str) -> bool:
+        try:
+            json.loads((self.cfg.cli_state / f"{op}.json").read_text())
+            return True
+        except (OSError, ValueError):
+            return False
+
     def send(self) -> tuple:
         """One send. Returns (delivered, reason to stop or None)."""
         resume = self.unresolved
@@ -439,9 +456,9 @@ class Soak:
             return False, "limit"
         before = self.ledger["sent"]
         out = self.run_cli(resume)
-        if out.op_id and not (self.cfg.cli_state / f"{out.op_id}.json").exists():
+        if out.op_id and not self.record_readable(out.op_id):
             # Deposits would go out and never be counted.
-            self.last_error = f"operation {out.op_id} is not in SOAK_CLI_STATE_DIR"
+            self.last_error = f"operation {out.op_id} cannot be read in SOAK_CLI_STATE_DIR"
             return False, "wrong_state_dir"
         self.sync()
         if self.ledger["sent"] > before:
@@ -456,6 +473,8 @@ class Soak:
                      "resumed": bool(resume), "message": out.message[:500]})
         if any(marker in out.message for marker in LIMIT_MARKERS):
             return False, "limit"
+        if out.exit_code in NEEDS_PERSON:
+            return False, "needs_person"
         if out.exit_code in GAS_FAILURES:
             self.gas_failures += 1
             if self.gas_failures >= self.cfg.max_failures:
@@ -466,37 +485,39 @@ class Soak:
                 return False, "unresolved_deposit"
         return False, None
 
+    def stopped(self, reason: str) -> int:
+        self.record({"status": "stopped", "reason": reason, "message": self.last_error[:500]})
+        self.write_status()
+        return EXIT_STOPPED
+
     def run(self, once: bool) -> int:
-        # By the wall clock and on file: a restart does not add a deposit.
-        last = self.ledger.get("last_send_at")
-        next_send = 0.0 if once or last is None else last + self.cfg.interval_s
+        retry_at = 0.0
         sent_here = False
         while not self.stop.is_set():
             self.sync()
             self.check_credits()
             self.write_status()
+            if self.halt:
+                return self.stopped(self.halt)
             settled = not self.ledger["pending"] and self.recipient_delta is not None \
                 and self.recipient_delta >= self.ledger["finalized_units"]
             if once and sent_here and settled:
                 return 0
-            if (not once or not sent_here) and time.time() >= next_send:
-                started = time.time()
+            # By the wall clock and from the CLI's records: a restart, even
+            # after a hard kill, does not add a deposit.
+            last = self.ledger.get("last_send_at") or 0
+            due = max(retry_at, 0 if once else last + self.cfg.interval_s)
+            if (not once or not sent_here) and time.time() >= due:
                 delivered, reason = self.send()
                 if reason:
-                    self.record({"status": "stopped", "reason": reason,
-                                 "message": self.last_error[:500]})
-                    self.write_status()
-                    return EXIT_STOPPED
+                    return self.stopped(reason)
                 if delivered:
                     sent_here = True
-                    self.ledger["last_send_at"] = started
-                    self.save_ledger()
-                    next_send = started + self.cfg.interval_s
                 else:
-                    next_send = time.time() + self.cfg.retry_s
+                    retry_at = time.time() + self.cfg.retry_s
                 continue
-            until_send = next_send - time.time()
-            self.stop.wait(max(0.0, min(self.cfg.poll_s, until_send)) if not once else self.cfg.poll_s)
+            wait = self.cfg.poll_s if once else min(self.cfg.poll_s, due - time.time())
+            self.stop.wait(max(0.0, wait))
         return 0
 
     def on_signal(self, signum, _frame):

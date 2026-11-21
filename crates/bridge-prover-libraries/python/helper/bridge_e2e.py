@@ -198,11 +198,25 @@ def require_bridged_headroom(amount: int, chain_id: int = DST_CHAIN_ID) -> None:
         USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getDepositLimits", {"chainId": str(chain_id)},
     )
     try:
-        maximum, outstanding = int(limits["maxTransfer"]), int(limits["outstanding"])
+        outstanding = int(limits["outstanding"])
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError(f"getDepositLimits({chain_id}) failed: {limits!r}") from error
-    if amount > maximum or amount > outstanding:
-        raise RuntimeError(f"getDepositLimits({chain_id}): maxTransfer={maximum}, outstanding={outstanding}; finalize a deposit on this chain before withdrawing {amount}")
+    if amount > outstanding:
+        raise RuntimeError(f"getDepositLimits({chain_id}): outstanding={outstanding}; finalize a deposit on this chain before withdrawing {amount}")
+    window = common.run_getter(
+        USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getWithdrawalWindow",
+        {"chainId": str(chain_id), "tokenId": USDC_TOKEN_ID},
+    )
+    try:
+        daily_limit, used = int(window["dailyLimit"]), int(window["used"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"getWithdrawalWindow({chain_id}) failed: {window!r}") from error
+    if amount > daily_limit or used > daily_limit - amount:
+        raise RuntimeError(
+            f"getWithdrawalWindow({chain_id}): dailyLimit={daily_limit}, used={used}; "
+            f"initiateWithdrawal of {amount} would be refunded with 247 (ERR_DAILY_LIMIT) "
+            "until the rolling 24-hour window has room."
+        )
     raw = common.run_getter(
         USDC_BRIDGE_ADDRESS, USDC_BRIDGE_ABI, "getTotalBridged",
         {"tokenId": USDC_TOKEN_ID},

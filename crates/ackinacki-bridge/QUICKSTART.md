@@ -106,7 +106,7 @@ so if you change the profile, open a new shell or re-`export`.
 ```bash
 BIN=../bridge-prover-libraries/target/release/ackinacki-bridge
 
-$BIN withdraw --dry-run \
+$BIN withdraw --dry-run --token usdc \
   --from "$WITHDRAW_FROM" --from-keys "$WITHDRAW_FROM_KEYS" \
   --to "$WITHDRAW_TO" --to-chain "$WITHDRAW_TO_CHAIN" \
   --amount "$WITHDRAW_AMOUNT"
@@ -116,8 +116,8 @@ echo "exit=$?"
 Exit 0 means nothing about either chain is misconfigured: the multisig is
 active and single-custodian, the key file is readable and matches the
 on-chain custodian, ECC[3] covers the amount, the RPC answers on the right
-chain id, the bridge is deployed with a complete verifier stack, and its
-treasury can pay you.
+chain id, and the bridge is deployed with a complete verifier stack. The
+EVM bridge's treasury is not read: the Acki Nacki bridge's limits decide.
 
 It does **not** mean a real run will succeed — a dry run has no prover
 plumbing, so it never checks the verifier files, the ceremony or the key
@@ -129,7 +129,7 @@ prompts — the confirmation belongs to the burn, which a dry run skips.
 ## 5. The real withdrawal
 
 ```bash
-$BIN withdraw \
+$BIN withdraw --token usdc \
   --from "$WITHDRAW_FROM" --from-keys "$WITHDRAW_FROM_KEYS" \
   --to "$WITHDRAW_TO" --to-chain "$WITHDRAW_TO_CHAIN" \
   --amount "$WITHDRAW_AMOUNT"
@@ -231,22 +231,24 @@ export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 ```
 
-Transfers are limited to 50 USDC. Each L1 bridge caps deposited principal minus
-completed payouts at 10,000 USDC; AN tracks the same capacity separately per
-chain. Limit reads must succeed before an approval, deposit or burn is requested.
+There is no per-transfer limit; an amount only has to fit `uint64`. Each EVM
+bridge caps deposited principal minus completed payouts at the owner's USDC
+`tvlCap`; AN does not check the USDC TVL. Withdrawals have an owner-set rolling
+24-hour limit per token on both sides. Limit reads must succeed before an
+approval, deposit or burn is requested.
 
 `--network` takes Sepolia and Arbitrum Sepolia in this version; Ethereum
 mainnet is not a deposit network at all. An Arbitrum Sepolia deposit waits
 35–75 minutes for its block to be anchored. The new EVM deployment must expose `deposit(address,uint256,bytes32)`
-and be paired with an AN bridge at version 1.18.0, which finalizes a deposit
-from its receipt proof. Older deployment addresses are incompatible. The RPC,
+and be paired with an AN bridge at version 1.19.0, whose limit getters this
+CLI reads. Older deployment addresses are incompatible. The RPC,
 Acki Nacki endpoint and state directory come from the profile. When reusing a
 profile, replace its old deployment values before running this build.
 
 ## 10. Dry run
 
 ```bash
-ackinacki-bridge deposit --dry-run --network sepolia \
+ackinacki-bridge deposit --dry-run --network sepolia --token usdc \
   --amount "$DEPOSIT_AMOUNT" --to "$DEPOSIT_TO"
 echo "exit=$?"
 ```
@@ -267,7 +269,7 @@ the same amount to the same recipient has an unknown outcome (section 12).
 ## 11. The deposit
 
 ```bash
-ackinacki-bridge deposit --network sepolia \
+ackinacki-bridge deposit --network sepolia --token usdc \
   --amount "$DEPOSIT_AMOUNT" --to "$DEPOSIT_TO"
 echo "exit=$?"
 ```

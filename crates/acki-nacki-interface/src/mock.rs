@@ -36,6 +36,7 @@ pub struct MockAckiNacki {
     children: Arc<Mutex<HashMap<TxHash, Vec<ChildTransaction>>>>,
     /// Accounts `get_account_info` knows, keyed by account id.
     accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
+    deploys: Arc<Mutex<HashMap<String, TxHash>>>,
 }
 
 impl MockAckiNacki {
@@ -49,7 +50,12 @@ impl MockAckiNacki {
             getter_response: Arc::new(Mutex::new(None)),
             children: Arc::new(Mutex::new(HashMap::new())),
             accounts: Arc::new(Mutex::new(HashMap::new())),
+            deploys: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn set_deploy(&self, account_id: &str, tx: TxHash) {
+        self.deploys.lock().unwrap().insert(account_id.to_owned(), tx);
     }
 
     /// Hash every `call_contract` returns.
@@ -226,6 +232,15 @@ impl IAckiNacki for MockAckiNacki {
             .unwrap()
             .get(address.account_id())
             .cloned())
+    }
+
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
+        Ok(self
+            .deploys
+            .lock()
+            .unwrap()
+            .get(address.account_id())
+            .copied())
     }
 }
 

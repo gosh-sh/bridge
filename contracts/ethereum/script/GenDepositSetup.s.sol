@@ -46,7 +46,9 @@ contract GenDepositSetup is Script {
             altDstChainId: 0,
             altDstHostChainId: 0,
             usdcTokenId: 0,
-            predecessor: IPredecessorBridge(address(0))
+            predecessor: IPredecessorBridge(address(0)),
+            usdcTvlCap: 10_000e6,
+            usdcDailyLimit: 10_000e6
         });
 
         MockAUSDC aUsdc = new MockAUSDC();

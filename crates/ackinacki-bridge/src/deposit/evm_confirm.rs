@@ -28,10 +28,13 @@ use crate::deposit::{
 pub struct Expect {
     /// The EVM bridge the deposit goes to.
     pub bridge: Address,
-    /// The paired wallet's address.
+    /// The depositor: the paired wallet's address, or for `deposit proof`
+    /// the `Deposit` event's sender.
     pub from: Address,
-    /// The requested `deposit(amount, 0, account)` calldata.
-    pub calldata: Bytes,
+    /// The requested `deposit(token, amount, account)` calldata; `None` for
+    /// `deposit proof`, which takes any transaction that emits the deposit
+    /// (a contract wallet's, say).
+    pub calldata: Option<Bytes>,
     /// The requested amount, in USDC units.
     pub amount: u64,
     /// The requested Acki Nacki recipient.
@@ -195,7 +198,7 @@ fn classify(receipt: &ReceiptLite, tx: &TxLite, exp: &Expect) -> Classified {
             ev.amount, ev.an_account, ev.sender, exp.amount, exp.account, exp.from
         )));
     }
-    if tx.input != exp.calldata {
+    if exp.calldata.as_ref().is_some_and(|c| tx.input != *c) {
         return Classified::Negative(Negative::Mismatch(format!(
             "{DIFFERS}: the Deposit event matches, but the transaction to {} carries {} bytes of \
              calldata that are not the requested deposit call",
@@ -423,11 +426,11 @@ mod tests {
         Expect {
             bridge: BRIDGE,
             from: sepolia_sender(),
-            calldata: deposit_calldata(
+            calldata: Some(deposit_calldata(
                 alloy_primitives::Address::repeat_byte(0x7c),
                 12_500_000,
                 ACC,
-            ),
+            )),
             amount: 12_500_000,
             account: ACC,
             confirmations: 12,
@@ -468,12 +471,12 @@ mod tests {
 
     #[test]
     fn nothing_is_decided_before_depth_and_a_second_reading() {
-        let o = obs(true, good_logs(), exp().calldata, 105, Some(90));
+        let o = obs(true, good_logs(), exp().calldata.unwrap(), 105, Some(90));
         assert!(matches!(judge(&o, None, &exp()), Verdict::WaitDepth {
             have: 6,
             need: 12
         }));
-        let o = obs(true, good_logs(), exp().calldata, 111, Some(90));
+        let o = obs(true, good_logs(), exp().calldata.unwrap(), 111, Some(90));
         assert_eq!(
             judge(&o, None, &exp()),
             Verdict::Settle(B256::repeat_byte(1))
@@ -486,7 +489,7 @@ mod tests {
 
     #[test]
     fn a_good_deposit_is_confirmed_with_both_log_indices() {
-        let o = obs(true, good_logs(), exp().calldata, 111, Some(90));
+        let o = obs(true, good_logs(), exp().calldata.unwrap(), 111, Some(90));
         let Verdict::Confirmed(f) = judge(&o, Some(B256::repeat_byte(1)), &exp()) else {
             panic!()
         };
@@ -498,12 +501,12 @@ mod tests {
     #[test]
     fn negative_outcomes_wait_for_finality() {
         let seen = Some(B256::repeat_byte(1));
-        let reverted = obs(false, vec![], exp().calldata, 111, Some(99));
+        let reverted = obs(false, vec![], exp().calldata.unwrap(), 111, Some(99));
         assert_eq!(
             judge(&reverted, seen, &exp()),
             Verdict::WaitFinality(Negative::Reverted)
         );
-        let reverted_fin = obs(false, vec![], exp().calldata, 111, Some(100));
+        let reverted_fin = obs(false, vec![], exp().calldata.unwrap(), 111, Some(100));
         assert_eq!(
             judge(&reverted_fin, seen, &exp()),
             Verdict::Final(Negative::Reverted)
@@ -511,7 +514,7 @@ mod tests {
         let no_log = obs(
             true,
             vec![transfer_log(USDC)],
-            exp().calldata,
+            exp().calldata.unwrap(),
             111,
             Some(100),
         );
@@ -536,7 +539,7 @@ mod tests {
     #[test]
     fn a_position_beyond_the_bridges_uint16_cannot_be_finalized() {
         let seen = Some(B256::repeat_byte(1));
-        let good = obs(true, good_logs(), exp().calldata, 111, Some(100));
+        let good = obs(true, good_logs(), exp().calldata.unwrap(), 111, Some(100));
         let last = with_receipt(good.clone(), |r| r.tx_index = Some(65_535));
         assert!(matches!(judge(&last, seen, &exp()), Verdict::Confirmed(_)));
         let beyond = with_receipt(good, |r| r.tx_index = Some(65_536));
@@ -552,7 +555,7 @@ mod tests {
     #[test]
     fn a_receipt_without_its_transaction_index_is_read_again() {
         let o = with_receipt(
-            obs(true, good_logs(), exp().calldata, 111, Some(100)),
+            obs(true, good_logs(), exp().calldata.unwrap(), 111, Some(100)),
             |r| r.tx_index = None,
         );
         let v = judge(&o, Some(B256::repeat_byte(1)), &exp());
@@ -568,7 +571,7 @@ mod tests {
         let mut data = logs[1].data.to_vec();
         data.extend([0u8; 32]);
         logs[1].data = data.into();
-        let o = obs(true, logs, exp().calldata, 111, Some(100));
+        let o = obs(true, logs, exp().calldata.unwrap(), 111, Some(100));
         let v = judge(&o, Some(B256::repeat_byte(1)), &exp());
         assert!(
             matches!(
@@ -588,7 +591,7 @@ mod tests {
             receipt,
             tx,
             ..
-        } = obs(false, vec![], exp().calldata, 111, Some(100))
+        } = obs(false, vec![], exp().calldata.unwrap(), 111, Some(100))
         else {
             unreachable!()
         };
@@ -615,7 +618,7 @@ mod tests {
 
     #[test]
     fn an_rpc_without_finalized_never_gives_a_negative_verdict() {
-        let reverted = obs(false, vec![], exp().calldata, 10_000, None);
+        let reverted = obs(false, vec![], exp().calldata.unwrap(), 10_000, None);
         assert_eq!(
             judge(&reverted, Some(B256::repeat_byte(1)), &exp()),
             Verdict::WaitFinality(Negative::Reverted)
@@ -699,12 +702,29 @@ mod tests {
 
     #[test]
     fn calldata_other_than_requested_is_a_mismatch_even_with_a_matching_log() {
-        let mut input = exp().calldata.to_vec();
+        let mut input = exp().calldata.unwrap().to_vec();
         input.push(0);
         let o = obs(true, good_logs(), Bytes::from(input), 111, Some(100));
         assert!(matches!(
             judge(&o, Some(B256::repeat_byte(1)), &exp()),
             Verdict::Final(Negative::Mismatch(_))
+        ));
+    }
+
+    /// `deposit proof` of a deposit a contract wallet made: its transaction
+    /// carries the wallet's own call, and the Deposit event alone decides.
+    #[test]
+    fn any_calldata_emitting_the_deposit_is_confirmed_for_deposit_proof() {
+        let mut input = exp().calldata.unwrap().to_vec();
+        input.push(0);
+        let o = obs(true, good_logs(), Bytes::from(input), 111, Some(100));
+        let any = Expect {
+            calldata: None,
+            ..exp()
+        };
+        assert!(matches!(
+            judge(&o, Some(B256::repeat_byte(1)), &any),
+            Verdict::Confirmed(_)
         ));
     }
 
@@ -719,7 +739,7 @@ mod tests {
             ACC,
             Some(42),
         ));
-        let o = obs(true, logs, exp().calldata, 111, Some(100));
+        let o = obs(true, logs, exp().calldata.unwrap(), 111, Some(100));
         let Verdict::Final(Negative::Mismatch(m)) = judge(&o, Some(B256::repeat_byte(1)), &exp())
         else {
             panic!()
@@ -789,7 +809,7 @@ mod tests {
             ("two logs with one logIndex", vec![same_index, good]),
         ];
         for (what, logs) in cases {
-            let o = obs(true, logs, exp().calldata, 111, Some(100));
+            let o = obs(true, logs, exp().calldata.unwrap(), 111, Some(100));
             assert!(
                 matches!(judge(&o, seen, &exp()), Verdict::Reread(_)),
                 "{what}: {:?}",
@@ -815,7 +835,7 @@ mod tests {
         ];
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata.unwrap()),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &b, true, bare.clone())),
@@ -860,7 +880,7 @@ mod tests {
         ];
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata.unwrap()),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, true, wrong.clone())),
@@ -916,7 +936,7 @@ mod tests {
         let new = header(100, 2);
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata.unwrap()),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, false, vec![])),
@@ -943,7 +963,7 @@ mod tests {
         let new = header(100, 2);
         evm.txs.lock().unwrap().insert(
             TX,
-            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
+            deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata.unwrap()),
         );
         evm.script_receipt(TX, vec![
             Some(deposit_receipt(TX, &old, false, vec![])),
@@ -969,7 +989,7 @@ mod tests {
             let evm = FakeEvm::sepolia();
             evm.txs.lock().unwrap().insert(
                 TX,
-                deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata),
+                deposit_tx(TX, sepolia_sender(), BRIDGE, 7, exp().calldata.unwrap()),
             );
             evm.script_receipt(TX, vec![Some(deposit_receipt(TX, &b, status, logs))]);
             evm.by_hash.lock().unwrap().insert(b.hash, b.clone());

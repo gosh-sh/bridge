@@ -39,6 +39,8 @@ ARB_AAVE_POOL = "0xBfC91D59fdAA134A4ED45f7B584cAf96D7792Eff"
 ARB_AUSDC = "0x460b97BD498E1157530AEb3086301d5225b91216"
 ARB_CHAIN, SEPOLIA_CHAIN = 421614, 11155111
 ARB_ROLLUP = "0x042b2e6c5e99d4c521bd49beed5e99651d9b0cf4"
+# Sepolia's beacon chain: genesis time, seconds per slot, slots per sync-committee period.
+SEPOLIA_BEACON_GENESIS, SLOT_SECS, PERIOD_SLOTS = 1655733600, 12, 8192
 
 
 def env(name):
@@ -169,9 +171,20 @@ class Arbitrum:
                 time.sleep(2 * (attempt + 1))
         raise AssertionError(f"{method}: Arbitrum Sepolia RPC did not answer")
 
-    def call(self, to, signature, args=b""):
+    def call(self, to, signature, args=b"", block="latest"):
         data = "0x" + keccak256(signature.encode())[:4].hex() + args.hex()
-        return int(self.rpc("eth_call", [{"to": to, "data": data}, "latest"]), 16)
+        return int(self.rpc("eth_call", [{"to": to, "data": data}, block]), 16)
+
+    def block(self):
+        return self.rpc("eth_blockNumber", [])
+
+    def words(self, to, signature, args=b"", block="latest"):
+        data = "0x" + keccak256(signature.encode())[:4].hex() + args.hex()
+        raw = self.rpc("eth_call", [{"to": to, "data": data}, block])[2:]
+        return [int(raw[i:i + 64], 16) for i in range(0, len(raw), 64)]
+
+    def erc20(self, token, address):
+        return self.call(token, "balanceOf(address)", bytes(12) + bytes.fromhex(address[2:]))
 
     def receipt(self, tx):
         return self.rpc("eth_getTransactionReceipt", [tx])

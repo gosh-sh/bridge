@@ -12,7 +12,6 @@
 use alloy_primitives::{Address, Signature};
 
 use crate::{
-    args::UsdcAmount,
     deposit::{
         args::Network,
         evm::EvmRead,
@@ -53,11 +52,10 @@ pub fn classify_code(code: &[u8]) -> CodeKind {
 }
 
 /// The text the wallet is asked to sign.
-pub fn sign_message(op_id: &str, bridge: Address, amount: &UsdcAmount, net: Network) -> String {
+pub fn sign_message(op_id: &str, bridge: Address, amount: &str, net: Network) -> String {
     format!(
-        "Acki Nacki bridge deposit check\noperation: {op_id}\nbridge: {bridge:#x}\namount: {} \
-         USDC\nnetwork: {} ({})\n\nSigning this sends nothing and costs nothing.",
-        amount.display(),
+        "Acki Nacki bridge deposit check\noperation: {op_id}\nbridge: {bridge:#x}\namount: \
+         {amount}\nnetwork: {} ({})\n\nSigning this sends nothing and costs nothing.",
         net.name(),
         net.chain_id()
     )
@@ -139,7 +137,7 @@ pub async fn check(
     account: Address,
     op_id: &str,
     bridge: Address,
-    amount: &UsdcAmount,
+    amount: &str,
     net: Network,
 ) -> CliResult<()> {
     let code =
@@ -203,7 +201,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        args::UsdcAmount,
         deposit::{
             args::Network,
             testkit::{sepolia_sender, *},
@@ -230,11 +227,25 @@ mod tests {
             account,
             "01J9ZQ4X7T8V5N6M3K2P1R0S9A",
             BRIDGE,
-            &UsdcAmount(12_500_000),
+            "12.500000 USDC",
             Network::Sepolia,
         )
         .await;
         (r, ui)
+    }
+
+    #[test]
+    fn the_signed_text_names_the_deposited_amount_and_currency() {
+        assert_eq!(
+            sign_message("op", BRIDGE, "12.500000 USDC", Network::Sepolia),
+            "Acki Nacki bridge deposit check\noperation: op\nbridge: \
+             0x0f4f8b7ef2e40587ff1cc5d3393b9c1fb8f02fc7\namount: 12.500000 USDC\nnetwork: Sepolia \
+             (11155111)\n\nSigning this sends nothing and costs nothing."
+        );
+        assert!(
+            sign_message("op", BRIDGE, "3.000000001 NACKL", Network::Sepolia)
+                .contains("\namount: 3.000000001 NACKL\n")
+        );
     }
 
     #[test]

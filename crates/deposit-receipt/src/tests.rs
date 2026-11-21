@@ -270,3 +270,22 @@ async fn a_receipt_of_another_block_is_retried_never_a_verdict() {
     let got = fetch_with(elsewhere, 1).await;
     assert!(matches!(got, Err(Error::BlockChanged(..))), "{got:?}");
 }
+
+#[test]
+fn the_witness_names_the_deposit_it_proves() {
+    let mut receipts: Vec<RpcReceipt> = serde_json::from_str(RECEIPTS).unwrap();
+    receipts.sort_by_key(|r| r.transaction_index);
+    let vector: serde_json::Value = serde_json::from_str(VECTOR).unwrap();
+    let fd = &vector["finalizeDeposit"];
+    let tx_index = fd["txIndex"].as_u64().unwrap() as usize;
+    let log_index = fd["logIndex"].as_u64().unwrap() as u16;
+    let values: Vec<Vec<u8>> = receipts.iter().map(RpcReceipt::trie_value).collect();
+    let mut w = witness(0, 0, 0, log_index);
+    w.receipt_proof = receipt_proof(&values, tx_index).1;
+    let log = &receipts[tx_index].logs[usize::from(log_index)];
+    assert_eq!(w.deposit_log(), Some((log.address, log.topics[1])));
+    w.log_index = 1000;
+    assert_eq!(w.deposit_log(), None);
+    w.receipt_proof = vec![];
+    assert_eq!(w.deposit_log(), None);
+}

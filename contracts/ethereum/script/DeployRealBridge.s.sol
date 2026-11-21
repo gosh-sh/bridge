@@ -274,7 +274,9 @@ contract DeployRealBridge is Script {
             altDstChainId: altDstChainId,
             altDstHostChainId: altDstHostChainId,
             usdcTokenId: usdcTokenId,
-            predecessor: IPredecessorBridge(predecessor)
+            predecessor: IPredecessorBridge(predecessor),
+            usdcTvlCap: vm.envOr("USDC_TVL_CAP", uint256(10_000e6)),
+            usdcDailyLimit: vm.envOr("USDC_DAILY_LIMIT", uint256(10_000e6))
         });
     }
 

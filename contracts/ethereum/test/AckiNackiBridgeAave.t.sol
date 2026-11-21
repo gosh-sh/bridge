@@ -553,7 +553,7 @@ contract AckiNackiBridgeAaveTest is Test {
         uint32 multiplier,
         uint8 count
     ) public {
-        depositAmt = uint96(bound(depositAmt, 1, bridge.MAX_TRANSFER_AMOUNT()));
+        depositAmt = uint96(bound(depositAmt, 1, VerifyBlockConfigLib.USDC_TVL_CAP / 8));
         bps = uint16(bound(bps, bridge.MIN_LIQUID_RESERVE_BPS(), bridge.MAX_LIQUID_RESERVE_BPS()));
         uint256 maxMultiplier = (bridge.BPS_DENOMINATOR() * bridge.BPS_DENOMINATOR()) / bps;
         multiplier = uint32(bound(multiplier, bridge.BPS_DENOMINATOR() + 1, maxMultiplier));
@@ -568,12 +568,12 @@ contract AckiNackiBridgeAaveTest is Test {
         }
     }
 
-    function testFuzz_depositAboveTransferLimitLeavesCustodyUnchanged(uint256 amount) public {
-        amount = bound(amount, 50 * UsdcTestLib.UNIT + 1, type(uint64).max);
+    function testFuzz_depositAboveTvlCapLeavesCustodyUnchanged(uint256 amount) public {
+        amount = bound(amount, VerifyBlockConfigLib.USDC_TVL_CAP + 1, type(uint64).max);
         usdc.mint(user1, amount);
         vm.startPrank(user1);
         usdc.approve(address(bridge), amount);
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
+        vm.expectRevert(AckiNackiBridge.TvlCapReached.selector);
         bridge.deposit(address(usdc), amount, bytes32(uint256(1)));
         vm.stopPrank();
         assertEq(usdc.balanceOf(user1), amount);

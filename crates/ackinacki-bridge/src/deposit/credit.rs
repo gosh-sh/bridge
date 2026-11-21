@@ -30,6 +30,9 @@ use crate::{
 pub const DEPOSIT_FINALIZED_DST: &str =
     ":000000000000000000000000000000000000000000000000000000000000026b";
 
+pub const DEPOSIT_REFUSED_DST: &str =
+    ":000000000000000000000000000000000000000000000000000000000000026d";
+
 /// A deposit as the bridge's `confirmDeposit` and `DepositFinalized` name
 /// it: the proven inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +83,10 @@ pub enum Credit {
         /// That transaction.
         bridge_tx: String,
     },
+    Refused {
+        bridge_tx: String,
+        reason: u16,
+    },
     /// Not visible (yet): a message in transit, a lagging node, or nothing
     /// finalized this deposit.
     NotYet,
@@ -117,35 +124,78 @@ pub async fn bridge_tx_verdict(
                 .and_then(|b| an.decode(BRIDGE_ABI, b, false))
                 .is_some_and(|(n, v)| n == "DepositFinalized" && id.matches(&v))
     });
-    let transfer = tx.out.iter().find(|m| {
-        is_recipient(&m.dst, &id.account)
-            && m.ecc
-                .iter()
-                .any(|(c, v)| *c == id.token_id && *v == id.amount)
-            && m.bounce == Some(false)
-    });
-    let (true, Some(t)) = (event_ok, transfer) else {
+    let refused = (!event_ok)
+        .then(|| {
+            tx.out.iter().find_map(|m| {
+                if !m.dst.ends_with(DEPOSIT_REFUSED_DST) {
+                    return None;
+                }
+                let (n, v) = an.decode(BRIDGE_ABI, m.body.as_deref()?, false)?;
+                (n == "DepositRefused" && id.matches(&v)).then(|| {
+                    u256(&v["reason"])
+                        .and_then(|r| u16::try_from(r).ok())
+                        .unwrap_or(0)
+                })
+            })
+        })
+        .flatten();
+    if let Some(reason) = refused {
+        return Ok(Credit::Refused {
+            bridge_tx: tx.hash.clone(),
+            reason,
+        });
+    }
+    if !event_ok {
         return Ok(Credit::NotYet);
+    }
+    let same_payout = |v: &Value| {
+        u256(&v["amount"]) == Some(U256::from(id.amount))
+            && u256(&v["anAccount"]) == Some(U256::from_be_bytes(id.account))
     };
-    let Some(full) = an.message(&t.hash).await? else {
-        return Ok(Credit::NotYet);
-    };
-    let Some(d) = full.dst_tx else {
-        return Ok(Credit::NotYet);
-    };
-    let Some(dtx) = an.transaction(&d.hash).await? else {
-        return Ok(Credit::NotYet);
-    };
-    if !dtx
-        .ecc_delta
+    let rank = tx
+        .out
         .iter()
-        .any(|(c, v)| *c == id.token_id && *v == id.amount as i128)
-    {
+        .filter(|m| m.dst.ends_with(DEPOSIT_FINALIZED_DST))
+        .filter_map(|m| an.decode(BRIDGE_ABI, m.body.as_deref()?, false))
+        .filter(|(n, v)| n == "DepositFinalized" && same_payout(v))
+        .position(|(_, v)| id.matches(&v));
+    let transfers: Vec<_> = tx
+        .out
+        .iter()
+        .filter(|m| {
+            is_recipient(&m.dst, &id.account)
+                && m.ecc
+                    .iter()
+                    .any(|(c, v)| *c == id.token_id && *v == id.amount)
+                && m.bounce == Some(false)
+        })
+        .collect();
+    let Some(rank) = rank.filter(|r| *r < transfers.len()) else {
         return Ok(Credit::NotYet);
+    };
+    let mut deliveries = Vec::with_capacity(transfers.len());
+    for t in transfers {
+        let Some(full) = an.message(&t.hash).await? else {
+            return Ok(Credit::NotYet);
+        };
+        let Some(d) = full.dst_tx else {
+            return Ok(Credit::NotYet);
+        };
+        let Some(dtx) = an.transaction(&d.hash).await? else {
+            return Ok(Credit::NotYet);
+        };
+        if !dtx
+            .ecc_delta
+            .iter()
+            .any(|(c, v)| *c == id.token_id && *v == id.amount as i128)
+        {
+            return Ok(Credit::NotYet);
+        }
+        deliveries.push(dtx.hash);
     }
     Ok(Credit::Confirmed(CreditInfo {
         confirm_tx: tx.hash.clone(),
-        delivery_tx: dtx.hash,
+        delivery_tx: deliveries.swap_remove(rank),
         via_events,
     }))
 }
@@ -162,18 +212,25 @@ pub async fn by_voucher(
     id: &Identity,
 ) -> anyhow::Result<Credit> {
     let mut after = None;
+    let mut last = None;
     let deploy = loop {
         let page = an.transactions(voucher, after.clone()).await?;
-        if let Some(t) = page.items.into_iter().find(|t| {
-            matches!(t.orig_status, AccStatus::NonExist | AccStatus::Uninit)
-                && t.end_status == AccStatus::Active
-                && !t.aborted
-        }) {
-            break t;
-        }
+        last = page
+            .items
+            .into_iter()
+            .filter(|t| {
+                matches!(t.orig_status, AccStatus::NonExist | AccStatus::Uninit)
+                    && t.end_status == AccStatus::Active
+                    && !t.aborted
+            })
+            .last()
+            .or(last);
         match page.cursor {
             Some(c) => after = Some(c),
-            None => return Ok(Credit::NotYet),
+            None => match last {
+                Some(t) => break t,
+                None => return Ok(Credit::NotYet),
+            },
         }
     };
     for m in &deploy.out_msgs {
@@ -442,6 +499,28 @@ pub async fn confirm(
                     bridge_tx,
                 },
             ) => {
+                if id.token_id == 1 {
+                    return Err(CliError::deposit(
+                        ExitCode::CreditAborted,
+                        Stage::Credit,
+                        Some(op_id),
+                        format!(
+                            "the deposit voucher exists, but the bridge transaction {bridge_tx} \
+                             that should have unlocked the NACKL aborted. The voucher is spent \
+                             and the deposit cannot be finalized again (CLI exit 37). The NACKL \
+                             stays locked on the bridge, and this bridge has no call that pays it \
+                             out: mintAndSendTokenBridged refuses ECC[1]. Only the bridge owner \
+                             can release it, with new bridge code. Give them depositId {}, {} \
+                             base units of ECC[1] to account {:#x}, EVM bridge {:#x}, chain {}, \
+                             operation {op_id}, Acki Nacki transaction {bridge_tx}",
+                            id.deposit_id,
+                            id.amount,
+                            B256::from(id.account),
+                            id.contract,
+                            id.chain_id,
+                        ),
+                    ));
+                }
                 let recovery = if id.token_id == 3 {
                     "mintAndSendBridged"
                 } else {
@@ -474,6 +553,36 @@ pub async fn confirm(
                         id.chain_id,
                     ),
                 ));
+            },
+            (
+                Credit::Refused {
+                    bridge_tx,
+                    reason,
+                },
+                _,
+            ) => {
+                let unpaid = matches!(
+                    tokio::time::timeout_at(deadline, finalized_event(an, bridge, id, not_before))
+                        .await,
+                    Ok(Ok(None))
+                );
+                if unpaid {
+                    return Err(CliError::deposit(
+                        ExitCode::CreditRefused,
+                        Stage::Credit,
+                        Some(op_id),
+                        format!(
+                            "the deposit is proven, but the Acki Nacki bridge cannot pay it now \
+                             (transaction {bridge_tx}, reason {reason}: 236 it holds less NACKL \
+                             locked for chain {} than {} base units, 241 the token is not \
+                             registered). Nothing was paid and nothing is lost: the bridge told \
+                             the deposit voucher to delete itself, so the same deposit can be \
+                             finalized again. Continue with --resume {op_id} once the bridge has \
+                             room for it.",
+                            id.chain_id, id.amount,
+                        ),
+                    ));
+                }
             },
             _ => {},
         }
@@ -663,6 +772,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_delivery_does_not_confirm_two_equal_deposits_paid_together() {
+        let an = FakeAn::default();
+        let (a, b) = (id(0), id(1));
+        let bridge = format!("0:{}", hex::encode(BRIDGE));
+        let acc = format!("0:{}", hex::encode(ACC));
+        let mut out = vec![];
+        for (n, i) in [("a", &a), ("b", &b)] {
+            let mut x = msg(&format!("xfer-{n}"), "Internal", &bridge, &acc, None);
+            x.ecc = vec![(i.token_id, i.amount)];
+            x.bounce = Some(false);
+            an.messages
+                .lock()
+                .unwrap()
+                .insert(x.hash.clone(), x.clone());
+            out.push(x);
+            let body = format!("B-ev-{n}");
+            an.bodies
+                .lock()
+                .unwrap()
+                .insert(body.clone(), ("DepositFinalized".into(), fields(i, "0")));
+            out.push(msg(
+                &format!("ev-{n}"),
+                "ExtOut",
+                &bridge,
+                DEPOSIT_FINALIZED_DST,
+                Some(&body),
+            ));
+        }
+        let tx = TxView {
+            hash: "both".into(),
+            aborted: false,
+            exit_code: Some(0),
+            account: String::new(),
+            now: 3,
+            out,
+            ecc_delta: vec![],
+        };
+        let deliver = |n: &str, i: &Identity| {
+            let mut m = an.messages.lock().unwrap()[&format!("xfer-{n}")].clone();
+            m.dst_tx = Some(TxRef {
+                hash: format!("rtx-{n}"),
+                aborted: false,
+                account: acc.clone(),
+                now: 4,
+            });
+            an.messages.lock().unwrap().insert(m.hash.clone(), m);
+            an.transactions
+                .lock()
+                .unwrap()
+                .insert(format!("rtx-{n}"), TxView {
+                    hash: format!("rtx-{n}"),
+                    aborted: false,
+                    exit_code: Some(0),
+                    account: String::new(),
+                    now: 4,
+                    out: vec![],
+                    ecc_delta: vec![(i.token_id, i.amount as i128)],
+                });
+        };
+        deliver("a", &a);
+        for i in [&a, &b] {
+            assert_eq!(
+                bridge_tx_verdict(&an, &tx, i, true).await.unwrap(),
+                Credit::NotYet
+            );
+        }
+        deliver("b", &b);
+        for (i, rtx) in [(&a, "rtx-a"), (&b, "rtx-b")] {
+            let Credit::Confirmed(c) = bridge_tx_verdict(&an, &tx, i, true).await.unwrap() else {
+                panic!()
+            };
+            assert_eq!(c.delivery_tx, rtx);
+        }
+    }
+
+    #[tokio::test]
     async fn a_prefunded_voucher_address_is_paged_past() {
         let an = FakeAn::default();
         chain(&an, &id(0), true, false);
@@ -729,6 +914,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_aborted_nackl_confirm_names_no_call_that_refuses_it() {
+        let an = FakeAn::default();
+        let nackl = Identity {
+            token_id: 1,
+            amount: 3_000_000_000,
+            ..id(0)
+        };
+        chain(&an, &nackl, false, true);
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let e = confirm(
+            &an,
+            BRIDGE,
+            VOUCHER,
+            &nackl,
+            false,
+            0,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(1),
+            "OP",
+            &ui,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.exit_code(), crate::errors::ExitCode::CreditAborted);
+        let m = e.to_string();
+        assert!(m.contains("3000000000 base units of ECC[1]"), "{m}");
+        assert!(m.contains("stays locked"), "{m}");
+        assert!(!m.contains("pay it out (mintAndSendTokenBridged"), "{m}");
+        assert!(!m.contains("mintAndSendBridged"), "{m}");
+    }
+
+    #[tokio::test]
     async fn another_deposit_of_the_same_amount_does_not_confirm_this_one() {
         let an = FakeAn::default();
         chain(&an, &id(1), false, false);
@@ -777,6 +994,98 @@ mod tests {
             by_events(&an, BRIDGE, &id(0), 0).await.unwrap(),
             Credit::NotYet
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_deposit_is_resumable_and_its_next_voucher_is_followed() {
+        let mut i = id(0);
+        i.token_id = 1;
+        let an = FakeAn::default();
+        chain(&an, &i, false, false);
+        let mut paid = an.transactions.lock().unwrap()["btx"].clone();
+        let mut paid_event = an
+            .ext_out
+            .lock()
+            .unwrap()
+            .get_mut(&BRIDGE)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut refused = msg(
+            "refused",
+            "ExtOut",
+            &format!("0:{}", hex::encode(BRIDGE)),
+            DEPOSIT_REFUSED_DST,
+            Some("B-refused"),
+        );
+        refused.created_at = 3;
+        let mut why = fields(&i, "0");
+        why["reason"] = json!("236");
+        an.bodies
+            .lock()
+            .unwrap()
+            .insert("B-refused".into(), ("DepositRefused".into(), why));
+        an.transactions.lock().unwrap().get_mut("btx").unwrap().out = vec![refused];
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let wait = |ui| {
+            confirm(
+                &an,
+                BRIDGE,
+                VOUCHER,
+                &i,
+                false,
+                0,
+                std::time::Duration::from_secs(300),
+                std::time::Duration::from_secs(10),
+                "OP",
+                ui,
+            )
+        };
+        let err = wait(&ui).await.unwrap_err();
+        assert_eq!(err.exit_code(), ExitCode::CreditRefused);
+        assert!(err.to_string().contains("reason 236"), "{err}");
+        assert!(err.to_string().contains("--resume OP"), "{err}");
+
+        an.txs
+            .lock()
+            .unwrap()
+            .get_mut(&VOUCHER)
+            .unwrap()
+            .push(TxListItem {
+                hash: "deploy2".into(),
+                now: 5,
+                orig_status: AccStatus::NonExist,
+                end_status: AccStatus::Active,
+                aborted: false,
+                out_msgs: vec!["confirm2".into()],
+            });
+        let mut again = an.messages.lock().unwrap()["confirm"].clone();
+        again.hash = "confirm2".into();
+        again.dst_tx.as_mut().unwrap().hash = "btx2".into();
+        an.messages.lock().unwrap().insert("confirm2".into(), again);
+        paid.hash = "btx2".into();
+        paid.now = 6;
+        an.transactions.lock().unwrap().insert("btx2".into(), paid);
+        let c = wait(&ui).await.unwrap();
+        assert_eq!(
+            (c.confirm_tx.as_str(), c.delivery_tx.as_str(), c.via_events),
+            ("btx2", "rtx", false)
+        );
+
+        paid_event.src_tx = Some("btx2".into());
+        an.messages
+            .lock()
+            .unwrap()
+            .insert("ev".into(), paid_event.clone());
+        an.ext_out
+            .lock()
+            .unwrap()
+            .entry(BRIDGE)
+            .or_default()
+            .push(paid_event);
+        an.txs.lock().unwrap().remove(&VOUCHER);
+        let c = wait(&ui).await.unwrap();
+        assert_eq!((c.confirm_tx.as_str(), c.via_events), ("btx2", true));
     }
 
     #[tokio::test(start_paused = true)]

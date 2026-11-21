@@ -20,9 +20,9 @@ contract MultiTokenBridge is AckiNackiBridge {
         address token,
         uint32 tokenId,
         uint8 decimals,
-        uint256 maxTransfer,
-        uint256 tvlCap
+        uint256 tvlCap,
+        uint256 dailyLimit
     ) external onlyOwner {
-        _listToken(tokenId, token, decimals, maxTransfer, tvlCap, false);
+        _listToken(tokenId, token, decimals, tvlCap, dailyLimit, false);
     }
 }

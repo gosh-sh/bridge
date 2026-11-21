@@ -21,6 +21,7 @@ import "./mocks/MockBridgeWithdrawalVerifier.sol";
 import "./mocks/MockERC20.sol";
 import "./mocks/MockAave.sol";
 import "./mocks/MultiTokenBridge.sol";
+import { WithdrawalWindow } from "../src/WithdrawalWindow.sol";
 
 /// @notice A token that keeps a cut of every transfer. The bridge must refuse
 ///         it: the custody delta would not match the booked amount.
@@ -147,10 +148,11 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         uint32 indexed tokenId,
         address indexed token,
         uint8 decimals,
-        uint256 maxTransfer,
         uint256 tvlCap,
+        uint256 dailyLimit,
         bool depositsEnabled
     );
+    event TokenLimitsSet(uint32 indexed tokenId, uint256 tvlCap, uint256 dailyLimit);
     event Deposit(
         uint256 indexed depositId,
         address indexed sender,
@@ -198,24 +200,27 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     // Construction
     // -----------------------------------------------------------------
 
-    /// @dev A deployment that makes no owner call must behave exactly as the
-    ///      single-token bridge did: USDC listed, same caps, deposits open.
-    function test_constructor_listsUsdcWithTheOldConstants() public {
+    /// @dev USDC is listed at construction with the TVL cap and daily
+    ///      withdrawal limit from `BridgeWithdrawConfig`, deposits open.
+    function test_constructor_listsUsdcWithTheConfiguredLimits() public {
         (
             address token,
             uint8 decimals,
             bool depositsEnabled,
-            uint256 maxTransfer,
             uint256 tvlCap,
+            uint256 dailyLimit,
             uint256 liabilities
         ) = bridge.tokenInfo(bridge.usdcTokenId());
 
         assertEq(token, address(usdc), "USDC listed under usdcTokenId");
         assertEq(decimals, 6);
         assertTrue(depositsEnabled);
-        assertEq(maxTransfer, bridge.MAX_TRANSFER_AMOUNT());
-        assertEq(tvlCap, bridge.MAX_BRIDGE_TVL());
+        assertEq(tvlCap, VerifyBlockConfigLib.USDC_TVL_CAP);
+        assertEq(dailyLimit, VerifyBlockConfigLib.USDC_DAILY_LIMIT);
         assertEq(liabilities, 0);
+        (uint256 limit, uint256 used) = bridge.withdrawalWindow(bridge.usdcTokenId());
+        assertEq(limit, VerifyBlockConfigLib.USDC_DAILY_LIMIT);
+        assertEq(used, 0);
 
         (bool listed, uint32 id) = bridge.tokenIdOf(address(usdc));
         assertTrue(listed);
@@ -293,42 +298,26 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         bridge.listToken(address(dai), takenId, 18, 1e18, 10e18);
     }
 
-    function test_listToken_rejectsZeroMaxTransfer() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.TokenLimitsInvalid.selector, 0, 10e18)
-        );
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 0, 10e18);
-    }
-
-    function test_listToken_rejectsMaxTransferAboveTvlCap() public {
-        vm.expectRevert(
-            abi.encodeWithSelector(AckiNackiBridge.TokenLimitsInvalid.selector, 10e18, 1e18)
-        );
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 10e18, 1e18);
-    }
-
-    /// @dev The decisive limit for a high-decimal token. `gosh.mintecc` takes a
-    ///      uint64 and the AN bridge requires `fr[2] <= type(uint64).max`, so a
-    ///      listing may not promise a deposit AN cannot mint. One whole
-    ///      18-decimal token (1e18) is inside the ceiling; a hundred are not.
-    function test_listToken_rejectsMaxTransferAboveMintCeiling() public {
+    /// @dev No per-transfer cap: one deposit may take the whole TVL cap, up
+    ///      to `MAX_DEPOSIT_AMOUNT`, the uint64 width `gosh.mintecc` takes.
+    function test_deposit_onlyTheMintWidthBoundsOneDeposit() public {
         uint256 ceiling = bridge.MAX_DEPOSIT_AMOUNT();
-        assertLt(ceiling, 100e18, "uint64 ceiling is below 100 whole 18-decimal tokens");
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.TokenLimitExceedsMintCeiling.selector, ceiling + 1, ceiling
-            )
-        );
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, ceiling + 1, type(uint256).max);
-    }
-
-    function test_listToken_acceptsMaxTransferAtTheCeiling() public {
-        uint256 ceiling = bridge.MAX_DEPOSIT_AMOUNT();
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, ceiling, ceiling);
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, type(uint256).max, ceiling);
         bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
-        (,,, uint256 maxTransfer,,) = bridge.tokenInfo(DAI_TOKEN_ID);
-        assertEq(maxTransfer, ceiling);
+        dai.mint(funder, ceiling + 1);
+        vm.startPrank(funder);
+        dai.approve(address(bridge), ceiling + 1);
+        vm.expectRevert(AckiNackiBridge.DepositTooLarge.selector);
+        bridge.deposit(address(dai), ceiling + 1, bytes32(uint256(1)));
+        bridge.deposit(address(dai), ceiling, bytes32(uint256(1)));
+        vm.stopPrank();
+        assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), ceiling);
+
+        bridge.withdrawByProof(
+            _dummyProof(),
+            _pubFor(DAI_TOKEN_ID, ceiling, Bn254FrLib.toFr(uint256(keccak256("wholeCeiling"))))
+        );
+        assertEq(dai.balanceOf(RECIPIENT), ceiling);
     }
 
     /// @dev A new listing must not accept deposits the moment it lands. The
@@ -481,15 +470,11 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(bridge.treasuryBalance(), 1 * UsdcTestLib.UNIT);
     }
 
-    function test_deposit_respectsPerTokenMaxTransfer() public {
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 100e18);
+    function test_deposit_noPerTransferCap() public {
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 10e18, 1e18);
         bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
-        dai.mint(funder, 2e18);
-        vm.startPrank(funder);
-        dai.approve(address(bridge), 2e18);
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.deposit(address(dai), 2e18, bytes32(uint256(1)));
-        vm.stopPrank();
+        _depositDai(funder, 10e18);
+        assertEq(bridge.liabilitiesOf(DAI_TOKEN_ID), 10e18);
     }
 
     /// @dev The exact-balance check has to cover every listed token, not just
@@ -520,36 +505,42 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
 
         vm.prank(nonOwner);
         vm.expectRevert(AckiNackiBridge.NotOwner.selector);
-        bridge.setTokenLimits(DAI_TOKEN_ID, 2e18, 20e18);
+        bridge.setTokenLimits(DAI_TOKEN_ID, 20e18, 2e18);
 
-        bridge.setTokenLimits(DAI_TOKEN_ID, 2e18, 20e18);
-        (,,, uint256 maxTransfer, uint256 tvlCap,) = bridge.tokenInfo(DAI_TOKEN_ID);
-        assertEq(maxTransfer, 2e18);
+        vm.expectEmit(true, false, false, true);
+        emit TokenLimitsSet(DAI_TOKEN_ID, 20e18, 2e18);
+        bridge.setTokenLimits(DAI_TOKEN_ID, 20e18, 2e18);
+        (,,, uint256 tvlCap, uint256 dailyLimit,) = bridge.tokenInfo(DAI_TOKEN_ID);
         assertEq(tvlCap, 20e18);
+        assertEq(dailyLimit, 2e18);
+        (uint256 limit,) = bridge.withdrawalWindow(DAI_TOKEN_ID);
+        assertEq(limit, 2e18);
     }
 
-    function test_usdcLimits_cannotExceedANLimits() public {
+    /// @dev The USDC TVL cap has no compiled ceiling: the owner may raise it
+    ///      above the former 10,000 USDC, and a single deposit and a single
+    ///      withdrawal may be as large as the caps allow.
+    function test_usdcTvlCap_ownerMayRaiseItAboveTenThousand() public {
         uint32 id = bridge.usdcTokenId();
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.TokenLimitsInvalid.selector, 50_000_001, 10_000_000_000
-            )
+        uint256 big = 25_000 * UsdcTestLib.UNIT;
+        bridge.setTokenLimits(id, 1_000_000 * UsdcTestLib.UNIT, big);
+        (,,, uint256 tvlCap, uint256 dailyLimit,) = bridge.tokenInfo(id);
+        assertEq(tvlCap, 1_000_000 * UsdcTestLib.UNIT);
+        assertEq(dailyLimit, big);
+
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, big);
+        assertEq(bridge.treasuryBalance(), big);
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(id, big, Bn254FrLib.toFr(uint256(keccak256("bigUsdc"))))
         );
-        bridge.setTokenLimits(id, 50_000_001, 10_000_000_000);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AckiNackiBridge.TokenLimitsInvalid.selector, 50_000_000, 10_000_000_001
-            )
-        );
-        bridge.setTokenLimits(id, 50_000_000, 10_000_000_001);
-        bridge.setTokenLimits(id, 1_000_000, 1_000_000);
-        assertEq(bridge.maxWithdrawalAmount(id), 50_000_000);
+        assertEq(usdc.balanceOf(RECIPIENT), big);
+        assertEq(bridge.treasuryBalance(), 0);
     }
 
-    function test_loweringDepositLimits_preservesUSDCWithdrawal() public {
+    function test_loweringTvlCap_preservesUsdcWithdrawal() public {
         UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 50_000_000);
         uint32 id = bridge.usdcTokenId();
-        bridge.setTokenLimits(id, 1_000_000, 1_000_000);
+        bridge.setTokenLimits(id, 1_000_000, VerifyBlockConfigLib.USDC_DAILY_LIMIT);
         uint256 before = usdc.balanceOf(RECIPIENT);
         bridge.withdrawByProof(
             _dummyProof(),
@@ -559,19 +550,74 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         assertEq(bridge.treasuryBalance(), 0);
     }
 
-    function test_withdrawalCap_keepsHighestAcceptedDepositLimit() public {
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
-        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
-        bridge.setTokenLimits(DAI_TOKEN_ID, 2e18, 20e18);
-        _depositDai(funder, 2e18);
-        bridge.setTokenLimits(DAI_TOKEN_ID, 1e18, 1e18);
-        assertEq(bridge.maxWithdrawalAmount(DAI_TOKEN_ID), 2e18);
-        uint256 before = dai.balanceOf(RECIPIENT);
+    /// @dev A USDC payout over the daily window reverts with the nullifier
+    ///      unspent, and the same proof pays once the window has room.
+    function test_usdcWindow_refusesThenPaysTheSameProof() public {
+        uint32 id = bridge.usdcTokenId();
+        uint256 limit = 100 * UsdcTestLib.UNIT;
+        bridge.setTokenLimits(id, VerifyBlockConfigLib.USDC_TVL_CAP, limit);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 150 * UsdcTestLib.UNIT);
+
         bridge.withdrawByProof(
-            _dummyProof(),
-            _pubFor(DAI_TOKEN_ID, 2e18, Bn254FrLib.toFr(uint256(keccak256("loweredDai"))))
+            _dummyProof(), _pubFor(id, limit, Bn254FrLib.toFr(uint256(keccak256("fill"))))
         );
-        assertEq(dai.balanceOf(RECIPIENT) - before, 2e18);
+        uint256 nullifier = Bn254FrLib.toFr(uint256(keccak256("late")));
+        IBridgeWithdrawalVerifier.WithdrawalPublicInputs memory late =
+            _pubFor(id, UsdcTestLib.UNIT, nullifier);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                WithdrawalWindow.WithdrawalWindowFull.selector, id, limit, UsdcTestLib.UNIT, limit
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), late);
+        assertFalse(bridge.isNullifierUsed(nullifier));
+        assertEq(bridge.treasuryBalance(), 50 * UsdcTestLib.UNIT);
+        (, uint256 used) = bridge.withdrawalWindow(id);
+        assertEq(used, limit);
+
+        vm.warp(block.timestamp + 24 hours);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                WithdrawalWindow.WithdrawalWindowFull.selector, id, limit, UsdcTestLib.UNIT, limit
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), late);
+
+        vm.warp(block.timestamp + 1 hours);
+        bridge.withdrawByProof(_dummyProof(), late);
+        assertTrue(bridge.isNullifierUsed(nullifier));
+        assertEq(usdc.balanceOf(RECIPIENT), limit + UsdcTestLib.UNIT);
+        (, used) = bridge.withdrawalWindow(id);
+        assertEq(used, UsdcTestLib.UNIT);
+    }
+
+    /// @dev Each token has its own window: a DAI payout uses none of USDC's.
+    function test_withdrawalWindows_arePerToken() public {
+        uint32 id = bridge.usdcTokenId();
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 10e18, 1e18);
+        bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
+        bridge.setTokenLimits(id, VerifyBlockConfigLib.USDC_TVL_CAP, UsdcTestLib.UNIT);
+        _depositDai(funder, 2e18);
+        UsdcTestLib.depositUsdc(vm, usdc, bridge, funder, 2 * UsdcTestLib.UNIT);
+
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(DAI_TOKEN_ID, 1e18, Bn254FrLib.toFr(uint256(keccak256("w-d"))))
+        );
+        bridge.withdrawByProof(
+            _dummyProof(), _pubFor(id, UsdcTestLib.UNIT, Bn254FrLib.toFr(uint256(keccak256("w-u"))))
+        );
+        (, uint256 daiUsed) = bridge.withdrawalWindow(DAI_TOKEN_ID);
+        (, uint256 usdcUsed) = bridge.withdrawalWindow(id);
+        assertEq(daiUsed, 1e18);
+        assertEq(usdcUsed, UsdcTestLib.UNIT);
+
+        uint256 n = Bn254FrLib.toFr(uint256(keccak256("w-d2")));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                WithdrawalWindow.WithdrawalWindowFull.selector, DAI_TOKEN_ID, 1e18, 1, 1e18
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), _pubFor(DAI_TOKEN_ID, 1, n));
     }
 
     function test_setTokenLimits_unlistedIdReverts() public {
@@ -735,7 +781,7 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
     }
 
     function _listAndDeposit(MockERC20 token, uint32 id, uint8 decimals, uint256 amount) internal {
-        bridge.listToken(address(token), id, decimals, amount, amount * 10);
+        bridge.listToken(address(token), id, decimals, amount * 10, amount * 10);
         bridge.setTokenDepositsEnabled(id, true);
         token.mint(funder, amount);
         vm.startPrank(funder);
@@ -867,16 +913,16 @@ contract AckiNackiBridgeTokenRegistryTest is Test {
         );
     }
 
-    function test_withdrawByProof_respectsPerTokenMaxTransfer() public {
-        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 1e18, 10e18);
+    function test_withdrawByProof_noPerTransferCap() public {
+        bridge.listToken(address(dai), DAI_TOKEN_ID, 18, 20e18, 10e18);
         bridge.setTokenDepositsEnabled(DAI_TOKEN_ID, true);
-        _depositDai(funder, 1e18);
+        _depositDai(funder, 10e18);
 
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
         bridge.withdrawByProof(
             _dummyProof(),
-            _pubFor(DAI_TOKEN_ID, 1e18 + 1, Bn254FrLib.toFr(uint256(keccak256("tooBig"))))
+            _pubFor(DAI_TOKEN_ID, 10e18, Bn254FrLib.toFr(uint256(keccak256("wholeDay"))))
         );
+        assertEq(dai.balanceOf(RECIPIENT), 10e18);
     }
 
     // -----------------------------------------------------------------

@@ -85,6 +85,7 @@ fi
 exec cargo run --release -p ackinacki-bridge \
   --manifest-path ../bridge-prover-libraries/Cargo.toml -- \
   withdraw --yes \
+    --token      usdc \
     --from       "$WITHDRAW_FROM" \
     --from-keys  "$WITHDRAW_FROM_KEYS" \
     --to         "$WITHDRAW_TO" \

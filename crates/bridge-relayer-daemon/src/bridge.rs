@@ -940,7 +940,6 @@ mod sol_bindings {
             /// `decode_withdraw_revert` can name them.
             error WithdrawByProofDisabled();
             error WithdrawalProofRejected();
-            error TransferTooLarge();
             error NullifierAlreadyUsed(uint256 nullifier);
             error FieldElementOutOfRange(uint256 value);
             error DstChainIdMismatch(uint256 supplied, uint256 expected);
@@ -959,15 +958,18 @@ mod sol_bindings {
             error AaveWithdrawFailed(uint256 requested, uint256 received);
             error WithdrawTransferFailed(address recipient, uint256 amount);
 
+            function nacklState() external view returns (uint256 minted, bool handedOver);
+            error NacklMinterGone();
+            error WithdrawalWindowFull(uint32 tokenId, uint256 used, uint256 amount, uint256 dailyLimit);
+            error NacklNotMinter(address token);
+
             /// Read-only getters the end-user CLI preflights the deploy
             /// with, before the irreversible Acki Nacki burn. All four are
             /// plain public state / immutables on `AckiNackiBridge`.
             function treasuryBalance() external view returns (uint256);
-            function MAX_TRANSFER_AMOUNT() external view returns (uint256);
-            /// The payout cap remains valid when deposit limits are lowered.
             function usdcTokenId() external view returns (uint32);
-            function maxWithdrawalAmount(uint32 tokenId) external view returns (uint256);
-            function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 maxTransfer, uint256 tvlCap, uint256 liabilities);
+            function withdrawalWindow(uint32 tokenId) external view returns (uint256 dailyLimit, uint256 used);
+            function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 tvlCap, uint256 dailyLimit, uint256 liabilities);
             function bridgeWithdrawalVerifier() external view returns (address);
             function bridgeWithdrawalDappFr() external view returns (uint256);
             function bridgeWithdrawalAccFr() external view returns (uint256);
@@ -1011,13 +1013,13 @@ mod sol_bindings {
     }
 }
 
-use sol_bindings::AckiNackiBridge;
+pub use sol_bindings::AckiNackiBridge;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TokenPayoutInfo {
     pub token: Address,
     pub decimals: u8,
-    pub max_withdrawal: U256,
+    pub daily_limit: U256,
     pub liabilities: U256,
 }
 
@@ -1468,6 +1470,19 @@ where
         }
     }
 
+    pub async fn nackl_state(&self) -> Result<NacklState, RelayerError> {
+        let r = self
+            .contract
+            .nacklState()
+            .call()
+            .await
+            .map_err(|e| RelayerError::other(format!("nacklState: {e}")))?;
+        Ok(NacklState {
+            minted: r.minted,
+            handed_over: r.handedOver,
+        })
+    }
+
     /// Submit `applyBkSetUpdate` for a BK-set rotation bundle (`bkupd_*.json`).
     pub async fn submit_bk_set_update(
         &self,
@@ -1639,21 +1654,22 @@ where
             .map_err(map_contract_err)
     }
 
-    /// Maximum amount the bridge pays in one withdrawal, in micro-USDC.
-    ///
-    /// This is the deployment-time constant, not the cap `withdrawByProof`
-    /// enforces. Use [`Self::usdc_payout_cap`] before burning ECC.
-    pub async fn max_transfer_amount(&self) -> Result<U256, RelayerError> {
-        self.contract
-            .MAX_TRANSFER_AMOUNT()
+    /// The rolling 24-hour withdrawal limit of `token_id` and how much of it
+    /// is used: `withdrawByProof` reverts `WithdrawalWindowFull` for a payout
+    /// above `dailyLimit - used`.
+    pub async fn withdrawal_window(&self, token_id: u32) -> Result<(U256, U256), RelayerError> {
+        let r = self
+            .contract
+            .withdrawalWindow(token_id)
             .call()
             .await
-            .map_err(map_contract_err)
+            .map_err(map_contract_err)?;
+        Ok((r.dailyLimit, r.used))
     }
 
     /// Refuse a USDC payout lane that does not match the AN bridge's ECC id,
-    /// then read the withdrawal cap, independently of the mutable deposit cap.
-    pub async fn usdc_payout_cap(&self) -> Result<U256, RelayerError> {
+    /// then read its withdrawal window.
+    pub async fn usdc_withdrawal_window(&self) -> Result<(U256, U256), RelayerError> {
         let token_id = self
             .contract
             .usdcTokenId()
@@ -1665,11 +1681,7 @@ where
                 "USDC token id {token_id} does not match AN ECC id 3"
             )));
         }
-        self.contract
-            .maxWithdrawalAmount(token_id)
-            .call()
-            .await
-            .map_err(map_contract_err)
+        self.withdrawal_window(token_id).await
     }
 
     pub async fn token_payout_info(&self, token_id: u32) -> Result<TokenPayoutInfo, RelayerError> {
@@ -1684,16 +1696,10 @@ where
                 "token id {token_id} is not registered"
             )));
         }
-        let max_withdrawal = self
-            .contract
-            .maxWithdrawalAmount(token_id)
-            .call()
-            .await
-            .map_err(map_contract_err)?;
         Ok(TokenPayoutInfo {
             token: info.token,
             decimals: info.decimals,
-            max_withdrawal,
+            daily_limit: info.dailyLimit,
             liabilities: info.liabilities,
         })
     }
@@ -2244,6 +2250,14 @@ pub enum WithdrawSubmitOutcome {
     },
 }
 
+pub const NACKL_TOKEN_ID: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NacklState {
+    pub minted: U256,
+    pub handed_over: bool,
+}
+
 /// The outcome of a `withdrawByProof` that was mined, from its receipt.
 ///
 /// A receipt proves inclusion, not success: `status == false` is a revert
@@ -2289,7 +2303,7 @@ pub fn outcome_from_mined_withdraw(status: bool, tx_hash: B256) -> WithdrawSubmi
 /// behaviour and remains a safe fallback.
 pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
     use alloy::sol_types::SolError;
-    let permanent_selectors: [[u8; 4]; 9] = [
+    let permanent_selectors: [[u8; 4]; 11] = [
         AckiNackiBridge::WithdrawalProofRejected::SELECTOR,
         AckiNackiBridge::WithdrawIdentityMismatch::SELECTOR,
         AckiNackiBridge::DstChainIdMismatch::SELECTOR,
@@ -2299,6 +2313,8 @@ pub fn classify_withdraw_revert(reason: &str) -> WithdrawRevertKind {
         AckiNackiBridge::FieldElementOutOfRange::SELECTOR,
         AckiNackiBridge::InvalidNumLayers::SELECTOR,
         AckiNackiBridge::NullifierAlreadyUsed::SELECTOR,
+        AckiNackiBridge::NacklMinterGone::SELECTOR,
+        AckiNackiBridge::LayerOutOfRange::SELECTOR,
     ];
     let lowered = reason.to_ascii_lowercase();
     for sel in permanent_selectors {
@@ -2367,7 +2383,6 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
     let (name, args) = match e {
         E::WithdrawByProofDisabled(_) => ("WithdrawByProofDisabled", String::new()),
         E::WithdrawalProofRejected(_) => ("WithdrawalProofRejected", String::new()),
-        E::TransferTooLarge(_) => ("TransferTooLarge", String::new()),
         E::NullifierAlreadyUsed(x) => (
             "NullifierAlreadyUsed",
             format!("nullifier: {}", word(x.nullifier)),
@@ -2412,6 +2427,15 @@ fn render_bridge_error(e: AckiNackiBridge::AckiNackiBridgeErrors) -> BridgeRever
             "WithdrawTransferFailed",
             format!("recipient: {}, amount: {}", x.recipient, x.amount),
         ),
+        E::NacklMinterGone(_) => ("NacklMinterGone", String::new()),
+        E::WithdrawalWindowFull(x) => (
+            "WithdrawalWindowFull",
+            format!(
+                "tokenId: {}, used: {}, amount: {}, dailyLimit: {}",
+                x.tokenId, x.used, x.amount, x.dailyLimit
+            ),
+        ),
+        E::NacklNotMinter(x) => ("NacklNotMinter", format!("token: {}", x.token)),
     };
     BridgeRevert {
         name,
@@ -2787,9 +2811,6 @@ mod tests {
         Arc::new(|_| true)
     }
 
-    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
-    /// slower than the daemons' bound must not come back to the user as a
-    /// failure. Only the daemons set a bound.
     /// A mined `withdrawByProof` with status 0 must not read as paid: the
     /// user's eccUSDC are already burned, so `Paid` would park an unpaid
     /// withdrawal in `done` behind a `PAID` log line.
@@ -2818,6 +2839,9 @@ mod tests {
         ));
     }
 
+    /// `ackinacki-bridge withdraw` builds its client with `new`: a payout
+    /// slower than the daemons' bound must not come back to the user as a
+    /// failure. Only the daemons set a bound.
     #[test]
     fn only_the_daemons_stop_waiting_for_a_withdraw_receipt() {
         let provider = alloy::providers::RootProvider::<alloy::network::Ethereum>::new_http(
@@ -3023,22 +3047,6 @@ mod tests {
     }
 
     #[test]
-    fn excessive_withdrawal_is_retried_and_names_the_limit() {
-        let reason = format!(
-            "execution reverted: {}",
-            selector_hex_of::<AckiNackiBridge::TransferTooLarge>()
-        );
-        assert_eq!(
-            classify_withdraw_revert(&reason),
-            WithdrawRevertKind::Transient
-        );
-        assert_eq!(
-            decode_withdraw_revert(&reason).unwrap().rendered,
-            "TransferTooLarge()"
-        );
-    }
-
-    #[test]
     fn a_token_listing_change_retries_the_existing_proof() {
         let reason = format!(
             "execution reverted: {}",
@@ -3068,6 +3076,24 @@ mod tests {
     }
 
     #[test]
+    fn classify_layer_out_of_range_is_permanent() {
+        use alloy::sol_types::SolError;
+        let out_of_range = AckiNackiBridge::LayerOutOfRange {
+            layer: 255,
+        }
+        .abi_encode();
+        let reason = format!("execution reverted: 0x{}", hex::encode(out_of_range));
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent,
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "LayerOutOfRange(layer: 255)"
+        );
+    }
+
+    #[test]
     fn classify_treasury_shortfall_is_transient() {
         let reason = format!(
             "execution reverted: {}",
@@ -3076,6 +3102,64 @@ mod tests {
         assert_eq!(
             classify_withdraw_revert(&reason),
             WithdrawRevertKind::Transient,
+        );
+    }
+
+    #[test]
+    fn a_full_withdrawal_window_is_retried_and_names_the_limit() {
+        use alloy::sol_types::SolError;
+        assert_eq!(AckiNackiBridge::WithdrawalWindowFull::SELECTOR, [
+            0x46, 0x53, 0xf3, 0x81
+        ]);
+        let full = AckiNackiBridge::WithdrawalWindowFull {
+            tokenId: 3,
+            used: U256::from(900u64),
+            amount: U256::from(200u64),
+            dailyLimit: U256::from(1_000u64),
+        }
+        .abi_encode();
+        let reason = format!("execution reverted, data: \"0x{}\"", hex::encode(full));
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "WithdrawalWindowFull(tokenId: 3, used: 900, amount: 200, dailyLimit: 1000)"
+        );
+    }
+
+    #[test]
+    fn a_successor_before_the_minter_handover_is_retried() {
+        use alloy::sol_types::SolError;
+        let not_minter = AckiNackiBridge::NacklNotMinter {
+            token: alloy::primitives::Address::repeat_byte(0x11),
+        }
+        .abi_encode();
+        let reason = format!("execution reverted: 0x{}", hex::encode(not_minter));
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Transient
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().name,
+            "NacklNotMinter"
+        );
+    }
+
+    #[test]
+    fn a_bridge_that_handed_the_minter_over_parks_the_proof() {
+        let reason = format!(
+            "execution reverted: {}",
+            selector_hex_of::<AckiNackiBridge::NacklMinterGone>()
+        );
+        assert_eq!(
+            classify_withdraw_revert(&reason),
+            WithdrawRevertKind::Permanent
+        );
+        assert_eq!(
+            decode_withdraw_revert(&reason).unwrap().rendered,
+            "NacklMinterGone()"
         );
     }
 

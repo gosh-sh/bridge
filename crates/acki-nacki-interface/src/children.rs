@@ -50,6 +50,22 @@ pub(crate) fn parse_internal_children(res: &Value) -> Vec<ChildTransaction> {
         .collect()
 }
 
+pub(crate) fn parse_last_deploy(res: &Value) -> Option<TxHash> {
+    res.pointer("/blockchain/account/transactions/edges")?
+        .as_array()?
+        .iter()
+        .filter_map(|e| e.get("node"))
+        .filter(|n| {
+            matches!(
+                n.get("orig_status_name").and_then(|v| v.as_str()),
+                Some("NonExist" | "Uninit")
+            ) && n.get("end_status_name").and_then(|v| v.as_str()) == Some("Active")
+                && !n.get("aborted").and_then(|v| v.as_bool()).unwrap_or(true)
+        })
+        .filter_map(|n| tx_hash(n.get("id")?.as_str()?))
+        .last()
+}
+
 /// The destination transaction of a `blockchain { message { dst_transaction }
 /// }` response.
 pub(crate) fn parse_message_dst_transaction(res: &Value) -> Option<ChildOutcome> {

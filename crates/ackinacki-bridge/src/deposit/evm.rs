@@ -26,12 +26,10 @@ alloy::sol! {
         function usdc() external view returns (address);
         function usdcTokenId() external view returns (uint32);
         function paused() external view returns (bool);
-        function MAX_TRANSFER_AMOUNT() external view returns (uint256);
-        function MAX_BRIDGE_TVL() external view returns (uint256);
         function MAX_DEPOSIT_AMOUNT() external view returns (uint256);
         function treasuryBalance() external view returns (uint256);
         function tokenIdOf(address token) external view returns (bool listed, uint32 tokenId);
-        function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 maxTransfer, uint256 tvlCap, uint256 liabilities);
+        function tokenInfo(uint32 tokenId) external view returns (address token, uint8 decimals, bool depositsEnabled, uint256 tvlCap, uint256 dailyLimit, uint256 liabilities);
         function liabilitiesOf(uint32 tokenId) external view returns (uint256);
         event Deposit(uint256 indexed depositId, address indexed sender, uint256 amount, bytes32 anAccount, uint256 timestamp, address token);
         error BridgePaused();
@@ -308,6 +306,16 @@ pub struct DepositEvent {
     pub an_account: B256,
 }
 
+/// The ERC-20 a bridge `Deposit` log names; `None` for any other log.
+pub fn deposit_log_token(log: &LogLite) -> Option<Address> {
+    if log.topics.first() != Some(&DEPOSIT_TOPIC0) {
+        return None;
+    }
+    IDeposit::Deposit::decode_raw_log(log.topics.iter().copied(), &log.data)
+        .ok()
+        .map(|ev| ev.token)
+}
+
 /// Decodes a bridge `Deposit` log; `None` for any other log.
 pub fn parse_deposit_log(log: &LogLite) -> Option<DepositEvent> {
     if log.topics.first() != Some(&DEPOSIT_TOPIC0) {
@@ -330,6 +338,26 @@ pub async fn read_usdc(evm: &dyn EvmRead, bridge: Address) -> anyhow::Result<Add
     Ok(IDeposit::usdcCall::abi_decode_returns(&out)?)
 }
 
+/// The ERC-20 the bridge lists under ECC id `token_id`; the zero address
+/// when it lists none.
+pub async fn read_token_of_id(
+    evm: &dyn EvmRead,
+    bridge: Address,
+    token_id: u32,
+) -> anyhow::Result<Address> {
+    let out = evm
+        .call(
+            bridge,
+            IDeposit::tokenInfoCall {
+                tokenId: token_id,
+            }
+            .abi_encode()
+            .into(),
+        )
+        .await?;
+    Ok(IDeposit::tokenInfoCall::abi_decode_returns(&out)?.token)
+}
+
 /// What the bridge says about one ERC-20.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenListing {
@@ -340,8 +368,6 @@ pub struct TokenListing {
     pub decimals: u8,
     /// Whether `deposit` currently accepts it.
     pub deposits_enabled: bool,
-    /// Per-transaction cap, token base units.
-    pub max_transfer: U256,
     /// Outstanding-liability cap, token base units.
     pub tvl_cap: U256,
     /// What the bridge currently owes in this token.
@@ -386,21 +412,19 @@ pub async fn read_token_listing(
         token_id: id.tokenId,
         decimals: info.decimals,
         deposits_enabled: info.depositsEnabled,
-        max_transfer: info.maxTransfer,
         tvl_cap: info.tvlCap,
         liabilities: info.liabilities,
     }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// A bridge's transfer ceiling and principal capacity, in base units. The
-/// EVM side reads its caps per listed token (`read_token_listing`); this is
-/// what the Acki Nacki side still reports for the chain as a whole.
+/// What the Acki Nacki bridge reports for one token on one chain, in base
+/// units. The EVM side reads its caps per listed token (`read_token_listing`).
 pub struct VolumeLimits {
-    /// Maximum amount of one transfer.
-    pub max_transfer: U256,
-    /// Maximum outstanding principal on this chain.
+    /// The owner's `maxTvl`; it bounds only the NACKL locked for the chain.
     pub max_tvl: U256,
+    /// The owner's rolling 24-hour withdrawal limit.
+    pub daily_limit: U256,
     /// Deposits minus completed payouts.
     pub outstanding: U256,
 }

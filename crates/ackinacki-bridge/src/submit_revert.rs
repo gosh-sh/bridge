@@ -33,6 +33,22 @@ pub(crate) fn explain(reason: &str) -> String {
             "the deployed verifier rejected the proof: this host's Circuit-4 keys or aggregator \
              do not match it",
         ),
+        "WithdrawalWindowFull" => Some(
+            "the EVM bridge's daily withdrawal limit for this token is full: its rolling 24-hour \
+             window has no room for this amount yet. Nothing was spent, the nullifier is unspent \
+             and the proof stays valid. Later, send it again: re-run the same `withdraw proof` \
+             command as it is, or re-run a `withdraw` with --allow-retry; the burn is not repeated",
+        ),
+        "NacklNotMinter" => Some(
+            "this EVM bridge is not the NACKL minter yet: the minter handover to it has not \
+             happened. Nothing was spent and the proof stays valid. Later, send it again: re-run \
+             the same `withdraw proof` command as it is, or re-run a `withdraw` with \
+             --allow-retry; the burn is not repeated",
+        ),
+        "NacklMinterGone" => Some(
+            "this EVM bridge has handed NACKL minting to its successor, and the proof is bound to \
+             this bridge, so it will never pay here",
+        ),
         _ => None,
     };
     match advice {
@@ -75,6 +91,16 @@ mod tests {
         let text = explain(&format!("data: \"0x{}\"", hex::encode(selector)));
         assert!(text.starts_with("BridgePaused()"), "{text}");
         assert!(text.contains("--allow-retry"), "{text}");
+        for (signature, words) in [
+            ("WithdrawalWindowFull(uint32,uint256,uint256,uint256)", 4),
+            ("NacklNotMinter(address)", 1),
+        ] {
+            let selector = &alloy::primitives::keccak256(signature)[..4];
+            let data = format!("0x{}{}", hex::encode(selector), "00".repeat(32 * words));
+            let text = explain(&format!("data: \"{data}\""));
+            assert!(text.contains("Nothing was spent"), "{text}");
+            assert!(text.contains("--allow-retry"), "{text}");
+        }
     }
 
     #[test]
@@ -87,6 +113,13 @@ mod tests {
             ("WithdrawTreasuryShortfall(uint256,uint256)", 2, "Top it up"),
             ("UnknownAnchor(uint256)", 1, "not in the bridge's window"),
             ("WithdrawalProofRejected()", 0, "rejected the proof"),
+            (
+                "WithdrawalWindowFull(uint32,uint256,uint256,uint256)",
+                4,
+                "daily withdrawal limit for this token is full",
+            ),
+            ("NacklNotMinter(address)", 1, "not the NACKL minter yet"),
+            ("NacklMinterGone()", 0, "will never pay here"),
         ] {
             let selector = &alloy::primitives::keccak256(signature)[..4];
             let data = format!("0x{}{}", hex::encode(selector), "00".repeat(32 * words));

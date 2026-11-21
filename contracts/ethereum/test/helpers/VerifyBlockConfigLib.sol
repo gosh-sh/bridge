@@ -15,6 +15,9 @@ import "../../src/IBridgeWithdrawalVerifier.sol";
 ///         `disabledWithdraw()` and the corresponding entrypoint reverts
 ///         with `VerifyBlockDisabled` / `WithdrawByProofDisabled`.
 library VerifyBlockConfigLib {
+    uint256 internal constant USDC_TVL_CAP = 10_000e6;
+    uint256 internal constant USDC_DAILY_LIMIT = 10_000e6;
+
     /// @notice Build an all-zero `VerifyBlockConfig` (verifyBlock disabled).
     function disabled() internal pure returns (AckiNackiBridge.VerifyBlockConfig memory) {
         return AckiNackiBridge.VerifyBlockConfig({
@@ -94,7 +97,9 @@ library VerifyBlockConfigLib {
             altDstChainId: 0,
             altDstHostChainId: 0,
             usdcTokenId: 0,
-            predecessor: IPredecessorBridge(address(0))
+            predecessor: IPredecessorBridge(address(0)),
+            usdcTvlCap: USDC_TVL_CAP,
+            usdcDailyLimit: USDC_DAILY_LIMIT
         });
     }
 
@@ -114,7 +119,9 @@ library VerifyBlockConfigLib {
             altDstChainId: 0,
             altDstHostChainId: 0,
             usdcTokenId: 0,
-            predecessor: IPredecessorBridge(address(0))
+            predecessor: IPredecessorBridge(address(0)),
+            usdcTvlCap: USDC_TVL_CAP,
+            usdcDailyLimit: USDC_DAILY_LIMIT
         });
     }
 
@@ -147,7 +154,9 @@ library VerifyBlockConfigLib {
                 altDstChainId: altDstChainId,
                 altDstHostChainId: altDstHostChainId,
                 usdcTokenId: usdcTokenId,
-                predecessor: IPredecessorBridge(address(0))
+                predecessor: IPredecessorBridge(address(0)),
+                usdcTvlCap: USDC_TVL_CAP,
+                usdcDailyLimit: USDC_DAILY_LIMIT
             });
     }
 }

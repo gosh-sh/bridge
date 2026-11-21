@@ -54,10 +54,24 @@ interface IShellAccumulator {
 ///
 ///         Deployed at fixed address in zerostate.
 contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
-    string constant version = "1.18.0";
+    string constant version = "1.19.0";
 
-    uint128 constant MAX_TRANSFER_AMOUNT = 50_000_000;
-    uint128 constant MAX_BRIDGE_TVL = 10_000_000_000;
+    uint32 constant WITHDRAWAL_WINDOW_HOURS = 25;
+    uint8 constant REGISTRY_FORMAT = 1;
+
+    struct LegacyBridgeTokenConfig {
+        uint256 evmToken;
+        uint128 maxTransfer;
+        uint128 maxTvl;
+        uint128 maxWithdrawal;
+        uint128 outstanding;
+        bool depositsEnabled;
+    }
+
+    struct WithdrawalBucket {
+        uint32 hour;
+        uint128 amount;
+    }
 
     event UsdcMigrated(address from, uint128 value);
     event UsdcMinted(address recipient, uint128 value);
@@ -75,6 +89,15 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         uint128 amount,
         uint32 tokenId,
         address sender,
+        uint16 reason
+    );
+    event DepositRefused(
+        uint256 depositId,
+        uint256 contractAddr,
+        uint256 dappId,
+        uint256 chainId,
+        uint128 amount,
+        uint256 anAccount,
         uint16 reason
     );
     event DepositFinalized(
@@ -212,6 +235,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // anyway until the owner re-seeds them.
     bool _paused;
 
+    mapping(uint256 => mapping(uint160 => uint128)) _nacklLockedTo;
+
+    mapping(uint256 => mapping(uint32 => mapping(uint8 => WithdrawalBucket))) _withdrawalWindow;
+
     /// @notice Contract constructor.
     /// @dev `_depositVoucherCode` is intentionally NOT a constructor arg:
     ///       in the only deploy path that matters (zerostate premine stub +
@@ -323,8 +350,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
         require(value > 0, ERR_ZERO_AMOUNT);
         require(value <= uint128(type(uint64).max), ERR_OVERFLOW);
-        require(value <= MAX_TRANSFER_AMOUNT, ERR_TRANSFER_TOO_LARGE);
-        require(_outstandingByChain[chainId] + value <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
         _mintNonce = nonce;
 
         gosh.mintecc(uint64(value), USDC_ECC_ID);
@@ -345,10 +370,11 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                                      uint256 chainId, uint32 tokenId)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
+        require(tokenId != NACKL_ECC_ID, ERR_TOKEN_CONFIG);
         require(nonce == _mintNonce + 1, ERR_INVALID_NONCE);
         require(value > 0 && value <= uint128(type(uint64).max), ERR_OVERFLOW);
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
-        require(_requireDepositToken(chainId, config.evmToken, value, false) == tokenId,
+        require(_requireDepositToken(chainId, config.evmToken, false) == tokenId,
                 ERR_TOKEN_CONFIG);
         _mintNonce = nonce;
         ensureBalance();
@@ -390,7 +416,7 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     // Cross-chain bridge — outbound (AN -> EVM): burn ECC, emit proof-source event
     // ========================================================
 
-    /// @notice Burns the ECC currency attached to this message and emits an event
+    /// @notice Burns the ECC currency attached to this message (NACKL is locked instead) and emits an event
     ///         carrying the data needed to mint the equivalent on the destination
     ///         chain. Exactly one ECC currency must be attached; its id and amount
     ///         are taken from `msg.currencies`.
@@ -421,37 +447,71 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                               ERR_NO_EVM_BRIDGE);
             return;
         }
-        uint128 payoutCap = config.evmToken == 0 ? MAX_TRANSFER_AMOUNT : config.maxWithdrawal;
-        if (currencies[tokenId] > varuint32(payoutCap)) {
-            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_TRANSFER_TOO_LARGE);
+        if (currencies[tokenId] > varuint32(type(uint64).max)) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_OVERFLOW);
             return;
         }
         uint128 amount = uint128(currencies[tokenId]);
         require(amount > 0, ERR_ZERO_AMOUNT);
-        require(amount <= uint128(type(uint64).max), ERR_OVERFLOW);
-        uint128 minted = _totalMintedBridgeByToken[tokenId];
-        uint128 burned = _totalBurnedBridgeByToken[tokenId];
-        if (burned > minted || amount > minted - burned) {
+        bool nackl = tokenId == NACKL_ECC_ID;
+        if (recipient.toSlice().bits() != 160 || recipient.toSlice().refs() != 0) {
             _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_BURN_EXCEEDS_BRIDGED);
+                              ERR_RECIPIENT_NOT_EVM);
             return;
         }
-        if (amount > _tokenOutstanding(dstChainId, tokenId)) {
-            _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
-                              ERR_CHAIN_BALANCE_EXCEEDED);
+        if (config.dailyLimit == 0) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_DAILY_LIMIT);
+            return;
+        }
+        if (!nackl) {
+            uint128 minted = _totalMintedBridgeByToken[tokenId];
+            uint128 burned = _totalBurnedBridgeByToken[tokenId];
+            if (burned > minted || amount > minted - burned) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                                  ERR_BURN_EXCEEDS_BRIDGED);
+                return;
+            }
+            if (amount > _tokenOutstanding(dstChainId, tokenId)) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId,
+                                  ERR_CHAIN_BALANCE_EXCEEDED);
+                return;
+            }
+        } else {
+            if (config.outstanding > config.maxTvl || amount > config.maxTvl - config.outstanding) {
+                _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_TVL_CAP);
+                return;
+            }
+        }
+        uint32 hour = uint32(block.timestamp / 3600);
+        mapping(uint8 => WithdrawalBucket) window = _withdrawalWindow[dstChainId][tokenId];
+        if (amount > config.dailyLimit || _windowUsed(window, hour) > config.dailyLimit - amount) {
+            _refundWithdrawal(currencies, dstChainId, recipient, tokenId, ERR_DAILY_LIMIT);
             return;
         }
 
         tvm.accept();
         ensureBalance();
 
-        gosh.burnecc(uint64(amount), tokenId);
-        _totalBurnedBridgeByToken[tokenId] += amount;
-        if (tokenId == USDC_ECC_ID) {
-            _outstandingByChain[dstChainId] -= amount;
+        uint8 slot = uint8(hour % WITHDRAWAL_WINDOW_HOURS);
+        WithdrawalBucket bucket = window[slot];
+        if (bucket.hour != hour) {
+            bucket = WithdrawalBucket(hour, 0);
+        }
+        bucket.amount += amount;
+        window[slot] = bucket;
+        _withdrawalWindow[dstChainId][tokenId] = window;
+
+        if (nackl) {
+            _bridgeTokens[dstChainId][tokenId].outstanding += amount;
+            _nacklLockedTo[dstChainId][dstBridge] += amount;
         } else {
-            _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+            gosh.burnecc(uint64(amount), tokenId);
+            _totalBurnedBridgeByToken[tokenId] += amount;
+            if (tokenId == USDC_ECC_ID) {
+                _outstandingByChain[dstChainId] -= amount;
+            } else {
+                _bridgeTokens[dstChainId][tokenId].outstanding -= amount;
+            }
         }
 
         address addrExtern = address.makeAddrExtern(WithdrawalInitiatedEmit, bitCntAddress);
@@ -464,13 +524,16 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///      code the call would have thrown if a refusal threw —
     ///      `ERR_TOKEN_UNREGISTERED` (241) when the currency is not registered
     ///      for the destination chain, `ERR_NO_EVM_BRIDGE` (239) when no EVM
-    ///      bridge is set for it, `ERR_TRANSFER_TOO_LARGE` (234) over the
-    ///      per-transfer cap,
+    ///      bridge is set for it, `ERR_OVERFLOW` (214) for an amount that
+    ///      does not fit `uint64`,
     ///      `ERR_BURN_EXCEEDS_BRIDGED` (233) when the burn would take bridged
     ///      burned above bridged minted, `ERR_CHAIN_BALANCE_EXCEEDED` (236)
-    ///      when the destination chain accounts for less than this amount.
+    ///      when the destination chain accounts for less than this amount,
+    ///      `ERR_TVL_CAP` (235) when a NACKL lock would pass the owner's
+    ///      `maxTvl`, `ERR_DAILY_LIMIT` (247) when the last 24 hours of
+    ///      withdrawals plus this one would pass the owner's `dailyLimit`.
     ///      An amount too large for `uint128` is reported saturated; it is
-    ///      already far above the cap that refused it.
+    ///      already far above the bound that refused it.
     function _refundWithdrawal(mapping(uint32 => varuint32) currencies, uint256 dstChainId,
                                bytes recipient, uint32 tokenId, uint16 reason) private pure {
         tvm.accept();
@@ -686,48 +749,66 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _paused = paused;
     }
 
-    /// @notice Register USDC for a source chain once, then update its deposit limits.
-    ///         ECC id 3 is the only id accepted: Acki Nacki has no other currency
-    ///         for the bridge to mint, and a new one takes a new version of this code.
-    ///         The token/id association is immutable; TVL can only increase.
+    /// @notice Register USDC (id 3) or NACKL (id 1) for a chain once, then update its limits.
+    ///         The token/id association is immutable; `maxTvl` can only increase.
+    ///         `maxTvl` bounds the NACKL locked for the chain; for USDC it is
+    ///         stored and reported only. `dailyLimit` bounds what
+    ///         `initiateWithdrawal` sends to the chain in this currency over
+    ///         the current hour and the 24 before it; it must be above zero.
     ///         Closing or throttling deposits preserves pending confirmations and withdrawals.
     function setBridgeToken(uint256 chainId, uint256 evmToken, uint32 tokenId,
-                            uint128 maxTransfer, uint128 maxTvl, bool depositsEnabled)
+                            uint128 maxTvl, uint128 dailyLimit, bool depositsEnabled)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
         require(chainId != 0 && evmToken != 0 && evmToken < (uint256(1) << 160), ERR_TOKEN_CONFIG);
-        require(tokenId == USDC_ECC_ID, ERR_TOKEN_CONFIG);
-        require(maxTransfer > 0 && maxTransfer <= uint128(type(uint64).max)
-                && maxTvl >= maxTransfer, ERR_TOKEN_CONFIG);
-        if (tokenId == USDC_ECC_ID) {
-            require(maxTransfer <= MAX_TRANSFER_AMOUNT && maxTvl <= MAX_BRIDGE_TVL, ERR_TOKEN_CONFIG);
-        }
+        require(tokenId == USDC_ECC_ID || tokenId == NACKL_ECC_ID, ERR_TOKEN_CONFIG);
+        require(dailyLimit > 0, ERR_TOKEN_CONFIG);
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
         require(maxTvl >= config.maxTvl, ERR_TOKEN_CONFIG);
         require(config.evmToken == 0 || config.evmToken == evmToken, ERR_TOKEN_CONFIG);
         uint32 previousId = _bridgeTokenIds[chainId][evmToken];
         require(previousId == 0 || previousId == tokenId, ERR_TOKEN_CONFIG);
         config.evmToken = evmToken;
-        config.maxTransfer = maxTransfer;
         config.maxTvl = maxTvl;
-        uint128 payoutFloor = tokenId == USDC_ECC_ID ? MAX_TRANSFER_AMOUNT : maxTransfer;
-        config.maxWithdrawal = math.max(config.maxWithdrawal, payoutFloor);
+        config.dailyLimit = dailyLimit;
         config.depositsEnabled = depositsEnabled;
         _bridgeTokens[chainId][tokenId] = config;
         _bridgeTokenIds[chainId][evmToken] = tokenId;
         ensureBalance();
     }
 
-    function _requireDepositToken(uint256 chainId, uint256 evmToken, uint128 amount,
+    function _requireDepositToken(uint256 chainId, uint256 evmToken,
                                   bool newDeposit) private view returns (uint32 tokenId) {
         tokenId = _bridgeTokenIds[chainId][evmToken];
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
         require(evmToken != 0 && config.evmToken == evmToken, ERR_TOKEN_UNREGISTERED);
         require(!newDeposit || config.depositsEnabled, ERR_TOKEN_DEPOSITS_DISABLED);
-        uint128 cap = newDeposit ? config.maxTransfer : config.maxWithdrawal;
-        require(amount <= cap, ERR_TRANSFER_TOO_LARGE);
-        uint128 outstanding = _tokenOutstanding(chainId, tokenId);
-        require(outstanding <= config.maxTvl && amount <= config.maxTvl - outstanding, ERR_TVL_CAP);
+    }
+
+    function _windowUsed(mapping(uint8 => WithdrawalBucket) window, uint32 hour)
+        private pure returns (uint128 used)
+    {
+        for ((, WithdrawalBucket bucket) : window) {
+            if (bucket.hour <= hour && bucket.hour + WITHDRAWAL_WINDOW_HOURS > hour) {
+                used += bucket.amount;
+            }
+        }
+    }
+
+    function _depositRefusal(uint256 chainId, uint256 evmToken, uint128 amount)
+        private view returns (uint32 tokenId, uint16 reason)
+    {
+        tokenId = _bridgeTokenIds[chainId][evmToken];
+        BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
+        if (evmToken == 0 || config.evmToken != evmToken) {
+            return (tokenId, ERR_TOKEN_UNREGISTERED);
+        }
+        if (tokenId == NACKL_ECC_ID
+            && (amount > config.outstanding
+                || varuint32(amount) > address(this).currencies[NACKL_ECC_ID])) {
+            return (tokenId, ERR_CHAIN_BALANCE_EXCEEDED);
+        }
+        return (tokenId, 0);
     }
 
     function _creditToken(uint256 chainId, uint32 tokenId, uint128 amount) private {
@@ -745,29 +826,38 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     }
 
     function getTokenDepositConfig(uint256 chainId, uint256 evmToken) external view returns (
-        bool listed, uint32 tokenId, uint128 maxTransfer, uint128 maxTvl,
-        uint128 outstanding, bool depositsEnabled, uint128 maxWithdrawal
+        bool listed, uint32 tokenId, uint128 maxTvl, uint128 dailyLimit,
+        uint128 outstanding, bool depositsEnabled
     ) {
         tokenId = _bridgeTokenIds[chainId][evmToken];
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
         listed = evmToken != 0 && config.evmToken == evmToken;
-        return (listed, tokenId, config.maxTransfer, config.maxTvl,
-                _tokenOutstanding(chainId, tokenId), config.depositsEnabled, config.maxWithdrawal);
+        return (listed, tokenId, config.maxTvl, config.dailyLimit,
+                _tokenOutstanding(chainId, tokenId), config.depositsEnabled);
     }
 
     function getTokenWithdrawalConfig(uint256 chainId, uint32 tokenId) external view returns (
-        bool listed, uint256 evmToken, uint128 maxTransfer, uint128 maxTvl,
-        uint128 outstanding, bool depositsEnabled, uint128 maxWithdrawal
+        bool listed, uint256 evmToken, uint128 maxTvl, uint128 dailyLimit,
+        uint128 outstanding, bool depositsEnabled
     ) {
         BridgeTokenConfig config = _bridgeTokens[chainId][tokenId];
-        return (config.evmToken != 0, config.evmToken, config.maxTransfer, config.maxTvl,
-                _tokenOutstanding(chainId, tokenId), config.depositsEnabled, config.maxWithdrawal);
+        return (config.evmToken != 0, config.evmToken, config.maxTvl, config.dailyLimit,
+                _tokenOutstanding(chainId, tokenId), config.depositsEnabled);
+    }
+
+    /// @notice The daily withdrawal limit of `tokenId` to `chainId` and the
+    ///         amount withdrawn in the current hour and the 24 before it.
+    ///         `initiateWithdrawal` refuses an amount above `dailyLimit - used`.
+    function getWithdrawalWindow(uint256 chainId, uint32 tokenId) external view returns (
+        uint128 dailyLimit, uint128 used
+    ) {
+        return (_bridgeTokens[chainId][tokenId].dailyLimit,
+                _windowUsed(_withdrawalWindow[chainId][tokenId], uint32(block.timestamp / 3600)));
     }
 
     /// @notice States how much of one chain's principal this bridge still
     ///         accounts for, which is the ceiling `initiateWithdrawal` pays out
-    ///         to that chain and the room left under `MAX_BRIDGE_TVL` for a
-    ///         credit to it. `confirmDeposit` raises the counter, a withdrawal
+    ///         to that chain. `confirmDeposit` raises the counter, a withdrawal
     ///         spends it, and `onCodeUpgrade` carries it between builds that
     ///         both have it. What leaves it empty is a migration from a build
     ///         that had none, while the principal stays locked on the source
@@ -775,12 +865,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///
     ///         The figure to write is the principal L1 holds less the deposits
     ///         not yet credited here and the burns L1 has not yet paid out —
-    ///         not L1's balance, which still carries both. The counter is also
-    ///         the deposit room, since `finalizeDeposit` and `confirmDeposit`
-    ///         bound `outstanding + amount` by `MAX_BRIDGE_TVL`, so writing
-    ///         more than that figure buys withdrawal room by refusing deposits
-    ///         with `ERR_TVL_CAP`, and a deposit caught between finalization
-    ///         and confirmation aborts with its voucher already consumed.
+    ///         not L1's balance, which still carries both. The deposit room is
+    ///         bounded on the EVM bridge, not here. Writing more than that
+    ///         figure buys withdrawal room the EVM treasury does not hold.
     ///         Writing less is the safe direction: it only refuses
     ///         withdrawals, which return the ECC.
     ///
@@ -795,12 +882,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         See `contracts/an/README.md`, *Restoring a chain's outstanding
     ///         amount*.
     /// @param chainId — EIP-155 chain id of the destination L1/L2.
-    /// @param amount  — principal outstanding to that chain, in token units,
-    ///                  at most `MAX_BRIDGE_TVL`.
+    /// @param amount  — principal outstanding to that chain, in token units.
     function setOutstandingByChain(uint256 chainId, uint128 amount)
         public onlyOwnerPubkey(_ownerPubkey) accept saveMsg
     {
-        require(amount <= MAX_BRIDGE_TVL, ERR_TVL_CAP);
         ensureBalance();
         _outstandingByChain[chainId] = amount;
     }
@@ -951,9 +1036,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
                              bytes[] receiptProof, uint16 logIndex) public {
         // Every check runs before accept, within the external message's gas
         // credit, so a refused deposit costs the bridge nothing. A deposit
-        // already finalized is not refused here: it passes every check, is
-        // accepted and paid for by the bridge, and ends at its existing
-        // voucher without a second mint. A deposit whose proof walk exceeds
+        // already finalized passes every check except a NACKL one above the
+        // NACKL now locked for its chain, refused with 236; it is accepted and
+        // paid for by the bridge, and ends at its existing voucher without a
+        // second mint. A deposit whose proof walk exceeds
         // the credit cannot be finalized; the CLI and deposit-relayer refuse
         // to send one.
         require(!_paused, ERR_PAUSED);
@@ -967,7 +1053,10 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(f.contractAddr != 0 && _trustedL1Bridge[f.chainId][f.contractAddr],
                 ERR_UNSUPPORTED_SRC_CHAIN);
         require(f.anAccount != 0, ERR_ZERO_RECIPIENT);
-        _requireDepositToken(f.chainId, f.evmToken, f.amount, true);
+        uint32 tokenId = _requireDepositToken(f.chainId, f.evmToken, true);
+        require(tokenId != NACKL_ECC_ID
+                || f.amount <= _bridgeTokens[f.chainId][NACKL_ECC_ID].outstanding,
+                ERR_CHAIN_BALANCE_EXCEEDED);
 
         tvm.accept();
         _saveMsg();
@@ -999,9 +1088,9 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///         registered ECC and sends it to the proof-bound AN recipient. The caller
     ///         must be the deterministic voucher address derived from the
     ///         deposit identity — replay attempts hit the existing voucher
-    ///         account whose constructor was already consumed. If this call
-    ///         aborts after that constructor has run, the voucher is spent
-    ///         and the owner pays the recipient with the matching recovery mint.
+    ///         account whose constructor was already consumed. If the bridge
+    ///         cannot pay the deposit now, it emits `DepositRefused` and tells the
+    ///         voucher to delete itself, so the same deposit can be finalized again.
     function confirmDeposit(
         uint256 depositId, uint256 contractAddr, uint256 dappId,
         uint256 chainId, uint128 amount, uint256 anAccount
@@ -1030,14 +1119,47 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         require(msg.sender == address.makeAddrStd(0, tvm.hash(stateInit)), ERR_INVALID_SENDER);
         require(anAccount != 0, ERR_ZERO_RECIPIENT);
         require(amount > 0, ERR_ZERO_AMOUNT);
-        uint32 tokenId = _requireDepositToken(chainId, evmToken, amount, false);
+        (uint32 tokenId, uint16 refusal) = _depositRefusal(chainId, evmToken, amount);
 
         tvm.accept();
         ensureBalance();
 
-        gosh.mintecc(uint64(amount), tokenId);
-        _creditToken(chainId, tokenId, amount);
+        if (refusal != 0) {
+            DepositVoucher(msg.sender).release{value: 0.1 vmshell, flag: 1, bounce: false}();
+            address refusedExtern = address.makeAddrExtern(DepositRefusedEmit, bitCntAddress);
+            emit DepositRefused{dest: refusedExtern}(
+                depositId, contractAddr, dappId, chainId, amount, anAccount, refusal
+            );
+            return;
+        }
 
+        if (tokenId == NACKL_ECC_ID) {
+            require(_unlockNackl(chainId, amount, anAccount), ERR_CHAIN_BALANCE_EXCEEDED);
+        } else {
+            gosh.mintecc(uint64(amount), tokenId);
+            _creditToken(chainId, tokenId, amount);
+            _sendEcc(anAccount, tokenId, amount);
+        }
+
+        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
+        emit DepositFinalized{dest: addrExtern}(
+            depositId, contractAddr, dappId, chainId, amount, anAccount
+        );
+    }
+
+    function _unlockNackl(uint256 chainId, uint128 amount, uint256 anAccount)
+        private returns (bool)
+    {
+        uint128 locked = _bridgeTokens[chainId][NACKL_ECC_ID].outstanding;
+        if (amount > locked || varuint32(amount) > address(this).currencies[NACKL_ECC_ID]) {
+            return false;
+        }
+        _bridgeTokens[chainId][NACKL_ECC_ID].outstanding = locked - amount;
+        _sendEcc(anAccount, NACKL_ECC_ID, amount);
+        return true;
+    }
+
+    function _sendEcc(uint256 anAccount, uint32 tokenId, uint128 amount) private pure {
         mapping(uint32 => varuint32) ecc;
         ecc[tokenId] = varuint32(amount);
         address.makeAddrStd(0, anAccount).transfer({
@@ -1046,11 +1168,6 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
             flag: 1,
             currencies: ecc
         });
-
-        address addrExtern = address.makeAddrExtern(DepositFinalizedEmit, bitCntAddress);
-        emit DepositFinalized{dest: addrExtern}(
-            depositId, contractAddr, dappId, chainId, amount, anAccount
-        );
     }
 
     // DepositVoucher code rotation is intentionally not exposed as a
@@ -1095,7 +1212,8 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         ensureBalance();
         TvmCell registryState = abi.encode(
             userCell.toSlice().empty() ? _depositVoucherCode : userCell,
-            _bridgeTokens, _bridgeTokenIds);
+            _bridgeTokens, _bridgeTokenIds,
+            abi.encode(_nacklLockedTo, REGISTRY_FORMAT, _withdrawalWindow));
         TvmCell migrationCell = abi.encode(
             _ownerPubkey, _usdcWallet, _totalMinted, _mintNonce, _mintAccumulatorNonce,
             _totalMintedBridgeByToken, _totalBurnedBridgeByToken, _depositVoucherCode,
@@ -1123,7 +1241,14 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     ///                  mapping(uint32 => mapping(uint256 => bool)) messages)
     ///         `depositVoucherCode` supplies the zerostate voucher code.
     ///         A non-empty `userCell` contains abi.encode(voucherCode,
-    ///         bridgeTokens, bridgeTokenIds). For an upgrade from 1.15.0,
+    ///         bridgeTokens, bridgeTokenIds) and, from 1.19.0, a further
+    ///         reference with abi.encode(nacklLockedTo, REGISTRY_FORMAT,
+    ///         withdrawalWindow). Without `REGISTRY_FORMAT` the token
+    ///         configs are the 1.17.0 and 1.18.0 ones (`LegacyBridgeTokenConfig`):
+    ///         `maxTvl`, `outstanding` and `depositsEnabled` are kept, and
+    ///         `dailyLimit` is set to the old `maxWithdrawal`, the largest
+    ///         payout one withdrawal could make before.
+    ///         For an upgrade from 1.15.0,
     ///         construct it with BridgeZerostateData.getTokenUpgradeData;
     ///         subsequent updateCode calls construct it automatically.
     ///
@@ -1162,14 +1287,43 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
         _messages = messages;
         _depositVoucherCode = depositVoucherCode;
         if (!userCell.toSlice().empty()) {
-            (_depositVoucherCode, _bridgeTokens, _bridgeTokenIds) = abi.decode(userCell, (
-                TvmCell, mapping(uint256 => mapping(uint32 => BridgeTokenConfig)),
-                mapping(uint256 => mapping(uint256 => uint32))));
+            TvmSlice registry = userCell.toSlice();
+            TvmSlice tokens = registry;
+            mapping(uint256 => mapping(uint32 => LegacyBridgeTokenConfig)) legacy;
+            (_depositVoucherCode, legacy, _bridgeTokenIds) = registry.load(
+                TvmCell, mapping(uint256 => mapping(uint32 => LegacyBridgeTokenConfig)),
+                mapping(uint256 => mapping(uint256 => uint32)));
+            uint8 format = 0;
+            if (registry.refs() != 0) {
+                TvmSlice extra = registry.load(TvmCell).toSlice();
+                _nacklLockedTo = extra.load(mapping(uint256 => mapping(uint160 => uint128)));
+                if (!extra.empty()) {
+                    (format, _withdrawalWindow) = extra.load(uint8,
+                        mapping(uint256 => mapping(uint32 => mapping(uint8 => WithdrawalBucket))));
+                }
+            }
+            if (format == REGISTRY_FORMAT) {
+                (, _bridgeTokens) = tokens.load(TvmCell,
+                    mapping(uint256 => mapping(uint32 => BridgeTokenConfig)));
+            } else {
+                _bridgeTokens = _upgradeLegacyTokens(legacy);
+            }
         }
         // `_lightClients`, `_lightClientL1ChainId` and `_ownerAnchorsDisabled`
         // are absent from the tuple: after an upgrade the owner writer is
         // on for every chain until the owner re-deploys the light client
         // and flips L1 again.
+    }
+
+    function _upgradeLegacyTokens(mapping(uint256 => mapping(uint32 => LegacyBridgeTokenConfig)) legacy)
+        private pure returns (mapping(uint256 => mapping(uint32 => BridgeTokenConfig)) tokens)
+    {
+        for ((uint256 chainId, mapping(uint32 => LegacyBridgeTokenConfig) configs) : legacy) {
+            for ((uint32 tokenId, LegacyBridgeTokenConfig old) : configs) {
+                tokens[chainId][tokenId] = BridgeTokenConfig(old.evmToken, old.maxTvl,
+                    old.maxWithdrawal, old.outstanding, old.depositsEnabled);
+            }
+        }
     }
 
     // ========================================================
@@ -1203,12 +1357,14 @@ contract eccBridge is eccBridgeModifiers, BridgeReplayProtection, ISubscriber {
     }
 
     function getDepositLimits(uint256 chainId) external view returns (
-        uint128 maxTransfer, uint128 maxTvl, uint128 outstanding
+        uint128 maxTvl, uint128 dailyLimit, uint128 outstanding
     ) {
         BridgeTokenConfig config = _bridgeTokens[chainId][USDC_ECC_ID];
-        return (config.evmToken == 0 ? MAX_TRANSFER_AMOUNT : config.maxTransfer,
-                config.evmToken == 0 ? MAX_BRIDGE_TVL : config.maxTvl,
-                _outstandingByChain[chainId]);
+        return (config.maxTvl, config.dailyLimit, _outstandingByChain[chainId]);
+    }
+
+    function getNacklLockedTo(uint256 chainId, uint160 evmBridge) external view returns (uint128) {
+        return _nacklLockedTo[chainId][evmBridge];
     }
 
     /// @notice Returns the hash of the currently installed DepositVoucher code.

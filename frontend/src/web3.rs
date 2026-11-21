@@ -344,7 +344,7 @@ fn deposit_calldata(amount: u128, an_account: &str) -> Result<String, String> {
 
 fn validate_transfer_amount(amount: u128) -> Result<(), String> {
     if amount > MAX_TRANSFER_USDC_UNITS {
-        return Err("Amount exceeds the 50 USDC per-transfer limit".into());
+        return Err("Amount exceeds the bridge's uint64 amount bound".into());
     }
     Ok(())
 }
@@ -388,12 +388,8 @@ fn check_token_capacity(raw: &str, amount: u128) -> Result<(), String> {
         1 => {},
         _ => return Err("Invalid token registry response".into()),
     }
-    let max_transfer = registry_uint(words[3])?;
-    let max_tvl = registry_uint(words[4])?;
+    let max_tvl = registry_uint(words[3])?;
     let outstanding = registry_uint(words[5])?;
-    if amount > max_transfer {
-        return Err("Deposit exceeds the bridge's current USDC transfer limit".into());
-    }
     if outstanding > max_tvl || amount > max_tvl - outstanding {
         return Err("The bridge's USDC TVL cap is reached; wait for withdrawals and retry".into());
     }
@@ -420,14 +416,14 @@ async fn check_deposit_capacity(bridge: &str, amount: u128) -> Result<(), String
 mod deposit_tests {
     use super::deposit_calldata;
 
-    fn token_info(enabled: u128, max_transfer: u128, cap: u128, outstanding: u128) -> String {
+    fn token_info(enabled: u128, daily_limit: u128, cap: u128, outstanding: u128) -> String {
         format!(
             "0x{}{}{}{}{}{}",
             super::encode_address(super::USDC_CONTRACT_ADDRESS),
             super::encode_uint256(6),
             super::encode_uint256(enabled),
-            super::encode_uint256(max_transfer),
             super::encode_uint256(cap),
+            super::encode_uint256(daily_limit),
             super::encode_uint256(outstanding)
         )
     }
@@ -436,9 +432,7 @@ mod deposit_tests {
     fn registry_limits_and_closed_deposits_are_checked_before_transactions() {
         use super::check_token_capacity as check;
         assert!(check(&token_info(1, 5_000_000, 20_000_000, 15_000_000), 5_000_000).is_ok());
-        assert!(check(&token_info(1, 5_000_000, 20_000_000, 0), 5_000_001)
-            .unwrap_err()
-            .contains("transfer limit"));
+        assert!(check(&token_info(1, 5_000_000, 20_000_000, 0), 5_000_001).is_ok());
         assert!(check(
             &token_info(1, 50_000_000, 20_000_000, 15_000_001),
             5_000_000
@@ -536,8 +530,10 @@ mod deposit_tests {
     #[test]
     fn excessive_transfers_are_rejected_before_approval_or_deposit() {
         let recipient = "a3".repeat(32);
-        rejects_before_wallet_access(super::approve_usdc(50_000_001), "50 USDC");
-        rejects_before_wallet_access(super::make_deposit(50_000_001, &recipient), "50 USDC");
+        let over = u64::MAX as u128 + 1;
+        rejects_before_wallet_access(super::approve_usdc(over), "uint64");
+        rejects_before_wallet_access(super::make_deposit(over, &recipient), "uint64");
+        assert!(super::validate_transfer_amount(50_000_001).is_ok());
     }
 }
 

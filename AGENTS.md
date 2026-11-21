@@ -339,8 +339,8 @@ Before the local commit, review and update the relevant docs.
 Review the branch's changes with a fresh run of the same agent from its CLI: no context of the
 work, the same model and reasoning effort, read-only. Before the first push, rerun it after each
 fix until it finds nothing critical, that is, at least nothing that can lead to funds being stolen
-or stuck in the bridge. Run it once more when every pipeline of the pull request is green. Edits in
-between need no new run.
+or stuck in the bridge. Once every pipeline of the pull request is green, run it again only if
+edits were made during the test runs to get them to pass.
 
 ## Where to look next
 

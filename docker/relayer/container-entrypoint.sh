@@ -60,9 +60,9 @@ cd "$BRIDGE_WORK_DIR"
 # Run as a child, not exec'd: its exit status decides what Docker sees. 78
 # means the Acki Nacki chain is behind the bridge (a restarted network, or a
 # GraphQL endpoint serving another one). No restart can help, and under
-# `restart: unless-stopped` the container would rerun the preflight and the
-# startup scan and stop again every few minutes. It stays up instead, with
-# the daemon stopped, until an operator stops or recreates it.
+# `restart: unless-stopped` the container would rerun the preflight and stop
+# again every few minutes. It stays up instead, with the daemon stopped, until
+# an operator stops or recreates it.
 # The cursor file relayer-state.json sits in BRIDGE_STATE_DIR with the
 # prover state (bridge-audit#132); the daemon names it itself.
 "$RELAYER_BINARY" daemon-live &

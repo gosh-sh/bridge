@@ -85,7 +85,6 @@ time they take.
 ```bash
 export BRIDGE_CONFIG=$PWD/config/bridge_config   # endpoints and prover paths
 export BRIDGE_ADDRESS='0x<new-bridge-address>'
-export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 
 export WITHDRAW_FROM=<dapp_id>::<account_id>     # the AN multisig
 export WITHDRAW_FROM_KEYS=/path/to/owner.keys.json
@@ -98,7 +97,7 @@ export BURNER_PRIVATE_KEY=0x…                    # the Sepolia signer
 
 RPC and GraphQL endpoints and the prover directories come from the profile.
 The shipped profile leaves the deployment target unset: obtain `BRIDGE_ADDRESS`
-and `BRIDGE_DEPLOY_BLOCK` from the operator of the new paired deployment. Exported shell variables win over it,
+from the operator of the new paired deployment. Exported shell variables win over it,
 so if you change the profile, open a new shell or re-`export`.
 
 ## 4. Dry run
@@ -226,7 +225,6 @@ With the two lines `install.sh` printed in effect (`PATH` and
 
 ```bash
 export BRIDGE_ADDRESS='0x<new-bridge-address>'      # deposit(address,uint256,bytes32)
-export BRIDGE_DEPLOY_BLOCK='<new-bridge-deployment-block>'
 export DEPOSIT_TO=<dapp_id>::<account_id>        # the Acki Nacki recipient
 export DEPOSIT_AMOUNT=1.000000                   # USDC, at most 6 decimals
 ```

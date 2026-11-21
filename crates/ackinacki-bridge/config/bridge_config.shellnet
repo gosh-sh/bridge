@@ -34,13 +34,10 @@
 # `crates/ackinacki-bridge/`.
 
 # --- Ethereum side (Sepolia) --------------------------------------------------
-# Must serve `eth_getLogs` back to the bridge's oldest held anchor (the
-# window-heights read of `withdraw`, in preflight and at stage 4b) AND
-# `eth_getBlockReceipts` (`deposit` proves its receipt against the block's
-# receiptsRoot, so it reads every receipt of that block). The EF DevOps
-# public endpoint serves both with full history; publicnode keeps only the
-# newest ~10 000 blocks of logs and receipts, so on it `withdraw`
-# is refused once the bridge's oldest held anchor is older than that.
+# Must serve `eth_getBlockReceipts` (`deposit` proves its receipt against the
+# block's receiptsRoot, so it reads every receipt of that block). The EF
+# DevOps public endpoint serves it with full history; publicnode keeps only
+# the newest ~10 000 blocks of receipts.
 RPC_URL=https://rpc.sepolia.ethpandaops.io
 
 # --- Acki Nacki side (shellnet) -----------------------------------------------
@@ -120,15 +117,9 @@ BRIDGE_DEPOSIT_STATE_DIR=./deposit-state
 BRIDGE_DEPOSIT_CONFIRMATIONS=12
 
 # --- Deploy target ------------------------------------------------------------
-# Set both values for your fresh deployment. This build uses
+# Set it for your fresh deployment. This build uses
 # deposit(address,uint256,bytes32) and requires eccBridge 1.18.0 for deposits;
 # earlier workchain-bearing EVM deployments cannot accept its deposit calls.
 # Keep USDC_BRIDGE_ACCOUNT_ID above paired with this EVM contract.
 # BRIDGE_ADDRESS=0x<new-AckiNackiBridge-address>
-# BRIDGE_DEPLOY_BLOCK=<new-bridge-deployment-block>
 # With no BRIDGE_ADDRESS, a fresh run refuses before requesting a transaction.
-# For a capped / rate-limited RPC (Alchemy's free tier: 10-block spans,
-# ~4 calls per second). The public default above needs neither, and it
-# serves the log history the read needs; see RPC_URL.
-# BRIDGE_GET_LOGS_CHUNK_BLOCKS=10
-# BRIDGE_GET_LOGS_PAUSE_MS=250

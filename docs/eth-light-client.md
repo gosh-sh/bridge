@@ -141,9 +141,9 @@ sequenceDiagram
     B-->>R: attested + finalized headers, sync_aggregate
     Note over R: a new checkpoint signed by at least 342 goes into the queue on disk
   end
-  Note over R: oldest queued checkpoint, same committee period
-  R->>B: GET /eth/v1/beacon/light_client/updates?start_period=P&count=1
-  B-->>R: current sync committee (512 pubkeys)
+  Note over R: oldest queued checkpoint, P = period of its signature slot
+  R->>B: GET /eth/v1/beacon/light_client/updates?start_period=P-1&count=1
+  B-->>R: next_sync_committee of P-1, the committee that signed (512 pubkeys)
   R->>B: GET /eth/v1/beacon/genesis, GET /eth/v1/config/spec (once, cached)
   R->>P: FINALITY_UPDATE_PATH, COMMITTEE_JSON_PATH,<br/>BEACON_FORK_VERSION, BEACON_GENESIS_VALIDATORS_ROOT,<br/>BEACON_GLOAS_FORK_SLOT
   P-->>R: step_proof.bin + step_public_inputs.bin (in the background, --parallel-proofs at once)

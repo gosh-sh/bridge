@@ -50,6 +50,10 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `eth-lc-relayer` proves a checkpoint with the committee of its signature slot: a checkpoint
+  finalized in one sync period and signed in the next no longer stops the light client. Before
+  upgrading, check `<state file>.steps/`: such an entry keeps the wrong `committee_json` and fails
+  with `live committee+bits+signature do not verify` until it is replaced by hand.
 - `eth-lc-relayer daemon` records a checkpoint already on chain after a refused `submitUpdate`
   instead of resending it for ever.
 - Acki Nacki call errors carry the contract's `exit_code=N`: `deposit-relayer` waits out

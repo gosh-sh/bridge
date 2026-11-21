@@ -100,6 +100,12 @@ impl FinalityUpdate {
     pub fn signing_period(&self) -> u64 {
         self.signature_slot / SLOTS_PER_SYNC_PERIOD
     }
+
+    /// The period whose `/updates` answer carries the signing committee as
+    /// its `next_sync_committee`.
+    pub fn committee_update_period(&self) -> u64 {
+        self.signing_period().saturating_sub(1)
+    }
 }
 
 /// Opcode operands for `submitUpdate` (step circuit).
@@ -441,6 +447,17 @@ mod tests {
         let u = parse_finality_update(&at_the_edge).unwrap();
         assert_eq!(u.attested_slot / p, 0);
         assert_eq!(u.signing_period(), 1);
+    }
+
+    /// The first slot of a period has no block: the checkpoint stays on the
+    /// last slot of the old period, and the new committee signs it.
+    #[test]
+    fn a_checkpoint_on_the_period_edge_takes_the_signers_committee() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let u = parse_finality_update(&sample_json(2 * p + 64, 2 * p - 1)).unwrap();
+        assert_eq!(u.period(), 1);
+        assert_eq!(u.signing_period(), 2);
+        assert_eq!(u.committee_update_period(), 1);
     }
 
     #[test]

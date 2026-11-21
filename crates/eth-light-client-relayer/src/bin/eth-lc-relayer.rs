@@ -1254,7 +1254,7 @@ async fn prove_one(
     if update.committee_json.is_empty() {
         if let Some(url) = &beacon_url {
             let src = HttpBeaconSource::new(url.clone())?;
-            let prev = update.period().saturating_sub(1);
+            let prev = update.committee_update_period();
             update.committee_json = src.fetch_period_update(prev).await?;
         }
     }

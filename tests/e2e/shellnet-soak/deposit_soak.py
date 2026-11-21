@@ -181,7 +181,8 @@ class Soak:
         self.resume_failures = 0
         self.last_error = ""
         self.recipient_delta: Optional[int] = None
-        self.short_since: Optional[float] = None
+        # (time, finalized units): what the recipient must have by now.
+        self.finalized_history = collections.deque()
         self.halt: Optional[str] = None
 
     # --- files ---------------------------------------------------------
@@ -354,13 +355,19 @@ class Soak:
 
     def check_balance(self):
         """A voucher does not prove the mint: the balance has to follow it."""
-        missing = self.ledger["finalized_units"] - self.recipient_delta
-        if missing <= 0:
-            self.short_since = None
-            return
         now = time.monotonic()
-        self.short_since = self.short_since or now
-        if now - self.short_since >= self.cfg.shortfall_s:
+        history = self.finalized_history
+        history.append((now, self.ledger["finalized_units"]))
+        # What was finalized a full SOAK_SHORTFALL_S ago: newer deposits may
+        # still be on their way, and with a steady stream some always are.
+        due = None
+        while history and now - history[0][0] >= self.cfg.shortfall_s:
+            due = history.popleft()[1]
+        if due is None:
+            return
+        history.appendleft((now - self.cfg.shortfall_s, due))
+        missing = due - self.recipient_delta
+        if missing > 0:
             self.last_error = f"recipient is short of {missing} units"
             self.record({"status": "credit_shortfall", "missing_units": missing})
             self.halt = "credit_shortfall"
@@ -397,7 +404,8 @@ class Soak:
         self.child = child
         if self.stop.is_set():
             child.send_signal(signal.SIGTERM)
-        threading.Thread(target=lambda: stderr_tail.extend(child.stderr), daemon=True).start()
+        drain = threading.Thread(target=lambda: stderr_tail.extend(child.stderr), daemon=True)
+        drain.start()
         timer = threading.Timer(SEND_TIMEOUT_S, self.interrupt, args=(child,))
         killer = threading.Timer(SEND_TIMEOUT_S + KILL_AFTER_S, child.kill)
         for t in (timer, killer):
@@ -432,7 +440,8 @@ class Soak:
             timer.cancel()
             killer.cancel()
             self.child = None
-        if outcome.exit_code != 0 and not outcome.message:
+        drain.join(timeout=5)
+        if outcome.exit_code != 0 and not outcome.message and not drain.is_alive():
             outcome.message = "".join(stderr_tail)[-500:]
         return outcome
 

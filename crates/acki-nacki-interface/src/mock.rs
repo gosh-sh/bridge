@@ -13,8 +13,8 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
-        ExtOutMessage, ExtOutPage, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, ExtOutMessage,
+        ExtOutPage, TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -36,7 +36,7 @@ pub struct MockAckiNacki {
     children: Arc<Mutex<HashMap<TxHash, Vec<ChildTransaction>>>>,
     /// Accounts `get_account_info` knows, keyed by account id.
     accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
-    deploys: Arc<Mutex<HashMap<String, Deploy>>>,
+    deploys: Arc<Mutex<HashMap<String, TxHash>>>,
     ext_out: Arc<Mutex<HashMap<String, Vec<ExtOutMessage>>>>,
 }
 
@@ -57,7 +57,10 @@ impl MockAckiNacki {
     }
 
     pub fn set_deploy(&self, account_id: &str, tx: TxHash) {
-        self.set_deploy_at(account_id, tx, 0);
+        self.deploys
+            .lock()
+            .unwrap()
+            .insert(account_id.to_owned(), tx);
     }
 
     pub fn push_ext_out(&self, account_id: &str, dst: &str, body: &str) {
@@ -69,16 +72,7 @@ impl MockAckiNacki {
             .push(ExtOutMessage {
                 dst: dst.to_owned(),
                 body: Some(body.to_owned()),
-            });
-    }
-
-    pub fn set_deploy_at(&self, account_id: &str, tx: TxHash, now: u64) {
-        self.deploys
-            .lock()
-            .unwrap()
-            .insert(account_id.to_owned(), Deploy {
-                tx_hash: tx,
-                now,
+                created_at: 0,
             });
     }
 
@@ -258,7 +252,7 @@ impl IAckiNacki for MockAckiNacki {
             .cloned())
     }
 
-    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<Deploy>> {
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
         Ok(self
             .deploys
             .lock()

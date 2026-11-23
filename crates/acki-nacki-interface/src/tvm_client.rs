@@ -29,8 +29,8 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
-        ExtOutPage, TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, ExtOutPage,
+        TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -355,14 +355,14 @@ impl IAckiNacki for TvmAckiNacki {
         Ok(AccountInfo::from_blockchain_api(&self.gql(gql).await?))
     }
 
-    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<Deploy>> {
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
         last_deploy(|before| {
             let before = before
                 .map(|cursor| format!(", before: \"{cursor}\""))
                 .unwrap_or_default();
             self.gql(format!(
                 "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ \
-                 transactions(last: 50{before}, archive: true) {{ edges {{ node {{ id now aborted \
+                 transactions(last: 50{before}, archive: true) {{ edges {{ node {{ id aborted \
                  orig_status_name end_status_name }} }} pageInfo {{ hasPreviousPage startCursor \
                  }} }} }} }} }}",
                 address.account_id(),
@@ -387,8 +387,8 @@ impl IAckiNacki for TvmAckiNacki {
             .unwrap_or_default();
         let gql = format!(
             "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ messages(msg_type: \
-             [ExtOut], archive: true, last: 50{before}) {{ edges {{ node {{ dst body }} }} \
-             pageInfo {{ hasPreviousPage startCursor }} }} }} }} }}",
+             [ExtOut], archive: true, last: 50{before}) {{ edges {{ node {{ dst body created_at \
+             }} }} pageInfo {{ hasPreviousPage startCursor }} }} }} }} }}",
             address.account_id(),
             address.dapp_id()
         );

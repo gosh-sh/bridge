@@ -152,10 +152,8 @@ assigns it when the release is tagged.
   it counts the deposit as already finalised instead.
 - The frontend no longer refuses a deposit above 50 USDC; only the `uint64` bound and the EVM
   bridge's USDC `tvlCap` apply.
-- `deposit-relayer` and its `finalize-one` count a deposit as finalised, and send nothing, when its
-  voucher shows the payout or, once the node no longer serves the payout transactions, when the
-  bridge's archived `DepositFinalized` event names the deposit (the last 2000 bridge events are
-  read): an old paid deposit is not sent again.
+- `deposit-relayer` and `finalize-one` no longer send `finalizeDeposit` again for an old paid deposit:
+  the bridge's `DepositFinalized` event, read back to the deposit's time, shows it paid.
 - `eth-lc-relayer arbitrum-anchors` `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
   `eth_getProof` alone, and logs are read only when `depositCounter` moves: point it at the Alchemy
   node and `ARBITRUM_RPC_URL` at a public one.

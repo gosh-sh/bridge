@@ -17,8 +17,9 @@ Each direction runs whole, or in two steps, each a run of its own:
 `withdraw proof --tx-hash <AN tx> --token …` proves that burn and sends `withdrawByProof`;
 `deposit send` stops once the deposit is confirmed on the EVM chain, and
 `deposit proof --tx-hash <EVM tx> --token …` waits for its anchor, proves it and sends
-`finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet; a burn must be to the chain of `--rpc-url` (one to the EVM bridge's alternative destination chain id is refused). The proof is
-always tried; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
+`finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet; a burn must
+be to the chain of `--rpc-url` (one to the EVM bridge's alternative destination chain id is
+refused). The proof is always tried; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
 proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "already_paid"`,
 `finalize: "already_finalized"`, also when that deposit's receipt proof cannot be built. A USDC or NACKL proof the EVM bridge refuses because the owner's
 rolling 24-hour withdrawal limit for the token is full (`WithdrawalWindowFull`) exits 13 with

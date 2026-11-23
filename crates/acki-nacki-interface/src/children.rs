@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::{
     error::Result,
-    types::{ChildOutcome, ChildTransaction, Deploy, ExtOutMessage, ExtOutPage, TxHash},
+    types::{ChildOutcome, ChildTransaction, ExtOutMessage, ExtOutPage, TxHash},
 };
 
 fn tx_hash(id: &str) -> Option<TxHash> {
@@ -57,7 +57,7 @@ pub(crate) fn parse_internal_children(res: &Value) -> Vec<ChildTransaction> {
 
 /// The newest deploy on one page of an account's transactions (from `NonExist`
 /// or `Uninit` to `Active`, not aborted), and the cursor of the older page.
-fn parse_deploy_page(res: &Value) -> (Option<Deploy>, Option<String>) {
+fn parse_deploy_page(res: &Value) -> (Option<TxHash>, Option<String>) {
     let Some(page) = res.pointer("/blockchain/account/transactions") else {
         return (None, None);
     };
@@ -77,12 +77,7 @@ fn parse_deploy_page(res: &Value) -> (Option<Deploy>, Option<String>) {
             ) && n.get("end_status_name").and_then(|v| v.as_str()) == Some("Active")
                 && !n.get("aborted").and_then(|v| v.as_bool()).unwrap_or(true)
         })
-        .find_map(|n| {
-            Some(Deploy {
-                tx_hash: tx_hash(n.get("id")?.as_str()?)?,
-                now: n.get("now").and_then(Value::as_u64).unwrap_or(0),
-            })
-        });
+        .find_map(|n| tx_hash(n.get("id")?.as_str()?));
     let older = page
         .pointer("/pageInfo/hasPreviousPage")
         .and_then(Value::as_bool)
@@ -95,7 +90,7 @@ fn parse_deploy_page(res: &Value) -> (Option<Deploy>, Option<String>) {
 /// The account's latest deploy, read page by page back from its newest
 /// transaction: any number of later transactions can sit on top of it.
 /// `page` fetches the transactions before a cursor, the newest without one.
-pub(crate) async fn last_deploy<F, Fut>(mut page: F) -> Result<Option<Deploy>>
+pub(crate) async fn last_deploy<F, Fut>(mut page: F) -> Result<Option<TxHash>>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = Result<Value>>,
@@ -129,6 +124,7 @@ pub(crate) fn parse_ext_out_page(res: &Value) -> ExtOutPage {
             Some(ExtOutMessage {
                 dst: n.get("dst")?.as_str()?.to_owned(),
                 body: n.get("body").and_then(Value::as_str).map(str::to_owned),
+                created_at: n.get("created_at").and_then(Value::as_u64).unwrap_or(0),
             })
         })
         .collect();
@@ -198,6 +194,28 @@ mod tests {
         assert!(!outcome.is_success());
     }
 
+    #[test]
+    fn an_ext_out_page_reads_newest_first_and_names_the_older_page() {
+        let res = json!({ "blockchain": { "account": { "messages": {
+            "edges": [
+                { "node": { "dst": ":01", "body": "b1", "created_at": 10 } },
+                { "node": { "dst": ":02", "body": null, "created_at": 20 } },
+            ],
+            "pageInfo": { "hasPreviousPage": true, "startCursor": "c0" },
+        } } } });
+        let page = parse_ext_out_page(&res);
+        assert_eq!(page.older.as_deref(), Some("c0"));
+        assert_eq!(page.messages.len(), 2);
+        assert_eq!(page.messages[0].dst, ":02");
+        assert_eq!(page.messages[0].body, None);
+        assert_eq!(page.messages[1].created_at, 10);
+        let last = json!({ "blockchain": { "account": { "messages": {
+            "edges": [], "pageInfo": { "hasPreviousPage": false, "startCursor": null },
+        } } } });
+        assert_eq!(parse_ext_out_page(&last), ExtOutPage::default());
+        assert_eq!(parse_ext_out_page(&json!({})), ExtOutPage::default());
+    }
+
     fn tx(id: u8, orig: &str, end: &str, aborted: bool) -> Value {
         json!({ "node": { "id": hex::encode([id; 32]), "aborted": aborted,
                           "orig_status_name": orig, "end_status_name": end } })
@@ -220,7 +238,7 @@ mod tests {
         })
         .await
         .unwrap();
-        (found.map(|d| d.tx_hash), reads)
+        (found, reads)
     }
 
     #[tokio::test]

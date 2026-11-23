@@ -2725,9 +2725,9 @@ pub async fn check_destination_chain(rpc_url: &str, expected_chain_id: u64) -> C
     if chain_id != expected_chain_id {
         return Err(CliError::Preflight {
             reason: format!(
-                "--rpc-url reports chain {chain_id} but --to-chain says {expected_chain_id} — \
-                 refusing before the burn, because a withdrawal aimed at the wrong chain cannot \
-                 be undone"
+                "--rpc-url reports chain {chain_id} but the withdrawal is to chain \
+                 {expected_chain_id} — refusing before anything is sent, because a withdrawal \
+                 aimed at the wrong chain cannot be undone"
             ),
             source: None,
         });

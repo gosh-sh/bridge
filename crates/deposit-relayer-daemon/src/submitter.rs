@@ -704,7 +704,7 @@ async fn voucher_verdict<C: IAckiNacki>(
     let Some(deploy) = client.get_last_deploy(&address).await? else {
         return Ok(Verdict::Unknown);
     };
-    let confirms = client.get_internal_children(&deploy.tx_hash).await?;
+    let confirms = client.get_internal_children(&deploy).await?;
     match confirms.first().and_then(|c| c.outcome.clone()) {
         None => Ok(Verdict::Unknown),
         Some(c) if c.is_success() => payout(client, &c.tx_hash, voucher).await,
@@ -760,11 +760,17 @@ async fn finalized_by_event<C: IAckiNacki>(
                 && event_u256(&v["contractAddr"])
                     == Some(U256::from_be_slice(event.source_contract.as_slice()))
                 && event_u256(&v["chainId"]) == Some(U256::from(event.source_chain_id))
-                && event_u256(&v["anAccount"])
-                    == Some(U256::from_be_slice(event.an_account.as_slice()))
             {
                 return Ok(true);
             }
+        }
+        let deposited = u64::try_from(event.timestamp).unwrap_or(0);
+        if page
+            .messages
+            .last()
+            .is_some_and(|m| m.created_at != 0 && m.created_at < deposited)
+        {
+            break;
         }
         match page.older {
             Some(cursor) if before.as_ref() != Some(&cursor) => before = Some(cursor),
@@ -1356,6 +1362,10 @@ mod tests {
             deposit_id: 0x124,
             ..finalized.clone()
         };
+        let from_the_witness = DepositEvent {
+            an_account: B256::ZERO,
+            ..finalized.clone()
+        };
         let client = Arc::new(MockAckiNacki::new());
         let sub = voucher_submitter(client.clone(), true);
         for ev in [&finalized, &other] {
@@ -1389,6 +1399,10 @@ mod tests {
         assert!(
             !sub.is_finalized(&other).await.unwrap(),
             "another deposit's event"
+        );
+        assert!(
+            sub.is_finalized(&from_the_witness).await.unwrap(),
+            "finalize-one, which has no recipient from the log"
         );
     }
 

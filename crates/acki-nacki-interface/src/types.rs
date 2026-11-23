@@ -12,18 +12,13 @@ pub type TxHash = [u8; 32];
 pub struct ExtOutMessage {
     pub dst: String,
     pub body: Option<String>,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtOutPage {
     pub messages: Vec<ExtOutMessage>,
     pub older: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Deploy {
-    pub tx_hash: TxHash,
-    pub now: u64,
 }
 
 /// ABI-encoded contract call routed through tvm_client 3.0 (`dapp_id` on the

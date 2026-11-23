@@ -689,12 +689,28 @@ async fn voucher_verdict<C: IAckiNacki>(
     let Some(deploy) = client.get_last_deploy(&address).await? else {
         return Ok(Verdict::Unknown);
     };
-    let confirms = client.get_internal_children(&deploy).await?;
-    match confirms.first().and_then(|c| c.outcome.clone()) {
-        None => Ok(Verdict::Unknown),
-        Some(c) if c.is_success() => payout(client, &c.tx_hash, voucher).await,
-        Some(c) => Ok(Verdict::Aborted(c)),
-    }
+    let confirms = client.get_internal_children(&deploy.tx_hash).await?;
+    let verdict = match confirms.first().and_then(|c| c.outcome.clone()) {
+        None => Verdict::Unknown,
+        Some(c) if c.is_success() => payout(client, &c.tx_hash, voucher).await?,
+        Some(c) => Verdict::Aborted(c),
+    };
+    Ok(match verdict {
+        Verdict::Unknown if settled_long_ago(deploy.now, unix_now()) => Verdict::Paid,
+        v => v,
+    })
+}
+
+const VOUCHER_SETTLED_AFTER_S: u64 = 6 * 3600;
+
+fn settled_long_ago(deployed_at: u64, now: u64) -> bool {
+    deployed_at != 0 && now.saturating_sub(deployed_at) > VOUCHER_SETTLED_AFTER_S
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn aborted_confirm(c: ChildOutcome, voucher: &str) -> SubmitOutcome {
@@ -1256,6 +1272,39 @@ mod tests {
             sub.submit(&ev, &witness(&ev)).await.unwrap(),
             SubmitOutcome::AlreadyFinalized
         ));
+    }
+
+    #[tokio::test]
+    async fn an_old_voucher_whose_payout_left_the_index_is_finalized_and_not_sent_again() {
+        use acki_nacki_interface::{AccountInfo, MockAckiNacki};
+
+        let voucher = "ffd5c4e7770b73e67ad8a44c828c0d2ee2e642cbbff53096ffd0c68ed0f9a80e";
+        let ev = shellnet_deposit();
+        let client = Arc::new(MockAckiNacki::new());
+        let sub = voucher_submitter(client.clone(), true);
+        client.set_account(voucher, AccountInfo {
+            active: true,
+            code_hash: None,
+            data: None,
+        });
+        let deploy: TxHash = [0x55; 32];
+        client.set_deploy_at(voucher, deploy, unix_now() - VOUCHER_SETTLED_AFTER_S / 2);
+        assert!(
+            !sub.is_finalized(&ev).await.unwrap(),
+            "a recent voucher whose payout is not visible yet is looked at again"
+        );
+        client.set_deploy_at(voucher, deploy, unix_now() - 2 * VOUCHER_SETTLED_AFTER_S);
+        assert!(
+            sub.is_finalized(&ev).await.unwrap(),
+            "an old voucher still standing was paid: a released one is gone"
+        );
+    }
+
+    #[test]
+    fn a_deploy_of_unknown_time_is_never_settled_by_age() {
+        assert!(!settled_long_ago(0, u64::MAX));
+        assert!(!settled_long_ago(100, 100 + VOUCHER_SETTLED_AFTER_S));
+        assert!(settled_long_ago(100, 101 + VOUCHER_SETTLED_AFTER_S));
     }
 
     #[tokio::test]

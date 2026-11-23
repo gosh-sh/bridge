@@ -126,7 +126,8 @@ assigns it when the release is tagged.
 - `relayer daemon-withdraw`, `daemon-bridge` and `daemon-withdraw-live` retry a proof refused with
   `WithdrawalWindowFull` or `NacklNotMinter` later and park one refused with `NacklMinterGone`.
 - `ackinacki-bridge withdraw send` burns and captures the event; `withdraw proof --tx-hash <AN tx>
-  --token …` proves any burn and sends `withdrawByProof` (JSON `submit` is `null` after `send`).
+  --token …` proves any burn to the chain of `--rpc-url` and sends `withdrawByProof` (JSON `submit` is
+  `null` after `send`); a burn to the EVM bridge's alternative destination chain id is refused.
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
   amount and recipient from the receipt.
@@ -151,8 +152,10 @@ assigns it when the release is tagged.
   it counts the deposit as already finalised instead.
 - The frontend no longer refuses a deposit above 50 USDC; only the `uint64` bound and the EVM
   bridge's USDC `tvlCap` apply.
-- `deposit-relayer finalize-one` reports a deposit whose voucher already exists as finalised and
-  sends nothing.
+- `deposit-relayer` and its `finalize-one` count a deposit as finalised, and send nothing, when its
+  voucher shows the payout, or when the voucher was deployed more than 6 hours ago and still
+  stands (a voucher the bridge could not pay deletes itself): a node that no longer serves the
+  payout transactions does not make the relayer send an old deposit again.
 - `eth-lc-relayer arbitrum-anchors` `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
   `eth_getProof` alone, and logs are read only when `depositCounter` moves: point it at the Alchemy
   node and `ARBITRUM_RPC_URL` at a public one.

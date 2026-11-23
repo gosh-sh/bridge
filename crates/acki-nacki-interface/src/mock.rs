@@ -13,7 +13,7 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
         TransactionReceipt, TransactionStatus, TxHash,
     },
 };
@@ -36,7 +36,7 @@ pub struct MockAckiNacki {
     children: Arc<Mutex<HashMap<TxHash, Vec<ChildTransaction>>>>,
     /// Accounts `get_account_info` knows, keyed by account id.
     accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
-    deploys: Arc<Mutex<HashMap<String, TxHash>>>,
+    deploys: Arc<Mutex<HashMap<String, Deploy>>>,
 }
 
 impl MockAckiNacki {
@@ -55,10 +55,17 @@ impl MockAckiNacki {
     }
 
     pub fn set_deploy(&self, account_id: &str, tx: TxHash) {
+        self.set_deploy_at(account_id, tx, 0);
+    }
+
+    pub fn set_deploy_at(&self, account_id: &str, tx: TxHash, now: u64) {
         self.deploys
             .lock()
             .unwrap()
-            .insert(account_id.to_owned(), tx);
+            .insert(account_id.to_owned(), Deploy {
+                tx_hash: tx,
+                now,
+            });
     }
 
     /// Hash every `call_contract` returns.
@@ -237,7 +244,7 @@ impl IAckiNacki for MockAckiNacki {
             .cloned())
     }
 
-    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<Deploy>> {
         Ok(self
             .deploys
             .lock()

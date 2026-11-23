@@ -27,7 +27,7 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
         TransactionReceipt, TransactionStatus, TxHash,
     },
 };
@@ -353,14 +353,14 @@ impl IAckiNacki for TvmAckiNacki {
         Ok(AccountInfo::from_blockchain_api(&self.gql(gql).await?))
     }
 
-    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<Deploy>> {
         last_deploy(|before| {
             let before = before
                 .map(|cursor| format!(", before: \"{cursor}\""))
                 .unwrap_or_default();
             self.gql(format!(
                 "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ \
-                 transactions(last: 50{before}, archive: true) {{ edges {{ node {{ id aborted \
+                 transactions(last: 50{before}, archive: true) {{ edges {{ node {{ id now aborted \
                  orig_status_name end_status_name }} }} pageInfo {{ hasPreviousPage startCursor \
                  }} }} }} }} }}",
                 address.account_id(),

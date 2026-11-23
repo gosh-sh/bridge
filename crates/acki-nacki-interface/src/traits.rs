@@ -6,7 +6,7 @@ use crate::{
     address::ExtendedAddress,
     error::{AckiNackiError, Result},
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
         TransactionReceipt, TransactionStatus, TxHash,
     },
 };
@@ -62,7 +62,7 @@ pub trait IAckiNacki: Send + Sync {
         Err(AckiNackiError::NotImplemented)
     }
 
-    async fn get_last_deploy(&self, _address: &ExtendedAddress) -> Result<Option<TxHash>> {
+    async fn get_last_deploy(&self, _address: &ExtendedAddress) -> Result<Option<Deploy>> {
         Err(AckiNackiError::NotImplemented)
     }
 }

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::{
     error::Result,
-    types::{ChildOutcome, ChildTransaction, TxHash},
+    types::{ChildOutcome, ChildTransaction, Deploy, TxHash},
 };
 
 fn tx_hash(id: &str) -> Option<TxHash> {
@@ -57,7 +57,7 @@ pub(crate) fn parse_internal_children(res: &Value) -> Vec<ChildTransaction> {
 
 /// The newest deploy on one page of an account's transactions (from `NonExist`
 /// or `Uninit` to `Active`, not aborted), and the cursor of the older page.
-fn parse_deploy_page(res: &Value) -> (Option<TxHash>, Option<String>) {
+fn parse_deploy_page(res: &Value) -> (Option<Deploy>, Option<String>) {
     let Some(page) = res.pointer("/blockchain/account/transactions") else {
         return (None, None);
     };
@@ -77,7 +77,12 @@ fn parse_deploy_page(res: &Value) -> (Option<TxHash>, Option<String>) {
             ) && n.get("end_status_name").and_then(|v| v.as_str()) == Some("Active")
                 && !n.get("aborted").and_then(|v| v.as_bool()).unwrap_or(true)
         })
-        .find_map(|n| tx_hash(n.get("id")?.as_str()?));
+        .find_map(|n| {
+            Some(Deploy {
+                tx_hash: tx_hash(n.get("id")?.as_str()?)?,
+                now: n.get("now").and_then(Value::as_u64).unwrap_or(0),
+            })
+        });
     let older = page
         .pointer("/pageInfo/hasPreviousPage")
         .and_then(Value::as_bool)
@@ -90,7 +95,7 @@ fn parse_deploy_page(res: &Value) -> (Option<TxHash>, Option<String>) {
 /// The account's latest deploy, read page by page back from its newest
 /// transaction: any number of later transactions can sit on top of it.
 /// `page` fetches the transactions before a cursor, the newest without one.
-pub(crate) async fn last_deploy<F, Fut>(mut page: F) -> Result<Option<TxHash>>
+pub(crate) async fn last_deploy<F, Fut>(mut page: F) -> Result<Option<Deploy>>
 where
     F: FnMut(Option<String>) -> Fut,
     Fut: Future<Output = Result<Value>>,
@@ -184,7 +189,7 @@ mod tests {
         })
         .await
         .unwrap();
-        (found, reads)
+        (found.map(|d| d.tx_hash), reads)
     }
 
     #[tokio::test]

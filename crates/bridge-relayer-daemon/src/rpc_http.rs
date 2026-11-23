@@ -18,8 +18,7 @@ pub const ENV_RPC_REQUEST_TIMEOUT_SECS: &str = "BRIDGE_RPC_REQUEST_TIMEOUT_SECS"
 
 /// Bound on one JSON-RPC request to one endpoint, from connecting to the
 /// last byte of the response; past it the request moves on to the next
-/// endpoint ([`crate::eth_rpc`]). The relayer's slowest call, one
-/// `eth_getLogs` span of the startup scan, takes seconds.
+/// endpoint ([`crate::eth_rpc`]).
 pub const DEFAULT_RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// [`ENV_RPC_REQUEST_TIMEOUT_SECS`] when it is set and non-empty, else

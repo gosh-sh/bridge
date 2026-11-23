@@ -74,6 +74,10 @@ assigns it when the release is tagged.
 - `ackinacki-bridge deposit --relayer-grace-s` is gone: the CLI builds the receipt proof once the block
   is anchored; a deposit finalized by then (by a relayer, say) is not sent again and ends with exit 0
   and `finalize: "already_finalized"`.
+- `ackinacki-bridge withdraw`, `relayer daemon-live` and `relayer daemon-withdraw-live` no longer take
+  `--bridge-deploy-block`, `--get-logs-chunk-blocks` and `--get-logs-pause-ms`: remove them from start
+  commands. These commands ignore `BRIDGE_DEPLOY_BLOCK`, `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and
+  `BRIDGE_GET_LOGS_PAUSE_MS`; the deposit relayer and `eth-lc-relayer` still read `BRIDGE_DEPLOY_BLOCK`.
 
 ### New / Improvements
 
@@ -155,9 +159,14 @@ assigns it when the release is tagged.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.
+- `ackinacki-bridge withdraw`, `relayer daemon-live` and `relayer daemon-withdraw-live` no longer read
+  `LayerAnchorAppended` logs: their EVM requests per withdrawal and per start do not grow with the
+  bridge's age.
 
 ### Fixes
 
+- The `bridge-cli` image ships `BridgeWithdrawalAggregatorVerifier_calldata.bin`: `withdraw` from the
+  image no longer stops in preflight.
 - `eth-lc-relayer` proves a checkpoint with the committee of its signature slot: a checkpoint
   finalized in one sync period and signed in the next no longer stops the light client. Before
   upgrading, check `<state file>.steps/`: such an entry keeps the wrong `committee_json` and fails

@@ -254,7 +254,7 @@ read anywhere in `src/`. It is retained for a future burn-proof flow (`:106-110`
 ```solidity
 struct HistoryWindow {
     uint256[128] data;      // layer-hash values, circular
-    uint64[128]  heights;   // ABI-stable, always zero; seq_nos are in LayerAnchorAppended
+    uint64[128]  heights;   // ABI-stable, always zero
     uint16 dataLen;         // saturating fill level, capped at 128
     uint16 writeCursor;     // next write index
     uint64 lastHeight;      // height of the most recent append
@@ -263,8 +263,8 @@ struct HistoryWindow {
 
 One window per layer `L ∈ [1, 10]`, in `_layerWindows`. `heights` is ABI-stable but
 **not written** on `verifyBlock` — `lastHeight` is the monotonicity guard, and
-per-slot seq_nos are in `LayerAnchorAppended`. The relayer paints `heights` from
-those logs on resurrect. This is the **authoritative** AN-state store;
+per-slot seq_nos are only in `LayerAnchorAppended`. The relayer and the CLI do not read them: they
+find a proof's anchor in the window by its hash, as `withdrawByProof` does. This is the **authoritative** AN-state store;
 the flat `storedNumLayers` / `storedLayerHashes[10]` cache was removed in storage v2.0 along with the
 per-block `storedPrevMaxLevelLayerHash` SSTORE (`:846-852`, ≈ 32 k gas/call saved).
 

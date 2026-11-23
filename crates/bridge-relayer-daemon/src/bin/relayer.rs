@@ -42,12 +42,12 @@ use bridge_relayer_daemon::{
     require_executable, rpc_request_timeout_from_env, run_withdraw_e2e_once, BackoffConfig,
     BkSetUpdateSubmitOutcome, BkUpdateProofsSource, BkUpdateSource, BlockSource, BridgeClient,
     Circuit4ShplonkPipeline, DryRunOutcome, EmptyBkUpdateSource, EthBridgeClient,
-    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, LogScanConfig,
-    PartnerWithdrawalProof, ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError,
-    RelayerMetrics, StatePaths, SubprocessAggregator, SubprocessAggregatorConfig,
-    SubprocessWithdrawalProver, SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge,
-    WithdrawE2EConfig, WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver,
-    WithdrawalPublicInputs, GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
+    FixturesBlockSource, InProcessCircuit4SnarkProver, LiveBlockSource, PartnerWithdrawalProof,
+    ProverProofsBlockSource, Relayer, RelayerConfig, RelayerError, RelayerMetrics, StatePaths,
+    SubprocessAggregator, SubprocessAggregatorConfig, SubprocessWithdrawalProver,
+    SubprocessWithdrawalProverConfig, TickOutcome, WithdrawBridge, WithdrawE2EConfig,
+    WithdrawRevertKind, WithdrawSubmitOutcome, WithdrawalProver, WithdrawalPublicInputs,
+    WITHDRAW_RECEIPT_TIMEOUT,
 };
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
@@ -461,19 +461,6 @@ enum Cmd {
         /// drift check.
         #[arg(long, env = "BRIDGE_ANCHOR_LEVEL", default_value_t = 1)]
         anchor_level: u8,
-        /// Block `AckiNackiBridge` was deployed in: where the startup
-        /// `LayerAnchorAppended` scan (backwards from the head) stops when a
-        /// window is not covered yet. Unset = genesis, warned about.
-        #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
-        bridge_deploy_block: Option<u64>,
-        /// Inclusive block span of one `eth_getLogs` call in that scan. Set
-        /// it to the RPC's cap (Alchemy free tier: 10); 0 means the default.
-        #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS", default_value_t = GET_LOGS_CHUNK_BLOCKS)]
-        get_logs_chunk_blocks: u64,
-        /// Milliseconds between two `eth_getLogs` calls of that scan, for a
-        /// rate-limited RPC (Alchemy free tier: ~250).
-        #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
-        get_logs_pause_ms: u64,
     },
     /// Live withdrawal payer: once a minute, every `WithdrawalInitiated` on
     /// the Acki Nacki bridge that names this EVM bridge is proven (Circuit 4)
@@ -522,14 +509,6 @@ enum Cmd {
         /// Defaults to `<params_dir>/pk_cache`.
         #[arg(long, env = "BRIDGE_PK_CACHE_DIR")]
         pk_cache_dir: Option<PathBuf>,
-        /// Where the `LayerAnchorAppended` scan of the bridge's windows stops,
-        /// as for `daemon-live`.
-        #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
-        bridge_deploy_block: Option<u64>,
-        #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS", default_value_t = GET_LOGS_CHUNK_BLOCKS)]
-        get_logs_chunk_blocks: u64,
-        #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS", default_value_t = 0)]
-        get_logs_pause_ms: u64,
         /// The Acki Nacki bridge account, `dapp_id::account_id` in hex,
         /// whose `WithdrawalInitiated` events are paid out on this bridge.
         #[arg(
@@ -987,15 +966,7 @@ async fn main() -> anyhow::Result<()> {
             anchor_level,
             gql_failover_endpoints,
             metrics_addr,
-            bridge_deploy_block,
-            get_logs_chunk_blocks,
-            get_logs_pause_ms,
         } => {
-            let scan = LogScanConfig {
-                deploy_block: bridge_deploy_block.unwrap_or(0),
-                chunk_blocks: get_logs_chunk_blocks,
-                pause: Duration::from_millis(get_logs_pause_ms),
-            };
             let backoff = BackoffConfig {
                 initial: Duration::from_secs(backoff_initial_secs),
                 max: Duration::from_secs(backoff_max_secs),
@@ -1057,7 +1028,6 @@ async fn main() -> anyhow::Result<()> {
                 backoff,
                 aggregation,
                 anchor_mode,
-                scan,
             )
             .await
             .map_err(|e| {
@@ -1082,18 +1052,10 @@ async fn main() -> anyhow::Result<()> {
             aggregate_proof_bin,
             verifiers_dir,
             pk_cache_dir,
-            bridge_deploy_block,
-            get_logs_chunk_blocks,
-            get_logs_pause_ms,
             an_token_bridge,
         } => {
             let an_token_bridge = parse_an_address(&an_token_bridge)
                 .map_err(|e| anyhow::anyhow!("--an-token-bridge: {e}"))?;
-            let scan = LogScanConfig {
-                deploy_block: bridge_deploy_block.unwrap_or(0),
-                chunk_blocks: get_logs_chunk_blocks,
-                pause: Duration::from_millis(get_logs_pause_ms),
-            };
             let pk_cache_dir = pk_cache_dir.unwrap_or_else(|| params_dir.join("pk_cache"));
             let aggregation = C12AggregationCfg {
                 aggregate_proof_bin: require_executable(&aggregate_proof_bin, "aggregate-proof")?,
@@ -1114,7 +1076,6 @@ async fn main() -> anyhow::Result<()> {
                 withdraw_state_dir,
                 work_dir,
                 aggregation,
-                scan,
                 an_token_bridge,
             )
             .await
@@ -2517,7 +2478,6 @@ async fn run_daemon_live(
     backoff: BackoffConfig,
     aggregation: C12AggregationCfg,
     anchor_mode: bridge_prover_lib::AnchorMode,
-    scan: LogScanConfig,
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
     use bridge_prover_lib::{
@@ -2581,7 +2541,7 @@ async fn run_daemon_live(
     );
     let bridge_probe = {
         let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan).with_sender(sender)
+        EthBridgeClient::new(bridge_address, provider).with_sender(sender)
     };
     let chain_full = bridge_probe
         .read_full_state()
@@ -2833,7 +2793,6 @@ async fn run_daemon_withdraw_live(
     state_dir: PathBuf,
     work_dir: PathBuf,
     aggregation: C12AggregationCfg,
-    scan: LogScanConfig,
     an_token_bridge: (String, String),
 ) -> anyhow::Result<()> {
     use bridge_gql_fetcher::gql_client::{create_client_with_failover, GqlClientConfig};
@@ -2854,7 +2813,7 @@ async fn run_daemon_withdraw_live(
     // lost transaction does not stop the claimer.
     let bridge = {
         let (provider, sender) = wallet_provider(&rpc_url, &private_key).await?;
-        EthBridgeClient::with_scan_config(bridge_address, provider, scan)
+        EthBridgeClient::new(bridge_address, provider)
             .with_sender(sender)
             .with_withdraw_receipt_timeout(WITHDRAW_RECEIPT_TIMEOUT)
     };

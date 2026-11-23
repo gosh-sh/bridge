@@ -119,8 +119,8 @@ sourced by its entrypoint; the other services get theirs as container environmen
 | File | Template | Holds |
 |---|---|---|
 | `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the three metrics ports |
-| `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, the deployed BK-set commitment |
-| `$BRIDGE_OPT/env/withdraw-live.env` | `env/withdraw-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address and deploy block, its own EOA and **private key** (`WITHDRAW_ADDRESS`, `WITHDRAW_PRIVATE_KEY`), the withdrawal `EXPECTED_*` pins, `PARAMS_MANIFEST_SHA256` |
+| `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, the deployed BK-set commitment |
+| `$BRIDGE_OPT/env/withdraw-live.env` | `env/withdraw-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address, its own EOA and **private key** (`WITHDRAW_ADDRESS`, `WITHDRAW_PRIVATE_KEY`), the withdrawal `EXPECTED_*` pins, `PARAMS_MANIFEST_SHA256` |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
 | `$BRIDGE_OPT/env/eth-lc-relayer.env` | `env/eth-lc-relayer.env.example` | `BEACON_URL`, `ETH_RPC_URL`, `AN_GRAPHQL_URL`, `AN_LIGHT_CLIENT`, `AN_SENDER`, `AN_USDC_BRIDGE` |
 | `$BRIDGE_OPT/env/arbitrum-anchors.env` | `env/arbitrum-anchors.env.example` | `PARENT_RPC_URL`, `ARBITRUM_RPC_URL`, `ARBITRUM_PROOF_RPC_URL`, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE` |

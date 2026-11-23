@@ -82,7 +82,7 @@ Set `PRIVATE_KEY` to the key of the kit's `RELAYER_ADDRESS`:
 the deploying account becomes the owner, and preflight requires the owner to be
 `RELAYER_ADDRESS`. Its `daemon-live.env` then needs:
 
-* `BRIDGE_ADDRESS` and `BRIDGE_DEPLOY_BLOCK`.
+* `BRIDGE_ADDRESS`.
 * `RPC_URL`, and `RPC_FAILOVER_URLS` if set: Arbitrum Sepolia endpoints, and
   `EXPECTED_EVM_CHAIN_ID=421614`. Preflight checks the chain id of every endpoint that
   answers.

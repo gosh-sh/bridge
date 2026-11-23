@@ -42,9 +42,9 @@ pub use aggregator::{
 pub use an_chain_guard::{ChainBehindGuard, BEHIND_FOR_TO_STOP, POLLS_BEHIND_TO_STOP};
 pub use bridge::{
     classify_withdraw_revert, is_unconfirmed_submit_failure, BkSetUpdateSubmitOutcome,
-    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, LogScanConfig,
-    MockBridgeClient, SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
-    GET_LOGS_CHUNK_BLOCKS, WITHDRAW_RECEIPT_TIMEOUT,
+    BridgeClient, BridgeOnChainState, DryRunOutcome, EthBridgeClient, MockBridgeClient,
+    SubmitOutcome, WithdrawBridge, WithdrawRevertKind, WithdrawSubmitOutcome,
+    WITHDRAW_RECEIPT_TIMEOUT,
 };
 pub use bundle_stride::{check_stride_for_rotations, stride_for_submitting, BundleStrideError};
 pub use daemon::{

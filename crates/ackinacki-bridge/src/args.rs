@@ -15,10 +15,9 @@
 //! - `--to-chain` — bridge has two sides, `--chain-id` would be ambiguous once
 //!   the source side is selectable too.
 
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr};
 
 use alloy_primitives::Address;
-use bridge_relayer_daemon::LogScanConfig;
 use clap::{Parser, Subcommand};
 use rust_decimal::Decimal;
 
@@ -328,24 +327,6 @@ pub struct ProveFlags {
     #[arg(long, env = "BRIDGE_ADDRESS", required = true)]
     pub bridge_address: Option<Address>,
 
-    /// Block the bridge in `--bridge-address` was deployed in: where the
-    /// `LayerAnchorAppended` scan that rebuilds the window heights
-    /// (preflight, then stage 4b) stops when a window is not covered yet.
-    /// Changes together with the address. Unset = genesis, which only a
-    /// failed scan walks back to.
-    #[arg(long, env = "BRIDGE_DEPLOY_BLOCK")]
-    pub bridge_deploy_block: Option<u64>,
-
-    /// Block span of one `eth_getLogs` call in that scan: the RPC's cap
-    /// (Alchemy free tier: 10). Unset or 0 = 2000.
-    #[arg(long, env = "BRIDGE_GET_LOGS_CHUNK_BLOCKS")]
-    pub get_logs_chunk_blocks: Option<u64>,
-
-    /// Milliseconds between two `eth_getLogs` calls of that scan, for a
-    /// rate-limited RPC (Alchemy free tier: ~250). Unset = 0.
-    #[arg(long, env = "BRIDGE_GET_LOGS_PAUSE_MS")]
-    pub get_logs_pause_ms: Option<u64>,
-
     /// Signer key for the EVM `withdrawByProof` tx. Distinct from
     /// `--from-keys` (which signs on AN). Typically the operator's ETH
     /// gas wallet; the recipient of the tokens is `--to`, not this signer.
@@ -413,9 +394,6 @@ pub struct ProveArgs {
     pub i_know_the_wait: bool,
     pub rpc_url: String,
     pub bridge_address: Address,
-    pub bridge_deploy_block: Option<u64>,
-    pub get_logs_chunk_blocks: Option<u64>,
-    pub get_logs_pause_ms: Option<u64>,
     pub eth_private_key: Option<String>,
     pub aggregator_dir: Option<PathBuf>,
     pub verifiers_dir: Option<PathBuf>,
@@ -446,9 +424,6 @@ impl ProveFlags {
             i_know_the_wait: self.i_know_the_wait,
             rpc_url: present(self.rpc_url, "rpc-url")?,
             bridge_address: present(self.bridge_address, "bridge-address")?,
-            bridge_deploy_block: self.bridge_deploy_block,
-            get_logs_chunk_blocks: self.get_logs_chunk_blocks,
-            get_logs_pause_ms: self.get_logs_pause_ms,
             eth_private_key: self.eth_private_key,
             aggregator_dir: self.aggregator_dir,
             verifiers_dir: self.verifiers_dir,
@@ -922,18 +897,6 @@ pub struct SubmitPlumbing {
 }
 
 impl ProveArgs {
-    /// The `LayerAnchorAppended` scan settings for
-    /// `EthBridgeClient::with_scan_config`: the three flags (or their
-    /// environment); unset means the library default, and so does a span
-    /// of 0.
-    pub fn log_scan_config(&self) -> LogScanConfig {
-        LogScanConfig {
-            deploy_block: self.bridge_deploy_block.unwrap_or(0),
-            chunk_blocks: self.get_logs_chunk_blocks.unwrap_or(0),
-            pause: Duration::from_millis(self.get_logs_pause_ms.unwrap_or(0)),
-        }
-    }
-
     /// Resolve the submit-only plumbing, or refuse listing everything that
     /// is missing. `--dry-run` never calls this — that is the whole point:
     /// a preflight must not require an EVM signing key it will never use.

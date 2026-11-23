@@ -336,12 +336,7 @@ pub async fn run_proof(args: WithdrawProofArgs) -> CliResult<WithdrawSuccess> {
         true,
     )
     .await?;
-    crate::preflight::check_window_scan(
-        &prove.rpc_url,
-        prove.bridge_address,
-        prove.log_scan_config(),
-    )
-    .await?;
+    crate::preflight::check_window_read(&prove.rpc_url, prove.bridge_address).await?;
     let artifacts = crate::preflight::check_prover_artifacts(
         &plumbing,
         &prove.snark_dir,
@@ -691,16 +686,12 @@ pub async fn run(args: WithdrawArgs, part: Part, skip_prompt: bool) -> CliResult
     .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
     info!(bridge = %args.prove.bridge_address, "bridge deploy ok");
 
-    // The window-heights read stage 4b performs after the burn, performed
-    // now: a wrong BRIDGE_DEPLOY_BLOCK, an eth_getLogs span the RPC rejects
-    // or an RPC without log history refuses here, before any money moves.
-    crate::preflight::check_window_scan(
-        &args.prove.rpc_url,
-        args.prove.bridge_address,
-        args.prove.log_scan_config(),
-    )
-    .await
-    .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
+    // The read of the bridge's windows stage 4b performs after the burn,
+    // performed now: an RPC that cannot serve it refuses here, before any
+    // money moves.
+    crate::preflight::check_window_read(&args.prove.rpc_url, args.prove.bridge_address)
+        .await
+        .map_err(|e| refusal_before_a_recorded_burn(e, &state_dir, &prior))?;
 
     // Signer + prover artifacts — real runs only (a dry-run has no
     // plumbing, never submits and never proves).
@@ -1249,18 +1240,13 @@ async fn prove_and_submit(
         target_covering_seq_no,
         "waiting for on-chain coverage",
     );
-    let ro_provider =
-        ProviderBuilder::new().connect_http(c.prove.rpc_url.parse().map_err(|e| {
-            CliError::EthSubmitFailed {
-                reason: format!("--rpc-url is not a valid URL: {e}"),
-                source: None,
-            }
-        })?);
-    let ro_bridge_for_wait = EthBridgeClient::with_scan_config(
-        c.prove.bridge_address,
-        ro_provider,
-        c.prove.log_scan_config(),
-    );
+    let ro_provider = ProviderBuilder::new().connect_http(c.prove.rpc_url.parse().map_err(|e| {
+        CliError::EthSubmitFailed {
+            reason: format!("--rpc-url is not a valid URL: {e}"),
+            source: None,
+        }
+    })?);
+    let ro_bridge_for_wait = EthBridgeClient::new(c.prove.bridge_address, ro_provider);
     let bridge_state = wait_for_coverage(
         &ro_bridge_for_wait,
         c.anchor_mode,

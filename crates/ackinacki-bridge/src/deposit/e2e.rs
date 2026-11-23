@@ -9,7 +9,6 @@
 //! ```text
 //! BRIDGE_CONFIG=config/bridge_config.shellnet \
 //! BRIDGE_ADDRESS=0x<new-bridge-address> \
-//! BRIDGE_DEPLOY_BLOCK=<new-bridge-deployment-block> \
 //! E2E_SEPOLIA_KEY=<hex private key> \
 //! E2E_AN_TO=<dapp_id>::<account_id> \
 //! E2E_AMOUNT=0.01 \

@@ -6,7 +6,8 @@
 //!
 //! Per-layer rolling window of width `W = HISTORY_PROOF_WINDOW_SIZE`:
 //!   * `data[W]`       — most recent layer-root hashes (circular buffer)
-//!   * `heights[W]`    — block heights matching each slot (parallel to `data`)
+//!   * `heights[W]`    — block heights of the slots this mirror appended (parallel
+//!     to `data`); zero on slots rebuilt from the contract, which stores none
 //!   * `data_len`      — number of valid entries (saturates at W)
 //!   * `write_cursor`  — next slot to overwrite (always `mod W`)
 //!   * `last_height`   — height of the most recently appended hash
@@ -114,35 +115,10 @@ impl HistoryWindow {
         })
     }
 
-    /// Lookup the slot for a given block height (linear scan; O(W)).
-    /// Returns the chronological position [0..data_len) if found.
-    pub fn slot_for_height(&self, height: u64) -> Option<usize> {
-        self.iter_chronological()
-            .position(|(_, h)| h == height)
-    }
-
-    /// Paint `heights` from a chronological list (oldest first), using the
-    /// same ring layout as [`append`]. The contract no longer stores
-    /// per-slot heights; the relayer reconstructs them from
-    /// `LayerAnchorAppended` logs on resurrect.
-    pub fn apply_chronological_heights(&mut self, oldest_first: &[u64]) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            oldest_first.len() == self.data_len,
-            "apply_chronological_heights: got {} heights, window data_len={}",
-            oldest_first.len(),
-            self.data_len,
-        );
-        self.heights.fill(0);
-        let w = self.data.len();
-        let start = if self.data_len < w {
-            0
-        } else {
-            self.write_cursor
-        };
-        for (i, h) in oldest_first.iter().enumerate() {
-            self.heights[(start + i) % w] = *h;
-        }
-        Ok(())
+    /// Whether the window holds `hash` (linear scan; O(W)): the test
+    /// `AckiNackiBridge._isKnownLayerAnchor` applies to a proof's root.
+    pub fn contains_hash(&self, hash: &[u8; 32]) -> bool {
+        self.iter_chronological().any(|(h, _)| h == *hash)
     }
 }
 
@@ -387,13 +363,6 @@ impl BridgeState {
         out
     }
 
-    /// Given an event observed at `event_height` and layer `L`, return the
-    /// chronological slot index within layer L whose `heights[slot]` matches.
-    /// Returns `None` if not found (slot rolled out of the window).
-    pub fn slot_for_event_height(&self, layer: u8, event_height: u64) -> Option<usize> {
-        self.window(layer).slot_for_height(event_height)
-    }
-
     pub fn highest_layer_latest_hash(&self) -> Option<[u8; 32]> {
         for win in self.layer_windows.iter().rev() {
             if win.data_len > 0 {
@@ -432,9 +401,8 @@ impl BridgeState {
     /// some other party has already advanced (e.g. a shared test bridge that
     /// a co-tester has been driving). The four scalar fields plus the
     /// `MAX_LAYERS` per-layer `HistoryWindow`s are copied; on-chain
-    /// `lastHeight` is seq_no, and per-slot `heights[]` are painted by the
-    /// caller from `LayerAnchorAppended` logs (also seq_no — Solidity never
-    /// stored AN chain-side `height`). The returned state has
+    /// `lastHeight` is seq_no, and per-slot `heights[]` are zero: the contract
+    /// stores none, and anchors are found by hash. The returned state has
     /// `initialized = true` iff the contract has recorded at least one
     /// block (`last_seen_block_seq_no > 0`).
     ///
@@ -608,46 +576,15 @@ mod tests {
     }
 
     #[test]
-    fn slot_for_event_height_lookup() {
+    fn a_window_finds_its_anchors_by_hash() {
         let mut s = BridgeState::new(8);
         s.append_layer(1, [1u8; 32], 8);
         s.append_layer(1, [2u8; 32], 16);
-        s.append_layer(1, [3u8; 32], 24);
-        assert_eq!(s.slot_for_event_height(1, 16), Some(1));
-        assert_eq!(s.slot_for_event_height(1, 99), None);
-    }
-
-    #[test]
-    fn apply_chronological_heights_matches_append_ring() {
-        let mut exact_w = HistoryWindow::new(4);
-        exact_w.data_len = 4;
-        exact_w.write_cursor = 0;
-        exact_w
-            .apply_chronological_heights(&[10, 20, 30, 40])
-            .unwrap();
-        let mut fresh = HistoryWindow::new(4);
-        for (i, h) in [10u64, 20, 30, 40].into_iter().enumerate() {
-            let mut hash = [0u8; 32];
-            hash[0] = i as u8;
-            fresh.append(hash, h);
-        }
-        assert_eq!(fresh.heights, exact_w.heights);
-        assert_eq!(fresh.write_cursor, exact_w.write_cursor);
-
-        let mut wrapped = HistoryWindow::new(4);
-        wrapped.data_len = 4;
-        wrapped.write_cursor = 2;
-        wrapped
-            .apply_chronological_heights(&[30, 40, 50, 60])
-            .unwrap();
-        let mut six = HistoryWindow::new(4);
-        for (i, h) in [10u64, 20, 30, 40, 50, 60].into_iter().enumerate() {
-            let mut hash = [0u8; 32];
-            hash[0] = i as u8;
-            six.append(hash, h);
-        }
-        assert_eq!(six.heights, wrapped.heights);
-        assert_eq!(six.write_cursor, wrapped.write_cursor);
+        assert!(s.window(1).contains_hash(&[2u8; 32]));
+        assert!(!s.window(1).contains_hash(&[9u8; 32]));
+        assert!(!s.window(2).contains_hash(&[2u8; 32]));
+        // An unused slot is zero, and zero is not an anchor.
+        assert!(!s.window(1).contains_hash(&[0u8; 32]));
     }
 
     #[test]
@@ -797,9 +734,8 @@ mod tests {
             s.append_layer(1, [10 + h as u8; 32], h);
         }
         assert_eq!(s.num_active_layers(), 4);
-        assert_eq!(
-            s.slot_for_event_height(1, 1),
-            None,
+        assert!(
+            !s.window(1).contains_hash(&[1u8; 32]),
             "window W=4 wrapped the first L1 hash out"
         );
         assert_eq!(s.prev_max_level_layer_hash_for(3), [3u8; 32]);

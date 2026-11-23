@@ -1,9 +1,14 @@
 //! Parsing of blockchain-API responses into [`ChildTransaction`]s, kept free of
 //! the `tvm-sdk` feature so it is testable in the default build.
 
+use std::future::Future;
+
 use serde_json::Value;
 
-use crate::types::{ChildOutcome, ChildTransaction, TxHash};
+use crate::{
+    error::Result,
+    types::{ChildOutcome, ChildTransaction, TxHash},
+};
 
 fn tx_hash(id: &str) -> Option<TxHash> {
     let bytes = hex::decode(id.trim_start_matches("0x")).ok()?;
@@ -50,10 +55,20 @@ pub(crate) fn parse_internal_children(res: &Value) -> Vec<ChildTransaction> {
         .collect()
 }
 
-pub(crate) fn parse_last_deploy(res: &Value) -> Option<TxHash> {
-    res.pointer("/blockchain/account/transactions/edges")?
-        .as_array()?
+/// The newest deploy on one page of an account's transactions (from `NonExist`
+/// or `Uninit` to `Active`, not aborted), and the cursor of the older page.
+fn parse_deploy_page(res: &Value) -> (Option<TxHash>, Option<String>) {
+    let Some(page) = res.pointer("/blockchain/account/transactions") else {
+        return (None, None);
+    };
+    let edges = page
+        .get("edges")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let deploy = edges
         .iter()
+        .rev()
         .filter_map(|e| e.get("node"))
         .filter(|n| {
             matches!(
@@ -62,16 +77,34 @@ pub(crate) fn parse_last_deploy(res: &Value) -> Option<TxHash> {
             ) && n.get("end_status_name").and_then(|v| v.as_str()) == Some("Active")
                 && !n.get("aborted").and_then(|v| v.as_bool()).unwrap_or(true)
         })
-        .filter_map(|n| tx_hash(n.get("id")?.as_str()?))
-        .last()
+        .find_map(|n| tx_hash(n.get("id")?.as_str()?));
+    let older = page
+        .pointer("/pageInfo/hasPreviousPage")
+        .and_then(Value::as_bool)
+        .filter(|more| *more)
+        .and_then(|_| page.pointer("/pageInfo/startCursor")?.as_str())
+        .map(str::to_owned);
+    (deploy, older)
 }
 
-pub(crate) fn parse_previous_page(res: &Value) -> Option<String> {
-    let page = res.pointer("/blockchain/account/transactions/pageInfo")?;
-    if page.get("hasPreviousPage")?.as_bool()? {
-        Some(page.get("startCursor")?.as_str()?.to_owned())
-    } else {
-        None
+/// The account's latest deploy, read page by page back from its newest
+/// transaction: any number of later transactions can sit on top of it.
+/// `page` fetches the transactions before a cursor, the newest without one.
+pub(crate) async fn last_deploy<F, Fut>(mut page: F) -> Result<Option<TxHash>>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let mut before = None;
+    loop {
+        let (deploy, older) = parse_deploy_page(&page(before.clone()).await?);
+        if deploy.is_some() {
+            return Ok(deploy);
+        }
+        match older {
+            Some(cursor) if before.as_ref() != Some(&cursor) => before = Some(cursor),
+            _ => return Ok(None),
+        }
     }
 }
 
@@ -88,45 +121,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    fn page(nodes: Vec<Value>, previous: Option<&str>) -> Value {
-        json!({"blockchain": {"account": {"transactions": {
-            "edges": nodes.into_iter().map(|n| json!({"node": n})).collect::<Vec<_>>(),
-            "pageInfo": {"hasPreviousPage": previous.is_some(), "startCursor": previous},
-        }}}})
-    }
-
-    fn node(id: &str, orig: &str, end: &str, aborted: bool) -> Value {
-        json!({"id": id, "orig_status_name": orig, "end_status_name": end, "aborted": aborted})
-    }
-
-    #[test]
-    fn a_page_without_a_deploy_names_the_page_before_it() {
-        let res = page(
-            vec![
-                node(&"aa".repeat(32), "Active", "Active", false),
-                node(&"bb".repeat(32), "Active", "Active", true),
-            ],
-            Some("cursor-1"),
-        );
-        assert_eq!(parse_last_deploy(&res), None);
-        assert_eq!(parse_previous_page(&res).as_deref(), Some("cursor-1"));
-    }
-
-    #[test]
-    fn the_newest_deploy_of_a_page_wins_and_the_first_page_has_no_previous() {
-        let res = page(
-            vec![
-                node(&"01".repeat(32), "NonExist", "Active", false),
-                node(&"02".repeat(32), "Active", "NonExist", false),
-                node(&"03".repeat(32), "NonExist", "Active", false),
-                node(&"04".repeat(32), "Active", "Active", false),
-            ],
-            None,
-        );
-        assert_eq!(parse_last_deploy(&res), Some([3u8; 32]));
-        assert_eq!(parse_previous_page(&res), None);
-    }
 
     /// Shapes as shellnet returned them on 2026-10-12 for a `finalizeDeposit`
     /// (bridge tx `4b722bbe…`) and its voucher deploy: null nested under
@@ -166,5 +160,93 @@ mod tests {
         let outcome = parse_internal_children(&parent)[0].outcome.clone().unwrap();
         assert_eq!(outcome.exit_code, Some(51));
         assert!(!outcome.is_success());
+    }
+
+    fn tx(id: u8, orig: &str, end: &str, aborted: bool) -> Value {
+        json!({ "node": { "id": hex::encode([id; 32]), "aborted": aborted,
+                          "orig_status_name": orig, "end_status_name": end } })
+    }
+
+    fn page(edges: Vec<Value>, older: Option<&str>) -> Value {
+        json!({ "blockchain": { "account": { "transactions": {
+            "edges": edges,
+            "pageInfo": { "hasPreviousPage": older.is_some(), "startCursor": older.unwrap_or("c") },
+        } } } })
+    }
+
+    async fn walk(pages: Vec<(Option<&str>, Value)>) -> (Option<TxHash>, usize) {
+        let mut reads = 0;
+        let found = last_deploy(|before| {
+            let (expected, answer) = pages[reads].clone();
+            reads += 1;
+            assert_eq!(before.as_deref(), expected);
+            async move { Ok(answer) }
+        })
+        .await
+        .unwrap();
+        (found, reads)
+    }
+
+    #[tokio::test]
+    async fn a_deploy_behind_a_full_page_of_later_transactions_is_found() {
+        let later = (0..50).map(|_| tx(9, "Active", "Active", true)).collect();
+        let (found, reads) = walk(vec![
+            (None, page(later, Some("c1"))),
+            (
+                Some("c1"),
+                page(vec![tx(1, "Uninit", "Active", false)], None),
+            ),
+        ])
+        .await;
+        assert_eq!(found, Some([1; 32]));
+        assert_eq!(reads, 2);
+    }
+
+    #[tokio::test]
+    async fn the_newest_deploy_wins_and_older_pages_are_not_read() {
+        let (found, reads) = walk(vec![(
+            None,
+            page(
+                vec![
+                    tx(1, "NonExist", "Active", false),
+                    tx(2, "Active", "NonExist", false),
+                    tx(3, "NonExist", "Active", false),
+                    tx(4, "Active", "Active", false),
+                ],
+                Some("c1"),
+            ),
+        )])
+        .await;
+        assert_eq!(found, Some([3; 32]));
+        assert_eq!(reads, 1);
+    }
+
+    #[tokio::test]
+    async fn an_aborted_deploy_is_not_a_deploy_and_the_history_ends() {
+        let (found, reads) = walk(vec![(
+            None,
+            page(vec![tx(1, "NonExist", "Active", true)], None),
+        )])
+        .await;
+        assert_eq!(found, None);
+        assert_eq!(reads, 1);
+    }
+
+    #[tokio::test]
+    async fn a_cursor_that_does_not_move_ends_the_walk() {
+        let (found, reads) = walk(vec![
+            (None, page(vec![], Some("c1"))),
+            (Some("c1"), page(vec![], Some("c1"))),
+        ])
+        .await;
+        assert_eq!(found, None);
+        assert_eq!(reads, 2);
+    }
+
+    #[tokio::test]
+    async fn an_answer_without_the_account_finds_nothing() {
+        let (found, reads) = walk(vec![(None, json!({ "blockchain": { "account": null } }))]).await;
+        assert_eq!(found, None);
+        assert_eq!(reads, 1);
     }
 }

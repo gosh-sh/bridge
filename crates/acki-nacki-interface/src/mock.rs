@@ -55,7 +55,10 @@ impl MockAckiNacki {
     }
 
     pub fn set_deploy(&self, account_id: &str, tx: TxHash) {
-        self.deploys.lock().unwrap().insert(account_id.to_owned(), tx);
+        self.deploys
+            .lock()
+            .unwrap()
+            .insert(account_id.to_owned(), tx);
     }
 
     /// Hash every `call_contract` returns.

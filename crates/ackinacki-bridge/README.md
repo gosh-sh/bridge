@@ -879,16 +879,17 @@ deterministic and reused.
 `withdrawByProof` reverted on Sepolia. One possible cause is
 `WithdrawTreasuryShortfall` — the treasury drained
 below your amount between Step 3's check and Step 5. Top it up as in
-Step 3, re-run with `--allow-retry`; the proof regenerates
-deterministically against the topped-up state and the resume path
-does NOT re-fire the AN burn (this prevents double-spend on the AN
-side).
+Step 3, then re-run the same `withdraw proof` command as it is, or a
+`withdraw` with `--allow-retry`; the proof regenerates
+deterministically against the topped-up state and neither re-fires
+the AN burn (this prevents double-spend on the AN side).
 
 The refusal names the bridge's error and its arguments first — for example
 `NullifierAlreadyUsed(nullifier: 0x2f01…)` or
 `WithdrawTreasuryShortfall(requested: 1000000, available: 20)` — and for
 `NullifierAlreadyUsed`, `BridgePaused`, `WithdrawTreasuryShortfall`,
-`UnknownAnchor`, `WithdrawalProofRejected` and `WithdrawalWindowFull` says what to do. The node's
+`UnknownAnchor`, `WithdrawalProofRejected`, `WithdrawalWindowFull`, `NacklNotMinter` and
+`NacklMinterGone` says what to do. The node's
 own text follows on a `node said:` line.
 
 Exit 13 also comes before any proof, when the captured

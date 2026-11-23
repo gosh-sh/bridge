@@ -74,7 +74,7 @@ Every term this document uses is defined here, and no other word is used for the
 | Symbol | Meaning | Source |
 |---|---|---|
 | `U` | USDC held by the bridge, `usdc.balanceOf(bridge)` | |
-| `A` | aUSDC held by the bridge, `aUsdcBalance()` | `contracts/ethereum/src/AckiNackiBridge.sol:1947` |
+| `A` | aUSDC held by the bridge, `aUsdcBalance()` | `contracts/ethereum/src/AckiNackiBridge.sol:2483` |
 | `B` | `treasuryBalance`, the principal owed to eccUSDC holders | `:108` |
 | `S` | `suppliedPrincipal`, the principal booked as supplied to AAVE | `:133` |
 | `L` | liquid principal: `min(U, B − S)` — the part of `B` that sits on the bridge as USDC | new |

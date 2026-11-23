@@ -134,13 +134,17 @@ impl BalanceCheck {
 ///    pubkey.
 /// 6. USDCBridge live dapp_id resolved via GraphQL (canonical account default
 ///    overridden by `--usdc-bridge-account`).
-/// 6b. While the burn is still to be sent: USDCBridge `isPaused()` is false,
-///     and `getTotalBridged(3)` has headroom for the amount (`burned` is
-///     not above `minted`, and `amount` fits in `minted - burned`). Both
-///     are skipped once the burn is on the wire.
+/// 6b. While the burn is still to be sent: USDCBridge `isPaused()` is false
+///     (231), and the token is registered for `--to-chain`.
 /// 6c. While the burn is still to be sent: `getEvmBridge(--to-chain)` is
 ///     `--bridge-address`. The burn names that bridge and only it pays the
 ///     proof; an unset one would have the burn refunded with 239.
+/// 6d. While the burn is still to be sent, in `initiateWithdrawal`'s order:
+///     the token has a daily withdrawal limit (247), `getTotalBridged` has
+///     headroom for a USDC amount (233), the chain's outstanding covers it
+///     (236) or a NACKL lock stays within `maxTvl` (235), and the amount fits
+///     the rolling 24-hour window (247). All of 6b–6d are skipped once the
+///     burn is on the wire.
 /// 7. Multisig ECC[3] balance ≥ amount (preflight, not guarantee — the chain
 ///    has the final word between check and send). Skipped, and only skipped,
 ///    when `balance_check` says the burn is already on the wire: see
@@ -367,14 +371,6 @@ pub async fn run_for_token(
                 source: None,
             });
         }
-        token_config = call_get_token_withdrawal_limits(
-            &context,
-            &usdc_bridge_legacy,
-            &bridge_boc,
-            to.chain_id,
-            token_id,
-        )
-        .await?;
         if call_is_paused(&context, &usdc_bridge_legacy, &bridge_boc).await? {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -386,6 +382,14 @@ pub async fn run_for_token(
                 source: None,
             });
         }
+        token_config = call_get_token_withdrawal_limits(
+            &context,
+            &usdc_bridge_legacy,
+            &bridge_boc,
+            to.chain_id,
+            token_id,
+        )
+        .await?;
         // 6c. The EVM bridge the burn will be bound to.
         let bound =
             call_get_evm_bridge(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id).await?;
@@ -1509,17 +1513,17 @@ impl ProverArtifacts {
 /// Called right before the proof, after the burn, the anchor wait at stage
 /// 4b (up to 120 minutes) and any wait for the prove lock: a binary
 /// replaced meanwhile was never probed, and the slot it names would be noted
-/// against the old one's digest. Exit 12; a re-run with `--allow-retry`
-/// checks the new one in its own preflight and resumes from the recorded
-/// burn.
+/// against the old one's digest. Exit 12; a re-run of the same
+/// `withdraw proof`, or of `withdraw` with `--allow-retry`, checks the new
+/// one in its own preflight without burning again.
 pub fn recheck_aggregate_proof(before: &str, bin: &Path) -> CliResult<()> {
     match bridge_prover_lib::keys::sha256_of(bin) {
         Ok(now) if now == before => Ok(()),
         Ok(now) => Err(CliError::ProofFailed {
             reason: format!(
-                "{} is not the aggregate-proof preflight checked: sha256 {}…, was {}…. Re-run \
-                 with --allow-retry: its preflight checks this one, and it resumes from the \
-                 recorded burn.",
+                "{} is not the aggregate-proof preflight checked: sha256 {}…, was {}…. Re-run the \
+                 same `withdraw proof` command as it is, or a `withdraw` with --allow-retry: its \
+                 preflight checks this one, and the burn is not repeated.",
                 bin.display(),
                 &now[..8.min(now.len())],
                 &before[..8.min(before.len())],
@@ -1727,9 +1731,9 @@ pub fn recheck_proving_key(before: Option<&PkFingerprint>) -> CliResult<()> {
                  was streamed before the burn and nothing has re-verified it since, so a \
                  replacement is vouched for by nothing — and a proof built from it fails on \
                  submit, after the anchor wait.\n\x20 The AN burn is already on the wire. Restore \
-                 the key this run started with, or clear the cache and re-run with --allow-retry, \
-                 which regenerates and resumes from the recorded burn instead of making a second \
-                 one:\n\x20   cargo run --release --manifest-path \
+                 the key this run started with, or clear the cache and re-run the same `withdraw \
+                 proof` command as it is, or a `withdraw` with --allow-retry, which regenerates \
+                 the key and does not burn again:\n\x20   cargo run --release --manifest-path \
                  ../bridge-prover-libraries/Cargo.toml -p bridge-prover-lib --bin \
                  probe_event_keys -- --params-dir '{}' --repair",
                 before.path.display(),
@@ -1748,9 +1752,9 @@ pub fn recheck_proving_key(before: Option<&PkFingerprint>) -> CliResult<()> {
         Err(e) => Err(CliError::ProofFailed {
             reason: format!(
                 "{} cannot be read back ({e}): preflight verified it before the burn.\n\x20 The \
-                 AN burn is already on the wire. Re-run with --allow-retry — a missing key reads \
-                 as a cold cache, so stage 5 regenerates and resumes from the recorded burn \
-                 rather than making a second one.",
+                 AN burn is already on the wire. Re-run the same `withdraw proof` command as it \
+                 is, or a `withdraw` with --allow-retry — a missing key reads as a cold cache, so \
+                 stage 5 regenerates it and the burn is not repeated.",
                 before.path.display(),
             ),
             source: None,
@@ -3418,6 +3422,103 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn preflight_names_the_unbound_evm_bridge_before_the_missing_daily_limit() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_bridge_artifact(
+                crate::test_chain::USDC_BRIDGE_TVC,
+                crate::burn::USDC_BRIDGE_ABI_JSON,
+                false,
+                0,
+                0,
+            )
+            .await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            alloy::primitives::Address::repeat_byte(2),
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("the burn would be bound to another EVM bridge");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("getEvmBridge"), "{msg}");
+        assert!(!msg.contains("247"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn preflight_names_the_pause_before_an_unregistered_token() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_bridge_artifact(
+                crate::test_chain::USDC_BRIDGE_TVC,
+                crate::burn::USDC_BRIDGE_ABI_JSON,
+                true,
+                0,
+                0,
+            )
+            .await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+
+        let err = run_for_token(
+            &from,
+            &keys,
+            &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+            bridge_relayer_daemon::bridge::NACKL_TOKEN_ID,
+        )
+        .await
+        .expect_err("a paused bridge refuses with 231 first");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("231"), "{msg}");
+        assert!(!msg.contains("not registered"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn preflight_passes_when_amount_equals_bridged_headroom() {
         let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
         let (usdc_bridge_account_id, usdc_bridge_boc) =
@@ -4414,6 +4515,10 @@ pub(crate) mod tests {
             msg.contains("--allow-retry"),
             "must give a way out that does not re-burn: {msg}"
         );
+        assert!(
+            msg.contains("the same `withdraw proof` command as it is"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -4454,6 +4559,10 @@ pub(crate) mod tests {
         assert!(
             msg.contains("--allow-retry"),
             "the burn already happened; the way forward must not re-burn: {msg}"
+        );
+        assert!(
+            msg.contains("the same `withdraw proof` command as it is"),
+            "got: {msg}"
         );
     }
 
@@ -5107,6 +5216,10 @@ pub(crate) mod tests {
         let err = recheck_aggregate_proof(&before, &bin).expect_err("replaced");
         assert_eq!(err.exit_code().as_i32(), 12, "after the burn: {err}");
         assert!(format!("{err}").contains("--allow-retry"), "{err}");
+        assert!(
+            format!("{err}").contains("the same `withdraw proof` command as it is"),
+            "{err}"
+        );
         std::fs::remove_file(&bin).unwrap();
         let err = recheck_aggregate_proof(&before, &bin).expect_err("gone");
         assert_eq!(err.exit_code().as_i32(), 12, "{err}");

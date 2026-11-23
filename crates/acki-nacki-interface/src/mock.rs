@@ -14,7 +14,7 @@ use crate::{
     traits::{IAckiNacki, TransactionSender},
     types::{
         AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
-        TransactionReceipt, TransactionStatus, TxHash,
+        ExtOutMessage, ExtOutPage, TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -37,6 +37,7 @@ pub struct MockAckiNacki {
     /// Accounts `get_account_info` knows, keyed by account id.
     accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
     deploys: Arc<Mutex<HashMap<String, Deploy>>>,
+    ext_out: Arc<Mutex<HashMap<String, Vec<ExtOutMessage>>>>,
 }
 
 impl MockAckiNacki {
@@ -51,11 +52,24 @@ impl MockAckiNacki {
             children: Arc::new(Mutex::new(HashMap::new())),
             accounts: Arc::new(Mutex::new(HashMap::new())),
             deploys: Arc::new(Mutex::new(HashMap::new())),
+            ext_out: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn set_deploy(&self, account_id: &str, tx: TxHash) {
         self.set_deploy_at(account_id, tx, 0);
+    }
+
+    pub fn push_ext_out(&self, account_id: &str, dst: &str, body: &str) {
+        self.ext_out
+            .lock()
+            .unwrap()
+            .entry(account_id.to_owned())
+            .or_default()
+            .push(ExtOutMessage {
+                dst: dst.to_owned(),
+                body: Some(body.to_owned()),
+            });
     }
 
     pub fn set_deploy_at(&self, account_id: &str, tx: TxHash, now: u64) {
@@ -251,6 +265,23 @@ impl IAckiNacki for MockAckiNacki {
             .unwrap()
             .get(address.account_id())
             .copied())
+    }
+
+    async fn get_ext_out_page(
+        &self,
+        address: &ExtendedAddress,
+        _before: Option<String>,
+    ) -> Result<ExtOutPage> {
+        Ok(ExtOutPage {
+            messages: self
+                .ext_out
+                .lock()
+                .unwrap()
+                .get(address.account_id())
+                .cloned()
+                .unwrap_or_default(),
+            older: None,
+        })
     }
 }
 

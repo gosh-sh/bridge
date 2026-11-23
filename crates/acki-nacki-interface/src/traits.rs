@@ -7,7 +7,7 @@ use crate::{
     error::{AckiNackiError, Result},
     types::{
         AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, Deploy,
-        TransactionReceipt, TransactionStatus, TxHash,
+        ExtOutPage, TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -63,6 +63,14 @@ pub trait IAckiNacki: Send + Sync {
     }
 
     async fn get_last_deploy(&self, _address: &ExtendedAddress) -> Result<Option<Deploy>> {
+        Err(AckiNackiError::NotImplemented)
+    }
+
+    async fn get_ext_out_page(
+        &self,
+        _address: &ExtendedAddress,
+        _before: Option<String>,
+    ) -> Result<ExtOutPage> {
         Err(AckiNackiError::NotImplemented)
     }
 }

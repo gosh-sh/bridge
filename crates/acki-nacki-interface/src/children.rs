@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::{
     error::Result,
-    types::{ChildOutcome, ChildTransaction, Deploy, TxHash},
+    types::{ChildOutcome, ChildTransaction, Deploy, ExtOutMessage, ExtOutPage, TxHash},
 };
 
 fn tx_hash(id: &str) -> Option<TxHash> {
@@ -110,6 +110,37 @@ where
             Some(cursor) if before.as_ref() != Some(&cursor) => before = Some(cursor),
             _ => return Ok(None),
         }
+    }
+}
+
+pub(crate) fn parse_ext_out_page(res: &Value) -> ExtOutPage {
+    let Some(page) = res.pointer("/blockchain/account/messages") else {
+        return ExtOutPage::default();
+    };
+    let messages = page
+        .get("edges")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .filter_map(|e| e.get("node"))
+        .filter_map(|n| {
+            Some(ExtOutMessage {
+                dst: n.get("dst")?.as_str()?.to_owned(),
+                body: n.get("body").and_then(Value::as_str).map(str::to_owned),
+            })
+        })
+        .collect();
+    let older = page
+        .pointer("/pageInfo/hasPreviousPage")
+        .and_then(Value::as_bool)
+        .filter(|more| *more)
+        .and_then(|_| page.pointer("/pageInfo/startCursor")?.as_str())
+        .map(str::to_owned);
+    ExtOutPage {
+        messages,
+        older,
     }
 }
 

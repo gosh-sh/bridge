@@ -38,7 +38,10 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio::sync::OnceCell;
 use tracing::{debug, warn};
-use tvm_client::{abi::Abi, ClientContext};
+use tvm_client::{
+    abi::{decode_message_body, Abi, ParamsOfDecodeMessageBody},
+    ClientContext,
+};
 
 use crate::{
     error::RelayerError,
@@ -258,7 +261,7 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
     fn with_voucher_code(mut self, code: &str) -> Self {
         self.voucher_check = Some(VoucherCheck {
             ctx: voucher::offline_context().unwrap(),
-            bridge_abi: Abi::Json("{}".to_string()),
+            bridge_abi: crate::an_config::bridge_abi(),
             code: OnceCell::new_with(Some(code.to_string())),
         });
         self
@@ -310,7 +313,19 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
         let verdict = voucher_verdict(self.client.as_ref(), &account.to_string())
             .await
             .map_err(RelayerError::from)?;
-        Ok(verdict == Verdict::Paid)
+        Ok(match verdict {
+            Verdict::Paid => true,
+            Verdict::Unknown => {
+                finalized_by_event(
+                    self.client.as_ref(),
+                    check,
+                    &self.config.token_bridge,
+                    event,
+                )
+                .await?
+            },
+            _ => false,
+        })
     }
 
     /// Submit a witness directly, without a [`DepositEvent`] to compare it
@@ -690,27 +705,73 @@ async fn voucher_verdict<C: IAckiNacki>(
         return Ok(Verdict::Unknown);
     };
     let confirms = client.get_internal_children(&deploy.tx_hash).await?;
-    let verdict = match confirms.first().and_then(|c| c.outcome.clone()) {
-        None => Verdict::Unknown,
-        Some(c) if c.is_success() => payout(client, &c.tx_hash, voucher).await?,
-        Some(c) => Verdict::Aborted(c),
-    };
-    Ok(match verdict {
-        Verdict::Unknown if settled_long_ago(deploy.now, unix_now()) => Verdict::Paid,
-        v => v,
-    })
+    match confirms.first().and_then(|c| c.outcome.clone()) {
+        None => Ok(Verdict::Unknown),
+        Some(c) if c.is_success() => payout(client, &c.tx_hash, voucher).await,
+        Some(c) => Ok(Verdict::Aborted(c)),
+    }
 }
 
-const VOUCHER_SETTLED_AFTER_S: u64 = 6 * 3600;
+const DEPOSIT_FINALIZED_DST: &str =
+    ":000000000000000000000000000000000000000000000000000000000000026b";
+const EVENT_PAGES: usize = 40;
 
-fn settled_long_ago(deployed_at: u64, now: u64) -> bool {
-    deployed_at != 0 && now.saturating_sub(deployed_at) > VOUCHER_SETTLED_AFTER_S
+fn event_u256(v: &serde_json::Value) -> Option<U256> {
+    let s = v.as_str()?;
+    match s.strip_prefix("0x") {
+        Some(hex) => U256::from_str_radix(hex, 16).ok(),
+        None => U256::from_str_radix(s, 10).ok(),
+    }
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+async fn finalized_by_event<C: IAckiNacki>(
+    client: &C,
+    check: &VoucherCheck,
+    bridge: &str,
+    event: &DepositEvent,
+) -> Result<bool, RelayerError> {
+    let address = ExtendedAddress::parse(bridge).map_err(RelayerError::from)?;
+    let mut before = None;
+    for _ in 0..EVENT_PAGES {
+        let page = client
+            .get_ext_out_page(&address, before.clone())
+            .await
+            .map_err(RelayerError::from)?;
+        for m in page
+            .messages
+            .iter()
+            .filter(|m| m.dst == DEPOSIT_FINALIZED_DST)
+        {
+            let Some(body) = &m.body else { continue };
+            let Ok(decoded) = decode_message_body(check.ctx.clone(), ParamsOfDecodeMessageBody {
+                abi: check.bridge_abi.clone(),
+                body: body.clone(),
+                is_internal: false,
+                allow_partial: false,
+                function_name: None,
+                data_layout: None,
+            }) else {
+                continue;
+            };
+            let Some(v) = decoded.value.filter(|_| decoded.name == "DepositFinalized") else {
+                continue;
+            };
+            if event_u256(&v["depositId"]) == Some(U256::from(event.deposit_id))
+                && event_u256(&v["contractAddr"])
+                    == Some(U256::from_be_slice(event.source_contract.as_slice()))
+                && event_u256(&v["chainId"]) == Some(U256::from(event.source_chain_id))
+                && event_u256(&v["anAccount"])
+                    == Some(U256::from_be_slice(event.an_account.as_slice()))
+            {
+                return Ok(true);
+            }
+        }
+        match page.older {
+            Some(cursor) if before.as_ref() != Some(&cursor) => before = Some(cursor),
+            _ => break,
+        }
+    }
+    Ok(false)
 }
 
 fn aborted_confirm(c: ChildOutcome, voucher: &str) -> SubmitOutcome {
@@ -1274,37 +1335,61 @@ mod tests {
         ));
     }
 
+    const SHELLNET_DEPOSIT_FINALIZED: &str = "te6ccgEBAgEAuQAByB7zV3cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIwAAAAAAAAAAAAAAAK9BO8S/61W13THdSNetdexHohreAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZu7gAAAAAAAAAAAAAAAAAAA+hHXa3iL8jI4MkSObOJ5FESxJE/eClWuG0DV9resg4Jcw==";
+
     #[tokio::test]
-    async fn an_old_voucher_whose_payout_left_the_index_is_finalized_and_not_sent_again() {
+    async fn a_voucher_whose_payout_left_the_index_is_finalized_by_the_bridge_event() {
         use acki_nacki_interface::{AccountInfo, MockAckiNacki};
 
-        let voucher = "ffd5c4e7770b73e67ad8a44c828c0d2ee2e642cbbff53096ffd0c68ed0f9a80e";
-        let ev = shellnet_deposit();
+        let finalized = DepositEvent {
+            deposit_id: 0x123,
+            source_contract: "0xaf413bc4bfeb55b5dd31dd48d7ad75ec47a21ade"
+                .parse()
+                .unwrap(),
+            source_chain_id: 0x66eee,
+            an_account: "0x475dade22fc8c8e0c91239b389e45112c4913f782956b86d0357dadeb20e0973"
+                .parse()
+                .unwrap(),
+            ..event(0x123)
+        };
+        let other = DepositEvent {
+            deposit_id: 0x124,
+            ..finalized.clone()
+        };
         let client = Arc::new(MockAckiNacki::new());
         let sub = voucher_submitter(client.clone(), true);
-        client.set_account(voucher, AccountInfo {
-            active: true,
-            code_hash: None,
-            data: None,
-        });
-        let deploy: TxHash = [0x55; 32];
-        client.set_deploy_at(voucher, deploy, unix_now() - VOUCHER_SETTLED_AFTER_S / 2);
+        for ev in [&finalized, &other] {
+            let check = sub.voucher_check.as_ref().unwrap();
+            let code = sub.voucher_code(check).await.unwrap();
+            let id = DepositIdentity {
+                deposit_id: U256::from(ev.deposit_id),
+                contract_addr: U256::from_be_slice(ev.source_contract.as_slice()),
+                chain_id: U256::from(ev.source_chain_id),
+            };
+            let voucher = voucher::voucher_account_id(&check.ctx, &code, &id).unwrap();
+            client.set_account(&voucher.to_string(), AccountInfo {
+                active: true,
+                code_hash: None,
+                data: None,
+            });
+        }
         assert!(
-            !sub.is_finalized(&ev).await.unwrap(),
-            "a recent voucher whose payout is not visible yet is looked at again"
+            !sub.is_finalized(&finalized).await.unwrap(),
+            "no payout and no event"
         );
-        client.set_deploy_at(voucher, deploy, unix_now() - 2 * VOUCHER_SETTLED_AFTER_S);
+        client.push_ext_out(
+            &"1a".repeat(32),
+            DEPOSIT_FINALIZED_DST,
+            SHELLNET_DEPOSIT_FINALIZED,
+        );
         assert!(
-            sub.is_finalized(&ev).await.unwrap(),
-            "an old voucher still standing was paid: a released one is gone"
+            sub.is_finalized(&finalized).await.unwrap(),
+            "its DepositFinalized"
         );
-    }
-
-    #[test]
-    fn a_deploy_of_unknown_time_is_never_settled_by_age() {
-        assert!(!settled_long_ago(0, u64::MAX));
-        assert!(!settled_long_ago(100, 100 + VOUCHER_SETTLED_AFTER_S));
-        assert!(settled_long_ago(100, 101 + VOUCHER_SETTLED_AFTER_S));
+        assert!(
+            !sub.is_finalized(&other).await.unwrap(),
+            "another deposit's event"
+        );
     }
 
     #[tokio::test]

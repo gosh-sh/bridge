@@ -27,7 +27,7 @@ pub use tvm_client::{
 };
 pub use types::{
     AccountInfo, AckiNackiTransaction, ChildOutcome, ChildTransaction, ContractCallRequest, Deploy,
-    TransactionReceipt, TransactionStatus,
+    ExtOutMessage, ExtOutPage, TransactionReceipt, TransactionStatus,
 };
 
 #[cfg(test)]

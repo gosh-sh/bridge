@@ -8,6 +8,18 @@ use crate::address::ExtendedAddress;
 /// Transaction hash type (32 bytes)
 pub type TxHash = [u8; 32];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtOutMessage {
+    pub dst: String,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtOutPage {
+    pub messages: Vec<ExtOutMessage>,
+    pub older: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deploy {
     pub tx_hash: TxHash,

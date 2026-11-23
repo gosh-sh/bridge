@@ -3804,8 +3804,12 @@ mod tests {
         let mut w = World::healthy();
         let op = w.finalizing_operation();
         let mut rec = Store::open(w.state.path()).unwrap().load(&op).unwrap();
-        let unconfirmed =
-            CliError::deposit(ExitCode::CreditUnconfirmed, Stage::Credit, Some(&op), "later");
+        let unconfirmed = CliError::deposit(
+            ExitCode::CreditUnconfirmed,
+            Stage::Credit,
+            Some(&op),
+            "later",
+        );
         assert!(!forget_a_refused_send(&mut rec, &unconfirmed));
         assert!(rec.finalize.as_ref().unwrap().accepted);
     }

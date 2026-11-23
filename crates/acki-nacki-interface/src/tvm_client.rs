@@ -360,9 +360,10 @@ impl IAckiNacki for TvmAckiNacki {
         let mut before = String::new();
         loop {
             let gql = format!(
-                "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ transactions(last: \
-                 50, {before}archive: true) {{ edges {{ node {{ id aborted orig_status_name \
-                 end_status_name }} }} pageInfo {{ hasPreviousPage startCursor }} }} }} }} }}",
+                "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ \
+                 transactions(last: 50, {before}archive: true) {{ edges {{ node {{ id aborted \
+                 orig_status_name end_status_name }} }} pageInfo {{ hasPreviousPage startCursor \
+                 }} }} }} }} }}",
                 address.account_id(),
                 address.dapp_id()
             );

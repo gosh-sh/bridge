@@ -26,7 +26,7 @@ DEBUGGER = os.environ.get("TVM_DEBUGGER", "tvm-debugger")
 ADDRESS = "0:" + "9c" * 32
 BRIDGE = "0:" + "1a" * 32
 SLOTS_PER_PERIOD = 8192
-KEPT = 7
+KEPT = 2
 GLOAS = 11_296_768
 ERR_BAD_PUBLIC_INPUTS = 240
 ERR_WRONG_COMMITTEE = 242
@@ -165,7 +165,7 @@ class LightClientCommittees(unittest.TestCase):
             "publicInputs": step_inputs(slot_in(attested_period), commitment, finalized_slot),
         }, expect=None)
 
-    def test_a_replaced_committee_signs_for_its_period_for_six_more_rotations(self):
+    def test_a_replaced_committee_signs_for_its_period_for_one_more_rotation(self):
         for current in range(FIRST + 1, FIRST + KEPT):
             self.rotate_to(current)
             self.assertTrue(self.signed_by(FIRST, committee(FIRST)), current)
@@ -189,7 +189,7 @@ class LightClientCommittees(unittest.TestCase):
         self.assertEqual(state["committeePeriod"], FIRST + 2)
         self.assertEqual(state["currentCommittee"], committee(FIRST + 2))
         self.assertEqual(state["prevCommittee"], committee(FIRST + 1))
-        self.assertEqual(self.held(), {p: committee(p) for p in range(FIRST, FIRST + 3)})
+        self.assertEqual(self.held(), {p: committee(p) for p in range(FIRST + 1, FIRST + 3)})
 
     def test_an_owner_reset_drops_every_committee_but_its_own(self):
         self.rotate_to(FIRST + 4)

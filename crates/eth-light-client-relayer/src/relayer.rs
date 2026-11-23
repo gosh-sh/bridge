@@ -286,9 +286,9 @@ const MAX_ROTATE_SENDS: u32 = 5;
 
 /// Failed rotates of one period before it is not started again.
 const MAX_ROTATE_FAILURES: u32 = 3;
-/// Committees `EthBeaconLightClient` holds (`KEPT_COMMITTEES`, from 1.8.0):
-/// the one in force and the six it replaced last.
-const KEPT_COMMITTEES: u64 = 7;
+/// Committees `EthBeaconLightClient` holds (`KEPT_COMMITTEES`, from 1.8.1):
+/// the one in force and the one it replaced last.
+const KEPT_COMMITTEES: u64 = 2;
 
 /// Wait after the first failed rotate of a period; doubled after each next.
 const ROTATE_RETRY_BACKOFF: Duration = Duration::from_secs(10 * 60);
@@ -2492,7 +2492,7 @@ mod tests {
         assert_eq!(
             submitter.rotate_submits(),
             0,
-            "after a rotate from period 8 the contract holds periods 3 to 9 and takes no step \
+            "after a rotate from period 8 the contract holds periods 8 and 9 and takes no step \
              signed in period 0"
         );
 
@@ -2511,8 +2511,8 @@ mod tests {
         assert_eq!(submitter.rotate_submits(), 1);
     }
 
-    /// Inside the window the rotate does not wait: a checkpoint signed five
-    /// periods before the rotate's is still taken after it.
+    /// Inside the window the rotate does not wait: a checkpoint signed in the
+    /// rotate's own period is still taken after it.
     #[test]
     fn a_checkpoint_inside_the_held_window_does_not_hold_the_rotate() {
         let p = SLOTS_PER_SYNC_PERIOD;
@@ -2531,12 +2531,12 @@ mod tests {
             .push(update(3 * p + 70, 3 * p + 64))
             .unwrap();
         assert!(
-            r.rotate_would_orphan(8).is_none(),
-            "signed in 3, held after 8 -> 9"
+            r.rotate_would_orphan(3).is_none(),
+            "signed in 3, held after 3 -> 4"
         );
         assert!(
-            r.rotate_would_orphan(9).is_some(),
-            "signed in 3, gone after 9 -> 10"
+            r.rotate_would_orphan(4).is_some(),
+            "signed in 3, gone after 4 -> 5"
         );
     }
 

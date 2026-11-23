@@ -166,11 +166,18 @@ assigns it when the release is tagged.
 
 ### Fixes
 
-- `EthBeaconLightClient` 1.8.1 (code hash `ab7b8865…`) refuses a `submitUpdate` whose finalized
-  slot is after its attested slot (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof. A committee of
-  an earlier period it still holds can no longer move the head past that period
-  (gosh-sh/bridge-audit#163). `updateCode` each light client and run `setLightClientCode` on
-  `eccBridge`.
+- `EthBeaconLightClient` 1.8.1 (code hash `c823fdb2…`, gosh-sh/bridge-audit#163):
+  - refuses a `submitUpdate` whose finalized slot is after its attested slot
+    (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof;
+  - keeps two committees, the one in force and the one before it, instead of seven. A step signed
+    by an older committee is refused with `ERR_WRONG_COMMITTEE` (242): its keys may belong to
+    validators that have left, and it could prove a forged block hash. A relayer that lags more
+    than a period behind a rotation loses those checkpoints; their blocks are reached with
+    `submitAncestry` from a later proven one.
+
+  `updateCode` each light client and run `setLightClientCode` on `eccBridge`, together with
+  `eth-lc-relayer`, which now holds a rotate while a queued checkpoint is signed before the
+  rotate's period.
 - The `bridge-cli` image ships `BridgeWithdrawalAggregatorVerifier_calldata.bin`: `withdraw` from the
   image no longer stops in preflight.
 - `eth-lc-relayer` proves a checkpoint with the committee of its signature slot: a checkpoint

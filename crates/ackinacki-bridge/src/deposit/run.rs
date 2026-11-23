@@ -1531,34 +1531,39 @@ async fn walk(
                     return Err(damaged(store, &op, "no confirmed deposit"));
                 };
                 board.start(StepId::Prove, "");
+                macro_rules! skip_if_finalized {
+                    ($why:expr) => {{
+                        let seen = finalized_or_now(
+                            finalized,
+                            d,
+                            cx.bridge_acc,
+                            rec,
+                            &dep,
+                            &to,
+                            p.anchor_timeout,
+                            &mut block_seen,
+                        )
+                        .await;
+                        if let Some(Some(via_events)) = seen {
+                            ui.warn(&format!(
+                                "the receipt proof could not be built ({}); the deposit is \
+                                 finalized already, so it is not needed",
+                                $why
+                            ));
+                            board.skip(StepId::Prove, FINALIZED_ALREADY);
+                            board.skip(StepId::Finalize, FINALIZED_ALREADY);
+                            phase = Phase::Credit {
+                                via_events,
+                            };
+                            continue;
+                        }
+                        seen
+                    }};
+                }
                 let Some(work) = work_dir_of(p, rec) else {
                     // Only a record that names no work directory, resumed
                     // without --work-dir and without HOME, gets here.
-                    if let Some(via_events) = finalized_or_now(
-                        finalized,
-                        d,
-                        ui,
-                        cx.bridge_acc,
-                        rec,
-                        &dep,
-                        &to,
-                        p.anchor_timeout,
-                        &mut block_seen,
-                    )
-                    .await
-                    {
-                        ui.warn(&format!(
-                            "the receipt proof could not be built ({}); the deposit is finalized \
-                             already, so it is not needed",
-                            "no work directory"
-                        ));
-                        board.skip(StepId::Prove, FINALIZED_ALREADY);
-                        board.skip(StepId::Finalize, FINALIZED_ALREADY);
-                        phase = Phase::Credit {
-                            via_events,
-                        };
-                        continue;
-                    }
+                    let _ = skip_if_finalized!("no work directory");
                     let e = err(
                         ExitCode::DepositProofFailed,
                         Stage::Prove,
@@ -1601,37 +1606,16 @@ async fn walk(
                             .map_err(WitnessError::Final),
                         Err(e) => Err(e),
                     };
-                    if let Err(e) = &built {
-                        let why = match e {
-                            WitnessError::Retry(why) => why.clone(),
-                            WitnessError::Final(v) => v.to_string(),
-                        };
-                        if let Some(via_events) = finalized_or_now(
-                            finalized,
-                            d,
-                            ui,
-                            cx.bridge_acc,
-                            rec,
-                            &dep,
-                            &to,
-                            p.anchor_timeout,
-                            &mut block_seen,
-                        )
-                        .await
-                        {
-                            ui.warn(&format!(
-                                "the receipt proof could not be built ({}); the deposit is \
-                                 finalized already, so it is not needed",
-                                why
-                            ));
-                            board.skip(StepId::Prove, FINALIZED_ALREADY);
-                            board.skip(StepId::Finalize, FINALIZED_ALREADY);
-                            phase = Phase::Credit {
-                                via_events,
+                    let seen = match &built {
+                        Err(e) => {
+                            let why = match e {
+                                WitnessError::Retry(why) => why.clone(),
+                                WitnessError::Final(v) => v.to_string(),
                             };
-                            continue;
-                        }
-                    }
+                            skip_if_finalized!(why)
+                        },
+                        Ok(_) => Some(None),
+                    };
                     let w = match built {
                         Ok(w) => w,
                         Err(WitnessError::Retry(why)) => {
@@ -1649,15 +1633,19 @@ async fn walk(
                         // The bridge cannot finalize it: close the operation,
                         // as step 5 would have.
                         Err(WitnessError::Final(v)) => {
-                            if rec.stage == OpStage::Finalizing {
+                            if rec.stage == OpStage::Finalizing || seen.is_none() {
+                                let why = if rec.stage == OpStage::Finalizing {
+                                    v.to_string()
+                                } else {
+                                    format!(
+                                        "{v}. Whether somebody finalized the deposit already \
+                                         could not be read, so the operation stays open: retry \
+                                         with --resume {op}"
+                                    )
+                                };
                                 return Err(in_doubt(
                                     rec,
-                                    err(
-                                        ExitCode::DepositProofFailed,
-                                        Stage::Prove,
-                                        &op,
-                                        v.to_string(),
-                                    ),
+                                    err(ExitCode::DepositProofFailed, Stage::Prove, &op, why),
                                 ));
                             }
                             return Err(negative(d, store, rec, Negative::Unprovable(v)).await);
@@ -1666,31 +1654,8 @@ async fn walk(
                     let saved =
                         std::fs::create_dir_all(&work).and_then(|()| witness::save(&work, &w));
                     if let Err(e) = saved {
-                        if let Some(via_events) = finalized_or_now(
-                            finalized,
-                            d,
-                            ui,
-                            cx.bridge_acc,
-                            rec,
-                            &dep,
-                            &to,
-                            p.anchor_timeout,
-                            &mut block_seen,
-                        )
-                        .await
-                        {
-                            ui.warn(&format!(
-                                "the receipt proof could not be built ({}); the deposit is \
-                                 finalized already, so it is not needed",
-                                format!("cannot write it to {}: {e}", work.display())
-                            ));
-                            board.skip(StepId::Prove, FINALIZED_ALREADY);
-                            board.skip(StepId::Finalize, FINALIZED_ALREADY);
-                            phase = Phase::Credit {
-                                via_events,
-                            };
-                            continue;
-                        }
+                        let why = format!("cannot write it to {}: {e}", work.display());
+                        let _ = skip_if_finalized!(why);
                         let e = err(
                             ExitCode::DepositProofFailed,
                             Stage::Prove,
@@ -1895,32 +1860,21 @@ async fn walk(
 async fn finalized_or_now(
     finalized: Option<bool>,
     d: &Deps,
-    ui: &dyn Ui,
     bridge: [u8; 32],
     rec: &OpRecord,
     dep: &DepositInfo,
     to: &AnTarget,
     timeout: Option<std::time::Duration>,
     block_seen: &mut Option<(B256, u64)>,
-) -> Option<bool> {
+) -> Option<Option<bool>> {
     if finalized.is_some() {
-        return finalized;
+        return Some(finalized);
     }
     let voucher = hex32(&dep.voucher_account)?;
-    let look = timeout.and_then(|t| Instant::now().checked_add(t));
+    let look = Instant::now().checked_add(timeout.map_or(ONE_READ, |t| t.min(ONE_READ)));
     let not_before = block_time(d, dep, look, block_seen).await;
     let check = finalized_check(rec, dep, to, voucher, not_before);
-    credit::finalized_already(
-        d.an.as_ref(),
-        ui,
-        bridge,
-        &check,
-        Look::BeforeSend {
-            have_proof: false,
-        },
-        look,
-    )
-    .await
+    credit::finalized_once(d.an.as_ref(), bridge, &check, look).await
 }
 
 fn forget_a_refused_send(rec: &mut OpRecord, e: &CliError) -> bool {
@@ -4836,6 +4790,29 @@ mod tests {
         assert_eq!(e.exit_code(), ExitCode::AnWaitTimeout, "{e}");
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
         assert_eq!(rec.stage, OpStage::Confirmed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unprovable_deposit_stays_open_while_its_finalization_cannot_be_read() {
+        let mut w = World::healthy();
+        let op = w.anchored_operation();
+        w.evm
+            .witness_errors
+            .lock()
+            .unwrap()
+            .push_back(WitnessError::Final(
+                crate::deposit::limits::Unfinalizable::Failed,
+            ));
+        let rec = Store::open(w.state.path()).unwrap().load(&op).unwrap();
+        let voucher = hex32(&rec.deposit.unwrap().voucher_account).unwrap();
+        w.an.failing_accounts.lock().unwrap().insert(voucher);
+        let (p, target) = resuming(&w, &op);
+        let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
+        assert!(e.to_string().contains("could not be read"), "{e}");
+        let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();
+        assert_eq!(rec.stage, OpStage::Anchored, "not closed");
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
     }
 
     #[tokio::test(start_paused = true)]

@@ -414,6 +414,38 @@ pub async fn finalized_already(
     found.flatten().map(|_| true)
 }
 
+pub async fn finalized_once(
+    an: &dyn AnRead,
+    bridge: [u8; 32],
+    check: &FinalizedCheck,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<Option<bool>> {
+    let code = once(
+        deadline,
+        an.run_getter(bridge, BRIDGE_ABI, "getDepositVoucherCodeHash", json!({})),
+    )
+    .await?;
+    let stored = check.stored_code.trim_start_matches("0x");
+    let moved = code["value0"]
+        .as_str()
+        .map(|h| h.trim_start_matches("0x").to_ascii_lowercase())
+        != Some(stored.to_ascii_lowercase());
+    if !moved {
+        let voucher = once(deadline, an.account(check.voucher)).await?;
+        return Some(
+            voucher
+                .is_some_and(|a| a.status == AccStatus::Active)
+                .then_some(false),
+        );
+    }
+    let found = once(
+        deadline,
+        finalized_event(an, bridge, &check.identity, check.not_before),
+    )
+    .await?;
+    Some(found.map(|_| true))
+}
+
 /// The fallback path, which does not depend on the voucher's address: the
 /// deposit's `DepositFinalized`, the bridge transaction that emitted it,
 /// and that transaction's transfer.

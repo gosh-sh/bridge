@@ -28,6 +28,7 @@ BRIDGE = "0:" + "1a" * 32
 SLOTS_PER_PERIOD = 8192
 KEPT = 7
 GLOAS = 11_296_768
+ERR_BAD_PUBLIC_INPUTS = 240
 ERR_WRONG_COMMITTEE = 242
 ERR_STALE_PERIOD = 245
 FIRST = 100
@@ -49,10 +50,12 @@ def slot_in(period, offset=100):
     return period * SLOTS_PER_PERIOD + offset
 
 
-def step_inputs(attested_slot, commitment):
+def step_inputs(attested_slot, commitment, finalized_slot=None):
     """The 11 step public inputs, 32-byte little-endian each, of a step that would
     advance an empty head."""
-    words = [attested_slot, attested_slot - 64, 0x11, 0x22, 512, commitment,
+    if finalized_slot is None:
+        finalized_slot = attested_slot - 64
+    words = [attested_slot, finalized_slot, 0x11, 0x22, 512, commitment,
              0x33, 0x44, 0x55, 0x66, GLOAS]
     return b"".join(w.to_bytes(32, "little") for w in words).hex()
 
@@ -156,10 +159,10 @@ class LightClientCommittees(unittest.TestCase):
         committees = self.call("getCommittees")["response"]["committees"]
         return {int(p): int(c, 0) for p, c in committees.items()}
 
-    def submit(self, attested_period, commitment):
+    def submit(self, attested_period, commitment, finalized_slot=None):
         return self.call("submitUpdate", {
             "proof": "00",
-            "publicInputs": step_inputs(slot_in(attested_period), commitment),
+            "publicInputs": step_inputs(slot_in(attested_period), commitment, finalized_slot),
         }, expect=None)
 
     def test_a_replaced_committee_signs_for_its_period_for_six_more_rotations(self):
@@ -226,6 +229,14 @@ class LightClientCommittees(unittest.TestCase):
         result = self.submit(FIRST, committee(FIRST))
         self.assertNotEqual(result["exit_code"], ERR_WRONG_COMMITTEE)
         self.assertNotEqual(result["exit_code"], 0, "a made-up proof must not verify")
+
+    def test_a_step_finalizing_a_slot_after_its_attested_one_is_refused_before_the_proof(self):
+        self.rotate_to(FIRST + KEPT - 1)
+        for signer in (FIRST, FIRST + KEPT - 1):
+            ahead = self.submit(signer, committee(signer), slot_in(FIRST + 40))
+            self.assertEqual(ahead["exit_code"], ERR_BAD_PUBLIC_INPUTS, signer)
+            same = self.submit(signer, committee(signer), slot_in(signer))
+            self.assertNotIn(same["exit_code"], (0, ERR_BAD_PUBLIC_INPUTS), signer)
 
 
 if __name__ == "__main__":

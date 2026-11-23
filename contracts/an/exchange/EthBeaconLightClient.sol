@@ -70,7 +70,7 @@ import "./eccBridge.sol";
 ///         older than that cannot `finalizeDeposit` against this oracle, and a
 ///         skipped checkpoint older than that cannot be late-registered.
 contract EthBeaconLightClient {
-    string constant version = "1.8.0";
+    string constant version = "1.8.1";
 
     // Sync committee size on Ethereum mainnet — the supermajority denominator.
     uint256 constant SYNC_COMMITTEE_SIZE = 512;
@@ -387,6 +387,7 @@ contract EthBeaconLightClient {
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
         require(_gloasForkSlotSet, ERR_FORK_SLOT_UNSET);
         require(pi.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
+        require(pi.finalizedSlot <= pi.attestedSlot, ERR_BAD_PUBLIC_INPUTS);
         // Head only moves forward. A slot behind the head is still admitted
         // when its execution hash is not yet in the proven set (late-register
         // a skipped checkpoint). Same-slot replay and already-proven hashes

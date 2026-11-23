@@ -166,6 +166,11 @@ assigns it when the release is tagged.
 
 ### Fixes
 
+- `EthBeaconLightClient` 1.8.1 (code hash `ab7b8865…`) refuses a `submitUpdate` whose finalized
+  slot is after its attested slot (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof. A committee of
+  an earlier period it still holds can no longer move the head past that period
+  (gosh-sh/bridge-audit#163). `updateCode` each light client and run `setLightClientCode` on
+  `eccBridge`.
 - The `bridge-cli` image ships `BridgeWithdrawalAggregatorVerifier_calldata.bin`: `withdraw` from the
   image no longer stops in preflight.
 - `eth-lc-relayer` proves a checkpoint with the committee of its signature slot: a checkpoint

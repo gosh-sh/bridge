@@ -73,7 +73,7 @@ Paths are relative to the repository root.
 | `AckiNackiBridge` | Pool (AAVE V3) | `supply`, `withdraw` | `supply`: `contracts/ethereum/src/AckiNackiBridge.sol:2427`, from `deposit` at `:1017`. `withdraw`: `:2442`, `:2465`, from `withdrawByProof` through `_payFromTreasury` at `:1965`; and from the owner's `withdrawFromAave` (`:2061` → `:2465`), `harvestYield` (`:2128`) and `emergencyWithdrawAll` (`:2073`) |
 | `AckiNackiBridge` | aUSDC (AAVE V3) | `balanceOf` | `contracts/ethereum/src/AckiNackiBridge.sol:2484` |
 | `ArbitrumBlockVerifier` | `eccBridge` | `acceptBlockHashFromL2Verifier` | `contracts/an/exchange/ArbitrumBlockVerifier.sol:136` |
-| `EthBeaconLightClient` | `eccBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:678` |
+| `EthBeaconLightClient` | `eccBridge` | `acceptBlockHashFromLightClient` | `contracts/an/exchange/EthBeaconLightClient.sol:679` |
 | `DepositVoucher` | `eccBridge` | `confirmTokenDeposit` | `contracts/an/exchange/DepositVoucher.sol:54` |
 
 Both the CLI and `deposit-relayer daemon` send `finalizeDeposit` for the same deposit; the second is

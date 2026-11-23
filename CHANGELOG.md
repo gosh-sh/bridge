@@ -73,7 +73,7 @@ assigns it when the release is tagged.
   to scripts.
 - `ackinacki-bridge deposit --relayer-grace-s` is gone: the CLI builds the receipt proof once the block
   is anchored; a deposit finalized by then (by a relayer, say) is not sent again and ends with exit 0
-  and `finalize: "already_finalized"`.
+  and `finalize: "already_finalized"`, even when its receipt proof cannot be built.
 - `ackinacki-bridge withdraw`, `relayer daemon-live` and `relayer daemon-withdraw-live` no longer take
   `--bridge-deploy-block`, `--get-logs-chunk-blocks` and `--get-logs-pause-ms`: remove them from start
   commands. These commands ignore `BRIDGE_DEPLOY_BLOCK`, `BRIDGE_GET_LOGS_CHUNK_BLOCKS` and
@@ -130,8 +130,8 @@ assigns it when the release is tagged.
 - `ackinacki-bridge deposit send` stops once the deposit is confirmed on the EVM chain;
   `deposit proof --tx-hash <EVM tx> --token …` finalizes any deposit to the bridge, reading its sender,
   amount and recipient from the receipt.
-- `ackinacki-bridge deposit` JSON `finalize`, once credited: `sent` when this run's `finalizeDeposit` was
-  accepted, otherwise `already_finalized`.
+- `ackinacki-bridge deposit` JSON `finalize`, once credited: `sent` when the operation's own
+  `finalizeDeposit` paid it, in this run or one it resumes, otherwise `already_finalized`.
 - `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning. Before the
   burn or lock it refuses (exit 2) an amount that does not fit the Acki Nacki daily window (247;
   with no daily limit set, it names `setBridgeToken`), a NACKL lock above `maxTvl` (235) and an amount above the EVM bridge's `dailyLimit`, which could

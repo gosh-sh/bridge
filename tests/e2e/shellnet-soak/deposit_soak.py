@@ -82,9 +82,6 @@ GAS_FAILURES = {21, 22}
 # The deposit is in the EVM bridge and no retry will finalize it.
 NEEDS_PERSON = {33, 35, 37}
 
-# The CLI proves only after this long with the block anchored and no voucher.
-# It is stopped before that; this keeps the proof out of reach regardless.
-RELAYER_GRACE_S = 365 * 24 * 3600
 ANCHOR_TIMEOUT_S = 5
 # A send that takes longer is interrupted and looked at again.
 SEND_TIMEOUT_S = 3600
@@ -151,10 +148,9 @@ class Config:
             "--to", self.to,
             "--qr-mode", "local-key",
             "--anchor-timeout-s", str(ANCHOR_TIMEOUT_S),
-            "--relayer-grace-s", str(RELAYER_GRACE_S),
             "--yes", "--non-interactive", "--json",
         ]
-        return cmd + ["--resume", resume] if resume else cmd
+        return cmd + ["--resume", resume] if resume else cmd + ["--token", "usdc"]
 
 
 @dataclass

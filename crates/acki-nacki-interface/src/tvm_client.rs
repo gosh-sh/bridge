@@ -23,7 +23,10 @@ use tvm_client::{
 
 use crate::{
     address::ExtendedAddress,
-    children::{parse_internal_children, parse_last_deploy, parse_message_dst_transaction},
+    children::{
+        parse_internal_children, parse_last_deploy, parse_message_dst_transaction,
+        parse_previous_page,
+    },
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
@@ -354,14 +357,24 @@ impl IAckiNacki for TvmAckiNacki {
     }
 
     async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
-        let gql = format!(
-            "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ transactions(last: 50, \
-             archive: true) {{ edges {{ node {{ id aborted orig_status_name end_status_name }} }} }} \
-             }} }} }}",
-            address.account_id(),
-            address.dapp_id()
-        );
-        Ok(parse_last_deploy(&self.gql(gql).await?))
+        let mut before = String::new();
+        loop {
+            let gql = format!(
+                "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ transactions(last: \
+                 50, {before}archive: true) {{ edges {{ node {{ id aborted orig_status_name \
+                 end_status_name }} }} pageInfo {{ hasPreviousPage startCursor }} }} }} }} }}",
+                address.account_id(),
+                address.dapp_id()
+            );
+            let res = self.gql(gql).await?;
+            if let Some(deploy) = parse_last_deploy(&res) {
+                return Ok(Some(deploy));
+            }
+            match parse_previous_page(&res) {
+                Some(cursor) => before = format!("before: {}, ", serde_json::to_string(&cursor)?),
+                None => return Ok(None),
+            }
+        }
     }
 }
 

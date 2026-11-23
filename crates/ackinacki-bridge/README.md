@@ -20,7 +20,7 @@ Each direction runs whole, or in two steps, each a run of its own:
 `finalizeDeposit`. `proof` takes any burn or deposit, made by this CLI or by a wallet. The proof is
 always built; a burn the bridge has paid out, or a deposit somebody has finalized, by the time the
 proof is to be sent (a relayer, say) ends in success, exit 0: `submit.status: "already_paid"`,
-`finalize: "already_finalized"`. A USDC or NACKL proof the EVM bridge refuses because the owner's
+`finalize: "already_finalized"`, also when that deposit's receipt proof cannot be built. A USDC or NACKL proof the EVM bridge refuses because the owner's
 rolling 24-hour withdrawal limit for the token is full (`WithdrawalWindowFull`) exits 13 with
 nothing spent and the nullifier unspent; later, re-running `withdraw` with `--allow-retry`, or the
 same `withdraw proof` command, sends the same proof.

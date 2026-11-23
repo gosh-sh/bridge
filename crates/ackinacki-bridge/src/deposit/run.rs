@@ -1296,9 +1296,6 @@ async fn walk(
         },
         OpStage::Proved | OpStage::Finalizing => Phase::Finalize,
     };
-    if let Some(f) = rec.finalize.as_mut() {
-        f.accepted = false;
-    }
     let to = AnTarget::parse(&rec.params.to).map_err(|e| after_request(store, &op, e))?;
     let from = rec.from.ok_or_else(|| damaged(store, &op, "no sender"))?;
     let exp = Expect {
@@ -1579,6 +1576,22 @@ async fn walk(
                             .map_err(WitnessError::Final),
                         Err(e) => Err(e),
                     };
+                    if let (Err(e), Some(via_events)) = (&built, finalized) {
+                        let why = match e {
+                            WitnessError::Retry(why) => why.clone(),
+                            WitnessError::Final(v) => v.to_string(),
+                        };
+                        ui.warn(&format!(
+                            "the receipt proof could not be built ({why}); the deposit is \
+                             finalized already, so it is not needed"
+                        ));
+                        board.skip(StepId::Prove, FINALIZED_ALREADY);
+                        board.skip(StepId::Finalize, FINALIZED_ALREADY);
+                        phase = Phase::Credit {
+                            via_events,
+                        };
+                        continue;
+                    }
                     let w = match built {
                         Ok(w) => w,
                         Err(WitnessError::Retry(why)) => {
@@ -1801,10 +1814,25 @@ async fn walk(
                             format!("{e}\n  (the operation record could not be updated)"),
                         ));
                     },
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        if forget_a_refused_send(rec, &e) {
+                            persist(store, rec)?;
+                        }
+                        return Err(e);
+                    },
                 }
             },
         };
+    }
+}
+
+fn forget_a_refused_send(rec: &mut OpRecord, e: &CliError) -> bool {
+    match rec.finalize.as_mut() {
+        Some(f) if e.exit_code() == ExitCode::CreditRefused && f.accepted => {
+            f.accepted = false;
+            true
+        },
+        _ => false,
     }
 }
 
@@ -3349,6 +3377,29 @@ mod tests {
     /// for the same transaction continues that operation: it is credited,
     /// and answers from its record.
     #[tokio::test]
+    async fn deposit_proof_of_a_finalized_deposit_whose_proof_cannot_be_built_still_succeeds() {
+        let mut w = World::healthy();
+        let h = w.mined_deposit(7);
+        w.anchor_after(0);
+        w.credit_chain_for_mined_deposit();
+        w.voucher_deployed();
+        w.evm
+            .witness_errors
+            .lock()
+            .unwrap()
+            .push_back(WitnessError::Retry("the RPC lost the block".into()));
+        let (mut p, d) = on_the_real_clock(&w);
+        p.mode = RunMode::Proof {
+            tx_hash: h,
+        };
+        let s = run_proof(&p, &d, h).await.unwrap();
+        assert_eq!(s.finalize, Some("already_finalized"), "{s:?}");
+        assert!(s.confirmation.is_some());
+        assert_eq!(w.witness_builds(), 1);
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn deposit_proof_of_a_finalized_deposit_builds_the_proof_and_sends_none() {
         let mut w = World::healthy();
         let h = w.mined_deposit(7);
@@ -3709,7 +3760,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_resume_that_finds_the_deposit_finalized_by_another_says_already_finalized() {
+    async fn a_resume_after_its_own_accepted_send_says_sent() {
         let mut w = World::healthy();
         let op = w.finalizing_operation();
         w.voucher_deployed();
@@ -3722,7 +3773,41 @@ mod tests {
         let s = resume(&p, &w.deps(), &target, None).await.unwrap();
         assert!(s.confirmation.is_some());
         assert_eq!(*w.an.sent.lock().unwrap(), 0);
+        assert_eq!(s.finalize, Some("sent"), "{s:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_after_a_refused_send_that_finds_the_deposit_finalized_says_already_finalized()
+    {
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        let store = Store::open(w.state.path()).unwrap();
+        let mut rec = store.load(&op).unwrap();
+        let refused = CliError::deposit(ExitCode::CreditRefused, Stage::Credit, Some(&op), "236");
+        assert!(forget_a_refused_send(&mut rec, &refused));
+        assert!(!forget_a_refused_send(&mut rec, &refused));
+        store.write(&mut rec).unwrap();
+        w.voucher_deployed();
+        w.credit_chain_for_mined_deposit();
+        let target = OpRef::Op(op);
+        let p = w.params(RunMode::Resume {
+            target: target.clone(),
+            tx_hash: None,
+        });
+        let s = resume(&p, &w.deps(), &target, None).await.unwrap();
+        assert_eq!(*w.an.sent.lock().unwrap(), 0);
         assert_eq!(s.finalize, Some("already_finalized"), "{s:?}");
+    }
+
+    #[test]
+    fn only_a_refused_credit_forgets_the_accepted_send() {
+        let mut w = World::healthy();
+        let op = w.finalizing_operation();
+        let mut rec = Store::open(w.state.path()).unwrap().load(&op).unwrap();
+        let unconfirmed =
+            CliError::deposit(ExitCode::CreditUnconfirmed, Stage::Credit, Some(&op), "later");
+        assert!(!forget_a_refused_send(&mut rec, &unconfirmed));
+        assert!(rec.finalize.as_ref().unwrap().accepted);
     }
 
     #[tokio::test(start_paused = true)]

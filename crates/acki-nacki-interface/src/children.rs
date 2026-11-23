@@ -66,6 +66,15 @@ pub(crate) fn parse_last_deploy(res: &Value) -> Option<TxHash> {
         .last()
 }
 
+pub(crate) fn parse_previous_page(res: &Value) -> Option<String> {
+    let page = res.pointer("/blockchain/account/transactions/pageInfo")?;
+    if page.get("hasPreviousPage")?.as_bool()? {
+        Some(page.get("startCursor")?.as_str()?.to_owned())
+    } else {
+        None
+    }
+}
+
 /// The destination transaction of a `blockchain { message { dst_transaction }
 /// }` response.
 pub(crate) fn parse_message_dst_transaction(res: &Value) -> Option<ChildOutcome> {
@@ -83,6 +92,45 @@ mod tests {
     /// Shapes as shellnet returned them on 2026-10-12 for a `finalizeDeposit`
     /// (bridge tx `4b722bbe…`) and its voucher deploy: null nested under
     /// `out_messages`, linked when the message is queried by hash.
+    fn page(nodes: Vec<Value>, previous: Option<&str>) -> Value {
+        json!({"blockchain": {"account": {"transactions": {
+            "edges": nodes.into_iter().map(|n| json!({"node": n})).collect::<Vec<_>>(),
+            "pageInfo": {"hasPreviousPage": previous.is_some(), "startCursor": previous},
+        }}}})
+    }
+
+    fn node(id: &str, orig: &str, end: &str, aborted: bool) -> Value {
+        json!({"id": id, "orig_status_name": orig, "end_status_name": end, "aborted": aborted})
+    }
+
+    #[test]
+    fn a_page_without_a_deploy_names_the_page_before_it() {
+        let res = page(
+            vec![
+                node(&"aa".repeat(32), "Active", "Active", false),
+                node(&"bb".repeat(32), "Active", "Active", true),
+            ],
+            Some("cursor-1"),
+        );
+        assert_eq!(parse_last_deploy(&res), None);
+        assert_eq!(parse_previous_page(&res).as_deref(), Some("cursor-1"));
+    }
+
+    #[test]
+    fn the_newest_deploy_of_a_page_wins_and_the_first_page_has_no_previous() {
+        let res = page(
+            vec![
+                node(&"01".repeat(32), "NonExist", "Active", false),
+                node(&"02".repeat(32), "Active", "NonExist", false),
+                node(&"03".repeat(32), "NonExist", "Active", false),
+                node(&"04".repeat(32), "Active", "Active", false),
+            ],
+            None,
+        );
+        assert_eq!(parse_last_deploy(&res), Some([3u8; 32]));
+        assert_eq!(parse_previous_page(&res), None);
+    }
+
     #[test]
     fn unlinked_child_resolves_through_the_message_query() {
         let msg = "9aa9755e3e9f89560c482a5a2baca77e29aa456d13a5b49f1619ca3d83ca927a";

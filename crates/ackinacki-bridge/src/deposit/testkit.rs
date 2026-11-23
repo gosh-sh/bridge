@@ -1366,6 +1366,7 @@ pub struct FakeAn {
     pub fail_transactions: AtomicBool,
     /// Every `ext_messages` call fails.
     pub fail_ext_messages: AtomicBool,
+    pub fail_ext_out: AtomicBool,
     /// Getters, by name, whose every call fails.
     pub failing_getters: Mutex<HashSet<String>>,
     /// Getters the deployed code does not have: answered like the VM does,
@@ -1524,6 +1525,7 @@ impl AnRead for FakeAn {
         before: Option<String>,
     ) -> anyhow::Result<Page<MsgView>> {
         if self.fail_ext_messages.load(Ordering::SeqCst)
+            || (dir == ExtDir::Out && self.fail_ext_out.load(Ordering::SeqCst))
             || self.failing_ext.lock().unwrap().contains(&id)
         {
             anyhow::bail!("GraphQL timeout");

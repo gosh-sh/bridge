@@ -424,19 +424,21 @@ pub async fn finalized_once(
         deadline,
         an.run_getter(bridge, BRIDGE_ABI, "getDepositVoucherCodeHash", json!({})),
     )
-    .await?;
+    .await;
     let stored = check.stored_code.trim_start_matches("0x");
-    let moved = code["value0"]
-        .as_str()
-        .map(|h| h.trim_start_matches("0x").to_ascii_lowercase())
-        != Some(stored.to_ascii_lowercase());
+    let moved = code.and_then(|c| {
+        c["value0"]
+            .as_str()
+            .map(|h| h.trim_start_matches("0x").to_ascii_lowercase())
+    }) != Some(stored.to_ascii_lowercase());
     if !moved {
-        let voucher = once(deadline, an.account(check.voucher)).await?;
-        return Some(
-            voucher
-                .is_some_and(|a| a.status == AccStatus::Active)
-                .then_some(false),
-        );
+        if let Some(voucher) = once(deadline, an.account(check.voucher)).await {
+            return Some(
+                voucher
+                    .is_some_and(|a| a.status == AccStatus::Active)
+                    .then_some(false),
+            );
+        }
     }
     let found = once(
         deadline,
@@ -1026,6 +1028,58 @@ mod tests {
             by_events(&an, BRIDGE, &id(0), 0).await.unwrap(),
             Credit::NotYet
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_look_at_a_finalized_deposit_says_unknown_only_when_nothing_answers() {
+        let stored = format!("0x{}", "ab".repeat(32));
+        let check = FinalizedCheck {
+            stored_code: stored.clone(),
+            voucher: VOUCHER,
+            identity: id(0),
+            not_before: 0,
+        };
+        let look = |an: FakeAn| {
+            let check = check.clone();
+            async move { finalized_once(&an, BRIDGE, &check, None).await }
+        };
+
+        let an = FakeAn::default();
+        an.failing_getters
+            .lock()
+            .unwrap()
+            .insert("getDepositVoucherCodeHash".into());
+        an.fail_ext_out.store(true, Ordering::SeqCst);
+        assert_eq!(look(an).await, None, "no code, no events");
+
+        let an = FakeAn::default();
+        an.failing_getters
+            .lock()
+            .unwrap()
+            .insert("getDepositVoucherCodeHash".into());
+        assert_eq!(look(an).await, Some(None), "no code, events without it");
+
+        let an = FakeAn::default();
+        an.failing_getters
+            .lock()
+            .unwrap()
+            .insert("getDepositVoucherCodeHash".into());
+        chain(&an, &id(0), false, false);
+        assert_eq!(look(an).await, Some(Some(true)), "no code, its event");
+
+        let an = FakeAn::default();
+        an.getter(BRIDGE, "getDepositVoucherCodeHash", vec![
+            json!({ "value0": stored }),
+        ]);
+        an.failing_accounts.lock().unwrap().insert(VOUCHER);
+        an.fail_ext_out.store(true, Ordering::SeqCst);
+        assert_eq!(look(an).await, None, "no voucher, no events");
+
+        let an = FakeAn::default();
+        an.getter(BRIDGE, "getDepositVoucherCodeHash", vec![
+            json!({ "value0": stored }),
+        ]);
+        assert_eq!(look(an).await, Some(None), "no voucher deployed");
     }
 
     #[tokio::test(start_paused = true)]

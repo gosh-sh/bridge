@@ -4806,8 +4806,17 @@ mod tests {
         let rec = Store::open(w.state.path()).unwrap().load(&op).unwrap();
         let voucher = hex32(&rec.deposit.unwrap().voucher_account).unwrap();
         w.an.failing_accounts.lock().unwrap().insert(voucher);
-        let (p, target) = resuming(&w, &op);
+        w.an.fail_ext_out
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (mut p, target) = resuming(&w, &op);
+        p.anchor_timeout = Some(Duration::from_secs(10 * 24 * 3600));
+        let t0 = tokio::time::Instant::now();
         let e = resume(&p, &w.deps(), &target, None).await.unwrap_err();
+        assert!(
+            t0.elapsed() < Duration::from_secs(600),
+            "{:?}",
+            t0.elapsed()
+        );
         assert_eq!(e.exit_code(), ExitCode::DepositProofFailed, "{e}");
         assert!(e.to_string().contains("could not be read"), "{e}");
         let rec = Store::open(&p.state_dir).unwrap().load(&op).unwrap();

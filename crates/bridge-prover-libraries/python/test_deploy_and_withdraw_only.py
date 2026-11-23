@@ -17,6 +17,10 @@ minted=0) can withdraw. In `shellnet` mode the mint is `mintAndSend`, which
 adds no inventory: the withdrawal needs a deposit finalized for at least
 `WITHDRAWAL_AMOUNT` first.
 
+`initiateWithdrawal` refunds with 247 on a chain without a daily limit, and a
+fresh network has none: `local` mode sets one for `DST_CHAIN_ID` with
+`setBridgeToken`, in `shellnet` mode the owner must have set it.
+
 Modes (env `MODE`, default `local`):
   local     - local devnet cluster, keys auto-materialized from
               `$ACKI_NACKI_ROOT/config/`
@@ -83,8 +87,42 @@ USDC_BRIDGE_KEY_PATH = USDC_BRIDGE_KEY_PATH_OVERRIDE or _DEFAULT_USDC_BRIDGE_KEY
 
 MSIG_KEY_PATH = os.path.join(WORK_DIR, "msig_withdrawals_e2e.keys.json")
 
+# What `local` mode registers for `DST_CHAIN_ID`. WithdrawalInitiated does not
+# carry the EVM token, so any listed one serves: Sepolia USDC.
+LOCAL_EVM_USDC = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+LOCAL_DAILY_LIMIT = 10_000_000_000
+LIMIT_READBACK_TIMEOUT_S = 60
+
 tracer: be.Tracer
 gql: be.GqlClient
+
+
+def set_withdrawal_limit() -> None:
+    """Give `DST_CHAIN_ID` a USDC daily limit and wait until the bridge reads it."""
+    tracer.log_phase(f"Setting the withdrawal limit for chain {DST_CHAIN_ID}")
+    result = common.call_contract(
+        USDC_BRIDGE_ADDRESS, be.USDC_BRIDGE_ABI, USDC_BRIDGE_KEY_PATH, "setBridgeToken",
+        {"chainId": str(DST_CHAIN_ID), "evmToken": str(LOCAL_EVM_USDC),
+         "tokenId": USDC_TOKEN_ID, "maxTvl": str(LOCAL_DAILY_LIMIT),
+         "dailyLimit": str(LOCAL_DAILY_LIMIT), "depositsEnabled": False},
+        True,
+    )
+    if not isinstance(result, dict) or not common.is_ok(result):
+        raise RuntimeError(f"USDCBridge.setBridgeToken({DST_CHAIN_ID}) failed: {result!r}")
+    # A getter can answer from state older than the call just sent.
+    deadline = time.time() + LIMIT_READBACK_TIMEOUT_S
+    while True:
+        window = common.run_getter(
+            USDC_BRIDGE_ADDRESS, be.USDC_BRIDGE_ABI, "getWithdrawalWindow",
+            {"chainId": str(DST_CHAIN_ID), "tokenId": USDC_TOKEN_ID},
+        )
+        if isinstance(window, dict) and window.get("dailyLimit") == str(LOCAL_DAILY_LIMIT):
+            tracer.log(f"  dailyLimit={LOCAL_DAILY_LIMIT}")
+            return
+        if time.time() > deadline:
+            raise RuntimeError(f"getWithdrawalWindow({DST_CHAIN_ID}) still reads {window!r} "
+                               f"{LIMIT_READBACK_TIMEOUT_S} s after setBridgeToken")
+        time.sleep(2)
 
 
 def wait_for_withdrawal_event(baseline_ids: set, timeout_s: int) -> dict | None:
@@ -150,6 +188,9 @@ def main():
     tracer.log_phase("Validating USDCBridge owner key against on-chain getOwnerPubkey")
     validate_usdc_bridge_key(tracer, USDC_BRIDGE_KEY_PATH,
                              overridden=USDC_BRIDGE_KEY_PATH_OVERRIDE is not None)
+
+    if not IS_SHELLNET:
+        set_withdrawal_limit()
 
     baseline = gql.fetch_bridge_extouts(limit=500)
     baseline_ids = {n["id"] for n in baseline}

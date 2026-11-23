@@ -225,7 +225,8 @@ Regenerated from this tree with `forge inspect AckiNackiBridge storageLayout`. `
 now three words — `token`/`decimals`/`depositsEnabled`, `tvlCap`, `liabilities`; `maxTransfer`
 and `maxWithdrawal` are gone. `NacklMint.State` lost `dailyLimit` and its hourly map and shrank
 from five slots to two, and the per-token withdrawal window (`WithdrawalWindow.Window`:
-`dailyLimit`, then `mapping(uint256 hour ⇒ uint256 paid)`) took slot 21. Slots 0–18 are where
+`dailyLimit`, then `Bucket[25] buckets`, each `(hour, paid)`, indexed by the hour modulo 25) took
+slot 21. Slots 0–18 are where
 they were, but the struct layouts behind slots 2 and 19 changed: any tool that reads this
 contract's storage by slot number — an indexer, a fork-state fixture, a hand-written
 `eth_getStorageAt` — has to be regenerated against the new deployment. Nothing upgrades in

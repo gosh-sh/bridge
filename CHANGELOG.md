@@ -133,8 +133,8 @@ assigns it when the release is tagged.
 - `ackinacki-bridge deposit` JSON `finalize`, once credited: `sent` when this run's `finalizeDeposit` was
   accepted, otherwise `already_finalized`.
 - `ackinacki-bridge withdraw` no longer reads the EVM bridge's treasury before burning. Before the
-  burn or lock it refuses (exit 2) an amount that does not fit the Acki Nacki daily window (247),
-  a NACKL lock above `maxTvl` (235) and an amount above the EVM bridge's `dailyLimit`, which could
+  burn or lock it refuses (exit 2) an amount that does not fit the Acki Nacki daily window (247;
+  with no daily limit set, it names `setBridgeToken`), a NACKL lock above `maxTvl` (235) and an amount above the EVM bridge's `dailyLimit`, which could
   never be paid; it warns when the EVM window has no room now.
 - `ackinacki-bridge withdraw --token nackl` withdraws NACKL.
 - `ackinacki-bridge withdraw` whose proof the EVM bridge refuses with `WithdrawalWindowFull` exits 13 with

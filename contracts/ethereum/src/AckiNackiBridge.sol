@@ -1920,45 +1920,55 @@ contract AckiNackiBridge {
             _nullifiers[nullifierKey] = true;
             NacklMint.pay(_nackl, recipient, pub.amount);
         } else {
-            // ---- Treasury check (must happen before the AAVE pull). ----
-            uint256 owed = liabilitiesOf(payoutTokenId);
-            if (pub.amount > owed) {
-                revert WithdrawTreasuryShortfall(pub.amount, owed);
-            }
-
-            // Measured before the debit: the USDC on hand and the part of it
-            // that is principal.
-            uint256 onHand = usdc.balanceOf(address(this));
-            uint256 liquid = _liquidPrincipal();
-            uint256 overBooked =
-                suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
-
-            // ---- Effects (CEI: mutate state before any external call). ----
-            _nullifiers[nullifierKey] = true;
-            _debitLiabilities(payoutTokenId, pub.amount);
-
-            // ---- Interactions ----
-            // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
-            // pull; every other token sits liquid in the contract. Only what the
-            // USDC on hand cannot pay has to come from AAVE. The pull also tries to
-            // leave the target of the new book liquid and to bring
-            // `suppliedPrincipal` back within the book, so it is attempted whenever
-            // the liquid principal falls short. It may reach aUSDC above
-            // `suppliedPrincipal`: user principal is paid before yield.
-            if (payoutTokenId == usdcTokenId && liquid < pub.amount) {
-                _refillFromAave(
-                    onHand < pub.amount ? pub.amount - onHand : 0,
-                    pub.amount - liquid + overBooked + _liquidTarget(treasuryBalance)
-                );
-            }
-
-            _pushExact(IERC20(payoutInfo.token), recipient, pub.amount);
+            _payFromTreasury(payoutTokenId, payoutInfo.token, nullifierKey, recipient, pub.amount);
         }
 
         emit WithdrawalByProofExecuted(
             pub.nullifier, recipient, pub.amount, pub.tokenId, msg.sender
         );
         return true;
+    }
+
+    function _payFromTreasury(
+        uint32 payoutTokenId,
+        address token,
+        bytes32 nullifierKey,
+        address recipient,
+        uint256 amount
+    ) private {
+        // ---- Treasury check (must happen before the AAVE pull). ----
+        uint256 owed = liabilitiesOf(payoutTokenId);
+        if (amount > owed) {
+            revert WithdrawTreasuryShortfall(amount, owed);
+        }
+
+        // Measured before the debit: the USDC on hand and the part of it
+        // that is principal.
+        uint256 onHand = usdc.balanceOf(address(this));
+        uint256 liquid = _liquidPrincipal();
+        uint256 overBooked =
+            suppliedPrincipal > treasuryBalance ? suppliedPrincipal - treasuryBalance : 0;
+
+        // ---- Effects (CEI: mutate state before any external call). ----
+        _nullifiers[nullifierKey] = true;
+        _debitLiabilities(payoutTokenId, amount);
+
+        // ---- Interactions ----
+        // Only USDC is ever supplied to AAVE, so only a USDC payout can need a
+        // pull; every other token sits liquid in the contract. Only what the
+        // USDC on hand cannot pay has to come from AAVE. The pull also tries to
+        // leave the target of the new book liquid and to bring
+        // `suppliedPrincipal` back within the book, so it is attempted whenever
+        // the liquid principal falls short. It may reach aUSDC above
+        // `suppliedPrincipal`: user principal is paid before yield.
+        if (payoutTokenId == usdcTokenId && liquid < amount) {
+            _refillFromAave(
+                onHand < amount ? amount - onHand : 0,
+                amount - liquid + overBooked + _liquidTarget(treasuryBalance)
+            );
+        }
+
+        _pushExact(IERC20(token), recipient, amount);
     }
 
     /// @notice View helper: has `nullifier` already been consumed?

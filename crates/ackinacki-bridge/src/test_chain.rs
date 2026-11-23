@@ -140,7 +140,7 @@ async fn deployed_multisig_for_token(ecc3: u128, token_id: u32) -> (String, Stri
 /// The USDCBridge contract, as compiled for the bridge account. Its ABI is
 /// the one the CLI ships (`abi/USDCBridge.abi.json`, kept identical to the
 /// compiled one by CI).
-const USDC_BRIDGE_TVC: &[u8] =
+pub(crate) const USDC_BRIDGE_TVC: &[u8] =
     include_bytes!("../../../contracts/an/0.80.1_compiled/exchange/eccBridge.tvc");
 
 /// The EVM bridge [`deployed_usdc_bridge`] binds Sepolia withdrawals to, and
@@ -210,7 +210,7 @@ pub(crate) async fn deployed_usdc_bridge_with(
 
 /// Deploy the specified bridge artifact using its unchanged constructor
 /// interface.
-async fn deployed_bridge_artifact(
+pub(crate) async fn deployed_bridge_artifact(
     tvc: &[u8],
     abi_json: &str,
     paused: bool,

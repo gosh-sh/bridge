@@ -18,16 +18,19 @@ pub(crate) fn explain(reason: &str) -> String {
              WithdrawalByProofExecuted with this nullifier before doing anything with the record",
         ),
         "BridgePaused" => Some(
-            "the owner has paused the EVM bridge. Re-run with --allow-retry once paused() is \
-             false again; the burn is not repeated",
+            "the owner has paused the EVM bridge. Once paused() is false again, re-run the same \
+             `withdraw proof` command as it is, or re-run a `withdraw` with --allow-retry; the \
+             burn is not repeated",
         ),
         "WithdrawTreasuryShortfall" => Some(
-            "the treasury holds less than this withdrawal. Top it up (README Step 3) and re-run \
-             with --allow-retry; the burn is not repeated",
+            "the treasury holds less than this withdrawal. Top it up (README Step 3), then re-run \
+             the same `withdraw proof` command as it is, or re-run a `withdraw` with \
+             --allow-retry; the burn is not repeated",
         ),
         "UnknownAnchor" => Some(
-            "the anchor the proof binds to is not in the bridge's window. Re-run with \
-             --allow-retry to prove against the current window; the burn is not repeated",
+            "the anchor the proof binds to is not in the bridge's window. To prove against the \
+             current window, re-run the same `withdraw proof` command as it is, or re-run a \
+             `withdraw` with --allow-retry; the burn is not repeated",
         ),
         "WithdrawalProofRejected" => Some(
             "the deployed verifier rejected the proof: this host's Circuit-4 keys or aggregator \
@@ -90,7 +93,6 @@ mod tests {
         let selector = &alloy::primitives::keccak256("BridgePaused()")[..4];
         let text = explain(&format!("data: \"0x{}\"", hex::encode(selector)));
         assert!(text.starts_with("BridgePaused()"), "{text}");
-        assert!(text.contains("--allow-retry"), "{text}");
         for (signature, words) in [
             ("WithdrawalWindowFull(uint32,uint256,uint256,uint256)", 4),
             ("NacklNotMinter(address)", 1),
@@ -99,7 +101,22 @@ mod tests {
             let data = format!("0x{}{}", hex::encode(selector), "00".repeat(32 * words));
             let text = explain(&format!("data: \"{data}\""));
             assert!(text.contains("Nothing was spent"), "{text}");
-            assert!(text.contains("--allow-retry"), "{text}");
+        }
+        for (signature, words) in [
+            ("BridgePaused()", 0),
+            ("WithdrawTreasuryShortfall(uint256,uint256)", 2),
+            ("UnknownAnchor(uint256)", 1),
+            ("WithdrawalWindowFull(uint32,uint256,uint256,uint256)", 4),
+            ("NacklNotMinter(address)", 1),
+        ] {
+            let selector = &alloy::primitives::keccak256(signature)[..4];
+            let data = format!("0x{}{}", hex::encode(selector), "00".repeat(32 * words));
+            let text = explain(&format!("data: \"{data}\""));
+            assert!(
+                text.contains("re-run the same `withdraw proof` command as it is"),
+                "withdraw proof has no --allow-retry: {text}"
+            );
+            assert!(text.contains("a `withdraw` with --allow-retry"), "{text}");
         }
     }
 

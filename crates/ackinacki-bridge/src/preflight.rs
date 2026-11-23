@@ -386,21 +386,27 @@ pub async fn run_for_token(
                 source: None,
             });
         }
-        let (minted, burned) =
-            call_get_total_bridged_for_token(&context, &usdc_bridge_legacy, &bridge_boc, token_id)
-                .await?;
-        // Match initiateWithdrawal's refund when burned already exceeds minted
-        // or this amount would take it there. The first arm avoids
-        // subtracting when burned > minted.
-        if !nackl && (burned > minted || amount.0 > minted - burned) {
+        // 6c. The EVM bridge the burn will be bound to.
+        let bound =
+            call_get_evm_bridge(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id).await?;
+        if bound != evm_bridge {
+            let named = if bound == alloy::primitives::Address::ZERO {
+                format!(
+                    "names no EVM bridge for chain {} (getEvmBridge is unset): initiateWithdrawal \
+                     would refund the burn with 239",
+                    to.chain_id
+                )
+            } else {
+                format!(
+                    "binds withdrawals to chain {} to the EVM bridge {bound} (getEvmBridge), and \
+                     only that bridge pays them",
+                    to.chain_id
+                )
+            };
             return Err(CliError::Preflight {
                 reason: format!(
-                    "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
-                     minted={minted} burned={burned} µUSDC (getTotalBridged(3)); \
-                     initiateWithdrawal of {} µUSDC would return the attached ECC without burning \
-                     it. Owner-minted ECC does not add bridged inventory; a prior finalized \
-                     deposit must cover the amount.",
-                    amount.0
+                    "the Acki Nacki bridge {usdc_bridge_extended} {named}, not --bridge-address \
+                     {evm_bridge}. Nothing was burnt."
                 ),
                 source: None,
             });
@@ -464,6 +470,25 @@ pub async fn run_for_token(
         if let (0, used) = window {
             return Err(window_refusal(0, used));
         }
+        let (minted, burned) =
+            call_get_total_bridged_for_token(&context, &usdc_bridge_legacy, &bridge_boc, token_id)
+                .await?;
+        // Match initiateWithdrawal's refund when burned already exceeds minted
+        // or this amount would take it there. The first arm avoids
+        // subtracting when burned > minted.
+        if !nackl && (burned > minted || amount.0 > minted - burned) {
+            return Err(CliError::Preflight {
+                reason: format!(
+                    "the Acki Nacki bridge {usdc_bridge_extended} has bridged inventory \
+                     minted={minted} burned={burned} µUSDC (getTotalBridged(3)); \
+                     initiateWithdrawal of {} µUSDC would return the attached ECC without burning \
+                     it. Owner-minted ECC does not add bridged inventory; a prior finalized \
+                     deposit must cover the amount.",
+                    amount.0
+                ),
+                source: None,
+            });
+        }
         if !nackl && amount.0 > outstanding {
             return Err(CliError::Preflight {
                 reason: format!(
@@ -489,31 +514,6 @@ pub async fn run_for_token(
         let (daily_limit, used) = window;
         if amount.0 > daily_limit || used > daily_limit - amount.0 {
             return Err(window_refusal(daily_limit, used));
-        }
-        // 6c. The EVM bridge the burn will be bound to.
-        let bound =
-            call_get_evm_bridge(&context, &usdc_bridge_legacy, &bridge_boc, to.chain_id).await?;
-        if bound != evm_bridge {
-            let named = if bound == alloy::primitives::Address::ZERO {
-                format!(
-                    "names no EVM bridge for chain {} (getEvmBridge is unset): initiateWithdrawal \
-                     would refund the burn with 239",
-                    to.chain_id
-                )
-            } else {
-                format!(
-                    "binds withdrawals to chain {} to the EVM bridge {bound} (getEvmBridge), and \
-                     only that bridge pays them",
-                    to.chain_id
-                )
-            };
-            return Err(CliError::Preflight {
-                reason: format!(
-                    "the Acki Nacki bridge {usdc_bridge_extended} {named}, not --bridge-address \
-                     {evm_bridge}. Nothing was burnt."
-                ),
-                source: None,
-            });
         }
     }
 
@@ -3364,6 +3364,57 @@ pub(crate) mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("without burning"), "{msg}");
         assert!(msg.contains("getTotalBridged"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn preflight_names_an_unregistered_usdc_before_the_bridged_inventory() {
+        let (account_id, account_boc) = crate::test_chain::deployed_multisig(5_000_000).await;
+        let (usdc_bridge_account_id, usdc_bridge_boc) =
+            crate::test_chain::deployed_bridge_artifact(
+                crate::test_chain::USDC_BRIDGE_TVC,
+                crate::burn::USDC_BRIDGE_ABI_JSON,
+                false,
+                0,
+                0,
+            )
+            .await;
+        let node = crate::test_chain::fake_node(crate::test_chain::NodeFixture {
+            account_id: account_id.clone(),
+            account_boc,
+            usdc_bridge_account_id: usdc_bridge_account_id.clone(),
+            usdc_bridge_boc,
+        })
+        .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keys = write_keys(dir.path(), PAIR_PUBLIC, PAIR_SECRET);
+        set_owner_only(&keys);
+
+        let from = crate::args::parse_from(&format!("{account_id}::{account_id}")).unwrap();
+        let to =
+            crate::args::parse_to("0x742d35Cc6634C0532925a3b844Bc454e4438f44e", Some(11155111))
+                .unwrap();
+        let amount = crate::args::parse_amount("1.000000").unwrap();
+
+        let err = run(
+            &from,
+            &keys,
+            &to,
+            crate::test_chain::BOUND_EVM_BRIDGE,
+            &amount,
+            &node.url,
+            &usdc_bridge_account_id,
+            BalanceCheck::Require,
+        )
+        .await
+        .expect_err("an unregistered USDC is refunded with 247 before any inventory check");
+        assert_eq!(err.exit_code().as_i32(), 2, "{err}");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("247") && msg.contains("setBridgeToken"),
+            "{msg}"
+        );
+        assert!(!msg.contains("getTotalBridged"), "{msg}");
     }
 
     #[tokio::test]

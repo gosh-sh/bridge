@@ -97,6 +97,8 @@ pub struct FinalizeInfo {
     pub voucher_code_hash: String,
     pub voucher_account: String,
     pub sends: u32,
+    #[serde(default)]
+    pub accepted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +130,8 @@ pub struct OpRecord {
     pub voucher_code_hash: String,
     #[serde(default = "legacy_currency_id")]
     pub token_id: u32,
+    #[serde(default)]
+    pub token_decimals: Option<u8>,
     pub from: Option<Address>,
     pub stage: OpStage,
     pub request: Option<RequestInfo>,
@@ -143,6 +147,10 @@ pub struct OpRecord {
     /// For the summary of a finished operation, which needs no network.
     pub an_bridge_dapp: Option<String>,
     pub anchor_writer: Option<String>,
+    /// Created by `deposit proof` for a deposit made elsewhere: any
+    /// transaction that emits it is accepted, whatever its calldata.
+    #[serde(default)]
+    pub found_by_tx: bool,
 }
 
 fn legacy_currency_id() -> u32 {
@@ -160,6 +168,7 @@ impl OpRecord {
             params,
             voucher_code_hash,
             token_id: 3,
+            token_decimals: None,
             from: None,
             stage: OpStage::Reserved,
             request: None,
@@ -172,6 +181,7 @@ impl OpRecord {
             work_dir: None,
             an_bridge_dapp: None,
             anchor_writer: None,
+            found_by_tx: false,
         }
     }
 
@@ -587,6 +597,7 @@ mod tests {
             voucher_code_hash: "bd44".into(),
             voucher_account: String::new(),
             sends: 1,
+            accepted: true,
         });
         assert!(!r.is_unresolved(), "Finalizing does not block new deposits");
     }

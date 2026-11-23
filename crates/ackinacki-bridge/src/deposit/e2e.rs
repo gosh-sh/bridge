@@ -19,7 +19,7 @@
 //! The test runs in `crates/ackinacki-bridge`, which the profile's relative
 //! paths are written for. `E2E_AMOUNT` is in USDC and defaults to 0.01.
 //! Use a fresh paired deployment with `deposit(address,uint256,bytes32)` on EVM
-//! and AN bridge 1.18.0. The operation is kept in the profile's state
+//! and AN bridge 1.19.0. The operation is kept in the profile's state
 //! directory, so a run that stops continues with the CLI's own `--resume
 //! <op-id>`.
 //!

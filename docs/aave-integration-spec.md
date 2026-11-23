@@ -74,7 +74,7 @@ Every term this document uses is defined here, and no other word is used for the
 | Symbol | Meaning | Source |
 |---|---|---|
 | `U` | USDC held by the bridge, `usdc.balanceOf(bridge)` | |
-| `A` | aUSDC held by the bridge, `aUsdcBalance()` | `contracts/ethereum/src/AckiNackiBridge.sol:1947` |
+| `A` | aUSDC held by the bridge, `aUsdcBalance()` | `contracts/ethereum/src/AckiNackiBridge.sol:2483` |
 | `B` | `treasuryBalance`, the principal owed to eccUSDC holders | `:108` |
 | `S` | `suppliedPrincipal`, the principal booked as supplied to AAVE | `:133` |
 | `L` | liquid principal: `min(U, B − S)` — the part of `B` that sits on the bridge as USDC | new |
@@ -103,7 +103,7 @@ Every term this document uses is defined here, and no other word is used for the
 
 | ID | Form | Requirement |
 |---|---|---|
-| DEP-1 | Ubiquitous | The checks of `deposit` shall stay: zero amount, `MAX_DEPOSIT_AMOUNT`, `MAX_TRANSFER_AMOUNT` = 50 USDC, zero account, `MAX_BRIDGE_TVL` = 10 000 USDC counting the principal in AAVE (`:845-852`). |
+| DEP-1 | Ubiquitous | The checks of `deposit` shall stay: zero amount, `MAX_DEPOSIT_AMOUNT`, zero account, the owner's USDC `tvlCap` counting the principal in AAVE (the per-transfer cap and `MAX_BRIDGE_TVL` were removed by gosh-sh/bridge-audit#161) (`:845-852`). |
 | DEP-2 | Event-driven | When a deposit succeeds, the bridge shall credit `B` with the USDC it received and emit `Deposit` before any call to the pool (`:853-858`). |
 | DEP-3 | Event-driven | When, after that credit, `aaveEnabled` is true and `L ≥ H`, the deposit shall supply `L − T` to the pool in the same transaction, leaving `L = T`. |
 | DEP-4 | State-driven | While `L < H` after the credit, the deposit shall make no call to the pool. |

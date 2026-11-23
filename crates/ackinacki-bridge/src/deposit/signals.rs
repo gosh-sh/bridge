@@ -207,6 +207,7 @@ pub mod tests_support {
             voucher_code_hash: "bd44".into(),
             voucher_account: "ee".repeat(32),
             sends: 1,
+            accepted: true,
         });
         rec.credit = Some(CreditInfo {
             confirm_tx: "c1".repeat(32),

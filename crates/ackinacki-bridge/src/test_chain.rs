@@ -140,7 +140,7 @@ async fn deployed_multisig_for_token(ecc3: u128, token_id: u32) -> (String, Stri
 /// The USDCBridge contract, as compiled for the bridge account. Its ABI is
 /// the one the CLI ships (`abi/USDCBridge.abi.json`, kept identical to the
 /// compiled one by CI).
-const USDC_BRIDGE_TVC: &[u8] =
+pub(crate) const USDC_BRIDGE_TVC: &[u8] =
     include_bytes!("../../../contracts/an/0.80.1_compiled/exchange/eccBridge.tvc");
 
 /// The EVM bridge [`deployed_usdc_bridge`] binds Sepolia withdrawals to, and
@@ -164,19 +164,53 @@ pub(crate) async fn deployed_usdc_bridge_with(
     bridged_minted: u128,
     bridged_burned: u128,
 ) -> (String, String) {
-    deployed_bridge_artifact(
+    let (account_id, boc) = deployed_bridge_artifact(
         USDC_BRIDGE_TVC,
         crate::burn::USDC_BRIDGE_ABI_JSON,
         paused,
         bridged_minted,
         bridged_burned,
     )
+    .await;
+    let ctx = Arc::new(ClientContext::new(ClientConfig::default()).unwrap());
+    let encoded = encode_message(ctx.clone(), ParamsOfEncodeMessage {
+        abi: Abi::Json(crate::burn::USDC_BRIDGE_ABI_JSON.to_string()),
+        address: Some(format!("0:{account_id}")),
+        call_set: Some(CallSet {
+            function_name: "setBridgeToken".into(),
+            input: Some(json!({"chainId": "11155111", "evmToken": "28656894849625547415758526131691823914822206725",
+                "tokenId": 3, "maxTvl": "10000000000", "dailyLimit": "50000000",
+                "depositsEnabled": true})),
+            ..Default::default()
+        }),
+        signer: Signer::Keys {
+            keys: KeyPair {
+                public: PAIR_PUBLIC.into(),
+                secret: PAIR_SECRET.into(),
+            },
+        },
+        ..Default::default()
+    })
     .await
+    .unwrap();
+    let boc = run_executor(ctx, ParamsOfRunExecutor {
+        message: encoded.message,
+        account: AccountForExecutor::Account {
+            boc,
+            unlimited_balance: Some(true),
+        },
+        return_updated_account: Some(true),
+        ..Default::default()
+    })
+    .await
+    .unwrap()
+    .account;
+    (account_id, boc)
 }
 
 /// Deploy the specified bridge artifact using its unchanged constructor
 /// interface.
-async fn deployed_bridge_artifact(
+pub(crate) async fn deployed_bridge_artifact(
     tvc: &[u8],
     abi_json: &str,
     paused: bool,
@@ -361,8 +395,8 @@ async fn bridge_with_token_lane(
         call_set: Some(CallSet {
             function_name: "setBridgeToken".into(),
             input: Some(
-                json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
-                "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true}),
+                json!({"chainId": "11155111", "evmToken": "28656894849625547415758526131691823914822206725", "tokenId": 3,
+                "maxTvl": "10000000000", "dailyLimit": "50000000", "depositsEnabled": true}),
             ),
             ..Default::default()
         }),
@@ -426,9 +460,8 @@ async fn bridge_with_token_lane(
                 panic!("token config");
             };
             for (name, value) in [
-                ("maxTransfer", amount),
                 ("maxTvl", amount * 10),
-                ("maxWithdrawal", amount),
+                ("dailyLimit", amount),
                 ("outstanding", amount),
             ] {
                 config.iter_mut().find(|f| f.name == name).unwrap().value =
@@ -953,6 +986,7 @@ impl FakeWorld {
         self.args
             .as_mut()
             .expect("the arguments are still here")
+            .prove
             .anchor_layer = layer.to_string();
     }
 
@@ -1002,11 +1036,11 @@ impl FakeWorld {
         )
         .unwrap();
         let args = self.args.as_mut().expect("the arguments are still here");
-        args.eth_private_key = Some("1a".repeat(32));
-        args.aggregator_dir = Some(path.clone());
-        args.verifiers_dir = Some(path.clone());
-        args.params_dir = Some(path.clone());
-        args.work_dir = Some(path);
+        args.prove.eth_private_key = Some("1a".repeat(32));
+        args.prove.aggregator_dir = Some(path.clone());
+        args.prove.verifiers_dir = Some(path.clone());
+        args.prove.params_dir = Some(path.clone());
+        args.prove.work_dir = Some(path);
         self._plumbing = Some(dir);
     }
 
@@ -1028,7 +1062,7 @@ impl FakeWorld {
     ) -> crate::errors::CliResult<crate::orchestrator::WithdrawSuccess> {
         let mut args = self.args.take().expect("a world puts one run through it");
         args.dry_run = dry_run;
-        let outcome = crate::orchestrator::run(args, dry_run, true).await;
+        let outcome = crate::orchestrator::run(args, crate::orchestrator::Part::Whole, true).await;
         // Before the caller reads the outcome: a refusal caused by this
         // node refusing to answer is not a fact about the withdrawal.
         self.node.complaint();
@@ -1135,16 +1169,16 @@ pub(crate) async fn fake_world_for_token(
         answers.insert(
             "68fb1109",
             format!(
-                "0x{:064x}{:064x}{:064x}{:064x}{:064x}{:064x}",
-                85u128,
+                "0x{:0>64}{:064x}{:064x}{:064x}{:064x}{:064x}",
+                "05".repeat(20),
                 decimals,
                 1u8,
-                ecc3,
                 ecc3 * 10,
+                ecc3,
                 ecc3
             ),
         );
-        answers.insert("aa407e56", format!("0x{ecc3:064x}"));
+        answers.insert("d8201475", format!("0x{ecc3:064x}{:064x}", 0u8));
     }
     let rpc = mock_rpc_code_for(&full_walk_code(), answers).await;
 
@@ -1171,23 +1205,25 @@ pub(crate) async fn fake_world_for_token(
         amount: amount.to_string(),
         dry_run: false,
         allow_retry: false,
-        allow_verifier_drift: false,
-        gql_endpoint: node.url.clone(),
-        usdc_bridge_account: usdc_bridge_account_id,
-        anchor_layer: "1".to_string(),
-        i_know_the_wait: false,
-        rpc_url: rpc,
-        bridge_address: BOUND_EVM_BRIDGE,
-        eth_private_key: None,
-        aggregator_dir: None,
-        verifiers_dir: None,
-        params_dir: None,
-        snark_dir: state_dir.path().join("snark"),
-        pk_cache_dir: None,
-        prover_out_dir: None,
-        prover_timeout_s: 60,
-        work_dir: None,
         state_dir: Some(state_dir.path().to_path_buf()),
+        prove: crate::args::ProveArgs {
+            allow_verifier_drift: false,
+            gql_endpoint: node.url.clone(),
+            usdc_bridge_account: usdc_bridge_account_id,
+            anchor_layer: "1".to_string(),
+            i_know_the_wait: false,
+            rpc_url: rpc,
+            bridge_address: BOUND_EVM_BRIDGE,
+            eth_private_key: None,
+            aggregator_dir: None,
+            verifiers_dir: None,
+            params_dir: None,
+            snark_dir: state_dir.path().join("snark"),
+            pk_cache_dir: None,
+            prover_out_dir: None,
+            prover_timeout_s: 60,
+            work_dir: None,
+        },
     };
 
     FakeWorld {
@@ -1347,7 +1383,7 @@ mod tests {
         .account;
         assert_eq!(
             getter(boc.clone(), "getVersion", json!({})).await["value0"],
-            "1.18.0"
+            "1.19.0"
         );
         assert_eq!(
             getter(
@@ -1359,7 +1395,7 @@ mod tests {
             "1000000"
         );
         let refused = owner_call_for_upgrade(&ctx, &address, &boc, "setBridgeToken", json!({"chainId": "11155111", "evmToken": "85", "tokenId": 4,
-            "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000", "depositsEnabled": true}))
+            "maxTvl": "10000000000000000000", "dailyLimit": "1000000000000000000", "depositsEnabled": true}))
         .await
         .expect("a special account records the refused call")
         .transaction;
@@ -1375,7 +1411,7 @@ mod tests {
             &boc,
             "setBridgeToken",
             json!({"chainId": "11155111", "evmToken": "85", "tokenId": 3,
-            "maxTransfer": "50000000", "maxTvl": "10000000000", "depositsEnabled": true}),
+            "maxTvl": "10000000000", "dailyLimit": "50000000", "depositsEnabled": true}),
         )
         .await
         .unwrap()
@@ -1475,11 +1511,11 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.1 build of eccBridge 1.18.0, against EthBeaconLightClient
+        // sold 0.80.1 build of eccBridge 1.19.0, against EthBeaconLightClient
         // 1.8.0, whose state layout the bridge builds the client's data from.
         assert_eq!(
             &hash[..8],
-            "2c2296a5",
+            "4d8ed160",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

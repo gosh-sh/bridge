@@ -19,6 +19,7 @@ import "./mocks/MockERC20.sol";
 import "./helpers/UsdcTestLib.sol";
 import "./helpers/Bn254FrLib.sol";
 import { MockAaveLib } from "./helpers/MockAaveLib.sol";
+import { WithdrawalWindow } from "../src/WithdrawalWindow.sol";
 
 /// @title AckiNackiBridgeWithdrawByProofTest
 /// @notice Circuit 4 (single-final-root) tests — the unified AN→ETH payout
@@ -975,11 +976,17 @@ contract AckiNackiBridgeWithdrawByProofTest is Test {
     // Treasury + verifier rejection
     // ─────────────────────────────────────────────────────────────────────
 
-    function test_withdrawAboveTransferLimitDoesNotConsumeProof() public {
+    function test_withdrawAboveDailyLimitDoesNotConsumeProof() public {
         uint256 nullifier = 100;
-        withdrawalVerifier.setShouldAccept(false);
-        vm.expectRevert(AckiNackiBridge.TransferTooLarge.selector);
-        bridge.withdrawByProof(_dummyProof(), _defaultPub(50 * UsdcTestLib.UNIT + 1, nullifier));
+        uint256 limit = 50 * UsdcTestLib.UNIT;
+        uint32 id = bridge.usdcTokenId();
+        bridge.setTokenLimits(id, VerifyBlockConfigLib.USDC_TVL_CAP, limit);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                WithdrawalWindow.WithdrawalWindowFull.selector, id, 0, limit + 1, limit
+            )
+        );
+        bridge.withdrawByProof(_dummyProof(), _defaultPub(limit + 1, nullifier));
         assertFalse(bridge.isNullifierUsed(nullifier));
         assertEq(bridge.treasuryBalance(), 50 * UsdcTestLib.UNIT);
         assertEq(usdc.balanceOf(RECIPIENT), 0);

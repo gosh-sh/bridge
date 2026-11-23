@@ -336,6 +336,7 @@ async fn attempts(
                 voucher_code_hash: hex::encode(cx.stored_code_hash),
                 voucher_account: hex::encode(cx.voucher),
                 sends: 0,
+                accepted: false,
             });
         }
         if let Some(f) = rec.finalize.as_mut() {
@@ -354,9 +355,18 @@ async fn attempts(
         let outcome = send.send_finalize(cx.bridge, cx.bridge_dapp, witness).await;
         match react(&outcome) {
             Reaction::ToCredit => {
+                if let Some(f) = rec.finalize.as_mut() {
+                    f.accepted = true;
+                }
+                if let Err(e) = store.write(rec) {
+                    ui.warn(&format!(
+                        "finalizeDeposit was accepted, but the record could not be updated ({e}); \
+                         a resume will report the deposit as finalized by somebody else"
+                    ));
+                }
                 return Ok(FinalizeExit::ToCredit {
                     via_events,
-                })
+                });
             },
             Reaction::BackToAnchor => return Ok(FinalizeExit::BackToAnchor),
             Reaction::WaitCapacity => {
@@ -364,6 +374,14 @@ async fn attempts(
                 ui.status(
                     "the source chain's TVL cap is reached; waiting for withdrawals before \
                      retrying",
+                );
+                tokio::time::sleep(cx.poll).await;
+            },
+            Reaction::WaitLock => {
+                in_doubt.store(earlier, Ordering::SeqCst);
+                ui.status(
+                    "the bridge holds less NACKL locked for this chain than the deposit; waiting \
+                     for NACKL withdrawals to lock more before retrying",
                 );
                 tokio::time::sleep(cx.poll).await;
             },
@@ -431,6 +449,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         assert_eq!(
             pre_send(H, H, Some(&v), false, false),
@@ -444,6 +463,7 @@ mod tests {
             status: AccStatus::Uninit,
             dapp_id: None,
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         assert_eq!(pre_send(H, H, Some(&v), false, false), PreSend::Send {
             via_events: false
@@ -456,6 +476,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         assert_eq!(
             pre_send(H, [1; 32], Some(&v), false, false),
@@ -698,6 +719,47 @@ mod tests {
             "not after a whole poll"
         );
         assert_eq!(*an.sent.lock().unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_accepted_send_is_on_disk_before_the_credit_step() {
+        use crate::deposit::{refusals::FinalizeSend, store::*, testkit::*};
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).unwrap();
+        let mut rec = proved(&store);
+        let an = FakeAn::default();
+        an.getter([0x1a; 32], "getDepositVoucherCodeHash", vec![
+            serde_json::json!({"value0": format!("0x{}", hex::encode(H))}),
+        ]);
+        an.getter([0x1a; 32], "isPaused", vec![
+            serde_json::json!({"value0": false}),
+        ]);
+        an.sends.lock().unwrap().push_back(FinalizeSend::Executed {
+            tx_id: "t".into(),
+            aborted: false,
+            exit_code: Some(0),
+        });
+        let cx = FinCtx {
+            bridge: [0x1a; 32],
+            bridge_dapp: [0; 32],
+            voucher: [0xee; 32],
+            stored_code_hash: H,
+            identity: ident(),
+            not_before: 0,
+            deadline: Some(tokio::time::Instant::now() + std::time::Duration::from_secs(60)),
+            poll: std::time::Duration::from_secs(1),
+        };
+        let ui = crate::deposit::ui::RecordingUi::new(true);
+        let exit = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
+            .await
+            .unwrap();
+        assert!(matches!(exit, FinalizeExit::ToCredit { .. }));
+        let back = store.load(&rec.op_id).unwrap();
+        assert_eq!(back.stage, OpStage::Finalizing);
+        assert!(
+            back.finalize.unwrap().accepted,
+            "a resume must still say sent"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1030,6 +1092,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         an.failing_getters.lock().unwrap().insert("isPaused".into());
         let ui = crate::deposit::ui::RecordingUi::new(true);
@@ -1065,6 +1128,7 @@ mod tests {
             status: AccStatus::Uninit,
             dapp_id: None,
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         let ui = crate::deposit::ui::RecordingUi::new(true);
         let out = finalize(&an, &an, &store, &mut rec, &cx, &witness(), &ui)
@@ -1179,6 +1243,7 @@ mod tests {
             voucher_code_hash: hex::encode(H),
             voucher_account: hex::encode([0xee; 32]),
             sends: 1,
+            accepted: true,
         });
         store.write(&mut rec).unwrap();
         rec

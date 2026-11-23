@@ -64,8 +64,9 @@ hashes the header with the VM's keccak, requires the hash to be a block hash acc
 id (anchored by the owner, the Ethereum light client or the Arbitrum block verifier), proves the
 receipt against the header's receipts root, and reads every deposit field out of the log, which must
 be a `Deposit` event emitted by a trusted EVM bridge. Then it mints.
-Each transfer is capped at 50 USDC, and the outstanding principal at 10,000 USDC
-per L1 chain.
+There is no per-transfer limit; an amount only has to fit `uint64`. The owner sets
+the USDC TVL cap of each EVM bridge (`tvlCap`) and a rolling 24-hour withdrawal
+limit per token on both sides.
 
 **Acki Nacki → Ethereum (state attestation + payout).** Three permissionless entrypoints:
 

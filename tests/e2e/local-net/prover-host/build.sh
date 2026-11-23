@@ -6,6 +6,8 @@
 set -euo pipefail
 POSEIDON_TGZ=https://registry.npmjs.org/poseidon-solidity/-/poseidon-solidity-0.0.5.tgz
 POSEIDON_SHA256=e21e1b6f1cd0d95b321e9a1a69031b544b4966635eefdbeaacb0bd6ea9fb3517
+OZ_TGZ=https://registry.npmjs.org/@openzeppelin/contracts/-/contracts-5.4.0.tgz
+OZ_SHA256=4e4d51f18935b32f0c877bf666ac37f5e5a98e75f03e7a77eb7569f84701f680
 for b in forge cast relayer aggregate-proof eth-lc-relayer deposit-relayer ackinacki-bridge \
   export_step_vk_blob; do
   [ -x "/out/$b" ] || { echo "build.sh: /out/$b is missing: docker build --target tools did not run" >&2; exit 1; }
@@ -15,5 +17,9 @@ curl -fsSL -o /tmp/poseidon.tgz "$POSEIDON_TGZ"
 echo "$POSEIDON_SHA256  /tmp/poseidon.tgz" | sha256sum -c - >/dev/null
 mkdir -p /out/evm/node_modules/poseidon-solidity
 tar -xzf /tmp/poseidon.tgz -C /out/evm/node_modules/poseidon-solidity --strip-components=1
+curl -fsSL -o /tmp/oz.tgz "$OZ_TGZ"
+echo "$OZ_SHA256  /tmp/oz.tgz" | sha256sum -c - >/dev/null
+mkdir -p /out/evm/node_modules/@openzeppelin/contracts
+tar -xzf /tmp/oz.tgz -C /out/evm/node_modules/@openzeppelin/contracts --strip-components=1
 (cd /out/evm && /out/forge install --no-git foundry-rs/forge-std >/dev/null && /out/forge build >/dev/null)
 ls -la /out

@@ -23,11 +23,13 @@ use tvm_client::{
 
 use crate::{
     address::ExtendedAddress,
-    children::{parse_internal_children, parse_message_dst_transaction},
+    children::{
+        last_deploy, parse_ext_out_page, parse_internal_children, parse_message_dst_transaction,
+    },
     error::{AckiNackiError, Result},
     traits::IAckiNacki,
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, ExtOutPage,
         TransactionReceipt, TransactionStatus, TxHash,
     },
 };
@@ -351,6 +353,46 @@ impl IAckiNacki for TvmAckiNacki {
             address.dapp_id()
         );
         Ok(AccountInfo::from_blockchain_api(&self.gql(gql).await?))
+    }
+
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
+        last_deploy(|before| {
+            let before = before
+                .map(|cursor| format!(", before: \"{cursor}\""))
+                .unwrap_or_default();
+            self.gql(format!(
+                "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ \
+                 transactions(last: 50{before}, archive: true) {{ edges {{ node {{ id aborted \
+                 orig_status_name end_status_name }} }} pageInfo {{ hasPreviousPage startCursor \
+                 }} }} }} }} }}",
+                address.account_id(),
+                address.dapp_id()
+            ))
+        })
+        .await
+    }
+
+    async fn get_ext_out_page(
+        &self,
+        address: &ExtendedAddress,
+        before: Option<String>,
+    ) -> Result<ExtOutPage> {
+        let before = before
+            .map(|cursor| {
+                format!(
+                    ", before: {}",
+                    serde_json::to_string(&cursor).unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
+        let gql = format!(
+            "{{ blockchain {{ account(account_id:\"{}\", dapp_id:\"{}\") {{ messages(msg_type: \
+             [ExtOut], archive: true, last: 50{before}) {{ edges {{ node {{ dst body created_at \
+             }} }} pageInfo {{ hasPreviousPage startCursor }} }} }} }} }}",
+            address.account_id(),
+            address.dapp_id()
+        );
+        Ok(parse_ext_out_page(&self.gql(gql).await?))
     }
 }
 

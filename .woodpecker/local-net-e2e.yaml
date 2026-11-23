@@ -263,9 +263,9 @@ steps:
         BRIDGE_REPO='$CI_REPO_CLONE_URL' TVM_CLI_VERSION='$TVM_CLI_VERSION' TVM_CLI_SHA256='$TVM_CLI_SHA256' bash -s"
         < $CI_WORKSPACE/tests/e2e/local-net/run-test-on-host.sh
 
-  # Arbitrum Sepolia: a fresh AckiNackiBridge every run, 2 USDC deposited from it to this
-  # network with `ackinacki-bridge deposit` and withdrawn back with `ackinacki-bridge
-  # withdraw`, one pytest step per stage (tests/e2e/local-net/arbitrum/). The provers and the
+  # Arbitrum Sepolia: a fresh AckiNackiBridge every run, USDC and NACKL deposited from it to
+  # this network and withdrawn back, paid by the relayers and proven again by `ackinacki-bridge
+  # deposit proof` and `withdraw proof`, one pytest step per stage (tests/e2e/local-net/arbitrum/). The provers and the
   # CLI run on a separate prover host through a restricted CI key
   # (tests/e2e/local-net/prover-host/ci-entry) and reach this network through the runner's ssh
   # tunnels; every run's logs stay there. The host is a secret too.

@@ -19,8 +19,13 @@ contract AaveBandHandler is AaveBridgeFixture {
     bytes32 internal constant REFILL_FAILED = keccak256("AaveRefillFailed(uint256,bytes)");
     bytes32 internal constant SUPPLY_REFUSED = keccak256("AaveSupplyRefused(uint256,bytes)");
 
+    uint256 internal constant STEP = 50 * UNIT;
+
     constructor() {
         _deployFixture();
+        bridge.setTokenLimits(
+            bridge.usdcTokenId(), VerifyBlockConfigLib.USDC_TVL_CAP, type(uint256).max
+        );
     }
 
     function exposedBridge() external view returns (AckiNackiBridge) {
@@ -34,8 +39,8 @@ contract AaveBandHandler is AaveBridgeFixture {
     // ---- user paths -----------------------------------------------------
 
     function deposit(uint256 amount) external {
-        uint256 room = bridge.MAX_BRIDGE_TVL() - bridge.treasuryBalance();
-        uint256 cap = bridge.MAX_TRANSFER_AMOUNT() < room ? bridge.MAX_TRANSFER_AMOUNT() : room;
+        uint256 room = VerifyBlockConfigLib.USDC_TVL_CAP - bridge.treasuryBalance();
+        uint256 cap = STEP < room ? STEP : room;
         if (cap == 0) return;
         amount = bound(amount, 1, cap);
         (uint256 s, uint256 b, uint256 r, uint256 m) = _snapshot();
@@ -65,7 +70,7 @@ contract AaveBandHandler is AaveBridgeFixture {
     function pay(uint256 amount) external {
         uint256 b = bridge.treasuryBalance();
         if (b == 0) return;
-        uint256 cap = bridge.MAX_TRANSFER_AMOUNT() < b ? bridge.MAX_TRANSFER_AMOUNT() : b;
+        uint256 cap = STEP < b ? STEP : b;
         amount = bound(amount, 1, cap);
         uint256 s = bridge.suppliedPrincipal();
         (,, uint256 r, uint256 m) = _snapshot();

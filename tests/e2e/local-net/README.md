@@ -11,7 +11,8 @@ covers: `.woodpecker/local-net-e2e.yaml`, `tests/e2e/local-net/`,
 `.woodpecker/local-net-e2e.yaml` brings up a complete acki-nacki network on one
 dedicated host, bakes **this PR's** `contracts/an/*` into its zerostate, and runs
 `crates/bridge-prover-libraries/python/test_deploy_and_withdraw_only.py` against it
-(multisig deploy → `mintAndSendBridged` → `initiateWithdrawal` → `WithdrawalInitiated`),
+(`setBridgeToken` with a daily limit → multisig deploy → `mintAndSendBridged` →
+`initiateWithdrawal` → `WithdrawalInitiated`),
 then `test_arbitrum_block_proof.py` (`deployL2Verifier` → `proveBlock` on the bench's
 synthetic vector, refused before its parent block is accepted and admitted after).
 It follows the dexdo e2e pattern (gosh-sh/dexdo `.woodpecker/e2e.yml`) and reuses
@@ -79,7 +80,12 @@ The other nodes' APIs are no way around this: they want the token `nginx0` adds.
 
 After `run-test`, the pytest suite in `tests/e2e/local-net/arbitrum/` deploys a fresh
 `AckiNackiBridge` on Arbitrum Sepolia (421614) and sends 2 USDC from it to this network with
-`ackinacki-bridge deposit`, then the same 2 USDC back with `ackinacki-bridge withdraw`. Each
+`ackinacki-bridge deposit send`, then 2 USDC back with `ackinacki-bridge withdraw send`. NACKL
+takes the same road beside it: 5 NACKL are withdrawn with `withdraw send` (locked on this
+network, minted on 421614) and 3 deposited back with `deposit send` (burned there, unlocked
+here). The relayers finalize and pay every transfer; then the CLI proves each one
+again (`deposit proof --tx-hash`, `withdraw proof --tx-hash`) and finds it finalized or paid when
+it sends: `finalize: already_finalized`, `submit.status: already_paid`. Each
 test is one step and asserts what the step must have produced, from the chains or from the
 log of the job that did it; `-x` stops at the first failure, which names the step, what it
 waited for and the tail of the log.
@@ -87,14 +93,15 @@ waited for and the tail of the log.
 | Tests | Step |
 |---|---|
 | `test_00`–`02` | Clean every earlier deployment (its logs stay); the deployer key signs for `ARBITRUM_SEPOLIA_E2E_ADDRESS`, which has gas and ≥ 2 USDC; the Sepolia sync committee does not change within the next 2 hours |
-| `test_10`–`12` | The zerostate bridge is Active at 1.18.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
+| `test_10`–`12` | The zerostate bridge is Active at 1.19.0; the commit is built on the prover host; GraphQL and every node are reachable through the tunnels |
 | `test_20`–`23` | Genesis at the network's start, seq_no 0 (L2 anchoring, as the live relayer runs; zero anchor, the BK set at 0 from GraphQL, which has to serve `blockchain.latestBkSet`); the bridge, oracle and four verifiers have code and the bridge's configuration; `deployL2Verifier` records the verifier; `setTrustedL1Bridge(421614, bridge)`, and the bridge holds the genesis anchor |
 | `test_30`–`32` | The keys of `daemon-live` and `daemon-withdraw-live` (derived from the deployer's) get gas; `daemon-live` (from `BRIDGE_BOOTSTRAP_SEQNO=0`), `daemon-withdraw-live` and `arbitrum-anchors` log their start; an empty multisig |
-| `test_40`–`44` | `deposit`: sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then `withdraw`, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614, burn, WithdrawalInitiated |
+| `test_40`–`44` | `deposit send` (job `cli-deposit`): sent, Deposit event, the bridge on the AAVE market of 421614 (`aavePool()`, `aUSDC()`) and part of the 2 USDC supplied to it (`suppliedPrincipal() > 0`) — as soon as the network is up; then the withdrawals, alongside it: a second multisig gets 2 USDC the owner mints with `mintAndSendBridged` for 421614; `withdraw send` (job `cli-withdraw-send`, logs `cli-withdraw-send-usdc`, `-nackl`) burns the 2 USDC and the 5 NACKL; daemon-withdraw-live finds both |
 | `test_50`–`55` | While the deposit waits for its assertion: the light client's step proving key is generated once (`lc-keygen`) and its VK is `EthBeaconLightClient`'s `VK_BLOB`; `eth-lc-relayer prove-one` proves the latest Sepolia finality update; `deployLightClient` deployed the light client without a committee; the proven committee is set once (`set-gloas-fork-slot`, `set-committee`); the owner's anchors are off for 11155111 (`flip-owner`) and 421614, and the light client's owner rotation is off; `eth-lc-relayer daemon` gets its first checkpoint accepted |
-| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, the receipt proof, `finalizeDeposit`, `confirmDeposit`, 2 USDC on the multisig |
-| `test_70`–`73` | `verifyBlock` covering the burn (the first bundle, 16384), Circuit 4 proof, `withdrawByProof` paid out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), 2 USDC back on the deployer |
-| `test_74` | How long each proof took on the prover host, printed from the relayer job's log: the bundle's Circuit 1A/1B and Circuit 2 proofs, every `aggregate-proof` run, the start and end of the withdrawal's proof |
+| `test_60`–`65` | The light client accepts a span (`submitAncestry`), the deposit block is anchored through the verifier, the deposit relayer finalizes both deposits and they are credited; `deposit proof --tx-hash` of each (job `cli-deposit-proof`, logs `cli-deposit-proof-usdc`, `-nackl`) builds the receipt proof and ends `already_finalized`; 2 USDC on the multisig |
+| `test_70`–`74` | `verifyBlock` covering both burns (the first bundle, 16384); daemon-withdraw-live proves and pays the USDC burn out of the deposit's 2 USDC, pulling what it needs back from AAVE (`WithdrawnFromAave`, nothing left booked as supplied), then the NACKL burn; `withdraw proof --tx-hash` of each (job `cli-withdraw`, logs `cli-withdraw-usdc`, `-nackl`) builds the Circuit 4 proof and ends `already_paid`; 2 USDC back on the deployer |
+| NACKL (`test_21`, `23`, `42b`, `43`, `45`, `46`, `66`, `71b`, `75`, `76`) | `deploy` adds a test NACKL token minted by the bridge, 1000 NACKL on the deployer, listed under id 1; `setBridgeToken(421614, NACKL, 1)`; a multisig gets 5 NACKL from the giver; `withdraw send` burns them, and the bridge keeps them locked for 421614 and for this bridge (`getNacklLockedTo`); `cli-deposit-nackl` (`deposit send`) deposits 3 NACKL, burned on 421614 and unlocked to the deposit's multisig; daemon-withdraw-live's `withdrawByProof` mints the 5 NACKL at once; the supply, the lock and `nacklState()` reconcile |
+| `test_77` | How long each proof took on the prover host, printed from the relayer job's log: the bundle's Circuit 1A/1B and Circuit 2 proofs, every `aggregate-proof` run, the start and end of the withdrawal's proof |
 
 Nothing is accepted by hand. The one trusted input is the Sepolia light client's committee:
 `lc-prove` proves the latest finality update from the beacon chain

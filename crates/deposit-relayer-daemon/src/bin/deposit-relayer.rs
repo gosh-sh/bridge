@@ -483,7 +483,35 @@ async fn finalize_one(
         token_bridge: an_token_bridge,
         confirm_timeout_secs: 60,
     };
-    let submitter = AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg);
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), submit_cfg).with_voucher_check(bridge_abi())?;
+
+    let proven = witness.deposit_log().and_then(|(contract, id)| {
+        let deposit_id = u64::try_from(alloy::primitives::U256::from_be_bytes(id.0)).ok()?;
+        Some(deposit_relayer_daemon::types::DepositEvent {
+            deposit_id,
+            sender: Address::ZERO,
+            amount: Default::default(),
+            an_account: Default::default(),
+            timestamp: Default::default(),
+            token: Address::ZERO,
+            tx_hash: Default::default(),
+            log_index: u64::from(witness.log_index),
+            block_number: witness.block_number,
+            block_hash: witness.block_hash,
+            source_contract: contract,
+            source_chain_id: witness.chain_id,
+        })
+    });
+    if let Some(event) = &proven {
+        if submitter.is_finalized(event).await? {
+            info!(
+                deposit_id = event.deposit_id,
+                "deposit already finalised on AN (its voucher exists); nothing sent"
+            );
+            return Ok(());
+        }
+    }
 
     match submitter.submit_witness(&witness).await? {
         SubmitOutcome::Finalized {

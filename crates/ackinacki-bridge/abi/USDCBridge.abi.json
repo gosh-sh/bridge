@@ -189,8 +189,8 @@
 				{"name":"chainId","type":"uint256"},
 				{"name":"evmToken","type":"uint256"},
 				{"name":"tokenId","type":"uint32"},
-				{"name":"maxTransfer","type":"uint128"},
 				{"name":"maxTvl","type":"uint128"},
+				{"name":"dailyLimit","type":"uint128"},
 				{"name":"depositsEnabled","type":"bool"}
 			],
 			"outputs": [
@@ -205,11 +205,10 @@
 			"outputs": [
 				{"name":"listed","type":"bool"},
 				{"name":"tokenId","type":"uint32"},
-				{"name":"maxTransfer","type":"uint128"},
 				{"name":"maxTvl","type":"uint128"},
+				{"name":"dailyLimit","type":"uint128"},
 				{"name":"outstanding","type":"uint128"},
-				{"name":"depositsEnabled","type":"bool"},
-				{"name":"maxWithdrawal","type":"uint128"}
+				{"name":"depositsEnabled","type":"bool"}
 			]
 		},
 		{
@@ -221,11 +220,21 @@
 			"outputs": [
 				{"name":"listed","type":"bool"},
 				{"name":"evmToken","type":"uint256"},
-				{"name":"maxTransfer","type":"uint128"},
 				{"name":"maxTvl","type":"uint128"},
+				{"name":"dailyLimit","type":"uint128"},
 				{"name":"outstanding","type":"uint128"},
-				{"name":"depositsEnabled","type":"bool"},
-				{"name":"maxWithdrawal","type":"uint128"}
+				{"name":"depositsEnabled","type":"bool"}
+			]
+		},
+		{
+			"name": "getWithdrawalWindow",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"tokenId","type":"uint32"}
+			],
+			"outputs": [
+				{"name":"dailyLimit","type":"uint128"},
+				{"name":"used","type":"uint128"}
 			]
 		},
 		{
@@ -441,9 +450,19 @@
 				{"name":"chainId","type":"uint256"}
 			],
 			"outputs": [
-				{"name":"maxTransfer","type":"uint128"},
 				{"name":"maxTvl","type":"uint128"},
+				{"name":"dailyLimit","type":"uint128"},
 				{"name":"outstanding","type":"uint128"}
+			]
+		},
+		{
+			"name": "getNacklLockedTo",
+			"inputs": [
+				{"name":"chainId","type":"uint256"},
+				{"name":"evmBridge","type":"uint160"}
+			],
+			"outputs": [
+				{"name":"value0","type":"uint128"}
 			]
 		},
 		{
@@ -519,6 +538,20 @@
 			]
 		},
 		{
+			"name": "DepositRefused",
+			"inputs": [
+				{"name":"depositId","type":"uint256"},
+				{"name":"contractAddr","type":"uint256"},
+				{"name":"dappId","type":"uint256"},
+				{"name":"chainId","type":"uint256"},
+				{"name":"amount","type":"uint128"},
+				{"name":"anAccount","type":"uint256"},
+				{"name":"reason","type":"uint16"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "DepositFinalized",
 			"inputs": [
 				{"name":"depositId","type":"uint256"},
@@ -546,7 +579,7 @@
 		{"init":false,"name":"_totalMintedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_totalBurnedBridgeByToken","type":"map(uint32,uint128)"},
 		{"init":false,"name":"_outstandingByChain","type":"map(uint256,uint128)"},
-		{"components":[{"name":"evmToken","type":"uint256"},{"name":"maxTransfer","type":"uint128"},{"name":"maxTvl","type":"uint128"},{"name":"maxWithdrawal","type":"uint128"},{"name":"outstanding","type":"uint128"},{"name":"depositsEnabled","type":"bool"}],"init":false,"name":"_bridgeTokens","type":"map(uint256,map(uint32,tuple))"},
+		{"components":[{"name":"evmToken","type":"uint256"},{"name":"maxTvl","type":"uint128"},{"name":"dailyLimit","type":"uint128"},{"name":"outstanding","type":"uint128"},{"name":"depositsEnabled","type":"bool"}],"init":false,"name":"_bridgeTokens","type":"map(uint256,map(uint32,tuple))"},
 		{"init":false,"name":"_bridgeTokenIds","type":"map(uint256,map(uint256,uint32))"},
 		{"init":false,"name":"_depositVoucherCode","type":"cell"},
 		{"init":false,"name":"_trustedL1Bridge","type":"map(uint256,map(uint256,bool))"},
@@ -559,6 +592,8 @@
 		{"init":false,"name":"_l2VerifierCode","type":"cell"},
 		{"init":false,"name":"_l2Verifiers","type":"map(uint256,address)"},
 		{"init":false,"name":"_l2VerifierParent","type":"map(uint256,uint256)"},
-		{"init":false,"name":"_paused","type":"bool"}
+		{"init":false,"name":"_paused","type":"bool"},
+		{"init":false,"name":"_nacklLockedTo","type":"map(uint256,map(uint160,uint128))"},
+		{"components":[{"name":"hour","type":"uint32"},{"name":"amount","type":"uint128"}],"init":false,"name":"_withdrawalWindow","type":"map(uint256,map(uint32,map(uint8,tuple)))"}
 	]
 }

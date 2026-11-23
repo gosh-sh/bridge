@@ -233,7 +233,18 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
     let skip_prompt = cli.yes;
 
     match cli.cmd {
-        Command::Withdraw(args) => {
+        Command::Withdraw(cmd) => {
+            // `withdraw proof` burns nothing and so asks nothing.
+            let (flags, part) = match cmd.step {
+                Some(args::WithdrawStep::Proof(flags)) => {
+                    return orchestrator::run_proof(flags.into_args()?)
+                        .await
+                        .map(|w| output::RunSuccess::Withdraw(Box::new(w)));
+                },
+                Some(args::WithdrawStep::Send(flags)) => (flags, orchestrator::Part::Send),
+                None => (cmd.run, orchestrator::Part::Whole),
+            };
+            let args = flags.into_args()?;
             if non_interactive_needs_prompt && !args.dry_run {
                 return Err(errors::CliError::Preflight {
                     reason: "--non-interactive requires --yes or --dry-run (would otherwise block \
@@ -242,23 +253,38 @@ async fn dispatch(cli: Cli) -> errors::CliResult<output::RunSuccess> {
                     source: None,
                 });
             }
-            let dry_run = args.dry_run;
-            orchestrator::run(args, dry_run, skip_prompt)
+            orchestrator::run(args, part, skip_prompt)
                 .await
                 .map(|w| output::RunSuccess::Withdraw(Box::new(w)))
         },
-        Command::Deposit(args) => {
-            // From here on nothing this process prints carries the path,
-            // query or userinfo of a configured URL, or the WalletConnect
-            // project id: RPC providers put their API keys in the URL, and
-            // HTTP clients quote the whole URL in their errors.
-            hide_deposit_secrets(&args);
+        Command::Deposit(cmd) => {
             let g = crate::deposit::args::GlobalFlags {
                 json: cli.json,
                 yes: cli.yes,
                 non_interactive: cli.non_interactive,
             };
-            let params = args.validate(&g)?;
+            // From here on nothing this process prints carries the path,
+            // query or userinfo of a configured URL, or the WalletConnect
+            // project id: RPC providers put their API keys in the URL, and
+            // HTTP clients quote the whole URL in their errors.
+            let params = match cmd.step {
+                None => {
+                    hide_deposit_secrets(&cmd.run);
+                    cmd.run.validate(&g)?
+                },
+                Some(deposit::args::DepositStep::Send(args)) => {
+                    hide_deposit_secrets(&args);
+                    args.validate_send(&g)?
+                },
+                Some(deposit::args::DepositStep::Proof(args)) => {
+                    deposit::ui::hide_url_secrets(
+                        [args.rpc_url.as_deref(), args.gql_endpoint.as_deref()]
+                            .into_iter()
+                            .flatten(),
+                    );
+                    args.validate(&g)?
+                },
+            };
             crate::deposit::run(params)
                 .await
                 .map(|s| output::RunSuccess::Deposit(Box::new(s)))
@@ -502,10 +528,10 @@ mod tests {
             "MainProject-4f5a6b",
         ])
         .unwrap();
-        let Command::Deposit(args) = cli.cmd else {
+        let Command::Deposit(cmd) = cli.cmd else {
             panic!("parsed as another subcommand");
         };
-        hide_deposit_secrets(&args);
+        hide_deposit_secrets(&cmd.run);
         let secrets = [
             "MainRpcKey-5e6f7a",
             "MainGqlToken-8b9c0d",

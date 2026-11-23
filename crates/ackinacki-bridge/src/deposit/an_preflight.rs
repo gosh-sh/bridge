@@ -34,11 +34,12 @@ impl std::fmt::Display for BridgeVersion {
     }
 }
 
-/// The first bridge whose `finalizeDeposit` takes the deposit's receipt
-/// proof: `(chainId, header, txIndex, receiptProof, logIndex)`.
-pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 17, 0));
+/// The first bridge whose limit getters this build reads:
+/// `getWithdrawalWindow`, six-field token configs and `getDepositLimits` as
+/// `(maxTvl, dailyLimit, outstanding)`.
+pub const MIN_BRIDGE_VERSION: Option<BridgeVersion> = Some(BridgeVersion(1, 19, 0));
 /// The newest bridge this build was checked against.
-pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 18, 0);
+pub const NEWEST_KNOWN_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 19, 0);
 
 /// The first bridge with Arbitrum verifiers, `getL2Verifier(l2ChainId)`.
 pub const L2_VERIFIER_BRIDGE_VERSION: BridgeVersion = BridgeVersion(1, 14, 0);
@@ -68,8 +69,8 @@ pub async fn read_volume_limits(
             .ok_or_else(|| refuse(format!("getDepositLimits: invalid {name}: {out}")))
     };
     Ok(crate::deposit::evm::VolumeLimits {
-        max_transfer: field("maxTransfer")?,
         max_tvl: field("maxTvl")?,
+        daily_limit: field("dailyLimit")?,
         outstanding: field("outstanding")?,
     })
 }
@@ -125,8 +126,8 @@ fn token_deposit_limits(
         ));
     }
     Ok(crate::deposit::evm::VolumeLimits {
-        max_transfer: number("maxTransfer")?,
         max_tvl: number("maxTvl")?,
+        daily_limit: number("dailyLimit")?,
         outstanding: number("outstanding")?,
     })
 }
@@ -212,6 +213,7 @@ pub fn recipient_verdict(
             status: AccStatus::Active,
             dapp_id: Some(d),
             ecc3,
+            ..
         }) => {
             if *d != target.dapp_id {
                 return Err(format!(
@@ -235,8 +237,8 @@ pub fn recipient_verdict(
                 ecc3: a.ecc3,
             },
             Some(format!(
-                "account {} is not deployed yet ({:?}); the eccUSDC will wait on it, and the dapp \
-                 in --to cannot be checked until it is deployed",
+                "account {} is not deployed yet ({:?}); the deposited currency will wait on it, \
+                 and the dapp in --to cannot be checked until it is deployed",
                 target.account_hex(),
                 a.status
             )),
@@ -244,9 +246,9 @@ pub fn recipient_verdict(
         None => Ok((
             RecipientState::Missing,
             Some(format!(
-                "account {} does not exist yet; the deposit will create it with the eccUSDC on \
-                 it, and it gets its dapp when it is deployed, so the dapp in --to cannot be \
-                 checked now",
+                "account {} does not exist yet; the deposit will create it with the deposited \
+                 currency on it, and it gets its dapp when it is deployed, so the dapp in --to \
+                 cannot be checked now",
                 target.account_hex()
             )),
         )),
@@ -565,11 +567,12 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         });
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
-        // A 1.17.0 bridge answers getL2Verifier; this chain is not a rollup,
+        // A 1.19.0 bridge answers getL2Verifier; this chain is not a rollup,
         // so it names none. Without the answer the read falls into
         // `transient`, which retries for ever.
         an.getter(BRIDGE, "getL2Verifier", vec![
@@ -622,17 +625,17 @@ mod tests {
             json!({ "value0": "1.16.0", "value1": "eccBridge" }),
         ]);
         let error = go(&an, [0; 32]).await.unwrap_err();
-        assert!(error.to_string().contains("1.17.0"), "{error}");
+        assert!(error.to_string().contains("1.19.0"), "{error}");
     }
 
-    /// A bridge whose version says 1.17.0 but whose code has no
+    /// A bridge whose version says 1.19.0 but whose code has no
     /// `getLightClient(chainId)`: the read must fall back once and warn, not
     /// retry for ever — `get` has no deadline.
     #[tokio::test]
     async fn a_mislabelled_bridge_without_the_per_chain_getter_falls_back() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": true }),
@@ -678,7 +681,7 @@ mod tests {
         let an = healthy();
         // A version inside the known range, so only the resume warnings count.
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isPaused", vec![json!({ "value0": true })]);
         an.getter(BRIDGE, "isTrustedL1Bridge", vec![
@@ -809,6 +812,7 @@ mod tests {
             status: AccStatus::Active,
             dapp_id: Some([2; 32]),
             ecc3: 5,
+            ecc: vec![(3, 5)],
         };
         assert!(recipient_verdict(&t, Some(&other))
             .unwrap_err()
@@ -825,6 +829,7 @@ mod tests {
             status: AccStatus::Uninit,
             dapp_id: None,
             ecc3: 5,
+            ecc: vec![(3, 5)],
         };
         assert!(matches!(
             recipient_verdict(&t, Some(&uninit)).unwrap(),
@@ -834,6 +839,13 @@ mod tests {
             recipient_verdict(&t, None).unwrap(),
             (RecipientState::Missing, Some(_))
         ));
+        for a in [Some(&uninit), None] {
+            let w = recipient_verdict(&t, a).unwrap().1.unwrap();
+            assert!(
+                w.contains("deposited currency") && !w.contains("USDC"),
+                "{w}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -848,7 +860,7 @@ mod tests {
     async fn a_bridge_with_verifiers_names_its_arbitrum_verifier_or_none() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "getL2Verifier", vec![
             json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -868,7 +880,7 @@ mod tests {
     async fn with_owner_anchors_off_a_verifier_needs_its_parent_chains_light_client() {
         let an = healthy();
         an.getter(BRIDGE, "getVersion", vec![
-            json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
         an.getter(BRIDGE, "isOwnerAnchorsEnabled", vec![
             json!({ "value0": false }),
@@ -898,7 +910,18 @@ mod tests {
             json!({ "value0": "1.10.0", "value1": "eccUSDCBridge" }),
         ]);
         let err = go(&an, [0; 32]).await.unwrap_err();
-        assert!(err.to_string().contains("needs 1.17.0 or newer"), "{err}");
+        assert!(err.to_string().contains("needs 1.19.0 or newer"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_1_18_bridge_whose_limit_getters_answer_the_old_shape_is_refused() {
+        let an = healthy();
+        an.getter(BRIDGE, "getVersion", vec![
+            json!({ "value0": "1.18.0", "value1": "eccBridge" }),
+        ]);
+        let err = go(&an, [0; 32]).await.unwrap_err();
+        assert_eq!(err.exit_code(), crate::errors::ExitCode::PreflightRefused);
+        assert!(err.to_string().contains("needs 1.19.0 or newer"), "{err}");
     }
 
     #[tokio::test]
@@ -944,14 +967,14 @@ mod token_listing_tests {
 
     fn listing() -> serde_json::Value {
         json!({"listed": true, "tokenId": "4", "depositsEnabled": true,
-               "maxTransfer": "1000000000000000000", "maxTvl": "10000000000000000000",
+               "maxTvl": "10000000000000000000", "dailyLimit": "1000000000000000000",
                "outstanding": "5000000000000000000"})
     }
 
     #[test]
     fn token_listing_keeps_eighteen_decimal_base_units() {
         let limits = token_deposit_limits(&listing(), 4).unwrap();
-        assert_eq!(limits.max_transfer, U256::from(10u128.pow(18)));
+        assert_eq!(limits.daily_limit, U256::from(10u128.pow(18)));
         assert_eq!(limits.outstanding, U256::from(5 * 10u128.pow(18)));
     }
 
@@ -962,8 +985,8 @@ mod token_listing_tests {
             "listed",
             "tokenId",
             "depositsEnabled",
-            "maxTransfer",
             "maxTvl",
+            "dailyLimit",
             "outstanding",
         ] {
             let mut out = listing();

@@ -6,7 +6,7 @@ use crate::{
     address::ExtendedAddress,
     error::{AckiNackiError, Result},
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, ExtOutPage,
         TransactionReceipt, TransactionStatus, TxHash,
     },
 };
@@ -59,6 +59,18 @@ pub trait IAckiNacki: Send + Sync {
 
     /// State of the account at `address`; `None` when no such account exists.
     async fn get_account_info(&self, _address: &ExtendedAddress) -> Result<Option<AccountInfo>> {
+        Err(AckiNackiError::NotImplemented)
+    }
+
+    async fn get_last_deploy(&self, _address: &ExtendedAddress) -> Result<Option<TxHash>> {
+        Err(AckiNackiError::NotImplemented)
+    }
+
+    async fn get_ext_out_page(
+        &self,
+        _address: &ExtendedAddress,
+        _before: Option<String>,
+    ) -> Result<ExtOutPage> {
         Err(AckiNackiError::NotImplemented)
     }
 }

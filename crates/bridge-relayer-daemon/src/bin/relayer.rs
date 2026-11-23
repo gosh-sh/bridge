@@ -1712,6 +1712,14 @@ struct WithdrawScanState {
     parked_permanent: u64,
 }
 
+enum TransientWithdrawRevert {
+    Configuration,
+    WithdrawalWindow,
+    NacklMint,
+    UnknownAnchor,
+    Stop,
+}
+
 /// SIGINT (+ SIGTERM on Unix) shutdown future shared by the long-running
 /// daemons. Resolves on the first signal; systemd sends SIGTERM by default.
 async fn shutdown_signal() {
@@ -1738,9 +1746,27 @@ async fn shutdown_signal() {
     }
 }
 
-fn withdrawal_configuration_revert(reason: &str) -> bool {
-    bridge_relayer_daemon::bridge::decode_withdraw_revert(reason)
-        .is_some_and(|error| matches!(error.name, "TransferTooLarge" | "UnsupportedTokenId"))
+fn transient_withdraw_revert(reason: &str) -> TransientWithdrawRevert {
+    match bridge_relayer_daemon::bridge::decode_withdraw_revert(reason).map(|error| error.name) {
+        Some("UnsupportedTokenId") => TransientWithdrawRevert::Configuration,
+        Some("WithdrawalWindowFull") => TransientWithdrawRevert::WithdrawalWindow,
+        Some("NacklNotMinter") => TransientWithdrawRevert::NacklMint,
+        Some("UnknownAnchor") => TransientWithdrawRevert::UnknownAnchor,
+        _ => TransientWithdrawRevert::Stop,
+    }
+}
+
+fn warn_unknown_anchor(proof_path: &Path, pub_inputs: &WithdrawalPublicInputs, reason: &str) {
+    warn!(
+        proof = %proof_path.display(),
+        %reason,
+        anchor_layer = %pub_inputs.anchor_layer,
+        final_root = %format!("{:#066x}", pub_inputs.final_root),
+        nullifier = %pub_inputs.nullifier,
+        "the bridge does not hold the proof's anchor; keeping the proof for the next scan. If the \
+         anchor has left the bridge's window, re-prove this withdrawal with `--anchor-layer auto` \
+         (the nullifier stays the same) or move the file out of the proofs directory"
+    );
 }
 
 /// Run **one full scan** of `proofs_dir` for ready `proof_event_*.json`
@@ -1752,11 +1778,11 @@ fn withdrawal_configuration_revert(reason: &str) -> bool {
 /// Permanent per-proof problems (parse errors, bad public inputs, proofs
 /// that fail the SHPLONK aggregator shape gate) park the proof in `st.done`
 /// and the scan drains the rest of the directory. A revert on the token's
-/// listing or transfer cap (`TransferTooLarge`, `UnsupportedTokenId`) keeps the
-/// proof for the next scan, moves on to the next proof and does not count as
-/// transient: it would otherwise slow every other payout and `verifyBlock` for
-/// as long as it lasts. Lower-level infra failures (RPC down during
-/// dry-run/submit) propagate as `Err`.
+/// listing (`UnsupportedTokenId`) or its rolling 24-hour withdrawal limit
+/// (`WithdrawalWindowFull`) keeps the proof for the next scan, moves on to the
+/// next proof and does not count as transient: it would otherwise slow every
+/// other payout and `verifyBlock` for as long as it lasts. Lower-level infra
+/// failures (RPC down during dry-run/submit) propagate as `Err`.
 async fn withdraw_scan_once<B>(
     bridge: &B,
     proofs_dir: &Path,
@@ -1877,14 +1903,24 @@ where
                             st.parked_permanent += 1;
                             st.done.insert(proof_path);
                         },
-                        WithdrawRevertKind::Transient => {
-                            if withdrawal_configuration_revert(&reason) {
-                                warn!(proof = %proof_path.display(), %reason, "dry-run reverted on the token's listing or transfer cap; retrying on the next scan");
-                                continue;
-                            }
-                            warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry (anchor may not be registered yet)");
-                            had_transient_failure = true;
-                            break;
+                        WithdrawRevertKind::Transient => match transient_withdraw_revert(&reason) {
+                            TransientWithdrawRevert::Configuration => {
+                                warn!(proof = %proof_path.display(), %reason, "dry-run reverted on the token's listing; retrying on the next scan");
+                            },
+                            TransientWithdrawRevert::WithdrawalWindow => {
+                                warn!(proof = %proof_path.display(), %reason, "dry-run: the EVM bridge's rolling 24-hour withdrawal limit has no room for this payout; the nullifier is unspent, retrying on the next scan");
+                            },
+                            TransientWithdrawRevert::NacklMint => {
+                                warn!(proof = %proof_path.display(), %reason, "dry-run: the bridge cannot mint this NACKL payout now; retrying on the next scan");
+                            },
+                            TransientWithdrawRevert::UnknownAnchor => {
+                                warn_unknown_anchor(&proof_path, &pub_inputs, &reason);
+                            },
+                            TransientWithdrawRevert::Stop => {
+                                warn!(proof = %proof_path.display(), %reason, "dry-run reverted; will retry");
+                                had_transient_failure = true;
+                                break;
+                            },
                         },
                     }
                 },
@@ -1927,14 +1963,24 @@ where
             WithdrawSubmitOutcome::Reverted {
                 reason,
                 permanent: false,
-            } => {
-                if withdrawal_configuration_revert(&reason) {
-                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted on the token's listing or transfer cap; retrying on the next scan");
-                    continue;
-                }
-                warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
-                had_transient_failure = true;
-                break;
+            } => match transient_withdraw_revert(&reason) {
+                TransientWithdrawRevert::Configuration => {
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted on the token's listing; retrying on the next scan");
+                },
+                TransientWithdrawRevert::WithdrawalWindow => {
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof: the EVM bridge's rolling 24-hour withdrawal limit has no room for this payout; the nullifier is unspent, retrying on the next scan");
+                },
+                TransientWithdrawRevert::NacklMint => {
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof: the bridge cannot mint this NACKL payout now; retrying on the next scan");
+                },
+                TransientWithdrawRevert::UnknownAnchor => {
+                    warn_unknown_anchor(&proof_path, &pub_inputs, &reason);
+                },
+                TransientWithdrawRevert::Stop => {
+                    warn!(proof = %proof_path.display(), %reason, "withdrawByProof reverted; will retry with backoff");
+                    had_transient_failure = true;
+                    break;
+                },
             },
         }
     }
@@ -1945,8 +1991,8 @@ where
 /// Withdraw-side twin of `run_prover_daemon`. Polls `proofs_dir` for
 /// `proof_event_*.json` bundles, skips nullifiers already consumed on-chain
 /// (so restarts are idempotent and re-scanning the same directory is cheap),
-/// and submits `withdrawByProof`. Transient reverts (e.g. anchor not yet
-/// registered by the verifyBlock lane) back off exponentially and are
+/// and submits `withdrawByProof`. Transient reverts (e.g. RPC failures,
+/// a paused bridge) back off exponentially and are
 /// retried; permanent per-proof failures are logged and the proof is parked
 /// so the loop keeps draining the rest of the directory.
 async fn run_withdraw_daemon(
@@ -3033,6 +3079,7 @@ mod withdraw_scan_tests {
         fail_first_only: bool,
         submit_reason: Option<(String, bool)>,
         address: Option<alloy::primitives::Address>,
+        script: Mutex<std::collections::VecDeque<Option<String>>>,
         calls: Mutex<Calls>,
     }
 
@@ -3041,6 +3088,12 @@ mod withdraw_scan_tests {
         is_used: usize,
         dry_run: usize,
         submit: usize,
+    }
+
+    impl StubBridge {
+        fn scripted(&self) -> Option<Option<String>> {
+            self.script.lock().unwrap().pop_front()
+        }
     }
 
     /// Slot 11 (`dstBridge`) of [`write_valid_proof_fixture`] is `12`.
@@ -3068,6 +3121,14 @@ mod withdraw_scan_tests {
         ) -> Result<DryRunOutcome, RelayerError> {
             let mut calls = self.calls.lock().unwrap();
             calls.dry_run += 1;
+            if let Some(step) = self.scripted() {
+                return Ok(match step {
+                    None => DryRunOutcome::WouldSucceed,
+                    Some(reason) => DryRunOutcome::WouldRevert {
+                        reason,
+                    },
+                });
+            }
             if self.fail_first_only && calls.dry_run > 1 {
                 return Ok(DryRunOutcome::WouldSucceed);
             }
@@ -3086,6 +3147,18 @@ mod withdraw_scan_tests {
         ) -> Result<WithdrawSubmitOutcome, RelayerError> {
             let mut calls = self.calls.lock().unwrap();
             calls.submit += 1;
+            if let Some(step) = self.scripted() {
+                return Ok(match step {
+                    None => WithdrawSubmitOutcome::Paid {
+                        tx_hash: alloy::primitives::B256::ZERO,
+                    },
+                    Some(reason) => WithdrawSubmitOutcome::Reverted {
+                        permanent: classify_withdraw_revert(&reason)
+                            == WithdrawRevertKind::Permanent,
+                        reason,
+                    },
+                });
+            }
             if self.fail_first_only && calls.submit > 1 {
                 return Ok(WithdrawSubmitOutcome::Paid {
                     tx_hash: alloy::primitives::B256::ZERO,
@@ -3141,8 +3214,12 @@ mod withdraw_scan_tests {
     #[tokio::test]
     async fn configuration_reverts_retry_without_backoff_or_blocking_the_next_payout() {
         for (signature, argument) in [
-            ("TransferTooLarge()", String::new()),
             ("UnsupportedTokenId(uint256)", format!("{:064x}", 3)),
+            (
+                "WithdrawalWindowFull(uint32,uint256,uint256,uint256)",
+                format!("{:064x}{:064x}{:064x}{:064x}", 3, 900, 200, 1000),
+            ),
+            ("NacklNotMinter(address)", format!("{:064x}", 0x11)),
         ] {
             let selector = alloy::primitives::keccak256(signature);
             let reason = format!(
@@ -3184,6 +3261,70 @@ mod withdraw_scan_tests {
                 assert_eq!(state.paid, if dry_run { 0 } else { 2 });
                 assert_eq!(std::fs::read(&first).unwrap(), original);
             }
+        }
+    }
+
+    fn revert_reason(signature: &str, argument: &str) -> String {
+        let selector = alloy::primitives::keccak256(signature);
+        format!(
+            "execution reverted: 0x{}{argument}",
+            hex::encode(&selector[..4])
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unknown_anchor_keeps_the_proof_and_the_scan_goes_on() {
+        let unknown = revert_reason("UnknownAnchor(uint256)", &format!("{:064x}", 10));
+        for dry_run in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let waiting = write_valid_proof_fixture(tmp.path(), 0);
+            let original = std::fs::read(&waiting).unwrap();
+            let next = write_valid_proof_fixture(tmp.path(), 1);
+            let bridge = StubBridge::default();
+            bridge.script.lock().unwrap().extend([
+                Some(unknown.clone()),
+                None,
+                Some(unknown.clone()),
+                None,
+            ]);
+            let mut st = WithdrawScanState::default();
+            for _ in 0..2 {
+                assert!(!withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut st)
+                    .await
+                    .unwrap());
+                assert!(!st.done.contains(&waiting));
+                assert!(st.done.contains(&next));
+                assert_eq!(st.parked_permanent, 0);
+                assert_eq!(std::fs::read(&waiting).unwrap(), original);
+            }
+            assert!(!withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut st)
+                .await
+                .unwrap());
+            assert!(st.done.contains(&waiting));
+            assert_eq!(st.parked_permanent, 0);
+            assert_eq!(st.paid, if dry_run { 0 } else { 2 });
+            assert!(bridge.script.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_layer_out_of_range_parks_the_proof() {
+        let reason = revert_reason("LayerOutOfRange(uint8)", &format!("{:064x}", 255));
+        for dry_run in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let proof = write_valid_proof_fixture(tmp.path(), 0);
+            let bridge = StubBridge::default();
+            bridge
+                .script
+                .lock()
+                .unwrap()
+                .push_back(Some(reason.clone()));
+            let mut st = WithdrawScanState::default();
+            assert!(!withdraw_scan_once(&bridge, tmp.path(), dry_run, &mut st)
+                .await
+                .unwrap());
+            assert!(st.done.contains(&proof));
+            assert_eq!(st.parked_permanent, 1);
         }
     }
 

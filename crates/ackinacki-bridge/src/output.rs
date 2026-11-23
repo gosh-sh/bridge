@@ -119,7 +119,29 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
     }
 
     // Human summary — final block of stderr, distinct from tracing lines.
-    let s = &summary.submit;
+    let unit = crate::args::Token::from_ecc_id(summary.burn.token_id).map_or_else(
+        || format!("ECC[{}]", summary.burn.token_id),
+        |t| t.name().to_string(),
+    );
+    let Some(s) = &summary.submit else {
+        // `withdraw send`: the burn and its event, nothing proven or sent.
+        emit(
+            &format!(
+                "\nwithdraw sent:\n\x20 amount:       {} {unit}\n\x20 AN tx:        {}\n\x20 msg \
+                 id:       {}\n\x20 block:        seq={} id={}\n\x20 next:         \
+                 ackinacki-bridge withdraw proof --tx-hash {} --token {}\n",
+                summary.burn.amount,
+                summary.burn.an_tx,
+                summary.capture.withdrawal_msg_id,
+                summary.capture.block_seq_no,
+                summary.capture.block_id,
+                summary.burn.an_tx,
+                unit.to_ascii_lowercase(),
+            ),
+            false,
+        );
+        return;
+    };
     let status = match s.status {
         crate::orchestrator::SubmitStatus::DryRunOk => "dry-run-ok",
         crate::orchestrator::SubmitStatus::Confirmed => "confirmed",
@@ -145,11 +167,11 @@ fn print_withdraw(summary: &WithdrawSuccess, json_mode: bool) {
             "{} bytes, {} public inputs, self_verified={}",
             p.calldata_bytes, p.pi_count, p.self_verified
         ),
-        None => "(not built: already paid out)".to_string(),
+        None => "(none)".to_string(),
     };
     emit(
         &format!(
-            "\nwithdraw complete:\n\x20 amount:       {} USDC\n\x20 AN tx:        {}\n\x20 msg \
+            "\nwithdraw complete:\n\x20 amount:       {} {unit}\n\x20 AN tx:        {}\n\x20 msg \
              id:       {}\n\x20 block:        seq={} id={}\n\x20 proof:        {proof}\n{eth}",
             summary.burn.amount,
             summary.burn.an_tx,
@@ -205,8 +227,18 @@ fn deposit_summary(s: &crate::deposit::DepositSuccess) -> String {
     // network's name.
     let network = crate::deposit::args::Network::from_chain_id(s.chain_id)
         .map_or_else(|| s.network.clone(), |n| n.name().to_string());
+    let unit = match s
+        .tx
+        .as_ref()
+        .and_then(|t| t.get("token_id"))
+        .and_then(|v| v.as_u64())
+    {
+        Some(1) => "NACKL".to_string(),
+        Some(3) | None => "USDC".to_string(),
+        Some(id) => format!("ECC[{id}]"),
+    };
     let mut out = format!(
-        "\n{head}:\n\x20 network:      {network} ({})\n\x20 amount:       {} USDC\n\x20 to:           \
+        "\n{head}:\n\x20 network:      {network} ({})\n\x20 amount:       {} {unit}\n\x20 to:           \
          {}\n",
         s.chain_id, s.amount, s.to,
     );
@@ -476,6 +508,7 @@ mod tests {
             confirmation: Some(json!({"confirm_tx": "c", "delivery_tx": null})),
             balance: None,
             abandoned: false,
+            finalize: None,
         }
     }
 
@@ -506,6 +539,27 @@ mod tests {
             !text.contains("anchored by") && !text.contains("null"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_deposit_summary_names_the_deposited_currency() {
+        let mut d = sample();
+        assert!(deposit_summary(&d).contains("  amount:       5 USDC\n"));
+        d.amount = "3.000000001".into();
+        d.tx = Some(json!({"token_id": 1}));
+        let text = deposit_summary(&d);
+        assert!(
+            text.contains("  amount:       3.000000001 NACKL\n"),
+            "{text}"
+        );
+        assert!(!text.contains("USDC"), "{text}");
+        d.tx = Some(json!({"token_id": 3}));
+        assert!(deposit_summary(&d).contains(" USDC\n"));
+        d.tx = Some(json!({"token_id": 7}));
+        assert!(deposit_summary(&d).contains(" ECC[7]\n"));
+        d.abandoned = true;
+        d.tx = Some(json!({"token_id": 1}));
+        assert!(deposit_summary(&d).contains("3.000000001 NACKL\n"));
     }
 
     #[tokio::test]

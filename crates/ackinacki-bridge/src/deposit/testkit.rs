@@ -225,8 +225,8 @@ impl FakeEvm {
         token_id: u32,
         decimals: u8,
         deposits_enabled: bool,
-        max_transfer: u128,
         tvl_cap: u128,
+        daily_limit: u128,
         liabilities: u128,
     ) {
         use alloy::sol_types::SolCall;
@@ -246,8 +246,8 @@ impl FakeEvm {
                 token,
                 decimals,
                 depositsEnabled: deposits_enabled,
-                maxTransfer: U256::from(max_transfer),
                 tvlCap: U256::from(tvl_cap),
+                dailyLimit: U256::from(daily_limit),
                 liabilities: U256::from(liabilities),
             })
             .into(),
@@ -270,11 +270,7 @@ impl FakeEvm {
 
     pub fn set_volume_limits(&self, bridge: Address) {
         use alloy::sol_types::{SolCall, SolValue};
-        for (selector, value) in [
-            (IDeposit::MAX_TRANSFER_AMOUNTCall::SELECTOR, 50_000_000u64),
-            (IDeposit::MAX_BRIDGE_TVLCall::SELECTOR, 10_000_000_000u64),
-            (IDeposit::treasuryBalanceCall::SELECTOR, 0),
-        ] {
+        for (selector, value) in [(IDeposit::treasuryBalanceCall::SELECTOR, 0)] {
             self.set_call(bridge, selector, U256::from(value).abi_encode().into());
         }
     }
@@ -1370,6 +1366,7 @@ pub struct FakeAn {
     pub fail_transactions: AtomicBool,
     /// Every `ext_messages` call fails.
     pub fail_ext_messages: AtomicBool,
+    pub fail_ext_out: AtomicBool,
     /// Getters, by name, whose every call fails.
     pub failing_getters: Mutex<HashSet<String>>,
     /// Getters the deployed code does not have: answered like the VM does,
@@ -1528,6 +1525,7 @@ impl AnRead for FakeAn {
         before: Option<String>,
     ) -> anyhow::Result<Page<MsgView>> {
         if self.fail_ext_messages.load(Ordering::SeqCst)
+            || (dir == ExtDir::Out && self.fail_ext_out.load(Ordering::SeqCst))
             || self.failing_ext.lock().unwrap().contains(&id)
         {
             anyhow::bail!("GraphQL timeout");
@@ -1728,7 +1726,7 @@ fn uint_json(v: impl std::fmt::Display) -> serde_json::Value {
 impl World {
     /// Everything a deposit needs, healthy: the EVM bridge and its token,
     /// a funded sender with nothing approved, and an Acki Nacki bridge
-    /// version 1.17.0, not paused, trusting the EVM bridge, anchored by its
+    /// version 1.19.0, not paused, trusting the EVM bridge, anchored by its
     /// owner, deploying the voucher this build knows. The light client's
     /// head is no block on the chain.
     pub fn healthy() -> World {
@@ -1751,7 +1749,7 @@ impl World {
         );
         // The bridge's own USDC, listed as the constructor lists it: ECC
         // currency id 3, six decimals, deposits open.
-        evm.set_token_listing(W_BRIDGE, W_USDC, 3, 6, true, 50_000_000, 10_000_000_000, 0);
+        evm.set_token_listing(W_BRIDGE, W_USDC, 3, 6, true, 10_000_000_000, 50_000_000, 0);
         evm.set_call(
             W_USDC,
             IErc20::decimalsCall::SELECTOR,
@@ -1774,6 +1772,7 @@ impl World {
             status: AccStatus::Active,
             dapp_id: Some(dapp),
             ecc3: 0,
+            ecc: vec![(3, 0)],
         };
         an.accounts
             .lock()
@@ -1781,14 +1780,14 @@ impl World {
             .insert(W_BRIDGE_ACC, active([0; 32]));
         an.accounts.lock().unwrap().insert(W_ACC, active([0; 32]));
         an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
         an.getter(W_BRIDGE_ACC, "getTokenDepositConfig", vec![
             serde_json::json!({"listed": true, "tokenId": "3", "depositsEnabled": true,
-                "maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
+                "maxTvl": "10000000000", "dailyLimit": "50000000", "outstanding": "0"}),
         ]);
         an.getter(W_BRIDGE_ACC, "getDepositLimits", vec![
-            serde_json::json!({"maxTransfer": "50000000", "maxTvl": "10000000000", "outstanding": "0"}),
+            serde_json::json!({"maxTvl": "10000000000", "dailyLimit": "50000000", "outstanding": "0"}),
         ]);
         an.getter(W_BRIDGE_ACC, "isPaused", vec![
             serde_json::json!({ "value0": false }),
@@ -1844,11 +1843,12 @@ impl World {
     ) -> crate::deposit::args::DepositParams {
         use std::time::Duration;
         crate::deposit::args::DepositParams {
-            token: None,
+            part: crate::deposit::args::DepositPart::Whole,
+            token: Some(crate::args::Token::Usdc),
             mode,
             globals: Default::default(),
             network: Some(crate::deposit::args::Network::Sepolia),
-            amount: Some(crate::args::UsdcAmount(u128::from(W_AMOUNT))),
+            amount: Some(crate::args::UsdcAmount(u128::from(W_AMOUNT)).display()),
             to: Some(Self::target()),
             rpc_url: Some("http://rpc.invalid/key".into()),
             bridge: Some(W_BRIDGE),
@@ -1858,7 +1858,6 @@ impl World {
             state_dir: self.state.path().to_path_buf(),
             work_dir: Some(self.work.path().to_path_buf()),
             anchor_timeout: Some(Duration::from_secs(3600)),
-            relayer_grace: Duration::from_secs(1),
             recovery_window: Duration::from_secs(60),
             credit_timeout: Duration::from_secs(300),
             pair_timeout: Duration::from_secs(60),
@@ -1879,7 +1878,7 @@ impl World {
         mode: crate::deposit::args::RunMode,
     ) -> crate::deposit::args::DepositParams {
         let mut p = self.params(mode);
-        p.amount = Some(crate::args::UsdcAmount(u128::from(W_AMOUNT + 1)));
+        p.amount = Some(crate::args::UsdcAmount(u128::from(W_AMOUNT + 1)).display());
         p
     }
 
@@ -1914,7 +1913,7 @@ impl World {
     /// chain, no light client for it and the owner's anchors off.
     pub fn arbitrum_verifier(&self) {
         self.an.getter(W_BRIDGE_ACC, "getVersion", vec![
-            serde_json::json!({ "value0": "1.17.0", "value1": "eccBridge" }),
+            serde_json::json!({ "value0": "1.19.0", "value1": "eccBridge" }),
         ]);
         self.an.getter(W_BRIDGE_ACC, "getL2Verifier", vec![
             serde_json::json!({ "verifier": format!("0:{}", "a2".repeat(32)), "parentChainId": "11155111" }),
@@ -2511,6 +2510,7 @@ impl World {
             voucher_code_hash: r.voucher_code_hash.clone(),
             voucher_account: info.voucher_account.clone(),
             sends: 1,
+            accepted: false,
         });
         r.deposit = Some(info);
         r.anchor_writer = Some("owner".into());
@@ -2605,6 +2605,7 @@ impl World {
                 status: AccStatus::Active,
                 dapp_id: Some([0; 32]),
                 ecc3: 0,
+                ecc: vec![(3, 0)],
             });
     }
 
@@ -2616,6 +2617,7 @@ impl World {
             status: crate::deposit::an::AccStatus::Active,
             dapp_id: Some([0; 32]),
             ecc3,
+            ecc: vec![(3, ecc3)],
         };
         self.an
             .accounts
@@ -2653,9 +2655,10 @@ pub fn deposit_args(argv: &[&str]) -> crate::deposit::args::DepositArgs {
     use clap::Parser as _;
     let cli = crate::args::Cli::try_parse_from(["ackinacki-bridge", "deposit"].iter().chain(argv))
         .unwrap();
-    let crate::args::Command::Deposit(mut a) = cli.cmd else {
+    let crate::args::Command::Deposit(cmd) = cli.cmd else {
         panic!("not a deposit command line")
     };
+    let mut a = cmd.run;
     let given = |flag: &str| argv.contains(&flag);
     if !given("--rpc-url") {
         a.rpc_url = None;

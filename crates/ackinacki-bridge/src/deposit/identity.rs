@@ -38,7 +38,7 @@ pub const BRIDGE_ABI: &str = include_str!("../../abi/USDCBridge.abi.json");
 /// `getDepositVoucherCodeHash()` of a bridge this build can compute
 /// voucher addresses for.
 pub const EXPECTED_VOUCHER_CODE_HASH: [u8; 32] =
-    hex!("9ef59c91227d007737ff466c458b044592d62e1ef3cda4085d80ce19aca42b41");
+    hex!("ebae00d26feb04cb9c5b5e2c07bbfa590d02ef2b8b9f1e1350eb2af517aae701");
 
 /// What the bridge keys a deposit by. The dapp id is always zero and is
 /// not stored.

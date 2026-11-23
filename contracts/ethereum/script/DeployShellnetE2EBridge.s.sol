@@ -179,7 +179,9 @@ contract DeployShellnetE2EBridge is Script {
                 altDstChainId: wd.altDstChainId,
                 altDstHostChainId: wd.altDstHostChainId,
                 usdcTokenId: wd.usdcTokenId,
-                predecessor: IPredecessorBridge(PredecessorEnv.read())
+                predecessor: IPredecessorBridge(PredecessorEnv.read()),
+                usdcTvlCap: vm.envOr("USDC_TVL_CAP", uint256(10_000e6)),
+                usdcDailyLimit: vm.envOr("USDC_DAILY_LIMIT", uint256(10_000e6))
             })
         );
     }

@@ -54,10 +54,9 @@ Fuzz-tested as `testFuzz_totalAssetsCoversTreasury`
 
 Actual order in `deposit` (`:578-593`):
 
-1. **Checks** — `amount != 0` (`InvalidAmount`), `amount <= MAX_DEPOSIT_AMOUNT` (`DepositTooLarge`),
-   `amount <= MAX_TRANSFER_AMOUNT` (`TransferTooLarge`),
-   `anAccount != 0` (`InvalidAnAccount`), and
-   `treasuryBalance + amount <= MAX_BRIDGE_TVL` (`TvlCapReached`).
+1. **Checks** — `amount != 0` (`InvalidAmount`), `anAccount != 0` (`InvalidAnAccount`),
+   `amount <= MAX_DEPOSIT_AMOUNT` (`DepositTooLarge`), and
+   `treasuryBalance + amount <= tvlCap` of the USDC listing (`TvlCapReached`).
 2. **Interaction** — `usdc.transferFrom(msg.sender, address(this), amount)`; a `false` return reverts
    `TransferFromFailed` (`:585-587`).
 3. **Effects** — `depositCounter++`, then `treasuryBalance += amount` (`:588-590`).
@@ -72,10 +71,12 @@ State it this way rather than as "checks-effects-interactions", which this path 
 
 Two consequences worth naming:
 
-* `MAX_DEPOSIT_AMOUNT` is the first width guard, `type(uint64).max`.
-  `MAX_TRANSFER_AMOUNT` adds the lower 50 USDC ceiling on deposits and withdrawals;
-  `MAX_BRIDGE_TVL` refuses a deposit that would take `treasuryBalance` past 10,000 USDC
-  per L1 bridge. Aave supply, yield and donations do not reset that capacity.
+* `MAX_DEPOSIT_AMOUNT`, `type(uint64).max`, is a technical width guard (`gosh.mintecc` takes a
+  uint64), not a policy limit. There is no per-transfer cap on deposits or withdrawals and no rate
+  limit on deposits. The USDC `tvlCap` refuses a deposit that would take `treasuryBalance` past it;
+  it is owner-set (initial value from the constructor's `BridgeWithdrawConfig.usdcTvlCap`, then
+  `setTokenLimits`) with no compiled ceiling, and it is checked only in `deposit`, where USDC is
+  locked. Aave supply, yield and donations do not reset that capacity.
   `fundTreasury` is not checked against it, so a migrated or owner-funded book can sit
   above the cap; deposits then stop until payouts bring it back under. The amount remains a parameter;
   deposits are not payable and have no minimum beyond `amount != 0`.
@@ -89,13 +90,17 @@ Two consequences worth naming:
 (`:1192`, `:1196`):
 
 1. Verify the Circuit-4 proof; reject with `WithdrawalProofRejected` (`:1185`).
-2. **Solvency check before touching AAVE**: `pub.amount > treasuryBalance` reverts
+2. **Daily withdrawal limit** — count `pub.amount` into the USDC withdrawal window (the current
+   hour and the 24 before it); above the owner-set `dailyLimit` it reverts
+   `WithdrawalWindowFull(tokenId, used, amount, dailyLimit)`. The revert rolls back the window and
+   leaves the nullifier unspent, so the same proof pays once the window has room.
+3. **Solvency check before touching AAVE**: `pub.amount > treasuryBalance` reverts
    `WithdrawTreasuryShortfall` (`:1188-1190`).
-3. **Effects** — mark the nullifier used, `treasuryBalance -= pub.amount` (`:1193-1194`).
-4. **Interactions** — pull the shortfall from AAVE only if liquid USDC is short (`:1199-1205`), then
+4. **Effects** — mark the nullifier used, `treasuryBalance -= pub.amount` (`:1193-1194`).
+5. **Interactions** — pull the shortfall from AAVE only if liquid USDC is short (`:1199-1205`), then
    `usdc.transfer(recipient, amount)` (`:1208`).
 
-A revert anywhere in step 4 rolls back steps 2–3 atomically, so a failed AAVE pull cannot leave the
+A revert anywhere in step 5 rolls back steps 2–4 atomically, so a failed AAVE pull cannot leave the
 book decremented.
 
 The two paths differ on purpose: a deposit must confirm receipt before crediting, a payout must
@@ -156,11 +161,12 @@ Quote these, not their earlier versions.
 | | Rule |
 |---|---|
 | **DEP-1** | Every successful `deposit` emits `Deposit(depositId, sender, amount, anAccount, timestamp)` with a unique monotonic `depositId`; `anAccount == 0` reverts `InvalidAnAccount`. |
-| **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`; otherwise an amount above 50 USDC reverts `TransferTooLarge`, and principal above 10,000 USDC reverts `TvlCapReached`, before a token call. The function is not `payable`. |
+| **DEP-2** | `amount == 0` reverts `InvalidAmount`; `amount > type(uint64).max` reverts `DepositTooLarge`; otherwise principal above the owner-set USDC `tvlCap` reverts `TvlCapReached`, before a token call. There is no per-transfer cap and no deposit rate limit. The function is not `payable`. |
 | **DEP-3** | A successful `deposit` makes exactly two state mutations: `depositCounter++` and `treasuryBalance += amount`. Apart from `deposit`, only `fundTreasury` (owner or `predecessor`, no `Deposit` event) increases `treasuryBalance`; `withdrawByProof` decreases it, and `migrateTreasury` zeroes it while handing it to a successor bridge. |
 | **DEP-4** | `deposit` is `nonReentrant` and makes exactly one external call, `usdc.transferFrom`, to the `immutable` token bound at construction. It happens **before** the state mutations. |
 | **CUST-1** | `treasuryBalance` is book value, not a balance. The solvency invariant is `totalAssets() ≥ treasuryBalance`, never equality. |
 | **CUST-2** | Owner functions can move custody between the bridge and AAVE, and can send only the surplus above `treasuryBalance` to `yieldRecipient`. The exception is `migrateTreasury`: on a paused bridge it sends the whole `treasuryBalance` to a contract whose `predecessor()` returns this bridge, through that contract's `fundTreasury`. The contract cannot tell a real successor bridge from any other contract that gives that answer, so this is an owner power over the whole book, not a guarantee about where it goes. `fundTreasury` (owner or `predecessor`), the other owner function that writes `treasuryBalance`, only raises it by USDC the caller supplies. `migrateToken` is the same owner power over a non-USDC listing's liabilities and the tokens behind them, through the successor's `fundToken`. |
+| **WD-1** | No single `withdrawByProof` is capped by amount. Over any 24 hours a token pays out at most its owner-set `dailyLimit` (`withdrawalWindow(tokenId)`); a payout that would exceed it reverts `WithdrawalWindowFull` with the nullifier unspent. `migrateTreasury` and `migrateToken` refuse a successor whose daily limit for the token is lower (`SuccessorWithdrawalLimitTooLow`). |
 | **CEI-1** | `withdrawByProof` mutates state before every external call. `deposit` does not, and does not need to — see above. A blanket "all external interactions follow CEI" claim is false for this contract. |
 
 ## What earlier text got wrong

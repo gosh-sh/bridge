@@ -8,6 +8,19 @@ use crate::address::ExtendedAddress;
 /// Transaction hash type (32 bytes)
 pub type TxHash = [u8; 32];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtOutMessage {
+    pub dst: String,
+    pub body: Option<String>,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtOutPage {
+    pub messages: Vec<ExtOutMessage>,
+    pub older: Option<String>,
+}
+
 /// ABI-encoded contract call routed through tvm_client 3.0 (`dapp_id` on the
 /// wire).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -543,4 +543,8 @@ contract ShortSuccessor {
     function fundTreasury(uint256 amount) external {
         usdc.transferFrom(msg.sender, address(this), amount - shortBy);
     }
+
+    function withdrawalWindow(uint32) external pure returns (uint256 dailyLimit, uint256 used) {
+        return (type(uint256).max, 0);
+    }
 }

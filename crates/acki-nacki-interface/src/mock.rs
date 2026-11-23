@@ -13,8 +13,8 @@ use crate::{
     error::{AckiNackiError, Result},
     traits::{IAckiNacki, TransactionSender},
     types::{
-        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest,
-        TransactionReceipt, TransactionStatus, TxHash,
+        AccountInfo, AckiNackiTransaction, ChildTransaction, ContractCallRequest, ExtOutMessage,
+        ExtOutPage, TransactionReceipt, TransactionStatus, TxHash,
     },
 };
 
@@ -36,6 +36,8 @@ pub struct MockAckiNacki {
     children: Arc<Mutex<HashMap<TxHash, Vec<ChildTransaction>>>>,
     /// Accounts `get_account_info` knows, keyed by account id.
     accounts: Arc<Mutex<HashMap<String, AccountInfo>>>,
+    deploys: Arc<Mutex<HashMap<String, TxHash>>>,
+    ext_out: Arc<Mutex<HashMap<String, Vec<ExtOutMessage>>>>,
 }
 
 impl MockAckiNacki {
@@ -49,7 +51,29 @@ impl MockAckiNacki {
             getter_response: Arc::new(Mutex::new(None)),
             children: Arc::new(Mutex::new(HashMap::new())),
             accounts: Arc::new(Mutex::new(HashMap::new())),
+            deploys: Arc::new(Mutex::new(HashMap::new())),
+            ext_out: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn set_deploy(&self, account_id: &str, tx: TxHash) {
+        self.deploys
+            .lock()
+            .unwrap()
+            .insert(account_id.to_owned(), tx);
+    }
+
+    pub fn push_ext_out(&self, account_id: &str, dst: &str, body: &str) {
+        self.ext_out
+            .lock()
+            .unwrap()
+            .entry(account_id.to_owned())
+            .or_default()
+            .push(ExtOutMessage {
+                dst: dst.to_owned(),
+                body: Some(body.to_owned()),
+                created_at: 0,
+            });
     }
 
     /// Hash every `call_contract` returns.
@@ -226,6 +250,32 @@ impl IAckiNacki for MockAckiNacki {
             .unwrap()
             .get(address.account_id())
             .cloned())
+    }
+
+    async fn get_last_deploy(&self, address: &ExtendedAddress) -> Result<Option<TxHash>> {
+        Ok(self
+            .deploys
+            .lock()
+            .unwrap()
+            .get(address.account_id())
+            .copied())
+    }
+
+    async fn get_ext_out_page(
+        &self,
+        address: &ExtendedAddress,
+        _before: Option<String>,
+    ) -> Result<ExtOutPage> {
+        Ok(ExtOutPage {
+            messages: self
+                .ext_out
+                .lock()
+                .unwrap()
+                .get(address.account_id())
+                .cloned()
+                .unwrap_or_default(),
+            older: None,
+        })
     }
 }
 

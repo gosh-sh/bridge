@@ -88,7 +88,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
             }
             if units > MAX_TRANSFER_USDC_UNITS {
                 error_msg.set(Some(
-                    "Amount exceeds the 50 USDC per-transfer limit".to_string(),
+                    "Amount exceeds the bridge's uint64 amount bound".to_string(),
                 ));
                 return;
             }
@@ -214,7 +214,7 @@ pub fn deposit_form(props: &DepositFormProps) -> Html {
                         <span class="input-suffix">{"USDC"}</span>
                     </div>
                     <div class="input-hint">
-                        {"Maximum 50 USDC per transfer. Gas is paid in ETH."}
+                        {"The owner's TVL cap on the bridge applies. Gas is paid in ETH."}
                     </div>
                 </div>
 

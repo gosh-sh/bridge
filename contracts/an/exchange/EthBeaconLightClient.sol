@@ -38,12 +38,12 @@ import "./eccBridge.sol";
 ///             enforced by matching `committeeCommitment` to the commitment
 ///             this contract holds for the period the header was signed in.
 ///             It holds the committees of the last `KEPT_COMMITTEES` periods
-///             (about 2 days), and takes committee `q` for headers attested
+///             and takes committee `q` for headers attested
 ///             in `q` or `q - 1`: the last header of a period is signed in
 ///             the next one. A replaced committee may
 ///             still move the head for its own period, so neither an early
 ///             `/updates` best-update hand-off nor a rotation sent while a
-///             relayer lags behind strands the checkpoints of the periods
+///             relayer lags behind strands the checkpoints of the period
 ///             before it. Bootstrapped from a weak-subjectivity checkpoint;
 ///             advanced by `submitRotate`. After `disableOwnerRotation`, the
 ///             owner hatch is `reAnchorCommittee`.
@@ -81,10 +81,11 @@ contract EthBeaconLightClient {
     uint64 constant PROVEN_WINDOW_SLOTS = 100_800;
     // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
     uint64 constant SLOTS_PER_PERIOD = 8192;
-    // Committees held: the one in force and the one before it, about 2 days.
-    // A step signed by either for its own period is accepted, so a relayer
-    // that falls behind by less than a period does not lose checkpoints to a
-    // rotation — which anyone may send, the proof being the authorization.
+    // Committees held: the one in force and the one before it. A step signed
+    // by either for its own period is accepted, so an early rotation — which
+    // anyone may send, the proof being the authorization — does not strand
+    // the checkpoints of the period before. A rotation can land at the start
+    // of a period, so the one before is held from zero to one period more.
     // An older committee is not held: its keys may belong to validators that
     // have left, and it could prove a forged hash for its period.
     uint64 constant KEPT_COMMITTEES = 2;

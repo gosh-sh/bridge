@@ -23,17 +23,28 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `EthBeaconLightClient` 1.8.0 (code hash `b3f85455…`) keeps the committees of seven periods
-  (`getCommittees`) and refuses a `submitRotate` period not past the current one
-  (`ERR_STALE_PERIOD`): `updateCode` each light client while its relayer queues no checkpoint of an
-  earlier period.
-- `eccBridge` 1.18.0 (code hash `2c2296a5…`) deploys 1.8.0 light clients: run its `updateCode` and
+- `EthBeaconLightClient` 1.8.1 (code hash `c823fdb2…`, gosh-sh/bridge-audit#163) replaces 1.8.0
+  (`b3f85455…`):
+  - it keeps two committees, the one in force and the one before it (`getCommittees`). A step
+    signed by an older one is refused with `ERR_WRONG_COMMITTEE` (242): its keys may belong to
+    validators that have left, and it could prove a forged block hash for its period;
+  - it refuses a `submitUpdate` whose finalized slot is after its attested slot
+    (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof;
+  - it refuses a `submitRotate` period not past the current one (`ERR_STALE_PERIOD`).
+
+  `updateCode` each light client while its relayer queues no checkpoint signed before the period
+  in force: the upgrade keeps only the committee in force.
+- `eccBridge` 1.18.0 (code hash `2c2296a5…`) deploys 1.8.1 light clients: run its `updateCode` and
   `setLightClientCode` before the next `deployLightClient`.
-- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.0: upgrade the two together.
+- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.1: upgrade the two together. It holds
+  a rotate while a queued checkpoint is signed before the rotate's period, and drops a checkpoint
+  refused with 242 whose committee the contract no longer holds; that checkpoint's blocks go to
+  the span behind the next one. A rotate sent by someone else can land at the start of a period,
+  so a relayer that lags behind its period may lose checkpoints this way.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.19.0, code hash `4d8ed160…`, with `DepositVoucher` 1.6.0 and the 1.8.0 light
+- `eccBridge` 1.19.0, code hash `4d8ed160…`, with `DepositVoucher` 1.6.0 and the 1.8.1 light
   clients: upgrade a 1.17.0 or 1.18.0 bridge with `updateCode` and the 1.6.0 voucher code in
   `userCell`. That moves every voucher address: finish the old EVM bridge's deposits first, and
   afterwards trust only the new EVM bridge.
@@ -166,18 +177,6 @@ assigns it when the release is tagged.
 
 ### Fixes
 
-- `EthBeaconLightClient` 1.8.1 (code hash `c823fdb2…`, gosh-sh/bridge-audit#163):
-  - refuses a `submitUpdate` whose finalized slot is after its attested slot
-    (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof;
-  - keeps two committees, the one in force and the one before it, instead of seven. A step signed
-    by an older committee is refused with `ERR_WRONG_COMMITTEE` (242): its keys may belong to
-    validators that have left, and it could prove a forged block hash. A relayer that lags more
-    than a period behind a rotation loses those checkpoints; their blocks are reached with
-    `submitAncestry` from a later proven one.
-
-  `updateCode` each light client and run `setLightClientCode` on `eccBridge`, together with
-  `eth-lc-relayer`, which now holds a rotate while a queued checkpoint is signed before the
-  rotate's period.
 - The `bridge-cli` image ships `BridgeWithdrawalAggregatorVerifier_calldata.bin`: `withdraw` from the
   image no longer stops in preflight.
 - `eth-lc-relayer` proves a checkpoint with the committee of its signature slot: a checkpoint

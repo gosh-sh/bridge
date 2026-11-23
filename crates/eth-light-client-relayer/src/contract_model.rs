@@ -175,7 +175,7 @@ impl LightClient {
         exec: [u8; 32],
         committee: [u8; 32],
     ) -> Result<UpdateKind, LcError> {
-        let attested = self.period.saturating_mul(SLOTS_PER_PERIOD);
+        let attested = self.period.saturating_mul(SLOTS_PER_PERIOD).max(slot);
         self.submit_update_at(slot, attested, exec, committee)
     }
 
@@ -190,6 +190,9 @@ impl LightClient {
     ) -> Result<UpdateKind, LcError> {
         if self.committee == [0; 32] {
             return Err(LcError::CommitteeUnset);
+        }
+        if slot > attested_slot {
+            return Err(LcError::BadPublicInputs);
         }
         let advancing = slot > self.finalized_slot;
         let late = slot < self.finalized_slot && !self.is_live(&exec);
@@ -566,7 +569,7 @@ mod tests {
         let mut c = LightClient::bootstrap(old_committee, 1);
         c.submit_update_at(
             SLOTS_PER_PERIOD + 64,
-            SLOTS_PER_PERIOD,
+            SLOTS_PER_PERIOD + 96,
             [0xAA; 32],
             old_committee,
         )
@@ -654,6 +657,30 @@ mod tests {
         );
     }
 
+    /// A step whose finalized slot is after its attested slot is refused
+    /// before the committee is looked at.
+    #[test]
+    fn a_step_finalizing_after_its_attested_slot_is_refused() {
+        let mut c = LightClient::bootstrap([0xC0; 32], 1);
+        assert_eq!(
+            c.submit_update_at(
+                40 * SLOTS_PER_PERIOD,
+                SLOTS_PER_PERIOD + 96,
+                [0xAA; 32],
+                [0xC0; 32]
+            )
+            .unwrap_err(),
+            LcError::BadPublicInputs
+        );
+        c.submit_update_at(
+            SLOTS_PER_PERIOD + 96,
+            SLOTS_PER_PERIOD + 96,
+            [0xAA; 32],
+            [0xC0; 32],
+        )
+        .unwrap();
+    }
+
     /// The replaced committee may only sign in the period it served.
     /// Without that bound it could sign any slot in the proven window,
     /// including slots it never attested, and the hashes it wrote would back
@@ -665,7 +692,7 @@ mod tests {
         let mut c = LightClient::bootstrap(old_committee, 1);
         c.submit_update_at(
             2 * SLOTS_PER_PERIOD,
-            SLOTS_PER_PERIOD,
+            2 * SLOTS_PER_PERIOD + 32,
             [0xAA; 32],
             old_committee,
         )

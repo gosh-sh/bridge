@@ -84,6 +84,10 @@ class LightClientCommittees(unittest.TestCase):
         _gloasForkSlot = 11296768;
         _gloasForkSlotSet = true;
     }
+    function testSetHead(uint64 slot) public {
+        tvm.accept();
+        _finalizedSlot = slot;
+    }
     function testRotate(uint256 next, uint64 period) public {
         tvm.accept();
         _installRotated(next, period);
@@ -237,6 +241,19 @@ class LightClientCommittees(unittest.TestCase):
             self.assertEqual(ahead["exit_code"], ERR_BAD_PUBLIC_INPUTS, signer)
             same = self.submit(signer, committee(signer), slot_in(signer))
             self.assertNotIn(same["exit_code"], (0, ERR_BAD_PUBLIC_INPUTS), signer)
+
+    def test_a_late_step_signed_by_a_dropped_committee_is_refused_before_the_proof(self):
+        self.rotate_to(FIRST + KEPT)
+        self.call("testSetHead", {"slot": slot_in(FIRST + KEPT, 500)})
+        dropped = self.submit(FIRST, committee(FIRST))
+        self.assertEqual(dropped["exit_code"], ERR_WRONG_COMMITTEE)
+        held = self.submit(FIRST + 1, committee(FIRST + 1))
+        self.assertNotIn(held["exit_code"], (0, ERR_WRONG_COMMITTEE))
+
+    def test_a_rotate_past_several_periods_keeps_only_the_new_committee(self):
+        self.call("testRotate", {"next": str(committee(FIRST + 5)), "period": FIRST + 5})
+        self.assertEqual(self.held(), {FIRST + 5: committee(FIRST + 5)})
+        self.assertFalse(self.signed_by(FIRST, committee(FIRST)))
 
 
 if __name__ == "__main__":

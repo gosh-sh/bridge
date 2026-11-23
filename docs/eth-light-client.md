@@ -44,7 +44,7 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client holds the committees of the last two periods and lets each advance the head for the period it served, so neither an early `/updates` hand-off nor a rotation sent while a relayer lags less than a period freezes the checkpoints behind it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client holds the committees of the last two periods and lets each advance the head for the period it served, so neither an early `/updates` hand-off nor a rotation sent while a relayer lags behind its own period freezes the checkpoints behind it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the KZG accumulation decider of tvm-sdk PR #284, released in tvm-sdk tag `v3.1.0.an` (the tag `acki-nacki` `dev` pins). A node built against an older tvm-sdk accepts a rotate proof without checking the inner proofs it aggregates. |
 | `USDCBridge` | `contracts/an/exchange/eccBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers besides the owner's `setAcceptedBlockHash`: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`), and `acceptBlockHashFromL2Verifier` (`eccBridge.sol:943`) from the `ArbitrumBlockVerifier` deployed for an Arbitrum chain (`deployL2Verifier`), which admits a block only once its parent-chain block is accepted. `disableOwnerAnchorsOn(chainId)` refuses `setAcceptedBlockHash` for one chain that has a light client or an L2 verifier (`:801-809`); every other chain keeps the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
@@ -227,10 +227,11 @@ flowchart TD
   is the one the current committee signed for, so the chain of committees becomes trustless.
   The attested header's period is bound to `attestedSlot / 8192 + 1`; a beacon
   `/updates` best update (start of the old period) is a valid hand-off. The
-  replaced committee stays for one more period and can still advance the head
+  replaced committee stays until the next rotate and can still advance the head
   for the period it served, so an early rotate does not freeze the rest
-  of a period, and one sent by anyone while the relayer lags less than a
-  period does not strand its queue. The daemon
+  of a period. A rotate can land at the start of a period, so a relayer is
+  sure to keep a lagging checkpoint only while nobody rotates; one whose
+  committee was dropped is skipped and its blocks go to the span behind the next. The daemon
   starts the rotate of period P as soon as the contract holds P and the
   beacon serves `/updates?start_period=P`: it fetches that update and the
   one of P−1 (whose next committee is the current one), and runs the three
@@ -242,8 +243,10 @@ flowchart TD
   (`eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256`)
   or whose current committee is not the contract's is refused and logged,
   not sent. A bundle from P also waits while a queued checkpoint is signed before period
-  P−5: after the rotate the contract holds the committees of P−5 to P+1 only, so sending it
-  would leave that checkpoint without a committee for good. It needs the decider of tvm-sdk PR
+  P: after the rotate the contract holds the committees of P and P+1 only, so sending it
+  would leave that checkpoint without a committee for good. A checkpoint that a rotate sent by
+  someone else has left without a committee is refused with `ERR_WRONG_COMMITTEE` (242); the
+  daemon drops it, and its blocks are owed to the span behind the next checkpoint. It needs the decider of tvm-sdk PR
   #284 in the node VM; on a
   network without it `submitRotate` proves less than it claims (§2), and
   `--no-rotate` keeps it off.

@@ -157,6 +157,7 @@ struct MockInner {
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
+    refuse_signed_before: Option<u64>,
     gateway_error: bool,
     /// Answer every `submitUpdate` the way a node did whose answer got lost:
     /// an update that lands comes back as "Unknown error", and a resend the
@@ -196,6 +197,7 @@ impl MockAnSubmitter {
                 gloas_gets: 0,
                 gloas_get_fails_from: None,
                 committee_period_read_fails: false,
+                refuse_signed_before: None,
                 gateway_error: false,
                 lose_update_answers: false,
                 update_submits: 0,
@@ -247,6 +249,11 @@ impl MockAnSubmitter {
     }
 
     /// `get_committee_period` errors, as a node that does not answer.
+    /// Refuse a step attested before `period` with `ERR_WRONG_COMMITTEE`.
+    pub fn refuse_signed_before(&self, period: u64) {
+        self.inner.lock().expect("poisoned").refuse_signed_before = Some(period);
+    }
+
     pub fn fail_committee_period_reads(&self) {
         self.inner
             .lock()
@@ -405,6 +412,14 @@ impl AnSubmitter for MockAnSubmitter {
                 reason: "submitUpdate failed: ZKHALO2VERIFYWITHVK rejected the step proof, \
                          exit_code=220"
                     .into(),
+            });
+        }
+        if inner
+            .refuse_signed_before
+            .is_some_and(|p| bundle.parsed.attested_slot / crate::types::SLOTS_PER_SYNC_PERIOD < p)
+        {
+            return Ok(SubmitOutcome::Rejected {
+                reason: "submitUpdate failed: tvm error (exit_code=242)".into(),
             });
         }
         let slot = bundle.parsed.finalized_slot;

@@ -89,9 +89,6 @@ mod tests {
 
     use super::*;
 
-    /// Shapes as shellnet returned them on 2026-10-12 for a `finalizeDeposit`
-    /// (bridge tx `4b722bbe…`) and its voucher deploy: null nested under
-    /// `out_messages`, linked when the message is queried by hash.
     fn page(nodes: Vec<Value>, previous: Option<&str>) -> Value {
         json!({"blockchain": {"account": {"transactions": {
             "edges": nodes.into_iter().map(|n| json!({"node": n})).collect::<Vec<_>>(),
@@ -131,6 +128,9 @@ mod tests {
         assert_eq!(parse_previous_page(&res), None);
     }
 
+    /// Shapes as shellnet returned them on 2026-10-12 for a `finalizeDeposit`
+    /// (bridge tx `4b722bbe…`) and its voucher deploy: null nested under
+    /// `out_messages`, linked when the message is queried by hash.
     #[test]
     fn unlinked_child_resolves_through_the_message_query() {
         let msg = "9aa9755e3e9f89560c482a5a2baca77e29aa456d13a5b49f1619ca3d83ca927a";

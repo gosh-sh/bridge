@@ -1412,10 +1412,12 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
     }
 
     /// The oldest period whose committee the contract still holds, or `None`
-    /// when it cannot be read.
+    /// when it cannot be read. An upgrade or an owner reset leaves only the
+    /// committee in force.
     async fn oldest_held_committee(&self) -> Option<u64> {
-        match self.submitter.get_committee_period().await {
-            Ok(period) => Some((period + 1).saturating_sub(KEPT_COMMITTEES)),
+        match self.submitter.get_committee_state().await {
+            Ok(state) if state.holds_previous => Some(state.period - 1),
+            Ok(state) => Some(state.period),
             Err(e) => {
                 warn!(error = %e, "getCommitteeState failed; keeping the checkpoint");
                 None
@@ -2597,6 +2599,47 @@ mod tests {
         lock(&r.taken)
             .queue
             .push(update(3 * p + 70, 3 * p + 64))
+            .unwrap();
+        let mut on_chain = Vec::new();
+        for _ in 0..6 {
+            if let TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } = r.tick().await.unwrap()
+            {
+                on_chain.push(finalized_slot);
+            }
+        }
+        assert_eq!(on_chain, vec![5 * p + 64]);
+        assert_eq!(r.queued(), 0);
+    }
+
+    /// After an upgrade or an owner reset the contract holds only the
+    /// committee in force, and a checkpoint signed in the period before
+    /// leaves the queue too.
+    #[tokio::test]
+    async fn a_checkpoint_of_the_period_before_a_reset_leaves_the_queue() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_committee_period(5);
+        submitter.drop_previous_committee();
+        submitter.refuse_signed_before(5);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(
+                5 * p + 70,
+                5 * p + 64,
+            )])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        lock(&r.taken)
+            .queue
+            .push(update(4 * p + 70, 4 * p + 64))
             .unwrap();
         let mut on_chain = Vec::new();
         for _ in 0..6 {

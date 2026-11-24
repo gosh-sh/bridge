@@ -158,6 +158,7 @@ struct MockInner {
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
     refuse_signed_before: Option<u64>,
+    previous_dropped: bool,
     gateway_error: bool,
     /// Answer every `submitUpdate` the way a node did whose answer got lost:
     /// an update that lands comes back as "Unknown error", and a resend the
@@ -198,6 +199,7 @@ impl MockAnSubmitter {
                 gloas_get_fails_from: None,
                 committee_period_read_fails: false,
                 refuse_signed_before: None,
+                previous_dropped: false,
                 gateway_error: false,
                 lose_update_answers: false,
                 update_submits: 0,
@@ -248,12 +250,18 @@ impl MockAnSubmitter {
         self.inner.lock().expect("poisoned").gloas_get_fails_from = Some(n);
     }
 
-    /// `get_committee_period` errors, as a node that does not answer.
     /// Refuse a step attested before `period` with `ERR_WRONG_COMMITTEE`.
     pub fn refuse_signed_before(&self, period: u64) {
         self.inner.lock().expect("poisoned").refuse_signed_before = Some(period);
     }
 
+    /// Hold only the committee in force, as after an upgrade or an owner
+    /// reset.
+    pub fn drop_previous_committee(&self) {
+        self.inner.lock().expect("poisoned").previous_dropped = true;
+    }
+
+    /// `get_committee_period` errors, as a node that does not answer.
     pub fn fail_committee_period_reads(&self) {
         self.inner
             .lock()
@@ -606,9 +614,16 @@ impl AnSubmitter for MockAnSubmitter {
 
     async fn get_committee_state(&self) -> Result<CommitteeState, RelayerError> {
         let inner = self.inner.lock().expect("poisoned");
+        if inner.committee_period_read_fails {
+            return Err(RelayerError::AckiNacki(
+                "getCommitteeState: transport error".into(),
+            ));
+        }
+        let period = inner.period.unwrap_or(0);
         Ok(CommitteeState {
             current_committee: inner.current_committee,
-            period: inner.period.unwrap_or(0),
+            period,
+            holds_previous: period > 0 && !inner.previous_dropped,
         })
     }
 
@@ -1147,9 +1162,12 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
             .ok_or_else(|| RelayerError::other("getCommitteeState: missing committeePeriod"))?;
         let current_committee = json_uint256_le_word(v.get("currentCommittee"))
             .ok_or_else(|| RelayerError::other("getCommitteeState: missing currentCommittee"))?;
+        let prev_committee = json_uint256_le_word(v.get("prevCommittee"))
+            .ok_or_else(|| RelayerError::other("getCommitteeState: missing prevCommittee"))?;
         Ok(CommitteeState {
             current_committee,
             period,
+            holds_previous: prev_committee != [0; 32],
         })
     }
 

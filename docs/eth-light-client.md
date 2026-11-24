@@ -148,7 +148,7 @@ sequenceDiagram
   R->>P: FINALITY_UPDATE_PATH, COMMITTEE_JSON_PATH,<br/>BEACON_FORK_VERSION, BEACON_GENESIS_VALIDATORS_ROOT,<br/>BEACON_GLOAS_FORK_SLOT
   P-->>R: step_proof.bin + step_public_inputs.bin (in the background, --parallel-proofs at once)
   R->>LC: submitUpdate(proof, publicInputs), signed external message
-  LC->>LC: parse PI, participation >= 342 of 512, fork slot, slot advances, committee
+  LC->>LC: parse PI, participation >= 342 of 512, fork slot, finalized <= attested, slot advances, committee
   LC->>LC: tvm.accept(), then zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)
   LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(execHash)), only when usdcBridge is set
   LC-->>R: HeadUpdated event
@@ -162,7 +162,8 @@ sequenceDiagram
 What the contract checks, in order (`contracts/an/exchange/EthBeaconLightClient.sol`, the copy
 shellnet runs): the public inputs parse; at least 342 of 512 committee members signed (also
 enforced in-circuit); a committee is anchored at all; the Gloas fork slot is set (`ERR_FORK_SLOT_UNSET`,
-256) and the proof was made for it (`ERR_WRONG_FORK_SLOT`, 255); the finalized slot moves the head
+256) and the proof was made for it (`ERR_WRONG_FORK_SLOT`, 255); the finalized slot is not after
+the attested one (`ERR_BAD_PUBLIC_INPUTS`, 240); the finalized slot moves the head
 forward, or back-fills a skipped checkpoint; then the proof's
 committee commitment equals one the contract holds for the attested slot's period or the next
 one (the last header of a period is signed in the next); then `tvm.accept()` and the opcode. The

@@ -93,7 +93,7 @@ function getCommitteeState() external view returns (uint256, uint256, uint64, bo
 6. record the head in `_prevCommitteeHeadSlot`, advance
    `_currentCommittee = next`, store `_committeePeriod = period` and
    `_committees[period] = next`, and drop the committees older than the
-   last seven periods; emit `CommitteeRotated` with that period.
+   last two periods; emit `CommitteeRotated` with that period.
 
 The replaced committees may still advance the head for the periods they
 served: a step is accepted from the committee held for its attested slot's

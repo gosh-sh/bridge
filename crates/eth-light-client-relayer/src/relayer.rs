@@ -338,6 +338,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         let taken = Arc::new(Mutex::new(Taken::new(
             queue,
             state.last_finalized_slot,
+            state.signed_from,
             state.genesis_validators_root.clone(),
         )));
         let watcher = Watcher::new(Arc::clone(&source), Arc::clone(&taken));
@@ -1480,6 +1481,45 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         }
     }
 
+    fn drop_refused(&mut self, update: &FinalityUpdate) -> Result<(), RelayerError> {
+        let before = self.state.clone();
+        let from = update.signing_period() + 1;
+        self.state.signed_from = Some(self.state.signed_from.map_or(from, |f| f.max(from)));
+        let refused = crate::state::DroppedCheckpoint {
+            hash: update.execution_block_hash,
+            slot: update.finalized_slot,
+        };
+        if self.state.last_execution_block_hash.is_none() {
+            if self
+                .state
+                .dropped_unanchored
+                .as_ref()
+                .is_none_or(|d| refused.slot < d.slot)
+            {
+                self.state.dropped_unanchored = Some(refused);
+            }
+        } else if let Some(anchor) = self
+            .state
+            .earliest_anchor
+            .clone()
+            .filter(|a| refused.slot < a.slot)
+        {
+            self.owe_span(crate::state::OwedSpan {
+                older: refused.hash,
+                newer: anchor.hash,
+                older_slot: Some(refused.slot),
+                newer_slot: Some(anchor.slot),
+                ..Default::default()
+            });
+            self.state.earliest_anchor = Some(refused);
+        }
+        if let Err(e) = self.persist() {
+            self.state = before;
+            return Err(e);
+        }
+        self.forget_step(update.finalized_slot)
+    }
+
     /// Drop a queued checkpoint with its proof.
     fn forget_step(&mut self, finalized_slot: u64) -> Result<(), RelayerError> {
         self.proofs.remove(&finalized_slot);
@@ -1586,7 +1626,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                         "the committee that signed this checkpoint is past the age the contract \
                          takes; dropping it"
                     );
-                    self.forget_step(slot)?;
+                    self.drop_refused(&update)?;
                     return Ok(TickOutcome::AnRejected {
                         reason,
                     });
@@ -1602,7 +1642,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                                  checkpoint; dropping it, its blocks are owed to the span behind \
                                  the next one"
                             );
-                            self.forget_step(slot)?;
+                            self.drop_refused(&update)?;
                             return Ok(TickOutcome::AnRejected {
                                 reason,
                             });
@@ -1689,6 +1729,22 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         update: &FinalityUpdate,
     ) {
         let checkpoint = update.execution_block_hash;
+        let dropped = self
+            .state
+            .dropped_unanchored
+            .take()
+            .filter(|d| prev_head.is_none() && d.slot < update.finalized_slot);
+        if prev_head.is_none() {
+            self.state.earliest_anchor =
+                Some(dropped.clone().unwrap_or(crate::state::DroppedCheckpoint {
+                    hash: checkpoint,
+                    slot: update.finalized_slot,
+                }));
+        }
+        let (prev_head, prev_slot) = match &dropped {
+            Some(d) => (Some(d.hash), Some(d.slot)),
+            None => (prev_head, prev_slot),
+        };
         let Some(older) = prev_head else {
             info!("no previous checkpoint on record; nothing behind this one is owed");
             return;
@@ -1703,9 +1759,13 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             newer_slot: Some(update.finalized_slot),
             ..Default::default()
         };
-        if !span.has_missed_checkpoints() && !self.config.submit_ancestry {
+        if dropped.is_none() && !span.has_missed_checkpoints() && !self.config.submit_ancestry {
             return;
         }
+        self.owe_span(span);
+    }
+
+    fn owe_span(&mut self, span: crate::state::OwedSpan) {
         if self.state.owed_spans.len() >= MAX_OWED_SPANS {
             let dropped = self.state.owed_spans.remove(0);
             error!(
@@ -1944,7 +2004,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
     fn persist(&mut self) -> Result<(), RelayerError> {
         self.state.save(&self.config.state_path)?;
         // The watcher takes only what is newer than the head on chain.
-        lock(&self.taken).recorded = self.state.last_finalized_slot;
+        let mut taken = lock(&self.taken);
+        taken.recorded = self.state.last_finalized_slot;
+        taken.signed_from = self.state.signed_from;
         Ok(())
     }
 
@@ -2622,6 +2684,97 @@ mod tests {
             }
         }
         assert_eq!(on_chain, vec![5 * p + 64]);
+        assert_eq!(r.queued(), 0);
+    }
+
+    async fn blocks_back_to_a_refused_checkpoint(behind_the_head: bool) {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let chain = crate::header_rlp::dummy_linked_chain(4);
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let refused = update_with_exec(4 * p + 70, 4 * p + 64, k(0));
+        let head = update_with_exec(5 * p + 70, 5 * p + 64, k(3));
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_committee_period(5);
+        submitter.refuse_aged_out_before(5);
+        let source = if behind_the_head {
+            vec![head]
+        } else {
+            vec![refused.clone(), head]
+        };
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(source)),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap()
+        .with_execution(Arc::new(crate::source::InMemoryExecution::single(
+            k(3),
+            chain.clone(),
+        )));
+        if behind_the_head {
+            lock(&r.taken).queue.push(refused).unwrap();
+        }
+        for _ in 0..8 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(r.state.last_finalized_slot, Some(5 * p + 64));
+        assert!(submitter.ancestry_count() >= 1);
+        assert!(submitter.is_proven(&k(0)), "the refused checkpoint's block");
+        assert!(r.state.owed_spans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_blocks_of_a_checkpoint_refused_before_any_head_are_owed() {
+        blocks_back_to_a_refused_checkpoint(false).await;
+    }
+
+    #[tokio::test]
+    async fn the_blocks_of_a_checkpoint_refused_behind_the_first_head_are_owed() {
+        blocks_back_to_a_refused_checkpoint(true).await;
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_refused_for_its_committee_is_not_taken_again() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let refused = update(4 * p + 70, 4 * p + 64);
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_committee_period(5);
+        submitter.refuse_aged_out_before(5);
+        let mut r = Relayer::new(
+            cfg.clone(),
+            Arc::new(InMemoryBeaconSource::new(vec![refused.clone()])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        for _ in 0..6 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(submitter.update_submits(), 1);
+        assert_eq!(r.queued(), 0);
+        assert_eq!(r.state.signed_from, Some(5));
+        drop(r);
+        let again = Arc::new(MockAnSubmitter::accepting());
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![refused])),
+            Arc::new(MockProofGenerator::new()),
+            again.clone(),
+        )
+        .unwrap();
+        for _ in 0..3 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(again.update_submits(), 0);
         assert_eq!(r.queued(), 0);
     }
 

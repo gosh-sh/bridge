@@ -251,7 +251,11 @@ flowchart TD
   would leave that checkpoint without a committee for good. A checkpoint that a rotate sent by
   someone else has left without a committee is refused with `ERR_WRONG_COMMITTEE` (242); the
   daemon drops it, and its blocks are owed to the span behind the next checkpoint. A checkpoint
-  refused with `ERR_COMMITTEE_TOO_OLD` (259) is dropped too. A rotate signed by a committee more
+  refused with `ERR_COMMITTEE_TOO_OLD` (259) is dropped too. The state file keeps the period such
+  a checkpoint was signed in (`signed_from`), and the watcher takes no checkpoint signed in it or
+  before it again. When the dropped checkpoint is older than every accepted one, its blocks are
+  owed to the oldest accepted checkpoint (`earliest_anchor`, or `dropped_unanchored` before the
+  first is accepted). A rotate signed by a committee more
   than two periods behind the current Ethereum period is refused with 259 as well: after a
   rotation stall that long the committee chain is restarted by the owner (`reAnchorCommittee`, or
   `setCommitteeCommitment` while owner rotation is on). It needs the decider of tvm-sdk PR

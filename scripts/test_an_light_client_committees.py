@@ -34,9 +34,11 @@ ERR_STALE_PERIOD = 245
 ERR_COMMITTEE_TOO_OLD = 259
 ERR_UNKNOWN_L1 = 260
 MAX_SIGNER_AGE = 2
+PERIOD_SECONDS = 12 * SLOTS_PER_PERIOD
+GENESIS = {1: 1606824023, 11155111: 1655733600, 560048: 1742213400}
 SEPOLIA = 11155111
-SEPOLIA_GENESIS = 1655733600
-PERIOD_NOW = int(time.time() - SEPOLIA_GENESIS) // 12 // SLOTS_PER_PERIOD
+PERIOD_NOW = 1500
+NOW = GENESIS[SEPOLIA] + PERIOD_NOW * PERIOD_SECONDS + 1000
 FIRST = PERIOD_NOW - MAX_SIGNER_AGE
 
 
@@ -82,7 +84,15 @@ class LightClientCommittees(unittest.TestCase):
         shutil.copytree(REPO / "contracts/an", src)
         client = src / "exchange/EthBeaconLightClient.sol"
         source = client.read_text()
+        clock = "uint64(block.timestamp)"
+        assert source.count(clock) == 1
+        source = source.replace(clock, "_testClock")
         hooks = """
+    uint64 _testClock;
+    function testSetClock(uint64 time) public {
+        tvm.accept();
+        _testClock = time;
+    }
     function testBootstrap(uint256 pubkey, uint256 committee, uint64 period) public {
         tvm.accept();
         _ownerPubkey = pubkey;
@@ -138,6 +148,7 @@ class LightClientCommittees(unittest.TestCase):
         self.tvc = self.root / "case.tvc"
         shutil.copyfile(self.root / "EthBeaconLightClient.tvc", self.tvc)
         self.call("constructor", source=BRIDGE)
+        self.set_clock(NOW)
         self.bootstrap(FIRST)
 
     def call(self, function, args=None, *, source=None, signed=False, expect=0):
@@ -172,6 +183,9 @@ class LightClientCommittees(unittest.TestCase):
     def held(self):
         committees = self.call("getCommittees")["response"]["committees"]
         return {int(p): int(c, 0) for p, c in committees.items()}
+
+    def set_clock(self, time_):
+        self.call("testSetClock", {"time": time_})
 
     def bootstrap(self, period):
         self.call("testBootstrap", {"pubkey": "0x" + self.keys["public"],
@@ -310,6 +324,26 @@ class LightClientCommittees(unittest.TestCase):
             "publicInputs": rotate_inputs(committee(FIRST), 0xD00D, FIRST + 1),
         }, expect=None)
         self.assertEqual(result["exit_code"], ERR_UNKNOWN_L1)
+
+    def test_a_committee_ages_out_at_the_first_second_of_its_third_period_after(self):
+        for chain, genesis in GENESIS.items():
+            signer = 700
+            self.bootstrap(signer)
+            self.call("testSetChain", {"chainId": chain})
+            edge = genesis + (signer + MAX_SIGNER_AGE + 1) * PERIOD_SECONDS
+            self.set_clock(edge - 1)
+            before = self.submit(signer, committee(signer))
+            self.assertNotIn(before["exit_code"], (0, ERR_COMMITTEE_TOO_OLD), chain)
+            self.set_clock(edge)
+            self.assertEqual(self.submit(signer, committee(signer))["exit_code"],
+                             ERR_COMMITTEE_TOO_OLD, chain)
+
+    def test_a_clock_before_genesis_ages_no_committee(self):
+        self.bootstrap(0)
+        for time_ in (GENESIS[SEPOLIA] - 1, GENESIS[SEPOLIA]):
+            self.set_clock(time_)
+            result = self.submit(0, committee(0))
+            self.assertNotIn(result["exit_code"], (0, ERR_COMMITTEE_TOO_OLD), time_)
 
 
 if __name__ == "__main__":

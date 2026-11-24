@@ -39,6 +39,8 @@ pub(crate) struct Taken {
     /// The newest finalized slot the light client has, as the daemon
     /// recorded it.
     pub(crate) recorded: Option<u64>,
+    /// The oldest signing period the light client may still take.
+    pub(crate) signed_from: Option<u64>,
     /// The beacon head as last seen.
     pub(crate) latest: Option<FinalityUpdate>,
     /// The `genesis_validators_root` the state file is pinned to.
@@ -49,10 +51,16 @@ pub(crate) struct Taken {
 }
 
 impl Taken {
-    pub(crate) fn new(queue: StepQueue, recorded: Option<u64>, network: Option<String>) -> Self {
+    pub(crate) fn new(
+        queue: StepQueue,
+        recorded: Option<u64>,
+        signed_from: Option<u64>,
+        network: Option<String>,
+    ) -> Self {
         Self {
             queue,
             recorded,
+            signed_from,
             latest: None,
             network,
             thin: None,
@@ -104,6 +112,12 @@ impl Taken {
             (q, r) => q.or(r),
         };
         if newest.is_some_and(|n| latest.finalized_slot <= n) {
+            return Ok(());
+        }
+        if self
+            .signed_from
+            .is_some_and(|f| latest.signing_period() < f)
+        {
             return Ok(());
         }
         if latest.participation < MIN_PARTICIPATION {

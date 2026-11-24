@@ -23,30 +23,19 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `EthBeaconLightClient` 1.8.1 (code hash `35fff017…`, gosh-sh/bridge-audit#163) replaces 1.8.0
-  (`b3f85455…`):
-  - it keeps two committees, the one in force and the one before it (`getCommittees`). A step
-    signed by an older one is refused with `ERR_WRONG_COMMITTEE` (242): its keys may belong to
-    validators that have left, and it could prove a forged block hash for its period;
-  - it refuses a `submitUpdate` or `submitRotate` signed by a committee more than two sync periods
-    (about 55 hours) behind the current Ethereum period, read from the Acki Nacki block time
-    (`ERR_COMMITTEE_TOO_OLD`, 259). After a rotation stall that long the owner restarts the
-    committee chain with `reAnchorCommittee` (or `setCommitteeCommitment` while owner rotation is
-    on). Only mainnet, Sepolia and Hoodi have a known beacon genesis time; a light client for
-    another chain refuses every step and rotate (`ERR_UNKNOWN_L1`, 260);
-  - it refuses a `submitUpdate` whose finalized slot is after its attested slot
-    (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof;
-  - it refuses a `submitRotate` period not past the current one (`ERR_STALE_PERIOD`).
-
-  `updateCode` each light client while its relayer queues no checkpoint signed before the period
-  in force: the upgrade keeps only the committee in force.
+- `EthBeaconLightClient` 1.8.1 (code hash `35fff017…`, replaces 1.8.0 `b3f85455…`) holds two
+  committees (`getCommittees`) and refuses a step signed by an older one (`ERR_WRONG_COMMITTEE`, 242),
+  a step or rotate whose committee is more than two sync periods behind Ethereum time
+  (`ERR_COMMITTEE_TOO_OLD`, 259), a chain other than mainnet, Sepolia or Hoodi (`ERR_UNKNOWN_L1`,
+  260), a step finalizing after its attested slot (`ERR_BAD_PUBLIC_INPUTS`, 240) and a
+  `submitRotate` period not past the current one (`ERR_STALE_PERIOD`): `updateCode`
+  each light client while its relayer queues no checkpoint signed before the period in force; after
+  a rotation stall past two periods restart the committee with `reAnchorCommittee`.
 - `eccBridge` 1.18.0 (code hash `2c2296a5…`) deploys 1.8.1 light clients: run its `updateCode` and
   `setLightClientCode` before the next `deployLightClient`.
-- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.1: upgrade the two together. It holds
-  a rotate while a queued checkpoint is signed before the rotate's period, and drops a checkpoint
-  refused with 242 whose committee the contract no longer holds, or refused with 259; that checkpoint's blocks go to
-  the span behind the next one. A rotate sent by someone else can land at the start of a period,
-  so a relayer that lags behind its period may lose checkpoints this way.
+- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.1: upgrade the two together. It
+  holds a rotate that would strand a queued checkpoint, drops a checkpoint refused with 259 or with
+  242 for a committee no longer held, and owes its blocks to the next accepted checkpoint.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.

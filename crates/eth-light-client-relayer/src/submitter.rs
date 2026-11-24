@@ -157,7 +157,7 @@ struct MockInner {
     gloas_gets: u32,
     gloas_get_fails_from: Option<u32>,
     committee_period_read_fails: bool,
-    refuse_signed_before: Option<u64>,
+    refuse_signed_before: Option<(u64, i32)>,
     previous_dropped: bool,
     gateway_error: bool,
     /// Answer every `submitUpdate` the way a node did whose answer got lost:
@@ -252,7 +252,12 @@ impl MockAnSubmitter {
 
     /// Refuse a step attested before `period` with `ERR_WRONG_COMMITTEE`.
     pub fn refuse_signed_before(&self, period: u64) {
-        self.inner.lock().expect("poisoned").refuse_signed_before = Some(period);
+        self.inner.lock().expect("poisoned").refuse_signed_before = Some((period, 242));
+    }
+
+    /// Refuse a step attested before `period` with `ERR_COMMITTEE_TOO_OLD`.
+    pub fn refuse_aged_out_before(&self, period: u64) {
+        self.inner.lock().expect("poisoned").refuse_signed_before = Some((period, 259));
     }
 
     /// Hold only the committee in force, as after an upgrade or an owner
@@ -422,13 +427,12 @@ impl AnSubmitter for MockAnSubmitter {
                     .into(),
             });
         }
-        if inner
-            .refuse_signed_before
-            .is_some_and(|p| bundle.parsed.attested_slot / crate::types::SLOTS_PER_SYNC_PERIOD < p)
-        {
-            return Ok(SubmitOutcome::Rejected {
-                reason: "submitUpdate failed: tvm error (exit_code=242)".into(),
-            });
+        if let Some((p, code)) = inner.refuse_signed_before {
+            if bundle.parsed.attested_slot / crate::types::SLOTS_PER_SYNC_PERIOD < p {
+                return Ok(SubmitOutcome::Rejected {
+                    reason: format!("submitUpdate failed: tvm error (exit_code={code})"),
+                });
+            }
         }
         let slot = bundle.parsed.finalized_slot;
         let hash = bundle.parsed.execution_block_hash;

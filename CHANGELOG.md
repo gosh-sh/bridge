@@ -23,11 +23,17 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `EthBeaconLightClient` 1.8.1 (code hash `c823fdb2…`, gosh-sh/bridge-audit#163) replaces 1.8.0
+- `EthBeaconLightClient` 1.8.1 (code hash `35fff017…`, gosh-sh/bridge-audit#163) replaces 1.8.0
   (`b3f85455…`):
   - it keeps two committees, the one in force and the one before it (`getCommittees`). A step
     signed by an older one is refused with `ERR_WRONG_COMMITTEE` (242): its keys may belong to
     validators that have left, and it could prove a forged block hash for its period;
+  - it refuses a `submitUpdate` or `submitRotate` signed by a committee more than two sync periods
+    (about 55 hours) behind the current Ethereum period, read from the Acki Nacki block time
+    (`ERR_COMMITTEE_TOO_OLD`, 259). After a rotation stall that long the owner restarts the
+    committee chain with `reAnchorCommittee` (or `setCommitteeCommitment` while owner rotation is
+    on). Only mainnet, Sepolia and Hoodi have a known beacon genesis time; a light client for
+    another chain refuses every step and rotate (`ERR_UNKNOWN_L1`, 260);
   - it refuses a `submitUpdate` whose finalized slot is after its attested slot
     (`ERR_BAD_PUBLIC_INPUTS`, 240), before the proof;
   - it refuses a `submitRotate` period not past the current one (`ERR_STALE_PERIOD`).
@@ -38,7 +44,7 @@ assigns it when the release is tagged.
   `setLightClientCode` before the next `deployLightClient`.
 - `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.1: upgrade the two together. It holds
   a rotate while a queued checkpoint is signed before the rotate's period, and drops a checkpoint
-  refused with 242 whose committee the contract no longer holds; that checkpoint's blocks go to
+  refused with 242 whose committee the contract no longer holds, or refused with 259; that checkpoint's blocks go to
   the span behind the next one. A rotate sent by someone else can land at the start of a period,
   so a relayer that lags behind its period may lose checkpoints this way.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy

@@ -1579,6 +1579,18 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 if code.is_none() {
                     self.keep_proof(slot, bundle);
                 }
+                if code == Some(259) {
+                    warn!(
+                        slot,
+                        signing_period = update.signing_period(),
+                        "the committee that signed this checkpoint is past the age the contract \
+                         takes; dropping it"
+                    );
+                    self.forget_step(slot)?;
+                    return Ok(TickOutcome::AnRejected {
+                        reason,
+                    });
+                }
                 if code == Some(242) {
                     if let Some(held) = self.oldest_held_committee().await {
                         if update.signing_period() < held {
@@ -2599,6 +2611,43 @@ mod tests {
         lock(&r.taken)
             .queue
             .push(update(3 * p + 70, 3 * p + 64))
+            .unwrap();
+        let mut on_chain = Vec::new();
+        for _ in 0..6 {
+            if let TickOutcome::SubmittedUpdate {
+                finalized_slot, ..
+            } = r.tick().await.unwrap()
+            {
+                on_chain.push(finalized_slot);
+            }
+        }
+        assert_eq!(on_chain, vec![5 * p + 64]);
+        assert_eq!(r.queued(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_signed_by_a_committee_past_its_age_leaves_the_queue() {
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.poll_interval = Duration::from_millis(1);
+        cfg.enable_rotate = false;
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_committee_period(5);
+        submitter.refuse_aged_out_before(5);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(
+                5 * p + 70,
+                5 * p + 64,
+            )])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        lock(&r.taken)
+            .queue
+            .push(update(4 * p + 70, 4 * p + 64))
             .unwrap();
         let mut on_chain = Vec::new();
         for _ in 0..6 {

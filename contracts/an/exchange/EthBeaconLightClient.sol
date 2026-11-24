@@ -81,6 +81,8 @@ contract EthBeaconLightClient {
     uint64 constant PROVEN_WINDOW_SLOTS = 100_800;
     // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
     uint64 constant SLOTS_PER_PERIOD = 8192;
+    uint64 constant SECONDS_PER_SLOT = 12;
+    uint64 constant MAX_SIGNER_AGE_PERIODS = 2;
     // Committees held: the one in force and the one before it. A step signed
     // by either for its own period is accepted, so an early rotation — which
     // anyone may send, the proof being the authorization — does not strand
@@ -138,6 +140,8 @@ contract EthBeaconLightClient {
     uint16 constant ERR_FORK_SLOT_UNSET    = 256;
     uint16 constant ERR_ALREADY_INITIALIZED = 257;
     uint16 constant ERR_WRONG_CODE_SALT     = 258;
+    uint16 constant ERR_COMMITTEE_TOO_OLD   = 259;
+    uint16 constant ERR_UNKNOWN_L1          = 260;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -404,7 +408,9 @@ contract EthBeaconLightClient {
         // The signer is the committee of the period the header was signed
         // in, one this contract still holds. Any of them may advance the
         // head, so a rotation does not freeze the checkpoints behind it.
-        require(_signedByHeldCommittee(pi), ERR_WRONG_COMMITTEE);
+        optional(uint64) signer = _heldSignerPeriod(pi);
+        require(signer.hasValue(), ERR_WRONG_COMMITTEE);
+        require(_signerFresh(signer.get()), ERR_COMMITTEE_TOO_OLD);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
         // multi-second WASM extern that vastly exceeds the external-message
@@ -503,6 +509,7 @@ contract EthBeaconLightClient {
         // The committee chain moves forward: a hand-off filed under a period
         // not past the one in force would overwrite a held committee.
         require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
+        require(_signerFresh(_committeePeriod), ERR_COMMITTEE_TOO_OLD);
         tvm.accept();
         require(
             gosh.zkhalo2VerifyWithVK(ROTATE_VK_BLOB, publicInputs, proof),
@@ -985,12 +992,28 @@ contract EthBeaconLightClient {
 
     /// The step's signer is the committee held for the attested slot's period
     /// or the next one: the last header of a period is signed in the next.
-    function _signedByHeldCommittee(StepPI pi) private view returns (bool) {
+    function _heldSignerPeriod(StepPI pi) private view returns (optional(uint64) period) {
         uint64 attested = pi.attestedSlot / SLOTS_PER_PERIOD;
         optional(uint256) same = _committees.fetch(attested);
-        if (same.hasValue() && same.get() == pi.committeeCommitment) { return true; }
+        if (same.hasValue() && same.get() == pi.committeeCommitment) { return attested; }
         optional(uint256) next = _committees.fetch(attested + 1);
-        return next.hasValue() && next.get() == pi.committeeCommitment;
+        if (next.hasValue() && next.get() == pi.committeeCommitment) { return attested + 1; }
+    }
+
+    function _signerFresh(uint64 period) private view returns (bool) {
+        uint64 genesis = _beaconGenesisTime(_l1ChainId);
+        require(genesis != 0, ERR_UNKNOWN_L1);
+        uint64 nowTime = uint64(block.timestamp);
+        if (nowTime <= genesis) { return true; }
+        uint64 periodNow = (nowTime - genesis) / SECONDS_PER_SLOT / SLOTS_PER_PERIOD;
+        return periodNow <= period + MAX_SIGNER_AGE_PERIODS;
+    }
+
+    function _beaconGenesisTime(uint256 chainId) private pure returns (uint64) {
+        if (chainId == 1) { return 1606824023; }
+        if (chainId == 11155111) { return 1655733600; }
+        if (chainId == 560048) { return 1742213400; }
+        return 0;
     }
 
     /// A verified hand-off: `next` serves `period`, the attested slot's

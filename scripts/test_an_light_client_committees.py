@@ -31,7 +31,13 @@ GLOAS = 11_296_768
 ERR_BAD_PUBLIC_INPUTS = 240
 ERR_WRONG_COMMITTEE = 242
 ERR_STALE_PERIOD = 245
-FIRST = 100
+ERR_COMMITTEE_TOO_OLD = 259
+ERR_UNKNOWN_L1 = 260
+MAX_SIGNER_AGE = 2
+SEPOLIA = 11155111
+SEPOLIA_GENESIS = 1655733600
+PERIOD_NOW = int(time.time() - SEPOLIA_GENESIS) // 12 // SLOTS_PER_PERIOD
+FIRST = PERIOD_NOW - MAX_SIGNER_AGE
 
 
 def command(args):
@@ -80,9 +86,14 @@ class LightClientCommittees(unittest.TestCase):
     function testBootstrap(uint256 pubkey, uint256 committee, uint64 period) public {
         tvm.accept();
         _ownerPubkey = pubkey;
+        _l1ChainId = 11155111;
         _setOnlyCommittee(committee, period);
         _gloasForkSlot = 11296768;
         _gloasForkSlotSet = true;
+    }
+    function testSetChain(uint256 chainId) public {
+        tvm.accept();
+        _l1ChainId = chainId;
     }
     function testSetHead(uint64 slot) public {
         tvm.accept();
@@ -96,7 +107,7 @@ class LightClientCommittees(unittest.TestCase):
         StepPI pi;
         pi.attestedSlot = attestedSlot;
         pi.committeeCommitment = commitment;
-        held = _signedByHeldCommittee(pi);
+        held = _heldSignerPeriod(pi).hasValue();
     }
     function testUpgrade() public {
         tvm.accept();
@@ -127,8 +138,7 @@ class LightClientCommittees(unittest.TestCase):
         self.tvc = self.root / "case.tvc"
         shutil.copyfile(self.root / "EthBeaconLightClient.tvc", self.tvc)
         self.call("constructor", source=BRIDGE)
-        self.call("testBootstrap", {"pubkey": "0x" + self.keys["public"],
-                                    "committee": str(committee(FIRST)), "period": FIRST})
+        self.bootstrap(FIRST)
 
     def call(self, function, args=None, *, source=None, signed=False, expect=0):
         if source:
@@ -162,6 +172,10 @@ class LightClientCommittees(unittest.TestCase):
     def held(self):
         committees = self.call("getCommittees")["response"]["committees"]
         return {int(p): int(c, 0) for p, c in committees.items()}
+
+    def bootstrap(self, period):
+        self.call("testBootstrap", {"pubkey": "0x" + self.keys["public"],
+                                    "committee": str(committee(period)), "period": period})
 
     def submit(self, attested_period, commitment, finalized_slot=None):
         return self.call("submitUpdate", {
@@ -254,6 +268,48 @@ class LightClientCommittees(unittest.TestCase):
         self.call("testRotate", {"next": str(committee(FIRST + 5)), "period": FIRST + 5})
         self.assertEqual(self.held(), {FIRST + 5: committee(FIRST + 5)})
         self.assertFalse(self.signed_by(FIRST, committee(FIRST)))
+
+
+    def test_a_step_signed_by_a_committee_past_its_age_is_refused_before_the_proof(self):
+        self.bootstrap(PERIOD_NOW - MAX_SIGNER_AGE - 1)
+        old = self.submit(PERIOD_NOW - MAX_SIGNER_AGE - 1, committee(PERIOD_NOW - MAX_SIGNER_AGE - 1))
+        self.assertEqual(old["exit_code"], ERR_COMMITTEE_TOO_OLD)
+        self.bootstrap(PERIOD_NOW - MAX_SIGNER_AGE)
+        aged = self.submit(PERIOD_NOW - MAX_SIGNER_AGE, committee(PERIOD_NOW - MAX_SIGNER_AGE))
+        self.assertNotIn(aged["exit_code"], (0, ERR_COMMITTEE_TOO_OLD))
+
+    def test_a_step_signed_in_the_period_before_its_signer_ages_by_the_signer(self):
+        signer = PERIOD_NOW - MAX_SIGNER_AGE
+        self.bootstrap(signer)
+        result = self.call("submitUpdate", {
+            "proof": "00",
+            "publicInputs": step_inputs(slot_in(signer - 1, SLOTS_PER_PERIOD - 1), committee(signer)),
+        }, expect=None)
+        self.assertNotIn(result["exit_code"], (0, ERR_WRONG_COMMITTEE, ERR_COMMITTEE_TOO_OLD))
+
+    def test_a_rotate_from_a_committee_past_its_age_is_refused_before_the_proof(self):
+        old = PERIOD_NOW - MAX_SIGNER_AGE - 1
+        self.bootstrap(old)
+        result = self.call("submitRotate", {
+            "proof": "00",
+            "publicInputs": rotate_inputs(committee(old), 0xD00D, old + 1),
+        }, expect=None)
+        self.assertEqual(result["exit_code"], ERR_COMMITTEE_TOO_OLD)
+        self.bootstrap(old + 1)
+        result = self.call("submitRotate", {
+            "proof": "00",
+            "publicInputs": rotate_inputs(committee(old + 1), 0xD00D, old + 2),
+        }, expect=None)
+        self.assertNotIn(result["exit_code"], (0, ERR_COMMITTEE_TOO_OLD))
+
+    def test_a_chain_of_unknown_genesis_takes_no_step_and_no_rotate(self):
+        self.call("testSetChain", {"chainId": 31337})
+        self.assertEqual(self.submit(FIRST, committee(FIRST))["exit_code"], ERR_UNKNOWN_L1)
+        result = self.call("submitRotate", {
+            "proof": "00",
+            "publicInputs": rotate_inputs(committee(FIRST), 0xD00D, FIRST + 1),
+        }, expect=None)
+        self.assertEqual(result["exit_code"], ERR_UNKNOWN_L1)
 
 
 if __name__ == "__main__":

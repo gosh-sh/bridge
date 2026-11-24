@@ -166,7 +166,10 @@ enforced in-circuit); a committee is anchored at all; the Gloas fork slot is set
 the attested one (`ERR_BAD_PUBLIC_INPUTS`, 240); the finalized slot moves the head
 forward, or back-fills a skipped checkpoint; then the proof's
 committee commitment equals one the contract holds for the attested slot's period or the next
-one (the last header of a period is signed in the next); then `tvm.accept()` and the opcode. The
+one (the last header of a period is signed in the next); then that committee's period is at most
+two periods behind the current Ethereum period, read from the Acki Nacki block time and the
+network's beacon genesis time (`ERR_COMMITTEE_TOO_OLD`, 259; a network other than mainnet, Sepolia
+or Hoodi fails `ERR_UNKNOWN_L1`, 260); then `tvm.accept()` and the opcode. The
 contract holds the committee in force and the one before it, `KEPT_COMMITTEES` (1.8.1). The slot test comes before
 the committee test, so a stale update from a wrong committee fails `ERR_STALE_UPDATE` (244), not
 `ERR_WRONG_COMMITTEE` (242).
@@ -247,7 +250,11 @@ flowchart TD
   P: after the rotate the contract holds the committees of P and P+1 only, so sending it
   would leave that checkpoint without a committee for good. A checkpoint that a rotate sent by
   someone else has left without a committee is refused with `ERR_WRONG_COMMITTEE` (242); the
-  daemon drops it, and its blocks are owed to the span behind the next checkpoint. It needs the decider of tvm-sdk PR
+  daemon drops it, and its blocks are owed to the span behind the next checkpoint. A checkpoint
+  refused with `ERR_COMMITTEE_TOO_OLD` (259) is dropped too. A rotate signed by a committee more
+  than two periods behind the current Ethereum period is refused with 259 as well: after a
+  rotation stall that long the committee chain is restarted by the owner (`reAnchorCommittee`, or
+  `setCommitteeCommitment` while owner rotation is on). It needs the decider of tvm-sdk PR
   #284 in the node VM; on a
   network without it `submitRotate` proves less than it claims (§2), and
   `--no-rotate` keeps it off.

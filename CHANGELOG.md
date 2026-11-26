@@ -189,6 +189,10 @@ assigns it when the release is tagged.
   instead of resending it for ever.
 - Acki Nacki call errors carry the contract's `exit_code=N`: `deposit-relayer` waits out
   `ERR_PAUSED`, `ERR_TVL_CAP` and the token gates instead of counting them as failed attempts.
+- `eth-lc-relayer arbitrum-anchors` finds a deposit block again after a round that failed while
+  placing it (Acki Nacki did not answer `isAcceptedBlockHash`). The count of deposits seen moved
+  before the block was pending, so the next round read no logs and passed the block: its deposits
+  waited for the owner's `setAcceptedBlockHash`.
 
 ## [0.9.0]
 

@@ -520,12 +520,15 @@ pub struct TickReport {
 }
 
 /// One round: new deposits, new batches and assertions, then every proof
-/// whose parent-chain block the bridge accepts. The caller saves `state`.
+/// whose parent-chain block the bridge accepts. The caller saves `state`,
+/// after a round that failed too.
 /// The round is recorded in the metrics ([`crate::arbitrum_metrics`])
-/// however it ends: a round that fails has changed `state` up to there, and
-/// the next one does not find the same deposit blocks again. What a failed
-/// round did in the parent-chain block it stopped at, the next one does
-/// again and counts again.
+/// however it ends, because a failed round keeps what it did: a deposit
+/// block it put in `pending` is not new to the next round, and the blocks
+/// of the scan it did not get to are scanned for again. What a failed round
+/// did in the parent-chain block it stopped at, the next one does again and
+/// counts again; an assertion matched there is then counted as missed, its
+/// proofs being taken already.
 pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     chain: &ArbitrumChain,
     view: &V,
@@ -566,11 +569,6 @@ async fn round<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
         let made = view.deposit_count(latest).await?;
         if state.deposits_seen != Some(made) {
             let scan = view.deposit_blocks(state.deposit_cursor + 1, head).await?;
-            state.deposits_seen = match (scan.next_id, state.deposits_seen) {
-                (Some(next), seen) => Some(seen.map_or(next, |s| s.max(next))),
-                (None, None) if made == 0 => Some(0),
-                (None, seen) => seen,
-            };
             for (n, hash) in scan.blocks {
                 if state.pending.contains_key(&n) || an.is_accepted(chain.chain_id, hash).await? {
                     continue;
@@ -579,6 +577,16 @@ async fn round<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                 state.pending.insert(n, hash);
                 report.new_deposit_blocks += 1;
             }
+            // Only once every block of the scan is placed, in one step with
+            // the cursor: a round that failed above has moved neither, and the
+            // next one scans this window again. A count moved before that
+            // would equal the bridge's, the next round would read no logs and
+            // move the cursor past a block that is not in `pending`.
+            state.deposits_seen = match (scan.next_id, state.deposits_seen) {
+                (Some(next), seen) => Some(seen.map_or(next, |s| s.max(next))),
+                (None, None) if made == 0 => Some(0),
+                (None, seen) => seen,
+            };
         }
         state.deposit_cursor = head;
     }
@@ -2018,11 +2026,18 @@ mod tests {
         spans: Mutex<Vec<Vec<Bytes>>>,
         /// How many submitAncestry calls fail before one is sent.
         failing_spans: Mutex<u32>,
+        /// Block hashes `is_accepted` fails for, once each.
+        failing_accepted: Mutex<Vec<B256>>,
     }
 
     #[async_trait]
     impl AnchorTarget for FakeBridge {
         async fn is_accepted(&self, chain_id: u64, block_hash: B256) -> Result<bool, RelayerError> {
+            let mut failing = self.failing_accepted.lock().unwrap();
+            if let Some(at) = failing.iter().position(|h| *h == block_hash) {
+                failing.remove(at);
+                return Err(RelayerError::Eth("Acki Nacki is not reachable".into()));
+            }
             Ok(self
                 .accepted
                 .lock()
@@ -2453,6 +2468,45 @@ mod tests {
         tick(ARB, &chain, &an, &mut state, &behind).await.unwrap();
         assert!(state.pending.contains_key(&180));
         assert_eq!(state.deposits_seen, Some(1));
+    }
+
+    /// Two deposit blocks in one scan, and Acki Nacki does not answer for the
+    /// second. The failed round has moved neither the cursor nor the count of
+    /// deposits seen, so the next one scans the same window: it finds the
+    /// second block, and the first, pending already, is not new to it. A
+    /// count moved before the blocks were placed would equal the bridge's;
+    /// the next round would read no logs, the cursor would pass the second
+    /// block, and its deposits would wait for the owner.
+    #[tokio::test]
+    async fn a_round_that_fails_placing_a_deposit_block_finds_it_again() {
+        let chain = Mutex::new(FakeChain {
+            arbitrum_head: 200,
+            ..FakeChain::default()
+        });
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        {
+            let mut c = chain.lock().unwrap();
+            c.deposits.push((300, h(300)));
+            c.deposits.push((310, h(310)));
+            c.arbitrum_head = 400;
+        }
+        an.failing_accepted.lock().unwrap().push(h(310));
+        tick(ARB, &chain, &an, &mut state, &cfg())
+            .await
+            .unwrap_err();
+        assert_eq!(state.pending.keys().collect::<Vec<_>>(), [&300]);
+        assert_eq!(state.deposit_cursor, 200, "both blocks are still ahead");
+        assert_eq!(state.deposits_seen, Some(0), "and neither is counted");
+        // No deposit since: the bridge's count is what the failed round read.
+        chain.lock().unwrap().arbitrum_head = 600;
+        let report = run(&chain, &an, &mut state).await;
+        assert_eq!(report.new_deposit_blocks, 1, "310; 300 is not new");
+        assert_eq!(state.pending.keys().collect::<Vec<_>>(), [&300, &310]);
+        assert_eq!(state.deposits_seen, Some(2));
+        assert_eq!(state.deposit_cursor, 600);
+        assert_eq!(chain.lock().unwrap().deposit_scans, 3);
     }
 
     #[tokio::test]

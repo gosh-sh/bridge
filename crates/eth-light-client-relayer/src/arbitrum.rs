@@ -60,6 +60,7 @@ use tracing::{error, info, warn};
 use tvm_client::crypto::KeyPair;
 
 use crate::{
+    arbitrum_metrics as prom,
     error::RelayerError,
     header_rlp::{encode_header_rlp, link_headers},
     source::get_logs_with_retry,
@@ -520,6 +521,11 @@ pub struct TickReport {
 
 /// One round: new deposits, new batches and assertions, then every proof
 /// whose parent-chain block the bridge accepts. The caller saves `state`.
+/// The round is recorded in the metrics ([`crate::arbitrum_metrics`])
+/// however it ends: a round that fails has changed `state` up to there, and
+/// the next one does not find the same deposit blocks again. What a failed
+/// round did in the parent-chain block it stopped at, the next one does
+/// again and counts again.
 pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     chain: &ArbitrumChain,
     view: &V,
@@ -528,10 +534,23 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     cfg: &TickConfig,
 ) -> Result<TickReport, RelayerError> {
     let mut report = TickReport::default();
+    let ended = round(chain, view, an, state, cfg, &mut report).await;
+    prom::record_tick(&report, ended.is_ok(), state);
+    ended.map(|()| report)
+}
 
+async fn round<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
+    chain: &ArbitrumChain,
+    view: &V,
+    an: &T,
+    state: &mut AnchorState,
+    cfg: &TickConfig,
+    report: &mut TickReport,
+) -> Result<(), RelayerError> {
     // Deposits, up to `arbitrum_lag` blocks behind the head. A batch seen below
     // may end past that point; a deposit there is waiting by the next batch.
     let latest = view.arbitrum_head().await?;
+    prom::set_arbitrum_head(latest);
     let head = latest.saturating_sub(cfg.arbitrum_lag);
     if head > state.deposit_cursor {
         let head = head.min(
@@ -597,7 +616,9 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     }
 
     // Batches and assertions.
-    let parent_head = view.parent_head().await?.saturating_sub(cfg.parent_lag);
+    let parent_latest = view.parent_head().await?;
+    prom::set_parent_head(parent_latest);
+    let parent_head = parent_latest.saturating_sub(cfg.parent_lag);
     if parent_head > state.parent_cursor {
         let mut events = view
             .parent_events(state.parent_cursor + 1, parent_head)
@@ -701,7 +722,7 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                 .is_none_or(|at| now >= at + cfg.resend_after_secs)
             {
                 proof.span_tried = Some(now);
-                if let Err(e) = cover_parent_block(chain, view, an, proof, &mut report).await {
+                if let Err(e) = cover_parent_block(chain, view, an, proof, report).await {
                     warn!(
                         parent_block = proof.parent_block,
                         error = %e,
@@ -766,7 +787,7 @@ pub async fn tick<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
         }
     }
     state.ready.retain(|p| !p.end.slots.is_empty());
-    Ok(report)
+    Ok(())
 }
 
 /// Most `submitAncestry` calls sent for one assertion block. One is sent only
@@ -974,6 +995,7 @@ async fn take_batch<V: ArbitrumView + ?Sized>(
              needs the bridge owner"
         );
         state.pending.remove(&n);
+        prom::count_expired_deposit_block();
     }
     let wanted: Vec<(u64, B256)> = state
         .pending
@@ -2981,5 +3003,173 @@ mod tests {
         assert_eq!(params["l1Header"], "f901");
         assert_eq!(params["storageProof"], serde_json::json!(["ef", "01"]));
         assert_eq!(params["blockNumber"], "518171193");
+    }
+
+    /// The first round of one deposit block, read from the metrics: what the
+    /// round did, and what the state holds after it.
+    #[tokio::test]
+    async fn the_first_round_of_a_deposit_block_shows_in_the_metrics() {
+        use crate::metrics::testing::Recorded;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let chain = one_deposit();
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+
+        run(&chain, &an, &mut state).await;
+        let m = Recorded::take(&snapshotter);
+        let get = |name| m.get(name, &[]);
+        assert_eq!(get(prom::NEW_DEPOSIT_BLOCKS_TOTAL), Some(1.0));
+        assert_eq!(get(prom::BATCHES_TAKEN_TOTAL), Some(1.0));
+        assert_eq!(get(prom::ASSERTIONS_MATCHED_TOTAL), Some(1.0));
+        assert_eq!(
+            get(prom::PROOFS_SENT_TOTAL),
+            Some(0.0),
+            "a counter that has not moved is there, at zero"
+        );
+        assert_eq!(get(prom::WAITING_FOR_PARENT), Some(1.0));
+        assert_eq!(get(prom::PENDING_DEPOSIT_BLOCKS), Some(1.0));
+        assert_eq!(get(prom::OLDEST_PENDING_DEPOSIT_BLOCK), Some(100.0));
+        assert_eq!(get(prom::READY_PROOFS), Some(1.0));
+        assert_eq!(get(prom::HELD_BATCH_ENDS), Some(0.0));
+        assert_eq!(get(prom::UNPLACED_BATCHES), Some(0.0));
+        assert_eq!(get(prom::ARBITRUM_HEAD_BLOCK), Some(200.0));
+        assert_eq!(get(prom::DEPOSIT_CURSOR_BLOCK), Some(200.0));
+        assert_eq!(get(prom::PARENT_HEAD_BLOCK), Some(30.0));
+        assert_eq!(
+            get(prom::PARENT_CURSOR_BLOCK),
+            Some(29.0),
+            "one block behind"
+        );
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[("outcome", "ok")]), Some(1.0));
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[("outcome", "error")]), None);
+    }
+
+    /// The whole way of one deposit block: every `TickReport` field adds up
+    /// in its counter over the rounds, and the gauges end where the state
+    /// does. One snapshot at the end: the gauges read 1 after the first round
+    /// (the test above), so a 0 here was written by a later round.
+    #[tokio::test]
+    async fn the_rounds_of_a_deposit_block_add_up_in_the_metrics() {
+        use crate::metrics::testing::Recorded;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let chain = one_deposit();
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+
+        run(&chain, &an, &mut state).await;
+        accept(&an, ARB.parent_chain_id, h(1_000_020));
+        run(&chain, &an, &mut state).await;
+        accept(&an, ARB.chain_id, h(100));
+        run(&chain, &an, &mut state).await;
+        assert!(state.pending.is_empty() && state.ready.is_empty());
+
+        let m = Recorded::take(&snapshotter);
+        let get = |name| m.get(name, &[]);
+        assert_eq!(get(prom::NEW_DEPOSIT_BLOCKS_TOTAL), Some(1.0), "found once");
+        assert_eq!(get(prom::BATCHES_TAKEN_TOTAL), Some(1.0));
+        assert_eq!(get(prom::ASSERTIONS_MATCHED_TOTAL), Some(1.0));
+        assert_eq!(get(prom::ASSERTIONS_MISSED_TOTAL), Some(0.0));
+        assert_eq!(get(prom::PROOFS_SENT_TOTAL), Some(1.0));
+        assert_eq!(get(prom::PROOFS_FAILED_TOTAL), Some(0.0));
+        assert_eq!(get(prom::ACCEPTED_TOTAL), Some(1.0));
+        assert_eq!(get(prom::WAITING_FOR_PARENT), Some(0.0));
+        assert_eq!(get(prom::PENDING_DEPOSIT_BLOCKS), Some(0.0));
+        assert_eq!(get(prom::OLDEST_PENDING_DEPOSIT_BLOCK), Some(0.0));
+        assert_eq!(get(prom::READY_PROOFS), Some(0.0));
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[("outcome", "ok")]), Some(3.0));
+        let now = crate::metrics::unix_now();
+        let good = get(prom::LAST_SUCCESSFUL_TICK_TIMESTAMP_SECONDS).expect("stamped");
+        assert!(good <= now && good > now - 60.0, "{good} vs {now}");
+        assert_eq!(get(prom::LAST_TICK_TIMESTAMP_SECONDS), Some(good));
+    }
+
+    /// A round that fails is counted as one, with what it got through: the
+    /// deposit block it found is in the state, and the next round does not
+    /// find it again. The time of the last good round stands still.
+    #[tokio::test]
+    async fn a_failed_round_is_counted_with_what_it_got_through() {
+        use crate::metrics::testing::Recorded;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let chain = one_deposit();
+        chain.lock().unwrap().failing_receipts = 1;
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        assert!(tick(ARB, &chain, &an, &mut state, &cfg()).await.is_err());
+
+        let m = Recorded::take(&snapshotter);
+        let get = |name| m.get(name, &[]);
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[("outcome", "error")]), Some(1.0));
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[("outcome", "ok")]), None);
+        assert_eq!(get(prom::NEW_DEPOSIT_BLOCKS_TOTAL), Some(1.0));
+        assert_eq!(get(prom::BATCHES_TAKEN_TOTAL), Some(1.0));
+        assert_eq!(get(prom::ASSERTIONS_MATCHED_TOTAL), Some(0.0));
+        assert!(get(prom::LAST_TICK_TIMESTAMP_SECONDS).is_some());
+        assert_eq!(
+            get(prom::LAST_SUCCESSFUL_TICK_TIMESTAMP_SECONDS),
+            None,
+            "no good round, no time of one"
+        );
+        assert_eq!(
+            get(prom::WAITING_FOR_PARENT),
+            None,
+            "not from a round that stopped before the proofs"
+        );
+        assert_eq!(get(prom::PENDING_DEPOSIT_BLOCKS), Some(1.0));
+        assert_eq!(get(prom::HELD_BATCH_ENDS), Some(1.0));
+
+        run(&chain, &an, &mut state).await;
+        let m = Recorded::take(&snapshotter);
+        let get = |name| m.get(name, &[]);
+        assert_eq!(get(prom::NEW_DEPOSIT_BLOCKS_TOTAL), Some(0.0), "found once");
+        assert_eq!(get(prom::ASSERTIONS_MATCHED_TOTAL), Some(1.0));
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[("outcome", "ok")]), Some(1.0));
+        assert!(get(prom::LAST_SUCCESSFUL_TICK_TIMESTAMP_SECONDS).is_some());
+    }
+
+    /// A deposit block past the history window is given up, and counted: it
+    /// needs the owner.
+    #[tokio::test]
+    async fn a_deposit_block_too_old_to_prove_is_counted_as_expired() {
+        use crate::metrics::testing::Recorded;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        // The first batch seen ends past block 100's window.
+        let late = 100 + HISTORY_WINDOW + 1;
+        let chain = Mutex::new(FakeChain {
+            arbitrum_head: late + 10,
+            parent_head: 30,
+            deposits: vec![(100, h(100))],
+            events: vec![ParentEvent::Batch {
+                block: 10,
+                log_index: 0,
+                batch: 7,
+            }],
+            batch_ends: BTreeMap::from([(7, late)]),
+            ..FakeChain::default()
+        });
+        let an = FakeBridge::default();
+        let mut state = AnchorState::default();
+        run(&chain, &an, &mut state).await;
+        assert!(state.pending.is_empty(), "given up");
+
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(m.get(prom::EXPIRED_DEPOSIT_BLOCKS_TOTAL, &[]), Some(1.0));
+        assert_eq!(m.get(prom::NEW_DEPOSIT_BLOCKS_TOTAL, &[]), Some(1.0));
+        assert_eq!(m.get(prom::PENDING_DEPOSIT_BLOCKS, &[]), Some(0.0));
     }
 }

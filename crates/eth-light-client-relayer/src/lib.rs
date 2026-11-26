@@ -25,11 +25,13 @@ pub mod abi;
 pub mod an_config;
 pub mod ancestry;
 pub mod arbitrum;
+pub mod arbitrum_metrics;
 pub mod contract_model;
 pub mod daemon;
 pub mod dirs;
 pub mod error;
 pub mod header_rlp;
+pub mod metrics;
 pub mod prover;
 pub mod redact;
 pub mod relayer;
@@ -52,7 +54,7 @@ pub use error::RelayerError;
 pub use prover::{
     MockProofGenerator, ProofGenerator, SubprocessProofGenerator, SubprocessProverConfig,
 };
-pub use relayer::{describe_metrics, Relayer, RelayerConfig, TickOutcome};
+pub use relayer::{Relayer, RelayerConfig, TickOutcome};
 pub use rotate::{
     MockRotateRunner, RotateStageRunner, SubprocessRotateConfig, SubprocessRotateRunner,
 };

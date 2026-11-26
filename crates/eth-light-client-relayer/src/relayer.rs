@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     error::RelayerError,
+    metrics as prom,
     prover::ProofGenerator,
     rotate::{
         check_before_submit, remove_rotate_dirs_before, run_rotate, PreSubmit, RotateDir,
@@ -27,20 +28,9 @@ use crate::{
     watcher::{lock, Taken, Watcher},
 };
 
-/// Failed attempts to get a checkpoint on chain, by `stage`: `prove` (the
-/// step proof did not come out), `submit` (Acki Nacki did not take it or did
-/// not answer) or `rotate` (it waits at a period boundary for the committee
-/// rotate). The checkpoint is tried again however often this grows.
-pub const CHECKPOINT_FAILURES: &str = "eth_lc_relayer_checkpoint_failures_total";
-
-/// Describe the daemon's metrics to the exporter the binary installs.
-pub fn describe_metrics() {
-    metrics::describe_counter!(
-        CHECKPOINT_FAILURES,
-        "Failed attempts to get a checkpoint on chain: stage=prove, submit or rotate"
-    );
-}
-
+/// Where an attempt to get a checkpoint on chain failed: the `stage` label of
+/// [`prom::CHECKPOINT_FAILURES`]. The checkpoint is tried again however often
+/// that counter grows.
 #[derive(Clone, Copy)]
 enum Stage {
     Prove,
@@ -62,7 +52,7 @@ impl Stage {
 
 /// One more failed attempt at the front checkpoint in the counter.
 fn count_failure(stage: Stage) {
-    metrics::counter!(CHECKPOINT_FAILURES, "stage" => stage.label()).increment(1);
+    prom::count_checkpoint_failure(stage.label());
 }
 
 #[derive(Clone, Debug)]
@@ -421,8 +411,35 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
 
     /// One round of everything but watching the beacon node: settle the
     /// spans owed, drive the rotate, prove and send the oldest queued
-    /// checkpoint.
+    /// checkpoint. The gauges of what the daemon holds follow the round,
+    /// however it ended.
     pub async fn work(&mut self) -> Result<TickOutcome, RelayerError> {
+        let outcome = self.round().await;
+        self.publish_gauges();
+        outcome
+    }
+
+    /// The gauges of what the daemon holds now ([`prom::RoundGauges`]): after
+    /// every round, and once before the first one.
+    pub fn publish_gauges(&self) {
+        prom::RoundGauges {
+            queued_checkpoints: self.queued(),
+            last_finalized_slot: self.state.last_finalized_slot,
+            last_committee_period: self.state.last_committee_period,
+            owed_spans: self.state.owed_spans.len(),
+            // A proof that is done waits here as `Running` until its
+            // checkpoint is the front one; its prover is gone by then.
+            step_proofs_running: self
+                .proofs
+                .values()
+                .filter(|job| matches!(job, StepJob::Running(task) if !task.0.is_finished()))
+                .count(),
+            rotate_running: self.rotate.as_ref().is_some_and(|r| r.job.is_some()),
+        }
+        .publish();
+    }
+
+    async fn round(&mut self) -> Result<TickOutcome, RelayerError> {
         let (latest, pinned) = {
             let taken = lock(&self.taken);
             let pinned = taken
@@ -656,7 +673,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             return;
         }
         let mut job = rotate.job.take().expect("checked above");
-        match (&mut job.handle).await {
+        let joined = (&mut job.handle).await;
+        prom::record_rotate_proof(job.started.elapsed(), matches!(joined, Ok(Ok(_))));
+        match joined {
             Ok(Ok(out)) => {
                 info!(
                     period = job.period,
@@ -771,9 +790,11 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 }
                 let rotate = self.rotate.as_mut().expect("drive_rotate checked");
                 rotate.sends.bump(from);
+                let sent = self.submitter.submit_rotate(&out.bundle).await;
+                prom::count_an_call(prom::AnCall::SubmitRotate, &sent);
                 // A transport error says as little about the chain as a wait
                 // that timed out.
-                let outcome = match self.submitter.submit_rotate(&out.bundle).await {
+                let outcome = match sent {
                     Ok(outcome) => outcome,
                     Err(e) => SubmitOutcome::NotSent {
                         reason: format!("submitRotate: {e}"),
@@ -1286,11 +1307,12 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             },
         };
         let period = update.signing_period();
-        match self
+        let sent = self
             .submitter
             .set_committee_commitment(bundle.parsed.committee_commitment, period)
-            .await?
-        {
+            .await;
+        prom::count_an_call(prom::AnCall::SetCommitteeCommitment, &sent);
+        match sent? {
             SubmitOutcome::Accepted {
                 tx_hash,
             } => {
@@ -1376,7 +1398,12 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 break;
             }
             let prover = Arc::clone(&self.prover);
-            let handle = tokio::spawn(async move { prover.generate_step(&update).await });
+            let handle = tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                let proven = prover.generate_step(&update).await;
+                prom::record_step_proof(started.elapsed(), proven.is_ok());
+                proven
+            });
             self.proofs.insert(slot, StepJob::Running(StepTask(handle)));
             info!(
                 slot,
@@ -1480,7 +1507,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         let old_head = self.state.last_execution_block_hash;
         let old_slot = self.state.last_finalized_slot;
         let slot = update.finalized_slot;
-        let outcome = match self.submitter.submit_update(&bundle).await? {
+        let sent = self.submitter.submit_update(&bundle).await;
+        prom::count_an_call(prom::AnCall::SubmitUpdate, &sent);
+        let outcome = match sent? {
             outcome @ (SubmitOutcome::Accepted {
                 ..
             }
@@ -1514,10 +1543,13 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     update.execution_block_hash,
                     update.attested_slot,
                 );
-                self.queue_span(old_head, old_slot, &update);
+                let gave_up_oldest = self.queue_span(old_head, old_slot, &update);
                 if let Err(e) = self.persist() {
                     self.state = before;
                     return Err(e);
+                }
+                if gave_up_oldest {
+                    prom::count_ancestry_span(true);
                 }
                 self.forget_step(slot)?;
                 info!(slot, queued = self.queued(), "submitUpdate accepted");
@@ -1542,10 +1574,13 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     update.execution_block_hash,
                     update.attested_slot,
                 );
-                self.queue_span(old_head, old_slot, &update);
+                let gave_up_oldest = self.queue_span(old_head, old_slot, &update);
                 if let Err(e) = self.persist() {
                     self.state = before;
                     return Err(e);
+                }
+                if gave_up_oldest {
+                    prom::count_ancestry_span(true);
                 }
                 self.forget_step(slot)?;
                 self.re_push_checkpoint(update.execution_block_hash).await;
@@ -1595,7 +1630,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         if !self.config.flip_owner || self.state.owner_flip_done {
             return Ok(());
         }
-        match self.submitter.flip_owner().await? {
+        let sent = self.submitter.flip_owner().await;
+        prom::count_an_call(prom::AnCall::FlipOwner, &sent);
+        match sent? {
             SubmitOutcome::Accepted {
                 tx_hash,
             } => {
@@ -1637,19 +1674,22 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
     /// Between adjacent checkpoints the span is owed only with
     /// `--submit-ancestry`; across missed checkpoints it always is, because
     /// nothing else puts those blocks on the light client.
+    ///
+    /// `true` when the queue was full and its oldest span was given up for
+    /// this one: the caller counts that once the write has gone through.
     fn queue_span(
         &mut self,
         prev_head: Option<[u8; 32]>,
         prev_slot: Option<u64>,
         update: &FinalityUpdate,
-    ) {
+    ) -> bool {
         let checkpoint = update.execution_block_hash;
         let Some(older) = prev_head else {
             info!("no previous checkpoint on record; nothing behind this one is owed");
-            return;
+            return false;
         };
         if older == checkpoint {
-            return;
+            return false;
         }
         let span = crate::state::OwedSpan {
             older,
@@ -1659,9 +1699,10 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             ..Default::default()
         };
         if !span.has_missed_checkpoints() && !self.config.submit_ancestry {
-            return;
+            return false;
         }
-        if self.state.owed_spans.len() >= MAX_OWED_SPANS {
+        let gave_up_oldest = self.state.owed_spans.len() >= MAX_OWED_SPANS;
+        if gave_up_oldest {
             let dropped = self.state.owed_spans.remove(0);
             error!(
                 from = %hex::encode(dropped.older),
@@ -1671,6 +1712,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             );
         }
         self.state.owed_spans.push(span);
+        gave_up_oldest
     }
 
     /// Re-push the proven hash to USDCBridge. The first push often bounced
@@ -1678,7 +1720,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
     /// touches the state file, so losing this call costs nothing a later
     /// `rePushAnchor` cannot redo.
     async fn re_push_checkpoint(&mut self, checkpoint: [u8; 32]) {
-        match self.submitter.re_push_anchor(checkpoint).await {
+        let sent = self.submitter.re_push_anchor(checkpoint).await;
+        prom::count_an_call(prom::AnCall::RePushAnchor, &sent);
+        match sent {
             Ok(SubmitOutcome::Accepted {
                 ..
             }) => {
@@ -1771,7 +1815,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             self.settle_front(&format!("local link_headers refused the span: {e}"), true);
             return false;
         }
-        match self.submitter.submit_ancestry(&headers).await {
+        let sent = self.submitter.submit_ancestry(&headers).await;
+        prom::count_an_call(prom::AnCall::SubmitAncestry, &sent);
+        match sent {
             Ok(SubmitOutcome::Accepted {
                 ..
             }) => {
@@ -1819,6 +1865,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             return;
         }
         let span = self.state.owed_spans.remove(0);
+        prom::count_ancestry_span(uncovered);
         if uncovered {
             error!(
                 from = %hex::encode(span.older),
@@ -1930,8 +1977,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        prover::MockProofGenerator, source::InMemoryBeaconSource, submitter::MockAnSubmitter,
-        types::parse_finality_update,
+        metrics::testing::Recorded, prover::MockProofGenerator, source::InMemoryBeaconSource,
+        submitter::MockAnSubmitter, types::parse_finality_update,
     };
 
     fn update(attested: u64, finalized: u64) -> FinalityUpdate {
@@ -4314,7 +4361,7 @@ mod tests {
             .into_vec()
             .into_iter()
             .filter(|(key, ..)| {
-                key.key().name() == CHECKPOINT_FAILURES
+                key.key().name() == prom::CHECKPOINT_FAILURES
                     && key
                         .key()
                         .labels()
@@ -4696,5 +4743,471 @@ mod tests {
         assert_eq!(r.state.last_finalized_slot, Some(128));
         assert!(r.state.owed_spans.is_empty());
         assert_eq!(mock.ancestry_attempts(), 0);
+    }
+
+    /// Every stage a failed attempt is counted under is one `/metrics`
+    /// declares, and so shows at zero from the start.
+    #[test]
+    fn the_stages_of_a_failed_attempt_are_the_declared_ones() {
+        let labels = [Stage::Prove, Stage::Submit, Stage::Rotate].map(Stage::label);
+        assert_eq!(labels, prom::CHECKPOINT_STAGES);
+    }
+
+    /// What `/metrics` carries once the daemon's loop has put a checkpoint on
+    /// chain and gone idle: its rounds by outcome, when the last good one
+    /// ended, what was sent to Acki Nacki, and what the daemon holds.
+    #[tokio::test]
+    async fn the_loop_records_its_rounds_and_what_the_daemon_holds() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let (mut r, _source, mock) = gated_relayer(
+            vec![update(100, 96)],
+            GatedProver::open(),
+            dir.path().join("state.json"),
+        );
+        let backoff = crate::daemon::BackoffConfig {
+            initial: Duration::from_millis(5),
+            max: Duration::from_millis(5),
+            multiplier: 1,
+        };
+        let tally = crate::daemon::RelayerMetrics::new();
+        let on_chain_then_idle = {
+            let mock = mock.clone();
+            async move {
+                while mock.head_slot() != Some(96) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+        };
+        r.run_until_shutdown(backoff, tally.clone(), on_chain_then_idle)
+            .await
+            .unwrap();
+
+        let m = Recorded::take(&snapshotter);
+        let rounds = |outcome| m.get(prom::TICKS_TOTAL, &[("outcome", outcome)]);
+        assert_eq!(rounds("submitted"), Some(1.0));
+        assert!(
+            rounds("unchanged") >= Some(1.0),
+            "idle rounds: {:?}",
+            rounds("unchanged")
+        );
+        // The tally the daemon keeps in memory is these counts, grouped.
+        let tallied = |n: &AtomicU64| Some(n.load(Ordering::Relaxed) as f64);
+        assert_eq!(m.get(prom::TICKS_TOTAL, &[]), tallied(&tally.ticks_total));
+        assert_eq!(tallied(&tally.submitted_total), rounds("submitted"));
+        assert_eq!(tallied(&tally.unchanged_total), rounds("unchanged"));
+
+        let now = prom::unix_now();
+        let good = m
+            .get(prom::LAST_SUCCESSFUL_TICK_TIMESTAMP_SECONDS, &[])
+            .expect("a good round was stamped");
+        assert!(good <= now && good > now - 60.0, "{good} vs {now}");
+        assert_eq!(
+            m.get(prom::LAST_TICK_TIMESTAMP_SECONDS, &[]),
+            Some(good),
+            "the last round was a good one"
+        );
+
+        let sent = |function| {
+            m.get(prom::AN_CALLS_TOTAL, &[
+                ("function", function),
+                ("outcome", "accepted"),
+            ])
+        };
+        assert_eq!(sent("submitUpdate"), Some(1.0));
+        assert_eq!(sent("rePushAnchor"), Some(1.0));
+        assert_eq!(m.get(prom::AN_CALLS_TOTAL, &[]), Some(2.0), "nothing else");
+        assert_eq!(
+            m.get(prom::STEP_PROOF_DURATION_SECONDS, &[("outcome", "ok")]),
+            Some(1.0),
+            "one proof was timed"
+        );
+        assert!(m.get(prom::BEACON_POLLS_TOTAL, &[("outcome", "ok")]) >= Some(1.0));
+        assert_eq!(m.get(prom::BEACON_FINALIZED_SLOT, &[]), Some(96.0));
+        assert_eq!(m.get(prom::LAST_FINALIZED_SLOT, &[]), Some(96.0));
+        assert_eq!(m.get(prom::LAST_COMMITTEE_PERIOD, &[]), Some(0.0));
+        assert_eq!(m.get(prom::QUEUED_CHECKPOINTS, &[]), Some(0.0));
+        assert_eq!(m.get(prom::OWED_SPANS, &[]), Some(0.0));
+        assert_eq!(m.get(prom::STEP_PROOFS_RUNNING, &[]), Some(0.0));
+        assert_eq!(m.get(prom::ROTATE_RUNNING, &[]), Some(0.0));
+    }
+
+    /// A daemon whose every round fails still counts its rounds, but not as
+    /// good ones: the time of the last good round stands still, which is what
+    /// an alert on a stalled light client reads.
+    #[tokio::test]
+    async fn rounds_that_fail_do_not_move_the_time_of_the_last_good_one() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        // A round waits for its proof, so none ends as `proving`.
+        cfg.poll_interval = Duration::from_secs(30);
+        cfg.watch_interval = Duration::from_millis(10);
+        cfg.enable_rotate = false;
+        let mock = Arc::new(MockAnSubmitter::accepting());
+        mock.set_reject(true);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![update(100, 96)])),
+            GatedProver::open(),
+            mock.clone(),
+        )
+        .unwrap();
+        // The checkpoint is queued before the loop starts, so no round finds
+        // the queue empty.
+        r.watcher().poll().await.unwrap();
+        let backoff = crate::daemon::BackoffConfig {
+            initial: Duration::from_millis(5),
+            max: Duration::from_millis(5),
+            multiplier: 1,
+        };
+        let refused_three_times = {
+            let mock = mock.clone();
+            async move {
+                while mock.update_submits() < 3 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        };
+        r.run_until_shutdown(
+            backoff,
+            crate::daemon::RelayerMetrics::new(),
+            refused_three_times,
+        )
+        .await
+        .unwrap();
+
+        let m = Recorded::take(&snapshotter);
+        assert!(
+            m.get(prom::TICKS_TOTAL, &[("outcome", "an_rejected")]) >= Some(2.0),
+            "the refused rounds are counted"
+        );
+        assert_eq!(
+            m.get(prom::TICKS_TOTAL, &[]),
+            m.get(prom::TICKS_TOTAL, &[("outcome", "an_rejected")]),
+            "and no round ended any other way"
+        );
+        assert!(m.get(prom::LAST_TICK_TIMESTAMP_SECONDS, &[]).is_some());
+        assert_eq!(
+            m.get(prom::LAST_SUCCESSFUL_TICK_TIMESTAMP_SECONDS, &[]),
+            None,
+            "no good round, no time of one"
+        );
+        assert!(
+            m.get(prom::AN_CALLS_TOTAL, &[
+                ("function", "submitUpdate"),
+                ("outcome", "rejected")
+            ]) >= Some(3.0)
+        );
+        assert_eq!(m.get(prom::QUEUED_CHECKPOINTS, &[]), Some(1.0));
+    }
+
+    /// Checkpoints the watcher missed are counted as it takes the next one,
+    /// and so is the span that closes their blocks, with its three calls.
+    #[tokio::test]
+    async fn missed_checkpoints_and_the_span_that_closes_them_are_counted() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let chain = crate::header_rlp::dummy_linked_chain(70);
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+        let dir = tempdir().unwrap();
+        let (r, _source, _mock) = gated_relayer(
+            vec![
+                update_with_exec(100, 96, k(0)),
+                // Epochs 4 and 5 are missed: their checkpoints never arrive.
+                update_with_exec(196, 192, k(69)),
+            ],
+            GatedProver::open(),
+            dir.path().join("state.json"),
+        );
+        let mut r = r.with_execution(Arc::new(crate::source::InMemoryExecution::single(
+            k(69),
+            chain.clone(),
+        )));
+        for _ in 0..3 {
+            r.tick().await.unwrap();
+        }
+        assert!(r.state.owed_spans.is_empty());
+
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(m.get(prom::MISSED_CHECKPOINTS_TOTAL, &[]), Some(2.0));
+        assert_eq!(
+            m.get(prom::AN_CALLS_TOTAL, &[
+                ("function", "submitAncestry"),
+                ("outcome", "accepted")
+            ]),
+            Some(3.0),
+            "33 + 33 + 6 headers"
+        );
+        assert_eq!(
+            m.get(prom::ANCESTRY_SPANS_TOTAL, &[("outcome", "closed")]),
+            Some(1.0)
+        );
+        assert_eq!(
+            m.get(prom::ANCESTRY_SPANS_TOTAL, &[("outcome", "given_up")]),
+            None
+        );
+        assert_eq!(m.get(prom::OWED_SPANS, &[]), Some(0.0));
+    }
+
+    /// A span Acki Nacki keeps refusing is given up after its three paid
+    /// tries, and counted apart: its blocks need the owner.
+    #[tokio::test]
+    async fn a_span_given_up_is_counted_apart() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let chain = crate::header_rlp::dummy_linked_chain(70);
+        let k = |i: usize| crate::header_rlp::keccak256(&chain[i]);
+        let dir = tempdir().unwrap();
+        let (r, _source, mock) = gated_relayer(
+            vec![
+                update_with_exec(100, 96, k(0)),
+                update_with_exec(196, 192, k(69)),
+            ],
+            GatedProver::open(),
+            dir.path().join("state.json"),
+        );
+        mock.reject_ancestry();
+        let mut r = r.with_execution(Arc::new(crate::source::InMemoryExecution::single(
+            k(69),
+            chain.clone(),
+        )));
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.state.owed_spans.len(), 1);
+        for _ in 0..MAX_SPAN_ATTEMPTS {
+            r.tick().await.unwrap();
+        }
+        assert!(r.state.owed_spans.is_empty(), "given up");
+
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(
+            m.get(prom::ANCESTRY_SPANS_TOTAL, &[("outcome", "given_up")]),
+            Some(1.0)
+        );
+        assert_eq!(
+            m.get(prom::ANCESTRY_SPANS_TOTAL, &[("outcome", "closed")]),
+            None
+        );
+        assert_eq!(
+            m.get(prom::AN_CALLS_TOTAL, &[
+                ("function", "submitAncestry"),
+                ("outcome", "rejected")
+            ]),
+            Some(f64::from(MAX_SPAN_ATTEMPTS))
+        );
+    }
+
+    /// A rotate shows while it is being proven.
+    #[tokio::test]
+    async fn a_rotate_shows_while_it_is_proven() {
+        use crate::rotate::Stage;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, _held) = held_runner(Stage::Tree);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(m.get(prom::ROTATE_RUNNING, &[]), Some(1.0));
+        assert_eq!(m.get(prom::ROTATE_PROOF_DURATION_SECONDS, &[]), None);
+    }
+
+    /// A rotate is timed when it ends, and shows no more. One snapshot at the
+    /// end: the gauge read 1 while the rotate ran (the test above), so a 0
+    /// here was written after it.
+    #[tokio::test]
+    async fn a_rotate_is_timed_when_it_ends_and_shows_no_more() {
+        use crate::rotate::Stage;
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let p = SLOTS_PER_SYNC_PERIOD;
+        let dir = tempdir().unwrap();
+        let (runner, release) = held_runner(Stage::Tree);
+        let mut rig = rotate_rig(
+            vec![update(p + 70, p + 64), update(p + 102, p + 96)],
+            false,
+            runner,
+            dir.path(),
+        );
+        let r = &mut rig.relayer;
+        r.tick().await.unwrap();
+        r.tick().await.unwrap();
+        assert_eq!(r.rotate_running(), Some(1));
+        release.notify_one();
+        r.wait_for_rotate().await;
+        assert!(matches!(r.tick().await.unwrap(), TickOutcome::Rotated {
+            period: 2,
+            ..
+        }));
+
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(
+            m.get(prom::ROTATE_PROOF_DURATION_SECONDS, &[("outcome", "ok")]),
+            Some(1.0)
+        );
+        assert_eq!(
+            m.get(prom::ROTATE_PROOF_DURATION_SECONDS, &[(
+                "outcome", "failed"
+            )]),
+            None
+        );
+        assert_eq!(m.get(prom::ROTATE_RUNNING, &[]), Some(0.0));
+        assert_eq!(
+            m.get(prom::AN_CALLS_TOTAL, &[
+                ("function", "submitRotate"),
+                ("outcome", "accepted")
+            ]),
+            Some(1.0)
+        );
+        assert_eq!(m.get(prom::LAST_COMMITTEE_PERIOD, &[]), Some(2.0));
+    }
+
+    /// A proof that is done while its checkpoint is not the front one yet has
+    /// no prover left: it is not counted as running.
+    #[tokio::test]
+    async fn a_finished_proof_waiting_for_its_turn_is_not_counted_as_running() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let prover = GatedProver::open();
+        let (mut r, _source, mock) = gated_relayer(
+            vec![update(100, 96), update(132, 128)],
+            prover.clone(),
+            dir.path().join("state.json"),
+        );
+        r.watcher().poll().await.unwrap();
+        r.watcher().poll().await.unwrap();
+        assert_eq!(r.queued(), 2);
+        // Acki Nacki does not take the first one, so the second, proven
+        // beside it, waits for its turn.
+        mock.set_gateway_error(true);
+        for _ in 0..3 {
+            assert!(matches!(
+                r.work().await.unwrap(),
+                TickOutcome::AnRejected { .. }
+            ));
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(prover.started(), 2, "both were proven");
+
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(m.get(prom::STEP_PROOFS_RUNNING, &[]), Some(0.0));
+        assert_eq!(m.get(prom::QUEUED_CHECKPOINTS, &[]), Some(2.0));
+        assert_eq!(
+            m.get(prom::STEP_PROOF_DURATION_SECONDS, &[("outcome", "ok")]),
+            Some(2.0)
+        );
+    }
+
+    /// A step proof that fails is timed as a failed one.
+    #[tokio::test]
+    async fn a_failed_step_proof_is_timed_as_failed() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let prover = GatedProver::open();
+        prover.fail.lock().unwrap().insert(96);
+        let (mut r, _source, _mock) =
+            gated_relayer(vec![update(100, 96)], prover, dir.path().join("state.json"));
+        let mut failed = false;
+        for _ in 0..20 {
+            if matches!(r.tick().await.unwrap(), TickOutcome::ProofFailed { .. }) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed);
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(
+            m.get(prom::STEP_PROOF_DURATION_SECONDS, &[("outcome", "failed")]),
+            Some(1.0)
+        );
+        assert_eq!(
+            m.get(prom::STEP_PROOF_DURATION_SECONDS, &[("outcome", "ok")]),
+            None
+        );
+    }
+
+    /// A poll the beacon node does not answer is counted, and leaves the
+    /// slot it last reported alone.
+    #[tokio::test]
+    async fn a_poll_the_beacon_node_does_not_answer_is_counted() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let (mut r, _source, _mock) =
+            gated_relayer(vec![], GatedProver::open(), dir.path().join("state.json"));
+        assert!(r.tick().await.is_err(), "the in-memory beacon has nothing");
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(
+            m.get(prom::BEACON_POLLS_TOTAL, &[("outcome", "error")]),
+            Some(1.0)
+        );
+        assert_eq!(m.get(prom::BEACON_POLLS_TOTAL, &[("outcome", "ok")]), None);
+        assert_eq!(m.get(prom::BEACON_FINALIZED_SLOT, &[]), None);
+    }
+
+    /// A checkpoint the queue cannot take is not the beacon node's fault: the
+    /// poll counts as answered, and the node's slot is on record.
+    #[tokio::test]
+    async fn a_checkpoint_the_queue_cannot_take_is_not_a_failed_poll() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (mut r, _source, _mock) =
+            gated_relayer(vec![update(100, 96)], GatedProver::open(), path.clone());
+        std::fs::remove_dir_all(StepQueue::dir_for(&path)).unwrap();
+        assert!(r.tick().await.is_err(), "nowhere to write the checkpoint");
+        assert_eq!(r.queued(), 0);
+
+        let m = Recorded::take(&snapshotter);
+        assert_eq!(
+            m.get(prom::BEACON_POLLS_TOTAL, &[("outcome", "ok")]),
+            Some(1.0)
+        );
+        assert_eq!(
+            m.get(prom::BEACON_POLLS_TOTAL, &[("outcome", "error")]),
+            None
+        );
+        assert_eq!(m.get(prom::BEACON_FINALIZED_SLOT, &[]), Some(96.0));
+        assert_eq!(m.get(prom::QUEUED_CHECKPOINTS, &[]), None);
     }
 }

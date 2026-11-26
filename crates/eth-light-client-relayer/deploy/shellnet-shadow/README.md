@@ -59,6 +59,9 @@ $K/compile-contract.sh               # sold -> contracts/, checks VK_BLOB == fix
 cp $K/env.example $ETH_LC_ROOT/config/eth-lc-relayer.env && chmod 600 $ETH_LC_ROOT/config/eth-lc-relayer.env
 ```
 
+Set `ETH_RPC_URL` in the environment file to a Sepolia execution RPC that serves the headers
+needed for checkpoint backfill. The supplied template sets a public endpoint.
+
 Smoke-test the beacon side (prints slots, `signature_slot`, fork version and
 `genesis_validators_root` the prover will be given):
 
@@ -161,14 +164,9 @@ emitted, `getCommitteeState` shows the new period).
 - `USDCBridge` wiring (`getAnchorConfig`, `acceptBlockHashFromLightClient`,
   `disableOwnerAnchors`): shadow does not call them; production flip-owner does.
 - `submitRotate` and `disableOwnerRotation`.
-- `submitAncestry` is a one-shot (`eth-lc-relayer submit-ancestry --eth-rpc-url ...
-  --checkpoint-hash <newer> --older-anchor-hash <older>`), and the daemon does
-  not send it unless `SUBMIT_ANCESTRY=true`. Both ends of the span have to be
-  proven anchors already. **Not against this kit yet:** `compile-contract.sh`
-  builds `contracts/an/EthBeaconLightClient.sol`, the standalone copy, which
-  still takes the old newest-first payload and still hashes in software, so the
-  call either runs out of gas or fails `ERR_BAD_ANCESTRY`. Leave
-  `SUBMIT_ANCESTRY=false` here until that copy is ported.
+- The kit compiles a private deployment of the exchange light client with the same daemon ABI.
+  It uses the owner's constructor and has no deposit bridge sink. Ancestry is optional in shadow
+  and uses the same trusted endpoints and header ordering as the deployed bridge.
 
 ## Notes
 

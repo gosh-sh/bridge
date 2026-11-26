@@ -56,6 +56,14 @@ impl OwedSpan {
 pub struct RelayerState {
     pub last_finalized_slot: Option<u64>,
     pub last_committee_period: Option<u64>,
+    #[serde(default)]
+    pub reanchors_applied: Option<u64>,
+    #[serde(default)]
+    pub pending_checkpoint_pushes: Vec<[u8; 32]>,
+    #[serde(default)]
+    pub ancestry_delivery_checks: Vec<([u8; 32], u64)>,
+    #[serde(default)]
+    pub recovery_delivery_cursor: u64,
     pub last_execution_block_hash: Option<[u8; 32]>,
     pub last_attested_slot: Option<u64>,
     #[serde(default)]
@@ -90,6 +98,8 @@ pub struct RelayerState {
     /// from: a checkpoint signed earlier was refused for its committee.
     #[serde(default)]
     pub signed_from: Option<u64>,
+    #[serde(default)]
+    pub skipped_through: Option<u64>,
     /// The oldest checkpoint refused for its committee before any was
     /// accepted: the first accepted one owes the blocks back to it.
     #[serde(default)]

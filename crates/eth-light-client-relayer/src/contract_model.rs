@@ -45,6 +45,7 @@ pub enum LcError {
     WrongCommittee,
     SelfRotation,
     BadPublicInputs,
+    CheckpointRequired,
 }
 
 impl LcError {
@@ -63,6 +64,7 @@ impl LcError {
             Self::NotProven => 252,
             Self::SelfRotation => 253,
             Self::BadPublicInputs => 240,
+            Self::CheckpointRequired => 262,
         }
     }
 }
@@ -85,6 +87,7 @@ pub struct LightClient {
     /// admission. Absent / expired ⇒ not live.
     pub proven: HashMap<[u8; 32], u64>,
     pub queue: VecDeque<[u8; 32]>,
+    pub ancestry_anchors: std::collections::HashSet<[u8; 32]>,
     /// The hash each `_notifySink` / `rePushAnchor` sends (including first
     /// insert), in Ethereum byte order.
     pub sink_notifies: Vec<[u8; 32]>,
@@ -111,6 +114,7 @@ impl LightClient {
             re_anchors_applied: 0,
             proven: HashMap::new(),
             queue: VecDeque::new(),
+            ancestry_anchors: std::collections::HashSet::new(),
             sink_notifies: Vec::new(),
             walk_steps: 0,
             sink_forgets: Vec::new(),
@@ -146,6 +150,7 @@ impl LightClient {
                 Some(s) if self.within_window(s) => self.queue.push_back(h),
                 Some(_) => {
                     self.proven.remove(&h);
+                    self.ancestry_anchors.remove(&h);
                     self.sink_forgets.push(pi_form(&h));
                     dropped += 1;
                 },
@@ -194,15 +199,7 @@ impl LightClient {
         if slot > attested_slot {
             return Err(LcError::BadPublicInputs);
         }
-        let advancing = slot > self.finalized_slot;
-        let late = slot < self.finalized_slot && !self.is_live(&exec);
-        if !advancing && !late {
-            return Err(LcError::StaleUpdate);
-        }
-        // The contract tests the window before the committee, so a stale
-        // update signed by the wrong committee reports StaleUpdate, not
-        // WrongCommittee. The order is part of what this replica pins.
-        if late && !self.within_window(slot) {
+        if slot <= self.finalized_slot {
             return Err(LcError::StaleUpdate);
         }
         let prev_ok = self.prev_committee != [0; 32]
@@ -212,17 +209,12 @@ impl LightClient {
         if !signer_ok {
             return Err(LcError::WrongCommittee);
         }
-        if advancing {
-            self.finalized_slot = slot;
-            self.exec_hash = exec;
-            self.evict_expired();
-            self.push_exec(exec, slot);
-            Ok(UpdateKind::Advanced)
-        } else {
-            self.evict_expired();
-            self.push_exec(exec, slot);
-            Ok(UpdateKind::Backfilled)
-        }
+        self.finalized_slot = slot;
+        self.exec_hash = exec;
+        self.evict_expired();
+        self.ancestry_anchors.insert(exec);
+        self.push_exec(exec, slot);
+        Ok(UpdateKind::Advanced)
     }
 
     pub fn submit_ancestry(&mut self, header_rlps: &[Vec<u8>]) -> Result<u64, LcError> {
@@ -238,6 +230,9 @@ impl LightClient {
         // before accept.
         if !self.is_live(&last_key) {
             return Err(LcError::UnknownCheckpoint);
+        }
+        if !self.ancestry_anchors.contains(&last_key) {
+            return Err(LcError::CheckpointRequired);
         }
         let anchor_slot = *self.proven.get(&last_key).expect("live");
         // The contract reverts, undoing every write, so nothing may be stored
@@ -257,7 +252,7 @@ impl LightClient {
                 .checked_sub(back)
                 .filter(|s| *s > 0)
                 .unwrap_or(1);
-            if !self.is_live(&key) && self.within_window(slot) {
+            if self.within_window(slot) {
                 behind.push((key, slot));
             }
             if i > 0 {
@@ -267,6 +262,7 @@ impl LightClient {
         self.evict_expired();
         let mut added = 0u64;
         for (key, slot) in behind {
+            self.ancestry_anchors.insert(key);
             if !self.is_live(&key) {
                 self.push_exec(key, slot);
                 added += 1;
@@ -318,6 +314,7 @@ impl LightClient {
         if !self.owner_rotation_enabled {
             return Err(LcError::OwnerRotationDisabled);
         }
+        self.ancestry_anchors.clear();
         self.prev_committee = [0; 32];
         self.prev_committee_head_slot = 0;
         self.committee = commitment;
@@ -350,6 +347,7 @@ impl LightClient {
         if commitment == self.committee && period == self.period {
             return Err(LcError::ReanchorNoop);
         }
+        self.ancestry_anchors.clear();
         self.prev_committee = [0; 32];
         self.prev_committee_head_slot = 0;
         self.committee = commitment;
@@ -364,6 +362,7 @@ impl LightClient {
     /// client starts with no window.
     pub fn snapshot(&self) -> Self {
         let mut next = self.clone();
+        next.ancestry_anchors.clear();
         next.prev_committee = [0; 32];
         next.prev_committee_head_slot = 0;
         next
@@ -373,7 +372,6 @@ impl LightClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateKind {
     Advanced,
-    Backfilled,
 }
 
 #[cfg(test)]
@@ -464,16 +462,16 @@ mod tests {
     }
 
     #[test]
-    fn late_register_does_not_rewind_head() {
+    fn late_register_is_refused_without_changing_the_head() {
         let mut c = lc();
         c.submit_update(192, [0xAA; 32], [0xC0; 32]).unwrap();
         assert_eq!(
-            c.submit_update(96, [0xBB; 32], [0xC0; 32]).unwrap(),
-            UpdateKind::Backfilled
+            c.submit_update(96, [0xBB; 32], [0xC0; 32]).unwrap_err(),
+            LcError::StaleUpdate
         );
         assert_eq!(c.finalized_slot, 192);
         assert!(c.is_live(&[0xAA; 32]));
-        assert!(c.is_live(&[0xBB; 32]));
+        assert!(!c.is_live(&[0xBB; 32]));
     }
 
     #[test]
@@ -558,12 +556,8 @@ mod tests {
         chain
     }
 
-    /// A checkpoint skipped near the end of a period is signed by the
-    /// committee that the rotation then replaces. Without accepting that
-    /// signer for late registration, those 32 blocks are unanchorable for
-    /// good and only the owner can admit their deposits.
     #[test]
-    fn a_checkpoint_skipped_before_a_rotation_can_still_be_registered() {
+    fn a_checkpoint_skipped_before_a_rotation_requires_ancestry() {
         let old_committee = [0xC0; 32];
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
@@ -588,8 +582,8 @@ mod tests {
             [0xBB; 32],
             old_committee,
         )
-        .expect("the skipped checkpoint must still be registrable");
-        assert!(c.is_live(&[0xBB; 32]));
+        .expect_err("old checkpoints require ancestry");
+        assert!(!c.is_live(&[0xBB; 32]));
         assert_eq!(
             c.finalized_slot,
             SLOTS_PER_PERIOD + 64,
@@ -681,10 +675,6 @@ mod tests {
         .unwrap();
     }
 
-    /// The replaced committee may only sign in the period it served.
-    /// Without that bound it could sign any slot in the proven window,
-    /// including slots it never attested, and the hashes it wrote would back
-    /// mints.
     #[test]
     fn the_replaced_committee_cannot_sign_past_the_head_it_left() {
         let old_committee = [0xC0; 32];
@@ -710,17 +700,13 @@ mod tests {
                 old_committee
             )
             .unwrap_err(),
-            LcError::WrongCommittee
+            LcError::StaleUpdate
         );
         assert!(!c.is_live(&[0xDD; 32]));
     }
 
-    /// The skip the window exists for: a checkpoint the leaving committee
-    /// never got to prove, attested *after* the last head it moved but still
-    /// within its own period. The first slot-based window excluded exactly
-    /// these, which is the case the feature is about.
     #[test]
-    fn a_skip_after_the_last_moved_head_is_still_rescued() {
+    fn a_skip_after_the_last_moved_head_requires_ancestry() {
         let old_committee = [0xC0; 32];
         let new_committee = [0xC1; 32];
         let mut c = LightClient::bootstrap(old_committee, 1);
@@ -747,11 +733,10 @@ mod tests {
             [0xBB; 32],
             old_committee,
         )
-        .expect("a skip just after the last moved head must be registrable");
-        assert!(c.is_live(&[0xBB; 32]));
+        .expect_err("old checkpoints require ancestry");
+        assert!(!c.is_live(&[0xBB; 32]));
     }
 
-    /// Nor anything more than one period before that head.
     #[test]
     fn the_replaced_committee_cannot_sign_long_before_its_window() {
         let old_committee = [0xC0; 32];
@@ -770,7 +755,7 @@ mod tests {
         assert_eq!(
             c.submit_update_at(100, 100, [0xDD; 32], old_committee)
                 .unwrap_err(),
-            LcError::WrongCommittee
+            LcError::StaleUpdate
         );
         assert!(!c.is_live(&[0xDD; 32]));
     }
@@ -789,7 +774,7 @@ mod tests {
             "the rejected committee is not kept"
         );
         assert_eq!(
-            c.submit_update_at(32, 64, [0xBB; 32], bad).unwrap_err(),
+            c.submit_update_at(96, 100, [0xBB; 32], bad).unwrap_err(),
             LcError::WrongCommittee
         );
     }
@@ -876,9 +861,9 @@ mod tests {
         let chain = dummy_linked_chain(4);
         let head = PROVEN_WINDOW_SLOTS + 1000;
         // The newest end sits one slot inside the window.
-        c.submit_update(head, [0xEE; 32], [0xC0; 32]).unwrap();
         c.submit_update(1001, pi_form(&keccak256(&chain[3])), [0xC0; 32])
             .unwrap();
+        c.submit_update(head, [0xEE; 32], [0xC0; 32]).unwrap();
         assert_eq!(c.submit_ancestry(&chain).unwrap(), 1);
         assert!(c.is_live(&pi_form(&keccak256(&chain[2]))));
         assert!(!c.is_live(&pi_form(&keccak256(&chain[1]))));

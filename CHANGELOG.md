@@ -23,23 +23,14 @@ assigns it when the release is tagged.
 
 ### Breaking Changes
 
-- `EthBeaconLightClient` 1.8.1 (code hash `35fff017…`, replaces 1.8.0 `b3f85455…`) holds two
-  committees (`getCommittees`) and refuses a step signed by an older one (`ERR_WRONG_COMMITTEE`, 242),
-  a step or rotate whose committee is more than two sync periods behind Ethereum time
-  (`ERR_COMMITTEE_TOO_OLD`, 259), a chain other than mainnet, Sepolia or Hoodi (`ERR_UNKNOWN_L1`,
-  260), a step finalizing after its attested slot (`ERR_BAD_PUBLIC_INPUTS`, 240) and a
-  `submitRotate` period not past the current one (`ERR_STALE_PERIOD`): `updateCode`
-  each light client while its relayer queues no checkpoint signed before the period in force; after
-  a rotation stall past two periods restart the committee with `reAnchorCommittee`.
-- `eccBridge` 1.18.0 (code hash `2c2296a5…`) deploys 1.8.1 light clients: run its `updateCode` and
-  `setLightClientCode` before the next `deployLightClient`.
-- `eth-lc-relayer daemon` requires `EthBeaconLightClient` 1.8.1: upgrade the two together. It
-  holds a rotate that would strand a queued checkpoint, drops a checkpoint refused with 259 or with
-  242 for a committee no longer held, and owes its blocks to the next accepted checkpoint.
+- `EthBeaconLightClient` 1.8.1 (code hash `4b383b84…`) accepts the current Ethereum committee and its predecessor only until two hours after the period boundary; upgrade with `updateCode` and install a fresh finalized checkpoint with `reAnchorCheckpoint` before backfill.
+- `EthBeaconLightClient.submitUpdate` only advances the finalized head; recover historical blocks through `submitAncestry` from an authorized checkpoint or its proven ancestors (259: expired committee, 261: future header/signer, 262: endpoint needs a checkpoint).
+- `eccBridge` 1.19.0 (code hash `46def3aa…`) embeds the updated light-client deployment layout: upgrade it and call `setLightClientCode` before deploying another light client.
+- `eth-lc-relayer` requires the matching `EthBeaconLightClient` ABI (`getTrustState`); stop the daemon to run `re-anchor-checkpoint --checkpoint <verified.json> --state-dir <state>`, then restart it to recover pending block spans.
 - NACKL (ECC id `1`) crosses the bridge (`docs/NACKL-bridge-extension.md`): redeploy
   `AckiNackiBridge` and upgrade `eccBridge`, `relayer`, `deposit-relayer` and `ackinacki-bridge`
   together.
-- `eccBridge` 1.19.0, code hash `4d8ed160…`, with `DepositVoucher` 1.6.0 and the 1.8.1 light
+- `eccBridge` 1.19.0, code hash `46def3aa…`, with `DepositVoucher` 1.6.0 and the 1.8.1 light
   clients: upgrade a 1.17.0 or 1.18.0 bridge with `updateCode` and the 1.6.0 voucher code in
   `userCell`. That moves every voucher address: finish the old EVM bridge's deposits first, and
   afterwards trust only the new EVM bridge.

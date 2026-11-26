@@ -32,10 +32,18 @@ Committee rotate: once the contract holds period P and the beacon serves
 background (`export_shard_snark`, `export_step_snark`, `rotate_tree_n8`;
 `--shard-prover-bin`, `--step-snark-prover-bin`, `--rotate-prover-bin`)
 and sends `submitRotate` when the bundle passes its checks against the
-contract (`docs/eth-light-client.md` §3.3) and no queued checkpoint is
-signed before period P, which the contract stops taking after the
-rotate (`EthBeaconLightClient` 1.8.1 holds two committees). `--no-rotate` turns it off;
-`--owner-hop` is the fallback at the boundary when no rotate was sent.
+contract (`docs/eth-light-client.md` §3.3). It may prepare the next committee early, but
+only the current committee and the previous one within its two-hour grace may sign.
+`--no-rotate` turns automatic rotation off; `--owner-hop` is the trusted owner fallback.
+The daemon requires `getTrustState` in the deployed ABI, stops proof work when trust expires,
+and retains pending checkpoints. Recovery: stop it, independently verify a fresh finalized
+checkpoint and its current committee, run `re-anchor-checkpoint --checkpoint <verified.json>
+--state-dir <same-state>` with the owner's AN options, then restart. The JSON tuple, hash byte
+order, age checks and required independent verification are in `docs/eth-light-client.md`
+§Recovery and historical block authentication. This command does not verify the tuple's
+canonicality itself. Old blocks are filled only by ancestry from an authorized checkpoint;
+standalone late step proofs are refused. Rejected late checkpoints do not exclude newer steps
+from the same signing period.
 The nodes need tvm-sdk#284's decider (tvm-sdk `v3.1.0.an`).
 
 Every long-running command writes only into the three directories it is

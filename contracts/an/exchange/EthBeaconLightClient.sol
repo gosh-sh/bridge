@@ -37,38 +37,7 @@ import "./eccBridge.sol";
 ///           * that the signing committee is the *chain-anchored* one —
 ///             enforced by matching `committeeCommitment` to the commitment
 ///             this contract holds for the period the header was signed in.
-///             It holds the committees of the last `KEPT_COMMITTEES` periods
-///             and takes committee `q` for headers attested
-///             in `q` or `q - 1`: the last header of a period is signed in
-///             the next one. A replaced committee may
-///             still move the head for its own period, so neither an early
-///             `/updates` best-update hand-off nor a rotation sent while a
-///             relayer lags behind strands the checkpoints of the period
-///             before it. Bootstrapped from a weak-subjectivity checkpoint;
-///             advanced by `submitRotate`. After `disableOwnerRotation`, the
-///             owner hatch is `reAnchorCommittee`.
 ///
-///             The rotate proof exposes the attested slot of that hand-off
-///             and binds `period` to `attestedSlot / 8192 + 1`. There is no
-///             end-of-period window: a beacon `/updates` best update (start
-///             of the old period) is a valid hand-off.
-///
-///         Checkpoint coverage: `submitUpdate` anchors the finalized execution
-///         hash (1/32). The head only moves forward, but a skipped checkpoint
-///         can still be late-registered behind it, with its own proof and
-///         its own slot (`CheckpointBackfilled`), signed by any committee
-///         this contract still holds, which is what rescues a skip at a
-///         period edge, or a relayer that fell behind, in the honest case.
-///         `submitAncestry` admits the blocks behind an already-proven one:
-///         headers oldest first, 2 to 33 of them, the last one proven, each
-///         hashed with `gosh.keccak256` and linked by RLP `parentHash`. Every
-///         header before the last goes into the same `_acceptedBlockHash`
-///         sink. A call's oldest header is proven for the next call, so a
-///         chain of calls reaches back over any gap inside the window.
-///         Proven hashes expire `PROVEN_WINDOW_SLOTS` (14 days of 12 s slots)
-///         behind head: `isProven` and the sink forget them. A deposit block
-///         older than that cannot `finalizeDeposit` against this oracle, and a
-///         skipped checkpoint older than that cannot be late-registered.
 contract EthBeaconLightClient {
     string constant version = "1.8.1";
 
@@ -82,15 +51,8 @@ contract EthBeaconLightClient {
     // Sync-committee period: 256 epochs of 32 slots, about 27 hours.
     uint64 constant SLOTS_PER_PERIOD = 8192;
     uint64 constant SECONDS_PER_SLOT = 12;
-    uint64 constant MAX_SIGNER_AGE_PERIODS = 2;
-    // Committees held: the one in force and the one before it. A step signed
-    // by either for its own period is accepted, so an early rotation — which
-    // anyone may send, the proof being the authorization — does not strand
-    // the checkpoints of the period before. A rotation can land at the start
-    // of a period, so the one before is held from zero to one period more.
-    // An older committee is not held: its keys may belong to validators that
-    // have left, and it could prove a forged hash for its period.
-    uint64 constant KEPT_COMMITTEES = 2;
+    uint64 constant COMMITTEE_GRACE_SECONDS = 7200;
+    uint64 constant KEPT_COMMITTEES = 3;
     // Amortized compact of the FIFO; leftover expired keys stay unreadable
     // via `_isLive` until a later tx deletes them.
     uint16 constant MAX_EVICT_PER_TX = 128;
@@ -116,6 +78,7 @@ contract EthBeaconLightClient {
     uint128 constant CheckpointBackfilledEmit = 705;
     uint128 constant AnchorPushBouncedEmit = 706;
     uint128 constant AnchorsExpiredEmit = 707;
+    uint128 constant CheckpointReAnchoredEmit = 708;
 
     // Error codes (kept clear of the shared USDCBridgeErrors range 204..229).
     uint16 constant ERR_NOT_OWNER          = 209;
@@ -142,6 +105,8 @@ contract EthBeaconLightClient {
     uint16 constant ERR_WRONG_CODE_SALT     = 258;
     uint16 constant ERR_COMMITTEE_TOO_OLD   = 259;
     uint16 constant ERR_UNKNOWN_L1          = 260;
+    uint16 constant ERR_FUTURE_UPDATE       = 261;
+    uint16 constant ERR_CHECKPOINT_REQUIRED = 262;
 
     event HeadUpdated(
         uint64  finalizedSlot,
@@ -164,7 +129,6 @@ contract EthBeaconLightClient {
         uint256 checkpointHash,
         uint64  hashesAdded
     );
-    /// Late-registered checkpoint (proof verified, head not rewound).
     event CheckpointBackfilled(
         uint64  finalizedSlot,
         uint256 executionBlockHash
@@ -173,6 +137,8 @@ contract EthBeaconLightClient {
     event AnchorPushBounced();
     /// Hashes dropped from the proven window (and forgotten at the sink).
     event AnchorsExpired(uint64 count);
+    event CheckpointReAnchored(uint64 period, uint64 finalizedSlot, uint256 finalizedBeaconRoot,
+        uint256 executionBlockHash, uint256 committeeCommitment);
 
     /// @notice Deposit-style struct of the 11 proven public inputs
     ///         (`step.rs::pack_step_instances`), all little-endian 32-byte Fr:
@@ -262,17 +228,14 @@ contract EthBeaconLightClient {
     // header was signed in. That is the join that pins the aggregated signers
     // to a chain-anchored committee. An owner path clears the older ones.
     mapping(uint64 => uint256) _committees;
+    mapping(uint256 => bool) _ancestryAnchors;
+    mapping(uint64 => uint256) _recoveryHashes;
+    mapping(uint256 => uint64) _recoveryIndex;
     // The finalized slot the head stood on when the last rotation replaced
     // the committee in force.
     // Nothing reads it; it is kept for the storage layout.
     uint64 _prevCommitteeHeadSlot;
 
-    // The sync-committee period `_currentCommittee` serves. `submitRotate`
-    // stores the rotate proof's period, which the circuit binds to the
-    // attested slot (that slot's period plus one). The replaced committee
-    // may late-register or advance the head while its attested slot sits
-    // in that period. `reAnchorCommittee` compares its argument against
-    // it. Bootstrapped with the weak-subjectivity checkpoint's period.
     uint64 _committeePeriod;
 
     // Whether the owner may still advance the committee directly via
@@ -284,8 +247,6 @@ contract EthBeaconLightClient {
     // Disabling this routine path does not remove the owner from the trust model.
     bool _ownerRotationEnabled = true;
 
-    // How many times `reAnchorCommittee` has fired (telemetry / alerting).
-    // Under a live relayer SLA this stays 0.
     uint64 _reAnchorsApplied;
 
     // First slot of the Gloas fork on the followed network (`type(uint64).max`
@@ -394,22 +355,11 @@ contract EthBeaconLightClient {
         require(_gloasForkSlotSet, ERR_FORK_SLOT_UNSET);
         require(pi.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
         require(pi.finalizedSlot <= pi.attestedSlot, ERR_BAD_PUBLIC_INPUTS);
-        // Head only moves forward. A slot behind the head is still admitted
-        // when its execution hash is not yet in the proven set (late-register
-        // a skipped checkpoint). Same-slot replay and already-proven hashes
-        // revert ERR_STALE_UPDATE.
-        bool advancing = pi.finalizedSlot > _finalizedSlot;
-        bool late = pi.finalizedSlot < _finalizedSlot
-            && !_isLive(pi.executionBlockHash);
-        require(advancing || late, ERR_STALE_UPDATE);
-        if (late) {
-            require(_withinWindow(pi.finalizedSlot), ERR_STALE_UPDATE);
-        }
-        // The signer is the committee of the period the header was signed
-        // in, one this contract still holds. Any of them may advance the
-        // head, so a rotation does not freeze the checkpoints behind it.
+        require(pi.attestedSlot <= _ethereumSlot(), ERR_FUTURE_UPDATE);
+        require(pi.finalizedSlot > _finalizedSlot, ERR_STALE_UPDATE);
         optional(uint64) signer = _heldSignerPeriod(pi);
         require(signer.hasValue(), ERR_WRONG_COMMITTEE);
+        require(signer.get() <= _ethereumSlot() / SLOTS_PER_PERIOD, ERR_FUTURE_UPDATE);
         require(_signerFresh(signer.get()), ERR_COMMITTEE_TOO_OLD);
 
         // accept() must precede the halo2 verify: ZKHALO2VERIFYWITHVK is a
@@ -426,23 +376,17 @@ contract EthBeaconLightClient {
         // `ensureBalanceForSinks`.
         ensureBalanceForSinks(MAX_FORGETS_PER_TX + 1);
 
-        if (advancing) {
-            _finalizedSlot = pi.finalizedSlot;
-            _finalizedBeaconRoot = pi.finalizedBeaconRoot;
-            _finalizedExecutionBlockHash = pi.executionBlockHash;
-            _updatesApplied += 1;
-            _evictExpired();
-            _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
-            address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
-            emit HeadUpdated{dest: addrExtern}(
-                pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
-            );
-        } else {
-            _evictExpired();
-            _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
-            address addrExtern = address.makeAddrExtern(CheckpointBackfilledEmit, bitCntAddress);
-            emit CheckpointBackfilled{dest: addrExtern}(pi.finalizedSlot, pi.executionBlockHash);
-        }
+        _finalizedSlot = pi.finalizedSlot;
+        _finalizedBeaconRoot = pi.finalizedBeaconRoot;
+        _finalizedExecutionBlockHash = pi.executionBlockHash;
+        _updatesApplied += 1;
+        _evictExpired();
+        _ancestryAnchors[pi.executionBlockHash] = true;
+        _pushExecHash(pi.executionBlockHash, pi.finalizedSlot);
+        address addrExtern = address.makeAddrExtern(HeadUpdatedEmit, bitCntAddress);
+        emit HeadUpdated{dest: addrExtern}(
+            pi.finalizedSlot, pi.finalizedBeaconRoot, pi.executionBlockHash, pi.committeeCommitment
+        );
     }
 
     // ========================================================
@@ -509,6 +453,9 @@ contract EthBeaconLightClient {
         // The committee chain moves forward: a hand-off filed under a period
         // not past the one in force would overwrite a held committee.
         require(pi.period > _committeePeriod, ERR_STALE_PERIOD);
+        require(pi.period == _committeePeriod + 1, ERR_BAD_PUBLIC_INPUTS);
+        require(pi.attestedSlot <= _ethereumSlot(), ERR_FUTURE_UPDATE);
+        require(_committeePeriod <= _ethereumSlot() / SLOTS_PER_PERIOD, ERR_FUTURE_UPDATE);
         require(_signerFresh(_committeePeriod), ERR_COMMITTEE_TOO_OLD);
         tvm.accept();
         require(
@@ -537,6 +484,7 @@ contract EthBeaconLightClient {
     ///         oldest header is proven for the next. Permissionless: the
     ///         keccak + parent links are the authorization.
     function submitAncestry(bytes[] headerRlps) public {
+        require(_trustActive(), ERR_COMMITTEE_TOO_OLD);
         require(headerRlps.length >= 2, ERR_BAD_ANCESTRY);
         require(headerRlps.length <= 33, ERR_ANCESTRY_TOO_LONG);
         // The proven end before `accept`, inside the pre-accept credit, so a
@@ -554,6 +502,7 @@ contract EthBeaconLightClient {
         uint last = headerRlps.length - 1;
         uint256 lastKey = _piForm(gosh.keccak256(headerRlps[last]));
         require(_isLive(lastKey), ERR_UNKNOWN_CHECKPOINT);
+        require(_ancestryAnchors.exists(lastKey), ERR_CHECKPOINT_REQUIRED);
         tvm.accept();
         // Before `_evictExpired` and the walk, because both queue messages.
         ensureBalanceForSinks(MAX_FORGETS_PER_TX + uint64(headerRlps.length));
@@ -573,9 +522,12 @@ contract EthBeaconLightClient {
             // admitted, or the sink would accept what the client has dropped.
             uint64 back = uint64(last - i);
             uint64 slot = anchorSlot > back ? anchorSlot - back : 1;
-            if (!_isLive(key) && _withinWindow(slot)) {
-                _pushExecHash(key, slot);
-                added += 1;
+            if (_withinWindow(slot)) {
+                _ancestryAnchors[key] = true;
+                if (!_isLive(key)) {
+                    _pushExecHash(key, slot);
+                    added += 1;
+                }
             }
             if (i > 0) {
                 parent = EthKeccak.rlpParentHash(headerRlps[i]);
@@ -647,6 +599,12 @@ contract EthBeaconLightClient {
                 _provenQueueHead += 1;
             } else if (s != 0) {
                 delete _provenEthSlot[h];
+                delete _ancestryAnchors[h];
+                optional(uint64) recovery = _recoveryIndex.fetch(h);
+                if (recovery.hasValue()) {
+                    delete _recoveryHashes[recovery.get()];
+                    delete _recoveryIndex[h];
+                }
                 _forgetSink(h);
                 dropped += 1;
             }
@@ -731,11 +689,15 @@ contract EthBeaconLightClient {
         public onlyOwnerPubkey accept
     {
         require(_ownerRotationEnabled, ERR_OWNER_ROTATION_DISABLED);
+        require(committeeCommitment != 0, ERR_COMMITTEE_UNSET);
+        require((_currentCommittee == 0 && _finalizedSlot == 0) || _trustActive(), ERR_CHECKPOINT_REQUIRED);
+        require(_signerFresh(period), ERR_STALE_PERIOD);
         ensureBalance();
         // A correction, not a hand-off: the committees being replaced are
         // the ones the owner is rejecting, so they must not keep write access.
         _prevCommitteeHeadSlot = 0;
         _setOnlyCommittee(committeeCommitment, period);
+        _reAnchorsApplied += 1;
     }
 
     /// @notice Disables the routine owner committee path
@@ -792,8 +754,9 @@ contract EthBeaconLightClient {
     {
         require(!_ownerRotationEnabled, ERR_REANCHOR_NOT_ARMED);
         require(_currentCommittee != 0, ERR_COMMITTEE_UNSET);
+        require(_trustActive(), ERR_CHECKPOINT_REQUIRED);
         require(committeeCommitment != 0, ERR_COMMITTEE_UNSET);
-        require(period >= _committeePeriod, ERR_STALE_PERIOD);
+        require(period >= _committeePeriod && _signerFresh(period), ERR_STALE_PERIOD);
         require(
             committeeCommitment != _currentCommittee || period != _committeePeriod,
             ERR_REANCHOR_NOOP
@@ -809,6 +772,51 @@ contract EthBeaconLightClient {
         emit CommitteeReAnchored{dest: addrExtern}(period, from, committeeCommitment);
     }
 
+    function reAnchorCheckpoint(
+        uint256 committeeCommitment,
+        uint64 period,
+        uint64 finalizedSlot,
+        uint256 finalizedBeaconRoot,
+        uint256 executionBlockHash
+    ) public onlyOwnerPubkey {
+        uint64 slotNow = _ethereumSlot();
+        require(committeeCommitment != 0, ERR_COMMITTEE_UNSET);
+        require(period == slotNow / SLOTS_PER_PERIOD, ERR_STALE_PERIOD);
+        require(finalizedSlot > 0 && finalizedSlot <= slotNow, ERR_FUTURE_UPDATE);
+        require(slotNow - finalizedSlot <= COMMITTEE_GRACE_SECONDS / SECONDS_PER_SLOT,
+            ERR_COMMITTEE_TOO_OLD);
+        require(finalizedBeaconRoot != 0 && executionBlockHash != 0, ERR_BAD_PUBLIC_INPUTS);
+        uint256 beacon = _piForm(finalizedBeaconRoot);
+        uint256 execution = _piForm(executionBlockHash);
+        require(finalizedSlot > _finalizedSlot || (finalizedSlot == _finalizedSlot
+            && beacon == _finalizedBeaconRoot && execution == _finalizedExecutionBlockHash),
+            ERR_STALE_UPDATE);
+        tvm.accept();
+        ensureBalanceForSinks(MAX_FORGETS_PER_TX + 1);
+        _setOnlyCommittee(committeeCommitment, period);
+        _prevCommitteeHeadSlot = 0;
+        _finalizedSlot = finalizedSlot;
+        _finalizedBeaconRoot = beacon;
+        _finalizedExecutionBlockHash = execution;
+        _reAnchorsApplied += 1;
+        optional(uint64) previousRecovery = _recoveryIndex.fetch(execution);
+        if (previousRecovery.hasValue()) {
+            delete _recoveryHashes[previousRecovery.get()];
+        }
+        _recoveryIndex[execution] = _reAnchorsApplied;
+        _recoveryHashes[_reAnchorsApplied] = execution;
+        _evictExpired();
+        _ancestryAnchors[execution] = true;
+        if (_isLive(execution)) {
+            _notifySink(execution);
+        } else {
+            _pushExecHash(execution, finalizedSlot);
+        }
+        address addrExtern = address.makeAddrExtern(CheckpointReAnchoredEmit, bitCntAddress);
+        emit CheckpointReAnchored{dest: addrExtern}(period, finalizedSlot, finalizedBeaconRoot,
+            executionBlockHash, committeeCommitment);
+    }
+
     /// @notice Replace code while keeping the anchored committee, head, and
     ///         proven-hash set. Needed because both VkBlobs live in code —
     ///         a step/rotate re-emit or an Ethereum gindex shift cannot be a
@@ -822,6 +830,7 @@ contract EthBeaconLightClient {
         if (userCell.toSlice().empty() && _gloasForkSlotSet) {
             userCell = abi.encode(_gloasForkSlot);
         }
+        userCell = _encodeMigrationExtension(userCell);
         TvmCell migrationCell = abi.encode(
             _ownerPubkey,
             _l1ChainId,
@@ -843,6 +852,10 @@ contract EthBeaconLightClient {
         tvm.setcode(newcode);
         tvm.setCurrentCode(newcode);
         onCodeUpgrade(migrationCell);
+    }
+
+    function _encodeMigrationExtension(TvmCell userCell) private view returns (TvmCell) {
+        return abi.encode(uint32(0x4c433031), userCell, _recoveryHashes, _recoveryIndex);
     }
 
     function onCodeUpgrade(TvmCell cell) private {
@@ -890,6 +903,14 @@ contract EthBeaconLightClient {
         _provenQueue = provenQueue;
         _provenQueueHead = provenQueueHead;
         _provenQueueTail = provenQueueTail;
+        TvmSlice extension = userCell.toSlice();
+        if (extension.bits() != 64 && !extension.empty()) {
+            uint32 format;
+            (format, userCell, _recoveryHashes, _recoveryIndex) = abi.decode(userCell, (
+                uint32, TvmCell, mapping(uint64 => uint256), mapping(uint256 => uint64)
+            ));
+            require(format == 0x4c433031, ERR_BAD_PUBLIC_INPUTS);
+        }
         TvmSlice user = userCell.toSlice();
         if (!user.empty()) {
             _gloasForkSlot = user.load(uint64);
@@ -916,6 +937,43 @@ contract EthBeaconLightClient {
             _currentCommittee,
             _updatesApplied
         );
+    }
+
+    function getTrustState() external view returns (
+        uint64 ethereumSlot,
+        uint64 ethereumPeriod,
+        bool active,
+        bool checkpointReady,
+        uint64 finalizedSlot,
+        uint256 executionBlockHash,
+        uint64 committeePeriod,
+        uint64 reAnchorsApplied
+    ) {
+        committeePeriod = _committeePeriod;
+        reAnchorsApplied = _reAnchorsApplied;
+        finalizedSlot = _finalizedSlot;
+        executionBlockHash = _piForm(_finalizedExecutionBlockHash);
+        ethereumSlot = _ethereumSlot();
+        ethereumPeriod = ethereumSlot / SLOTS_PER_PERIOD;
+        active = _trustActive();
+        checkpointReady = active && _ancestryAnchors.exists(_finalizedExecutionBlockHash)
+            && _isLive(_finalizedExecutionBlockHash);
+    }
+
+    function nextRecoveryHash(uint64 afterGeneration) external view returns (
+        uint64 generation, uint256 executionBlockHash
+    ) {
+        optional(uint64, uint256) next = _recoveryHashes.next(afterGeneration);
+        if (next.hasValue()) {
+            uint256 h;
+            (generation, h) = next.get();
+            executionBlockHash = _piForm(h);
+        }
+    }
+
+    function isAncestryAnchor(uint256 executionBlockHash) external view returns (bool) {
+        uint256 h = _piForm(executionBlockHash);
+        return _trustActive() && _isLive(h) && _ancestryAnchors.exists(h);
     }
 
     /// @notice Whether a finalized execution block hash has been proven canonical.
@@ -1000,13 +1058,25 @@ contract EthBeaconLightClient {
         if (next.hasValue() && next.get() == pi.committeeCommitment) { return attested + 1; }
     }
 
-    function _signerFresh(uint64 period) private view returns (bool) {
+    function _ethereumSlot() private view returns (uint64) {
         uint64 genesis = _beaconGenesisTime(_l1ChainId);
         require(genesis != 0, ERR_UNKNOWN_L1);
         uint64 nowTime = uint64(block.timestamp);
-        if (nowTime <= genesis) { return true; }
-        uint64 periodNow = (nowTime - genesis) / SECONDS_PER_SLOT / SLOTS_PER_PERIOD;
-        return periodNow <= period + MAX_SIGNER_AGE_PERIODS;
+        require(nowTime >= genesis, ERR_FUTURE_UPDATE);
+        return (nowTime - genesis) / SECONDS_PER_SLOT;
+    }
+
+    function _signerFresh(uint64 period) private view returns (bool) {
+        uint64 slot = _ethereumSlot();
+        uint64 periodNow = slot / SLOTS_PER_PERIOD;
+        return period == periodNow || (period < periodNow && periodNow - period == 1
+            && slot % SLOTS_PER_PERIOD < COMMITTEE_GRACE_SECONDS / SECONDS_PER_SLOT);
+    }
+
+    function _trustActive() private view returns (bool) {
+        uint64 period = _ethereumSlot() / SLOTS_PER_PERIOD;
+        if (_committees.exists(period)) { return true; }
+        return period > 0 && _committees.exists(period - 1) && _signerFresh(period - 1);
     }
 
     function _beaconGenesisTime(uint256 chainId) private pure returns (uint64) {
@@ -1046,6 +1116,7 @@ contract EthBeaconLightClient {
     /// the contract unbootstrapped.
     function _setOnlyCommittee(uint256 committeeCommitment, uint64 period) private {
         delete _committees;
+        delete _ancestryAnchors;
         _currentCommittee = committeeCommitment;
         _committeePeriod = period;
         if (committeeCommitment != 0) {

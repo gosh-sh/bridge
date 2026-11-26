@@ -286,9 +286,6 @@ const MAX_ROTATE_SENDS: u32 = 5;
 
 /// Failed rotates of one period before it is not started again.
 const MAX_ROTATE_FAILURES: u32 = 3;
-/// Committees `EthBeaconLightClient` holds (`KEPT_COMMITTEES`, from 1.8.1):
-/// the one in force and the one it replaced last.
-const KEPT_COMMITTEES: u64 = 2;
 
 /// Wait after the first failed rotate of a period; doubled after each next.
 const ROTATE_RETRY_BACKOFF: Duration = Duration::from_secs(10 * 60);
@@ -341,6 +338,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             state.signed_from,
             state.genesis_validators_root.clone(),
         )));
+        lock(&taken).skipped_through = state.skipped_through;
         let watcher = Watcher::new(Arc::clone(&source), Arc::clone(&taken));
         Ok(Self {
             config,
@@ -432,6 +430,42 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 .filter(|_| self.state.genesis_validators_root.is_none());
             (taken.latest.clone(), pinned)
         };
+        let trust = self.submitter.get_trust_state().await?;
+        if trust.as_ref().is_some_and(|state| !state.active) {
+            if let Err(error) = self.retry_checkpoint_pushes().await {
+                warn!(%error, "could not reconcile checkpoint delivery");
+            }
+            self.proofs.clear();
+            if let Some(rotate) = self.rotate.as_mut() {
+                rotate.job = None;
+                rotate.ready = None;
+            }
+            return Ok(TickOutcome::AnRejected {
+                reason: "light-client committee expired; owner re-anchor-checkpoint required"
+                    .into(),
+            });
+        }
+        if let Some(trust) = trust.as_ref() {
+            let newer = trust.checkpoint_ready
+                && self
+                    .state
+                    .last_finalized_slot
+                    .is_none_or(|slot| slot < trust.finalized_slot);
+            let recovered = self.state.reanchors_applied != Some(trust.reanchors_applied);
+            if recovered {
+                self.reconcile_recovery(trust, newer)?;
+            } else if newer {
+                let before = self.state.clone();
+                self.adopt_checkpoint(trust)?;
+                if let Err(error) = self.persist() {
+                    self.state = before;
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = self.retry_checkpoint_pushes().await {
+            warn!(%error, "could not reconcile checkpoint delivery");
+        }
         // The network the watcher pinned goes into the state file.
         if let Some(network) = pinned {
             self.state.genesis_validators_root = Some(network);
@@ -445,7 +479,9 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 "light-client lag approaching / past one sync-committee period (~27 h)"
             );
         }
-        self.cover_front_span().await;
+        if trust.as_ref().is_none_or(|state| state.checkpoint_ready) {
+            self.cover_front_span().await;
+        }
 
         if let Some(latest) = &latest {
             if let Some(outcome) = self.drive_rotate(latest).await? {
@@ -762,10 +798,6 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                 Ok(None)
             },
             PreSubmit::Send => {
-                if let Some(why) = self.rotate_would_orphan(from) {
-                    self.rotate_note(why);
-                    return Ok(None);
-                }
                 if let Some(why) = self.gloas_slot_blocks(&out).await {
                     self.rotate_note(why);
                     return Ok(None);
@@ -784,30 +816,6 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     .map(Some)
             },
         }
-    }
-
-    /// After a rotate from `from` the contract holds the committees of
-    /// periods `from + 2 - KEPT_COMMITTEES` to `from + 1`, and takes a step
-    /// only from one of them. A queued checkpoint signed by an older committee
-    /// could then never go on chain, and the head would stand on it for good:
-    /// a rotate sent while the head lagged behind left a whole period of
-    /// checkpoints that way. The proof waits until the head is past them.
-    fn rotate_would_orphan(&self, from: u64) -> Option<String> {
-        let recorded = self.state.last_finalized_slot;
-        let taken = lock(&self.taken);
-        let front = taken
-            .queue
-            .iter()
-            .find(|u| recorded.is_none_or(|r| u.finalized_slot > r))?;
-        let oldest_kept = (from + 2).saturating_sub(KEPT_COMMITTEES);
-        (front.signing_period() < oldest_kept).then(|| {
-            format!(
-                "the rotate from period {from} waits for checkpoint {} (signed in period {}): the \
-                 committee after it would not take that checkpoint",
-                front.finalized_slot,
-                front.signing_period()
-            )
-        })
     }
 
     /// Why `out` cannot go out against the contract's `getGloasForkSlot`
@@ -1125,7 +1133,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                             RotateDir::new(&rotate.work_dir, from_period).remove();
                         },
                         // Gloas slot unset: the proof waits for the owner.
-                        256 => {},
+                        256 | 261 => {},
                         // The contract's own refusal is not proven again by
                         // this process.
                         _ => {
@@ -1444,47 +1452,208 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         );
     }
 
-    /// A send that did not come back accepted may still have run: the
-    /// message executes and only its answer is lost. Every resend of that
-    /// update is then refused as stale, and when the node's error carries no
-    /// exit code nothing tells that refusal apart from any other, so the same
-    /// checkpoint went out every tick while the head stood on it. The chain
-    /// decides instead: the checkpoint is there when the head has reached its
-    /// slot and its execution hash is proven, the two facts the contract's
-    /// `ERR_STALE_UPDATE` stands for. The head check keeps a hash that a span
-    /// proved from being taken for a head. A read that fails answers no, and
-    /// the checkpoint is tried again as before.
     async fn on_chain_anyway(&self, update: &FinalityUpdate) -> bool {
-        let slot = update.finalized_slot;
-        match self.submitter.get_head_finalized_slot().await {
-            Ok(head) if head >= slot => {},
-            Ok(_) => return false,
-            Err(e) => {
-                warn!(slot, error = %e, "getHead failed; the checkpoint counts as not on chain");
-                return false;
-            },
-        }
-        match self
-            .submitter
-            .is_proven_execution_block_hash(update.execution_block_hash)
-            .await
-        {
-            Ok(proven) => proven,
-            Err(e) => {
-                warn!(
-                    slot,
-                    error = %e,
-                    "isProvenExecutionBlockHash failed; the checkpoint counts as not on chain"
-                );
+        match self.submitter.get_finalized_head().await {
+            Ok(head) => head == Some((update.finalized_slot, update.execution_block_hash)),
+            Err(error) => {
+                warn!(%error, "could not read finalized head after submitUpdate");
                 false
             },
         }
     }
 
-    fn drop_refused(&mut self, update: &FinalityUpdate) -> Result<(), RelayerError> {
+    fn reconcile_recovery(
+        &mut self,
+        trust: &crate::submitter::TrustState,
+        newer: bool,
+    ) -> Result<(), RelayerError> {
+        let before = self.state.clone();
+        if let Some(rotate) = self.rotate.as_mut() {
+            rotate.job = None;
+            rotate.ready = None;
+            rotate.refused = None;
+            rotate.sends = PeriodCount::default();
+            rotate.failures = PeriodCount::default();
+            rotate.hop_refused = false;
+            rotate.retry_at = None;
+            rotate.note = None;
+            rotate.refetch = false;
+            RotateDir::new(&rotate.work_dir, trust.committee_period).remove();
+            if let Some(period) = self.state.last_committee_period {
+                if period != trust.committee_period {
+                    RotateDir::new(&rotate.work_dir, period).remove();
+                }
+            }
+        }
+        if newer {
+            self.adopt_checkpoint(trust)?;
+        }
+        self.state.record_rotate(trust.committee_period);
+        self.state.reanchors_applied = Some(trust.reanchors_applied);
+        if let Err(error) = self.persist() {
+            self.state = before;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn queue_checkpoint_delivery(&mut self, hash: [u8; 32]) {
+        if !self.state.pending_checkpoint_pushes.contains(&hash) {
+            self.state.pending_checkpoint_pushes.push(hash);
+        }
+    }
+
+    async fn retry_checkpoint_pushes(&mut self) -> Result<(), RelayerError> {
+        let before = self.state.clone();
+        let mut cursor = self.state.recovery_delivery_cursor;
+        let mut hashes = Vec::new();
+        for _ in 0..16 {
+            let (generation, hash) = match self.submitter.next_recovery_hash(cursor).await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    warn!(%error, "could not read recovery history");
+                    break;
+                },
+            };
+            cursor = generation;
+            hashes.push(hash);
+        }
+        self.state.recovery_delivery_cursor = cursor;
+        for hash in hashes {
+            self.queue_checkpoint_delivery(hash);
+        }
+        if self.state != before {
+            if let Err(error) = self.persist() {
+                self.state = before;
+                return Err(error);
+            }
+        }
+        let before = self.state.clone();
+        let finalized_slot = self.state.last_finalized_slot.unwrap_or(0);
+        let checks = self.state.ancestry_delivery_checks.len().min(32);
+        for _ in 0..checks {
+            let (hash, until) = self.state.ancestry_delivery_checks.remove(0);
+            match self.submitter.is_proven_execution_block_hash(hash).await {
+                Ok(true) => self.queue_checkpoint_delivery(hash),
+                Ok(false) if finalized_slot > until => {},
+                _ => self.state.ancestry_delivery_checks.push((hash, until)),
+            }
+        }
+        let batch = self.state.pending_checkpoint_pushes.len().min(16);
+        for _ in 0..batch {
+            let hash = self.state.pending_checkpoint_pushes.remove(0);
+            let finished = match self.submitter.checkpoint_at_sink(hash).await {
+                Ok(Some(true)) => true,
+                Ok(Some(false)) => {
+                    match self.submitter.is_proven_execution_block_hash(hash).await {
+                        Ok(false) => true,
+                        Ok(true) => {
+                            self.re_push_checkpoint(hash).await;
+                            false
+                        },
+                        Err(error) => {
+                            warn!(%error, "could not check recovered checkpoint retention");
+                            false
+                        },
+                    }
+                },
+                Ok(None) => matches!(
+                    self.submitter.re_push_anchor(hash).await,
+                    Ok(SubmitOutcome::Accepted { .. })
+                ),
+                Err(error) => {
+                    warn!(%error, "could not confirm recovered checkpoint at bridge");
+                    false
+                },
+            };
+            if !finished {
+                self.state.pending_checkpoint_pushes.push(hash);
+            }
+        }
+        if self.state != before {
+            if let Err(error) = self.persist() {
+                self.state = before;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn adopt_checkpoint(
+        &mut self,
+        checkpoint: &crate::submitter::TrustState,
+    ) -> Result<(), RelayerError> {
+        let queued = lock(&self.taken).queue.front().cloned();
+        let mut older = Vec::new();
+        if let (Some(hash), Some(slot)) = (
+            self.state.last_execution_block_hash,
+            self.state.last_finalized_slot,
+        ) {
+            older.push((slot, hash));
+        }
+        if let Some(dropped) = self.state.dropped_unanchored.as_ref() {
+            older.push((dropped.slot, dropped.hash));
+        }
+        if let Some(update) = queued {
+            older.push((update.finalized_slot, update.execution_block_hash));
+        }
+        for span in &self.state.owed_spans {
+            if let Some(slot) = span.older_slot {
+                older.push((slot, span.older));
+            }
+        }
+        if let Some((slot, hash)) = older
+            .into_iter()
+            .filter(|(slot, _)| *slot < checkpoint.finalized_slot)
+            .min_by_key(|(slot, _)| *slot)
+        {
+            self.owe_span(crate::state::OwedSpan {
+                older: hash,
+                newer: checkpoint.execution_block_hash,
+                older_slot: Some(slot),
+                newer_slot: Some(checkpoint.finalized_slot),
+                ..Default::default()
+            });
+            self.state.earliest_anchor = Some(crate::state::DroppedCheckpoint {
+                hash,
+                slot,
+            });
+        }
+        if !self
+            .state
+            .pending_checkpoint_pushes
+            .contains(&checkpoint.execution_block_hash)
+        {
+            self.state
+                .pending_checkpoint_pushes
+                .push(checkpoint.execution_block_hash);
+        }
+        self.state.dropped_unanchored = None;
+        self.state.record_update(
+            checkpoint.finalized_slot,
+            checkpoint.committee_period,
+            checkpoint.execution_block_hash,
+            checkpoint.finalized_slot,
+        );
+        Ok(())
+    }
+
+    fn drop_refused(
+        &mut self,
+        update: &FinalityUpdate,
+        expired_signer: bool,
+    ) -> Result<(), RelayerError> {
         let before = self.state.clone();
         let from = update.signing_period() + 1;
-        self.state.signed_from = Some(self.state.signed_from.map_or(from, |f| f.max(from)));
+        if expired_signer {
+            self.state.signed_from = Some(self.state.signed_from.map_or(from, |f| f.max(from)));
+        }
+        self.state.skipped_through = Some(
+            self.state
+                .skipped_through
+                .map_or(update.finalized_slot, |s| s.max(update.finalized_slot)),
+        );
         let refused = crate::state::DroppedCheckpoint {
             hash: update.execution_block_hash,
             slot: update.finalized_slot,
@@ -1569,13 +1738,16 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     update.attested_slot,
                 );
                 self.queue_span(old_head, old_slot, &update);
+                self.queue_checkpoint_delivery(update.execution_block_hash);
                 if let Err(e) = self.persist() {
                     self.state = before;
                     return Err(e);
                 }
                 self.forget_step(slot)?;
                 info!(slot, queued = self.queued(), "submitUpdate accepted");
-                self.re_push_checkpoint(update.execution_block_hash).await;
+                if let Err(error) = self.retry_checkpoint_pushes().await {
+                    warn!(%error, "could not reconcile checkpoint delivery");
+                }
                 self.maybe_flip_owner().await?;
                 Ok(TickOutcome::SubmittedUpdate {
                     finalized_slot: update.finalized_slot,
@@ -1597,12 +1769,15 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                     update.attested_slot,
                 );
                 self.queue_span(old_head, old_slot, &update);
+                self.queue_checkpoint_delivery(update.execution_block_hash);
                 if let Err(e) = self.persist() {
                     self.state = before;
                     return Err(e);
                 }
                 self.forget_step(slot)?;
-                self.re_push_checkpoint(update.execution_block_hash).await;
+                if let Err(error) = self.retry_checkpoint_pushes().await {
+                    warn!(%error, "could not reconcile checkpoint delivery");
+                }
                 Ok(TickOutcome::AlreadyOnHead {
                     finalized_slot: update.finalized_slot,
                 })
@@ -1626,7 +1801,19 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                         "the committee that signed this checkpoint is past the age the contract \
                          takes; dropping it"
                     );
-                    self.drop_refused(&update)?;
+                    self.drop_refused(&update, true)?;
+                    return Ok(TickOutcome::AnRejected {
+                        reason,
+                    });
+                }
+                if code == Some(244)
+                    && self
+                        .submitter
+                        .get_head_finalized_slot()
+                        .await
+                        .is_ok_and(|head| head >= slot)
+                {
+                    self.drop_refused(&update, false)?;
                     return Ok(TickOutcome::AnRejected {
                         reason,
                     });
@@ -1642,7 +1829,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
                                  checkpoint; dropping it, its blocks are owed to the span behind \
                                  the next one"
                             );
-                            self.drop_refused(&update)?;
+                            self.drop_refused(&update, true)?;
                             return Ok(TickOutcome::AnRejected {
                                 reason,
                             });
@@ -1807,11 +1994,19 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
     /// proven one, so a span across missed checkpoints takes several, up to
     /// [`MAX_SPAN_CALLS_PER_TICK`] in one tick.
     async fn cover_front_span(&mut self) {
+        let delivery_head = match self.submitter.get_trust_state().await {
+            Ok(Some(state)) if !state.active || !state.checkpoint_ready => return,
+            Err(e) => {
+                warn!(error = %e, "trust state unavailable; retaining ancestry work");
+                return;
+            },
+            Ok(state) => state.map(|state| state.finalized_slot),
+        };
         for _ in 0..MAX_SPAN_CALLS_PER_TICK {
             let Some(front) = self.state.owed_spans.first().cloned() else {
                 return;
             };
-            if !self.cover_span_call(front).await {
+            if !self.cover_span_call(front, delivery_head).await {
                 return;
             }
         }
@@ -1819,7 +2014,11 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
 
     /// One `submitAncestry` for the front span. `true` when it went through
     /// and the next call may follow in this tick.
-    async fn cover_span_call(&mut self, front: crate::state::OwedSpan) -> bool {
+    async fn cover_span_call(
+        &mut self,
+        front: crate::state::OwedSpan,
+        delivery_head: Option<u64>,
+    ) -> bool {
         let Some(rpc) = self.execution.clone() else {
             // Nothing will ever fetch the headers, so holding the queue would
             // only repeat this for ever.
@@ -1832,7 +2031,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         // the epoch before.
         let bound = match (front.older_slot, front.newer_slot) {
             (Some(o), Some(n)) => n.saturating_sub(o) + 1,
-            _ => 33,
+            _ => 100_800,
         };
         let top = front.cursor.unwrap_or(front.newer);
         let headers = match rpc.headers_back(top, front.older, 33).await {
@@ -1855,7 +2054,17 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             },
         };
         let reached = crate::header_rlp::keccak256(&headers[0]) == front.older;
-        if reached && headers.len() <= 2 {
+        if reached
+            && headers.len() <= 2
+            && self
+                .submitter
+                .is_proven_execution_block_hash(front.older)
+                .await
+                .unwrap_or(false)
+        {
+            if delivery_head.is_some() {
+                self.queue_checkpoint_delivery(front.older);
+            }
             self.settle_front("nothing between the two checkpoints", false);
             return true;
         }
@@ -1876,23 +2085,55 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             self.settle_front(&format!("local link_headers refused the span: {e}"), true);
             return false;
         }
+        if let Some(head) = delivery_head {
+            let before = self.state.clone();
+            let until = head.saturating_add(crate::contract_model::PROVEN_WINDOW_SLOTS);
+            for header in &headers[..headers.len() - 1] {
+                let hash = crate::header_rlp::keccak256(header);
+                if let Some((_, existing)) = self
+                    .state
+                    .ancestry_delivery_checks
+                    .iter_mut()
+                    .find(|(h, _)| *h == hash)
+                {
+                    *existing = (*existing).max(until);
+                } else {
+                    self.state.ancestry_delivery_checks.push((hash, until));
+                }
+            }
+            if let Err(error) = self.persist() {
+                self.state = before;
+                warn!(%error, "could not record ancestry batch before submission");
+                return false;
+            }
+        }
         match self.submitter.submit_ancestry(&headers).await {
             Ok(SubmitOutcome::Accepted {
                 ..
             }) => {
-                info!(admitted, reached_older = reached, "submitAncestry accepted");
-                if reached {
-                    self.settle_front("sent", false);
-                    return true;
+                let before = self.state.clone();
+                if delivery_head.is_some() {
+                    for header in &headers[..headers.len() - 1] {
+                        let hash = crate::header_rlp::keccak256(header);
+                        self.state
+                            .ancestry_delivery_checks
+                            .retain(|(pending, _)| *pending != hash);
+                        self.queue_checkpoint_delivery(hash);
+                    }
                 }
-                if let Some(f) = self.state.owed_spans.first_mut() {
+                if reached {
+                    self.state.owed_spans.remove(0);
+                } else if let Some(f) = self.state.owed_spans.first_mut() {
                     f.cursor = Some(crate::header_rlp::keccak256(&headers[0]));
                     f.walked = f.walked.saturating_add(admitted);
                     f.paid_attempts = 0;
                 }
-                if let Err(e) = self.persist() {
-                    warn!(error = %e, "could not persist the owed-span queue");
+                if let Err(error) = self.persist() {
+                    self.state = before;
+                    warn!(%error, "could not persist ancestry progress and delivery work");
+                    return false;
                 }
+                info!(admitted, reached_older = reached, "submitAncestry accepted");
                 true
             },
             // Everything else costs an attempt, including the outcomes that
@@ -1905,6 +2146,30 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
             // without limit and held back every span behind it. A fetch
             // failure is different and stays free — nothing of it reaches the
             // chain, which is what `retry_front_fetch` is for.
+            Ok(SubmitOutcome::Rejected {
+                reason,
+            }) if crate::submitter::parsed_exit_code(&reason) == Some(262) => {
+                if let Ok(Some(trust)) = self.submitter.get_trust_state().await {
+                    if trust.checkpoint_ready
+                        && trust.finalized_slot > front.older_slot.unwrap_or(0)
+                    {
+                        if let Some(span) = self.state.owed_spans.first_mut() {
+                            span.newer = trust.execution_block_hash;
+                            span.newer_slot = Some(trust.finalized_slot);
+                            span.cursor = None;
+                            span.walked = 0;
+                            span.paid_attempts = 0;
+                        }
+                        if let Err(e) = self.persist() {
+                            warn!(error = %e, "could not persist checkpoint ancestry rebase");
+                        }
+                    }
+                }
+                false
+            },
+            Ok(SubmitOutcome::Rejected {
+                reason,
+            }) if crate::submitter::parsed_exit_code(&reason) == Some(259) => false,
             Ok(other) => {
                 self.retry_front_paid(format!("{other:?}"));
                 false
@@ -2007,6 +2272,7 @@ impl<S: BeaconSource, P: ProofGenerator + 'static, A: AnSubmitter> Relayer<S, P,
         let mut taken = lock(&self.taken);
         taken.recorded = self.state.last_finalized_slot;
         taken.signed_from = self.state.signed_from;
+        taken.skipped_through = self.state.skipped_through;
         Ok(())
     }
 
@@ -2550,12 +2816,8 @@ mod tests {
         assert_eq!(r.rotate_running(), None);
     }
 
-    /// A rotate proof that is ready while a queued checkpoint is attested
-    /// before the oldest period the contract holds after it waits for that
-    /// checkpoint: sent, it would leave the checkpoint without a committee the
-    /// contract takes.
     #[tokio::test]
-    async fn a_rotate_waits_for_the_checkpoints_its_committees_would_not_take() {
+    async fn an_expired_checkpoint_does_not_hold_a_ready_rotation() {
         let p = SLOTS_PER_SYNC_PERIOD;
         let dir = tempdir().unwrap();
         let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
@@ -2595,56 +2857,46 @@ mod tests {
         r.tick().await.unwrap();
         assert_eq!(r.rotate_running(), Some(8));
         r.wait_for_rotate().await;
-        r.tick().await.unwrap();
-        assert_eq!(
-            submitter.rotate_submits(),
-            0,
-            "after a rotate from period 8 the contract holds periods 8 and 9 and takes no step \
-             signed in period 0"
-        );
-
         submitter.set_gateway_error(false);
+        submitter.refuse_aged_out_before(7);
         let out = r.tick().await.unwrap();
         assert!(
-            matches!(out, TickOutcome::SubmittedUpdate {
-                finalized_slot,
+            matches!(out, TickOutcome::Rotated {
+                period: 9,
                 ..
-            } if finalized_slot == p - 32),
+            }),
             "{out:?}"
         );
-        assert_eq!(submitter.rotate_submits(), 0);
-        let out = r.tick().await.unwrap();
-        assert!(matches!(out, TickOutcome::Rotated { .. }), "{out:?}");
         assert_eq!(submitter.rotate_submits(), 1);
+        assert_eq!(r.queue_front().unwrap().finalized_slot, p - 32);
+
+        let out = r.tick().await.unwrap();
+        assert!(matches!(out, TickOutcome::AnRejected { .. }), "{out:?}");
+        assert_eq!(r.state.signed_from, Some(1));
     }
 
-    /// Inside the window the rotate does not wait: a checkpoint signed in the
-    /// rotate's own period is still taken after it.
-    #[test]
-    fn a_checkpoint_inside_the_held_window_does_not_hold_the_rotate() {
-        let p = SLOTS_PER_SYNC_PERIOD;
+    #[tokio::test]
+    async fn a_proven_ancestor_is_not_the_finalized_head() {
         let dir = tempdir().unwrap();
-        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
-        cfg.enable_rotate = false;
+        let cfg = RelayerConfig::new(dir.path().join("state.json"));
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        let ancestor = update_with_exec(90, 80, [1; 32]);
+        let head = update_with_exec(110, 100, [2; 32]);
+        let proof = MockProofGenerator::new()
+            .generate_step(&head)
+            .await
+            .unwrap();
+        submitter.submit_update(&proof).await.unwrap();
+        submitter.mark_proven(ancestor.execution_block_hash);
         let r = Relayer::new(
             cfg,
             Arc::new(InMemoryBeaconSource::new(vec![])),
             Arc::new(MockProofGenerator::new()),
-            Arc::new(MockAnSubmitter::accepting()),
+            submitter,
         )
         .unwrap();
-        lock(&r.taken)
-            .queue
-            .push(update(3 * p + 70, 3 * p + 64))
-            .unwrap();
-        assert!(
-            r.rotate_would_orphan(3).is_none(),
-            "signed in 3, held after 3 -> 4"
-        );
-        assert!(
-            r.rotate_would_orphan(4).is_some(),
-            "signed in 3, gone after 4 -> 5"
-        );
+        assert!(!r.on_chain_anyway(&ancestor).await);
+        assert!(r.on_chain_anyway(&head).await);
     }
 
     /// A checkpoint signed by a committee the contract has dropped is refused
@@ -2685,6 +2937,165 @@ mod tests {
         }
         assert_eq!(on_chain, vec![5 * p + 64]);
         assert_eq!(r.queued(), 0);
+    }
+
+    #[tokio::test]
+    async fn equal_slot_recovery_replaces_a_prepared_committee_after_restart() {
+        let dir = tempdir().unwrap();
+        let cfg = RelayerConfig::new(dir.path().join("state.json"));
+        let hash = [3; 32];
+        RelayerState {
+            last_finalized_slot: Some(100),
+            last_execution_block_hash: Some(hash),
+            last_committee_period: Some(5),
+            rotate_in_flight_period: Some(5),
+            reanchors_applied: Some(0),
+            ..Default::default()
+        }
+        .save(&cfg.state_path)
+        .unwrap();
+
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.mark_proven(hash);
+        submitter.set_trust_state(crate::submitter::TrustState {
+            ethereum_period: 4,
+            committee_period: 4,
+            reanchors_applied: 1,
+            active: true,
+            checkpoint_ready: true,
+            finalized_slot: 100,
+            execution_block_hash: hash,
+        });
+        let mut r = Relayer::new(
+            cfg.clone(),
+            Arc::new(InMemoryBeaconSource::new(vec![])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+
+        r.work().await.unwrap();
+        let saved = RelayerState::load(&cfg.state_path).unwrap().unwrap();
+        assert_eq!(saved.last_finalized_slot, Some(100));
+        assert_eq!(saved.last_committee_period, Some(4));
+        assert_eq!(saved.rotate_in_flight_period, None);
+        assert_eq!(saved.reanchors_applied, Some(1));
+        assert_eq!(submitter.re_push_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_trust_retains_queue_until_checkpoint_recovery_then_fills_the_gap() {
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.enable_rotate = false;
+        cfg.poll_interval = Duration::from_millis(1);
+        let headers = crate::header_rlp::dummy_linked_chain(4);
+        let hashes: Vec<_> = headers
+            .iter()
+            .map(|h| crate::header_rlp::keccak256(h))
+            .collect();
+        let hash = |i: usize| hashes[i];
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        submitter.set_trust_state(crate::submitter::TrustState {
+            ethereum_period: 4,
+            committee_period: 3,
+            reanchors_applied: 1,
+            active: false,
+            checkpoint_ready: false,
+            finalized_slot: 0,
+            execution_block_hash: [0; 32],
+        });
+        let mut r = Relayer::new(
+            cfg.clone(),
+            Arc::new(InMemoryBeaconSource::new(vec![update_with_exec(
+                100,
+                96,
+                hash(0),
+            )])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap()
+        .with_execution(Arc::new(crate::source::InMemoryExecution::single(
+            hash(3),
+            headers,
+        )));
+        for _ in 0..3 {
+            assert!(matches!(
+                r.tick().await.unwrap(),
+                TickOutcome::AnRejected { .. }
+            ));
+        }
+        assert_eq!(submitter.update_submits(), 0);
+        assert_eq!(r.queued(), 1);
+        submitter.set_committee_period(3);
+        submitter.mark_proven(hash(3));
+        submitter.set_trust_state(crate::submitter::TrustState {
+            ethereum_period: 4,
+            committee_period: 3,
+            reanchors_applied: 1,
+            active: true,
+            checkpoint_ready: true,
+            finalized_slot: 100,
+            execution_block_hash: hash(3),
+        });
+        for _ in 0..4 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(r.state.last_finalized_slot, Some(100));
+        assert_eq!(r.state.last_committee_period, Some(3));
+        assert_eq!(r.queued(), 0);
+        assert!(submitter.is_proven(&hash(0)));
+        assert_eq!(submitter.update_submits(), 0);
+        assert!(RelayerState::load(&cfg.state_path)
+            .unwrap()
+            .unwrap()
+            .owed_spans
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn late_step_does_not_exclude_newer_steps_by_the_same_signer_after_restart() {
+        let dir = tempdir().unwrap();
+        let mut cfg = RelayerConfig::new(dir.path().join("state.json"));
+        cfg.enable_rotate = false;
+        cfg.poll_interval = Duration::from_millis(1);
+        let submitter = Arc::new(MockAnSubmitter::accepting());
+        let seed = MockProofGenerator::new()
+            .generate_step(&update(110, 100))
+            .await
+            .unwrap();
+        submitter.submit_update(&seed).await.unwrap();
+        let source = Arc::new(InMemoryBeaconSource::new(vec![update(90, 80)]));
+        let mut r = Relayer::new(
+            cfg.clone(),
+            source,
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(submitter.update_submits(), 2);
+        assert_eq!(r.state.signed_from, None);
+        assert_eq!(r.state.skipped_through, Some(80));
+        drop(r);
+        let mut r = Relayer::new(
+            cfg,
+            Arc::new(InMemoryBeaconSource::new(vec![
+                update(90, 80),
+                update(130, 120),
+            ])),
+            Arc::new(MockProofGenerator::new()),
+            submitter.clone(),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            r.tick().await.unwrap();
+        }
+        assert_eq!(r.state.last_finalized_slot, Some(120));
+        assert_eq!(submitter.update_submits(), 3);
     }
 
     async fn blocks_back_to_a_refused_checkpoint(behind_the_head: bool) {

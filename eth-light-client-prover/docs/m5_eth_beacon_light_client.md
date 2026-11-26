@@ -163,58 +163,15 @@ reviewer does not have to reconstruct them from comments. Relayer, ancestry
 check, E2E runbook, audit scope, and the `finalizeDeposit` flip procedure are
 **in this PR**.
 
-**Deposits in non-checkpoint blocks (31/32).** `submitUpdate` records
-`finalized_execution.block_hash` — one execution hash per epoch (~6.4 min).
-`submitAncestry(bytes[] headerRlps)` fills the span between two checkpoints
-that are already proven: headers oldest first, 3 to 33 of them, hashed with the
-`gosh.keccak256` builtin and linked by RLP `parentHash`. The blocks between the
-two anchors go into `USDCBridge._acceptedBlockHash`. Operator:
-`eth-lc-relayer submit-ancestry --checkpoint-hash <newer>
---older-anchor-hash <older>`.
-
-**Missed checkpoints.** The head is skip-*forward*: a later checkpoint may
-be submitted without the skipped ones. A skipped checkpoint can still be
-late-registered, signed by the committee in force or by the one a
-`submitRotate` replaced, so a skip at a period edge is not lost in the honest
-case. `submitUpdate` verifies the proof, records the exec hash (and pushes it
-to `USDCBridge`), and does **not** move the head back. Same-slot replay and
-already-proven hashes still revert. The owner hatches
-(`setCommitteeCommitment`, `reAnchorCommittee`) leave no window to the
-committee they replace.
-
-The contract holds the committees of the last two periods
-(`KEPT_COMMITTEES`, `_committees` by period, from 1.8.1) and accepts each
-for headers attested in its period or the one before, including to move
-the head. There is no end-of-period window: a beacon `/updates` best update
-is a valid hand-off. Signing still needs a supermajority of the retired
-committee's keys. `_prevCommitteeHeadSlot` is kept for the storage
-layout; nothing reads it.
-
-- Head liveness does **not** require every 6.4 min update — jumping to the
-  latest checkpoint is enough to keep the committee/WS clock moving.
-- 1/32 deposit coverage: catch up later in the same period by late-registering
-  the skipped checkpoint proofs. One rotation later that window closes: the
-  committee two periods back is no longer accepted (`ERR_WRONG_COMMITTEE`),
-  so a gap older than that waits for ancestry.
-- Intended cadence (M0 §7 / M5 relayer): ≥ 1 update per period (~27 h) for
-  weak-subjectivity safety, plus on-demand so a pending deposit's checkpoint
-  is anchored.
-
-**Recovery after `disableOwnerRotation()`.** Everyday committee advance is then
-only `submitRotate` (unbroken period chain). Catch-up by replaying rotations is
-safe for **at most one sync-committee period (~27 h)**. Past that lag the owner
-calls `reAnchorCommittee(commitment, period)` — a logged WS hop
-(`CommitteeReAnchored`, `reAnchorsApplied++`) that does **not** write exec
-hashes. `setCommitteeCommitment` stays disabled. tvm-sdk#284 co-deploys with
-this contract, so `disableOwnerRotation()` is part of the deposit flip; the
-relayer SLA is what keeps `reAnchorsApplied` at 0.
-
-**Anchor retention.** `_provenExecutionBlockHash` / `_acceptedBlockHash` are
-permanent; there is no TTL. At checkpoint cadence that is ~225 entries/day,
-~82 k/year, duplicated across the two contracts — accepted. If ancestry
-extends coverage to every block (~2.6 M/year) a retention window becomes a
-product trade (older deposits stop being claimable) and will be designed
-then, not now.
+**Historical block coverage and recovery.** The placed contract only moves the finalized
+head forward. `submitAncestry` authenticates old execution headers through Keccak parent links
+back from an authorized finalized checkpoint, 2 to 33 headers per call. Late independent step
+roots are refused. A current committee acts during its Ethereum period and for two hours after
+its end; future committee commitments may be prepared but do not sign early. Expired clients
+require a fresh owner-verified checkpoint via `reAnchorCheckpoint`; committee-only resets
+cannot revive expired trust. Accepted hashes have a 100,800-slot window behind
+the finalized head, not permanent retention. Full rules and the recovery command are in
+[`docs/eth-light-client.md`](../../docs/eth-light-client.md#recovery-and-historical-block-authentication).
 
 **Relayer / audit.** Relayer crate: `crates/eth-light-client-relayer`
 (`eth-lc-relayer` CLI). systemd is the **live** loop (no hardcoded

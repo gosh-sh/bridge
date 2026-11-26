@@ -41,6 +41,7 @@ pub(crate) struct Taken {
     pub(crate) recorded: Option<u64>,
     /// The oldest signing period the light client may still take.
     pub(crate) signed_from: Option<u64>,
+    pub(crate) skipped_through: Option<u64>,
     /// The beacon head as last seen.
     pub(crate) latest: Option<FinalityUpdate>,
     /// The `genesis_validators_root` the state file is pinned to.
@@ -61,6 +62,7 @@ impl Taken {
             queue,
             recorded,
             signed_from,
+            skipped_through: None,
             latest: None,
             network,
             thin: None,
@@ -112,6 +114,12 @@ impl Taken {
             (q, r) => q.or(r),
         };
         if newest.is_some_and(|n| latest.finalized_slot <= n) {
+            return Ok(());
+        }
+        if self
+            .skipped_through
+            .is_some_and(|slot| latest.finalized_slot <= slot)
+        {
             return Ok(());
         }
         if self

@@ -33,8 +33,30 @@ pub enum SubmitOutcome {
     },
 }
 
+#[derive(Clone, Debug)]
+pub struct TrustState {
+    pub ethereum_period: u64,
+    pub committee_period: u64,
+    pub reanchors_applied: u64,
+    pub active: bool,
+    pub checkpoint_ready: bool,
+    pub finalized_slot: u64,
+    pub execution_block_hash: [u8; 32],
+}
+
 #[async_trait]
 pub trait AnSubmitter: Send + Sync {
+    async fn get_trust_state(&self) -> Result<Option<TrustState>, RelayerError> {
+        Ok(None)
+    }
+
+    async fn get_finalized_head(&self) -> Result<Option<(u64, [u8; 32])>, RelayerError> {
+        Ok(self
+            .get_trust_state()
+            .await?
+            .map(|state| (state.finalized_slot, state.execution_block_hash)))
+    }
+
     async fn submit_update(&self, bundle: &StepProofBundle) -> Result<SubmitOutcome, RelayerError>;
 
     async fn submit_rotate(
@@ -48,6 +70,17 @@ pub trait AnSubmitter: Send + Sync {
     /// Re-send an already-proven hash to `USDCBridge` (`rePushAnchor`).
     /// `block_hash` is Ethereum byte order, as the relayer carries hashes;
     /// [`anchor_key_hex`] re-packs it into the stored key at the ABI boundary.
+    async fn next_recovery_hash(
+        &self,
+        _after: u64,
+    ) -> Result<Option<(u64, [u8; 32])>, RelayerError> {
+        Ok(None)
+    }
+
+    async fn checkpoint_at_sink(&self, _hash: [u8; 32]) -> Result<Option<bool>, RelayerError> {
+        Ok(None)
+    }
+
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError>;
 
     /// Owner flip: take the chain id from the light client's own `getConfig`,
@@ -129,6 +162,8 @@ pub struct MockAnSubmitter {
 
 struct MockInner {
     head_slot: Option<u64>,
+    head_hash: Option<[u8; 32]>,
+    trust_state: Option<TrustState>,
     proven: HashSet<[u8; 32]>,
     period: Option<u64>,
     current_committee: [u8; 32],
@@ -172,10 +207,16 @@ struct MockInner {
 }
 
 impl MockAnSubmitter {
+    pub fn set_trust_state(&self, state: TrustState) {
+        self.inner.lock().expect("poisoned").trust_state = Some(state);
+    }
+
     pub fn accepting() -> Self {
         Self {
             inner: Mutex::new(MockInner {
                 head_slot: None,
+                head_hash: None,
+                trust_state: None,
                 proven: HashSet::new(),
                 period: None,
                 current_committee: [0xC0; 32],
@@ -407,6 +448,31 @@ impl MockAnSubmitter {
 
 #[async_trait]
 impl AnSubmitter for MockAnSubmitter {
+    async fn get_trust_state(&self) -> Result<Option<TrustState>, RelayerError> {
+        Ok(self.inner.lock().expect("poisoned").trust_state.clone())
+    }
+
+    async fn next_recovery_hash(
+        &self,
+        after: u64,
+    ) -> Result<Option<(u64, [u8; 32])>, RelayerError> {
+        let inner = self.inner.lock().expect("poisoned");
+        Ok(inner
+            .trust_state
+            .as_ref()
+            .filter(|s| s.checkpoint_ready && s.reanchors_applied > after)
+            .map(|s| (s.reanchors_applied, s.execution_block_hash)))
+    }
+
+    async fn get_finalized_head(&self) -> Result<Option<(u64, [u8; 32])>, RelayerError> {
+        let inner = self.inner.lock().expect("poisoned");
+        Ok(inner
+            .trust_state
+            .as_ref()
+            .map(|state| (state.finalized_slot, state.execution_block_hash))
+            .or_else(|| inner.head_slot.zip(inner.head_hash)))
+    }
+
     async fn submit_update(&self, bundle: &StepProofBundle) -> Result<SubmitOutcome, RelayerError> {
         let mut inner = self.inner.lock().expect("poisoned");
         inner.update_submits += 1;
@@ -437,25 +503,24 @@ impl AnSubmitter for MockAnSubmitter {
         let slot = bundle.parsed.finalized_slot;
         let hash = bundle.parsed.execution_block_hash;
         let advance = inner.head_slot.map(|h| slot > h).unwrap_or(true);
-        let unseen = !inner.proven.contains(&hash);
-        let late = inner.head_slot.map(|h| slot < h).unwrap_or(false) && unseen;
         if inner.head_slot == Some(slot) {
             if inner.lose_update_answers {
                 return Ok(refused_without_code);
             }
             return Ok(SubmitOutcome::AlreadyOnHead);
         }
-        if !advance && !late {
+        if !advance {
             if inner.lose_update_answers {
                 return Ok(refused_without_code);
             }
             return Ok(SubmitOutcome::Rejected {
-                reason: format!("ERR_STALE_UPDATE slot={slot}"),
+                reason: format!("ERR_STALE_UPDATE exit_code=244 slot={slot}"),
             });
         }
         inner.proven.insert(hash);
         if advance {
             inner.head_slot = Some(slot);
+            inner.head_hash = Some(hash);
         }
         if inner.follow_steps {
             if inner.period.is_none() {
@@ -839,7 +904,7 @@ mod ancestry_submit_tests {
     }
 
     #[tokio::test]
-    async fn mock_late_register_keeps_head() {
+    async fn mock_late_register_is_refused_and_keeps_head() {
         let mock = MockAnSubmitter::accepting();
         let first = crate::types::StepProofBundle {
             parsed: crate::types::StepPublicInputs {
@@ -871,14 +936,14 @@ mod ancestry_submit_tests {
             proof: vec![0xAB; 8],
         };
         match mock.submit_update(&late).await.unwrap() {
-            SubmitOutcome::Accepted {
-                ..
-            } => {},
+            SubmitOutcome::Rejected {
+                reason,
+            } => assert!(reason.contains("exit_code=244")),
             other => panic!("{other:?}"),
         }
         assert_eq!(mock.head_slot(), Some(192));
         assert!(mock.is_proven(&[0xAA; 32]));
-        assert!(mock.is_proven(&[0xBB; 32]));
+        assert!(!mock.is_proven(&[0xBB; 32]));
         match mock.submit_update(&late).await.unwrap() {
             SubmitOutcome::Rejected {
                 reason,
@@ -923,6 +988,13 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
     pub fn with_usdc(mut self, address: String, client: std::sync::Arc<C>) -> Self {
         self.usdc = Some((address, client));
         self
+    }
+
+    pub async fn re_anchor_checkpoint(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<SubmitOutcome, RelayerError> {
+        self.call("reAnchorCheckpoint", params).await
     }
 
     async fn call(
@@ -979,6 +1051,30 @@ impl<C: IAckiNacki> AnInterfaceSubmitter<C> {
 
 #[async_trait]
 impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
+    async fn get_trust_state(&self) -> Result<Option<TrustState>, RelayerError> {
+        let v = self
+            .client
+            .run_getter(&self.config.light_client, "getTrustState", json!({}))
+            .await
+            .map_err(RelayerError::from)?;
+        let missing = || RelayerError::other("getTrustState: missing or malformed field");
+        let hash: alloy::primitives::U256 = v
+            .get("executionBlockHash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(missing)?
+            .parse()
+            .map_err(|_| missing())?;
+        Ok(Some(TrustState {
+            ethereum_period: json_u64(v.get("ethereumPeriod")).ok_or_else(missing)?,
+            committee_period: json_u64(v.get("committeePeriod")).ok_or_else(missing)?,
+            reanchors_applied: json_u64(v.get("reAnchorsApplied")).ok_or_else(missing)?,
+            active: json_bool(v.get("active")).ok_or_else(missing)?,
+            checkpoint_ready: json_bool(v.get("checkpointReady")).ok_or_else(missing)?,
+            finalized_slot: json_u64(v.get("finalizedSlot")).ok_or_else(missing)?,
+            execution_block_hash: hash.to_be_bytes::<32>(),
+        }))
+    }
+
     async fn submit_update(&self, bundle: &StepProofBundle) -> Result<SubmitOutcome, RelayerError> {
         self.call(
             "submitUpdate",
@@ -1006,6 +1102,73 @@ impl<C: IAckiNacki> AnSubmitter for AnInterfaceSubmitter<C> {
         let header_rlps: Vec<String> = header_rlps.iter().map(hex::encode).collect();
         self.call("submitAncestry", json!({ "headerRlps": header_rlps }))
             .await
+    }
+
+    async fn next_recovery_hash(
+        &self,
+        after: u64,
+    ) -> Result<Option<(u64, [u8; 32])>, RelayerError> {
+        let output = self
+            .client
+            .run_getter(
+                &self.config.light_client,
+                "nextRecoveryHash",
+                json!({ "afterGeneration": after }),
+            )
+            .await?;
+        let generation = json_u64(output.get("generation"))
+            .ok_or_else(|| RelayerError::other("nextRecoveryHash: missing generation"))?;
+        if generation == 0 {
+            return Ok(None);
+        }
+        let hash: alloy::primitives::U256 = output
+            .get("executionBlockHash")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| RelayerError::other("nextRecoveryHash: missing execution hash"))?;
+        if generation <= after {
+            return Err(RelayerError::other(
+                "nextRecoveryHash: generation did not advance",
+            ));
+        }
+        Ok(Some((generation, hash.to_be_bytes::<32>())))
+    }
+
+    async fn checkpoint_at_sink(&self, hash: [u8; 32]) -> Result<Option<bool>, RelayerError> {
+        let Some((configured, client)) = &self.usdc else {
+            return Ok(None);
+        };
+        let config = self
+            .client
+            .run_getter(&self.config.light_client, "getConfig", json!({}))
+            .await?;
+        let chain = config
+            .get("l1ChainId")
+            .ok_or_else(|| RelayerError::other("getConfig: missing l1ChainId"))?;
+        let address = config
+            .get("usdcBridge")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| RelayerError::other("getConfig: missing usdcBridge"))?;
+        if is_zero_tvm_account(address) {
+            return Ok(Some(true));
+        }
+        let configured = ExtendedAddress::parse(configured).ok();
+        let light_client = ExtendedAddress::parse(&self.config.light_client)?;
+        let dapp = configured
+            .as_ref()
+            .filter(|configured| same_tvm_account(address, configured.account_id()))
+            .map_or_else(|| light_client.dapp_id(), ExtendedAddress::dapp_id);
+        let address = ExtendedAddress::from_legacy(address, Some(dapp))?;
+        let output = client
+            .run_getter(
+                &address.to_string(),
+                "isAcceptedBlockHash",
+                json!({ "chainId": chain, "blockHash": format!("0x{}", hex::encode(hash)) }),
+            )
+            .await?;
+        json_bool(output.get("value0"))
+            .map(Some)
+            .ok_or_else(|| RelayerError::other("isAcceptedBlockHash: missing result"))
     }
 
     async fn re_push_anchor(&self, block_hash: [u8; 32]) -> Result<SubmitOutcome, RelayerError> {
@@ -1297,16 +1460,15 @@ fn classify_call_error(function: &str, msg: &str) -> SubmitOutcome {
     // timestamps, and a `244` anywhere in those would have turned any refusal
     // into "already on head" — recording a head the chain never took, which
     // then costs the span behind it its anchors as well.
-    if let Some(code) = parsed_exit_code(msg) {
-        if code == 244 {
-            return SubmitOutcome::AlreadyOnHead;
-        }
+    if parsed_exit_code(msg).is_some() {
         return SubmitOutcome::Rejected {
             reason: format!("{function} failed: {msg}"),
         };
     }
     if msg.contains("STALE_UPDATE") {
-        return SubmitOutcome::AlreadyOnHead;
+        return SubmitOutcome::Rejected {
+            reason: format!("{function} failed: {msg}; exit_code=244"),
+        };
     }
     // No exit code: the chain did not execute the call. Transport failures and
     // an expired message are free retries — a caller budgeting paid attempts
@@ -1359,11 +1521,11 @@ mod classify_tests {
     }
 
     #[test]
-    fn the_parsed_exit_code_244_is_already_on_head() {
+    fn code_244_requires_an_independent_head_and_hash_check() {
         let msg = "tvm error (account=0abc) (exit_code=244)";
         assert!(matches!(
             classify_call_error("submitUpdate", msg),
-            SubmitOutcome::AlreadyOnHead
+            SubmitOutcome::Rejected { .. }
         ));
     }
 
@@ -1622,6 +1784,25 @@ mod flip_owner_tests {
             s
         };
         (s, lc_client)
+    }
+
+    #[tokio::test]
+    async fn trust_getter_preserves_ethereum_hash_byte_order_and_rejects_partial_output() {
+        let hash: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let output = json!({
+            "ethereumPeriod": "1500", "committeePeriod": "1499", "reAnchorsApplied": "1",
+            "active": "true", "checkpointReady": true,
+            "finalizedSlot": "12288000", "executionBlockHash": format!("0x{}", hex::encode(hash)),
+        });
+        let (s, _) = submitter(RecordingClient::new(Ok(output.clone())), false);
+        let state = s.get_trust_state().await.unwrap().unwrap();
+        assert_eq!(state.execution_block_hash, hash);
+        assert_eq!(state.ethereum_period, 1500);
+        assert!(state.active && state.checkpoint_ready);
+        let mut partial = output;
+        partial.as_object_mut().unwrap().remove("active");
+        let (s, _) = submitter(RecordingClient::new(Ok(partial)), false);
+        assert!(s.get_trust_state().await.is_err());
     }
 
     /// Sepolia, as the light client reports it from `getConfig`.

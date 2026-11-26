@@ -184,10 +184,11 @@ one-time (or rare, on VK rotation) cost, not per period.
 
 **One host, two lanes.** Step ~41 GB + rotate ~44 GB ≈ 85 GB — both fit on a
 125 GB box concurrently. Anchoring does **not** have to pause for a rotation.
-If the operator prefers isolation, a step can wait; a missed checkpoint of the
-current committee can be late-registered (see
-[`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md) §Operational
-constraints). That is not a WS failure as long as ≥ 1 update lands per period.
+If the operator prefers isolation, a missed checkpoint is recovered through ancestry
+from a later authorized finalized checkpoint. Independent late step roots are refused.
+The signing committee expires two hours after its Ethereum period ends, regardless of
+when the rotation arrived; after expiry install a fresh owner-verified checkpoint.
+See [`m5_eth_beacon_light_client.md`](m5_eth_beacon_light_client.md) §Operational constraints.
 
 ### Full N=8 tree — end to end (measured 2026-08-22, n14) ✅
 

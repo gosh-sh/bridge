@@ -347,7 +347,7 @@ that commit rather than the older tree cited at the top of this document.
 Two switches disable routine owner anchor writes and routine owner committee updates.
 They do not revoke either contract's owner key or upgrade authority. The daemon issues
 them after its first accepted `submitUpdate` only when started with `--flip-owner`
-(`src/relayer.rs:335`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
+(`src/relayer.rs:1629`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
 The relayer key must be the owner key of both contracts.
 
@@ -649,7 +649,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   up` (ERROR) names blocks that need the owner. From `arbitrum-anchors`: `submitAncestry sent
   for the assertion's parent-chain block`.
 - The state file is pinned to the first `genesis_validators_root` it sees
-  (`src/watcher.rs:64`); pointing a daemon at another network fails instead of mixing heads.
+  (`src/watcher.rs:65`); pointing a daemon at another network fails instead of mixing heads.
 
 ## 7. Known limits
 

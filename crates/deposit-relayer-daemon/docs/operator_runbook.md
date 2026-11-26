@@ -371,7 +371,7 @@ tested values.
 | `time() - (arbitrum_anchors_last_successful_tick_timestamp_seconds or arbitrum_anchors_start_timestamp_seconds) > 600` | no round has ended without an error for 10 minutes (a round takes seconds, every 12): `--parent-rpc-url`, `--arbitrum-rpc-url` or Acki Nacki does not answer, or the relayer hangs. The `or` covers a relayer that has had no good round since it started |
 | `sum(increase(arbitrum_anchors_rpc_requests_total{rpc="proof",outcome!="ok"}[30m])) > 3` | the proof endpoint fails `eth_getProof`: throttled, down, or no longer keeping the state of a block a minute old. The rounds still end `ok`; every batch is missed meanwhile and the deposit blocks wait |
 | `arbitrum_anchors_oldest_pending_deposit_block > 0` and `arbitrum_anchors_arbitrum_head_block - arbitrum_anchors_oldest_pending_deposit_block > 43200` | the oldest waiting deposit block is about three hours old (four blocks a second): longer than a batch, an assertion and the light client take together. Its deposits wait too (`deposit_relayer_waiting_for_anchor`) |
-| the same difference `> 300000` | that block is three quarters through the 393 168 blocks after which it can no longer be proven; past them only the owner's `setAcceptedBlockHash` anchors it |
+| `arbitrum_anchors_oldest_pending_deposit_block > 0` and `arbitrum_anchors_arbitrum_head_block - arbitrum_anchors_oldest_pending_deposit_block > 300000` | that block is three quarters through the 393 168 blocks after which it can no longer be proven; past them only the owner's `setAcceptedBlockHash` anchors it |
 | `increase(arbitrum_anchors_expired_deposit_blocks_total[1h]) > 0` | a deposit block was given up as too old: it needs the owner now |
 | `increase(arbitrum_anchors_proofs_failed_total[1h]) > 3` or `increase(arbitrum_anchors_spans_failed_total[1h]) > 0` | Acki Nacki keeps refusing `proveBlock` or `submitAncestry` |
 
@@ -384,9 +384,10 @@ assertion while no deposit block waits, which is the normal idle state. In
 `arbitrum_anchors_rpc_requests_total`, `rpc_error` is any JSON-RPC error the node answered
 with, a rate limit sent as one (HTTP 429 with an error object) included, and a reverted
 `eth_call` is how the Arbitrum node says a block is in no batch yet; `transport_error` is a
-request with no JSON-RPC answer. An event counted before the first scrape after a start (a
-block given up by the first batch seen) is in its counter when it is first read, and is no
-increase.
+request with no JSON-RPC answer. A series of it starts with its first request, which
+`increase()` therefore does not see: the rule on the proof endpoint fires one failure later
+after a start. An event counted before the first scrape after a start (a block given up by the
+first batch seen) is in its counter when it is first read, and is no increase either.
 
 `eth-lc-relayer arbitrum-vector --out <file>` writes one `proveBlock` vector from
 the live chains, built the way `arbitrum-anchors` builds its calls, and sends

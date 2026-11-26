@@ -281,7 +281,9 @@ pub fn count_expired_deposit_block() {
 /// The HTTP transport below hands on a JSON-RPC error body as an answer
 /// whatever the HTTP status, so a rate limit sent as one (HTTP 429 with an
 /// error object) counts as `rpc_error`, like a reverted call; only a request
-/// with no JSON-RPC answer is a `transport_error`.
+/// with no JSON-RPC answer is a `transport_error`. A batch would count once
+/// for each of its methods, all with the outcome of the batch as a whole;
+/// nothing in this crate sends one.
 #[derive(Clone, Copy, Debug)]
 pub struct CountRpcRequests {
     rpc: &'static str,

@@ -2,7 +2,7 @@
 
 The TVM side of the bridge, deployed on Acki Nacki. These are the contracts in
 `exchange/` — `eccBridge` at version 1.19.0, `DepositVoucher` at 1.6.0,
-`EthBeaconLightClient` at 1.8.0 and `ArbitrumBlockVerifier` at 1.0.0:
+`EthBeaconLightClient` at 1.8.1 and `ArbitrumBlockVerifier` at 1.0.0:
 
 - `eccBridge`, with the `EthTrie` library — premined into the zerostate. Mints USDC on a proven
   Ethereum deposit (`finalizeDeposit`, confirmed back by the voucher through
@@ -97,7 +97,11 @@ and repeat the intended flips after upgrading. `setLightClientCode` alone keeps
 recorded clients unchanged, but calling `deployLightClient` afterwards for the
 same chain can replace its writer even while the owner-anchor flag is off;
 `setL2VerifierCode` followed by `deployL2Verifier` does the same for an
-Arbitrum chain's verifier. The light client's owner also retains `reAnchorCommittee` and `updateCode`.
+Arbitrum chain's verifier. The light client's owner also retains `reAnchorCommittee`, `reAnchorCheckpoint` and `updateCode`.
+The placed client accepts only the current Ethereum committee plus two hours of the previous
+committee. After expiry, install a fresh owner-verified finalized checkpoint and current
+committee; recover historical blocks by ancestry. See `docs/eth-light-client.md` for the tuple,
+byte order, expiry and retention rules. Upgrading clears ancestry authorization for cached roots.
 An owner who retains `updateCode` can install arbitrary replacement code,
 including code that removes these checks. The current implementation cannot
 constrain owner-selected replacement code, even if a migration preserves the

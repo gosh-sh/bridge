@@ -303,6 +303,7 @@ contract EthBeaconLightClient {
         require(pi.committeeCommitment == _currentCommittee, ERR_WRONG_COMMITTEE);
         require(_gloasForkSlotSet, ERR_FORK_SLOT_UNSET);
         require(pi.gloasForkSlot == _gloasForkSlot, ERR_WRONG_FORK_SLOT);
+        require(pi.finalizedSlot <= pi.attestedSlot, ERR_BAD_PUBLIC_INPUTS);
         // Head only moves forward. A slot behind the head is still admitted
         // when its execution hash is not yet in the proven set (late-register
         // a skipped checkpoint of the *current* committee). Same-slot replay

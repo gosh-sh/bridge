@@ -1511,11 +1511,9 @@ mod tests {
             .get_code_hash()
             .expect("an Active bridge has a code hash")
             .as_hex_string();
-        // sold 0.80.1 build of eccBridge 1.19.0, against EthBeaconLightClient
-        // 1.8.0, whose state layout the bridge builds the client's data from.
         assert_eq!(
             &hash[..8],
-            "4d8ed160",
+            "46def3aa",
             "full code hash {hash} — put the first eight hex digits in CHANGELOG"
         );
     }

@@ -60,6 +60,25 @@ use tracing::{error, info, warn};
 #[cfg(feature = "live-submit")]
 use tvm_client::crypto::KeyPair;
 
+#[derive(clap::Args, Debug)]
+struct CheckpointArgs {
+    #[arg(
+        long,
+        help = "JSON with the independently verified finalized checkpoint and current committee"
+    )]
+    checkpoint: PathBuf,
+    #[arg(long, env = "ETH_LC_RELAYER_STATE_DIR")]
+    state_dir: PathBuf,
+    #[arg(long, env = "AN_GRAPHQL_URL")]
+    an_graphql_url: String,
+    #[arg(long, env = "AN_KEYS_PATH")]
+    an_keys_path: String,
+    #[arg(long, env = "AN_LIGHT_CLIENT")]
+    an_light_client: String,
+    #[arg(long, env = "AN_SENDER")]
+    an_sender: String,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "eth-lc-relayer",
@@ -180,6 +199,7 @@ enum Cmd {
         #[arg(long, env = "AN_SENDER")]
         an_sender: String,
     },
+    ReAnchorCheckpoint(CheckpointArgs),
     /// Owner `setCommitteeCommitment(commitment, period)` from a proven step
     /// bundle (public-input word 5 = commitment of the committee that signed
     /// the attested header). Bootstraps a fresh contract and hops periods
@@ -587,6 +607,7 @@ async fn real_main() -> anyhow::Result<()> {
             )
             .await
         },
+        Cmd::ReAnchorCheckpoint(args) => re_anchor_checkpoint(args).await,
         Cmd::SetCommittee {
             bundle_dir,
             period,
@@ -907,6 +928,84 @@ async fn beacon_watch(beacon_url: String) -> anyhow::Result<()> {
         genesis_validators_root = %gvr,
         "finality_update"
     );
+    Ok(())
+}
+
+fn checkpoint_params(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    let params: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let fields = [
+        "committeeCommitment",
+        "period",
+        "finalizedSlot",
+        "finalizedBeaconRoot",
+        "executionBlockHash",
+    ];
+    let object = params
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("checkpoint must be a JSON object"))?;
+    if object.len() != fields.len() || fields.iter().any(|name| !object.contains_key(*name)) {
+        anyhow::bail!("checkpoint requires exactly: {}", fields.join(", "));
+    }
+    for name in [
+        "committeeCommitment",
+        "finalizedBeaconRoot",
+        "executionBlockHash",
+    ] {
+        let value: alloy::primitives::U256 = params[name]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("{name} must be a uint256 string"))?
+            .parse()?;
+        if value.is_zero() {
+            anyhow::bail!("{name} must be nonzero");
+        }
+    }
+    for name in ["period", "finalizedSlot"] {
+        if params[name].as_u64().is_none() {
+            anyhow::bail!("{name} must be a uint64 JSON number");
+        }
+    }
+    Ok(params)
+}
+
+#[cfg(not(feature = "live-submit"))]
+async fn re_anchor_checkpoint(args: CheckpointArgs) -> anyhow::Result<()> {
+    checkpoint_params(&args.checkpoint)?;
+    Err(live_submit_needs_feature())
+}
+
+#[cfg(feature = "live-submit")]
+async fn re_anchor_checkpoint(args: CheckpointArgs) -> anyhow::Result<()> {
+    let params = checkpoint_params(&args.checkpoint)?;
+    prepare_dir("state", &args.state_dir).map_err(|e| anyhow::anyhow!(e))?;
+    let state = args.state_dir.join(STATE_FILE_NAME);
+    refuse_unrecognised_state(&state, STATE_FILE_NAME)?;
+    let _lock = StateLock::acquire(&state)?;
+    let mut st = RelayerState::load(&state)?.unwrap_or_default();
+    let keys: KeyPair = serde_json::from_str(&std::fs::read_to_string(&args.an_keys_path)?)?;
+    let tvm = TvmAckiNacki::connect(TvmClientConfig {
+        graphql_endpoints: vec![args.an_graphql_url],
+        keys,
+        bridge_abi: light_client_abi(),
+    })
+    .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
+    let submitter =
+        AnInterfaceSubmitter::new(Arc::new(tvm), eth_light_client_relayer::AnSubmitConfig {
+            from: args.an_sender,
+            light_client: args.an_light_client,
+            confirm_timeout_secs: 120,
+            usdc_bridge: None,
+        });
+    match submitter.re_anchor_checkpoint(params.clone()).await? {
+        eth_light_client_relayer::SubmitOutcome::Accepted {
+            ..
+        } => {},
+        other => {
+            anyhow::bail!("reAnchorCheckpoint: {other:?}; check the on-chain state before retrying")
+        },
+    }
+    st.record_rotate(params["period"].as_u64().expect("validated"));
+    st.save(&state)?;
+    info!(checkpoint = %args.checkpoint.display(), "trusted finalized checkpoint installed; pending block spans retained");
     Ok(())
 }
 
@@ -1748,7 +1847,7 @@ async fn run_daemon(
         })
         .map_err(|e| anyhow::anyhow!("tvm connect: {e}"))?;
         let mut submitter = AnInterfaceSubmitter::new(Arc::new(tvm), an.to_submit_config());
-        if an.is_usdc_ready() {
+        {
             let tvm_usdc = TvmAckiNacki::connect(TvmClientConfig {
                 graphql_endpoints: vec![an.graphql_url.clone()],
                 keys,
@@ -2208,6 +2307,36 @@ mod tests {
     use std::{os::unix::fs::PermissionsExt, path::Path};
 
     use super::*;
+
+    #[test]
+    fn checkpoint_file_requires_the_complete_explicit_nonzero_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("checkpoint.json");
+        let valid = serde_json::json!({
+            "committeeCommitment": "0xcafe", "period": 1500, "finalizedSlot": 12288000,
+            "finalizedBeaconRoot": "0x1234", "executionBlockHash": "0x5678",
+        });
+        std::fs::write(&file, serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(checkpoint_params(&file).unwrap(), valid);
+        for name in [
+            "committeeCommitment",
+            "period",
+            "finalizedSlot",
+            "finalizedBeaconRoot",
+            "executionBlockHash",
+        ] {
+            let mut bad = valid.clone();
+            bad.as_object_mut().unwrap().remove(name);
+            std::fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(checkpoint_params(&file).is_err(), "missing {name}");
+        }
+        for bad_hash in ["0x0", "invalid", "-1"] {
+            let mut bad = valid.clone();
+            bad["executionBlockHash"] = serde_json::json!(bad_hash);
+            std::fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(checkpoint_params(&file).is_err(), "{bad_hash}");
+        }
+    }
 
     /// A file `require_executable` accepts; nothing runs it.
     fn executable(dir: &Path, name: &str) -> PathBuf {

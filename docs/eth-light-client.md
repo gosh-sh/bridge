@@ -44,7 +44,7 @@ different language dialect and a different chain.
 
 | Component | Source | Runs on | Notes |
 |---|---|---|---|
-| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client holds the committees of the last seven periods and lets each advance the head for the period it served, so neither an early `/updates` hand-off nor a rotation sent while a relayer lags freezes the checkpoints behind it. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
+| `EthBeaconLightClient` | `contracts/an/EthBeaconLightClient.sol`, `contracts/an/EthKeccak.sol` | Acki Nacki | Compiled with `sold` (Linux release `gosh_0.81.0` or newer, `--tvm-version gosh`). **This copy is not what shellnet runs**, and there is no patch that turns one into the other. Shellnet runs the variant maintained in `acki-nacki` `contracts/exchange`: sink as the `0:1a1a…` constant with a constructor sender check, versus the settable `_usdcBridge` here, which also means an extra field in the `updateCode` migration cell. The two have also drifted on ancestry: this copy still hashes with the software `EthKeccak.hash` and still takes `submitAncestry` newest-first, at most 32 headers, so the payload the relayer now builds fails on it — the shadow kit cannot exercise on-chain ancestry until the copy is ported. The standalone copy still accepts only the committee in force on `submitUpdate` and still requires a strictly later period on `submitRotate` (`ERR_STALE_PERIOD`, 245). The placed `exchange/` client authorizes the current Ethereum committee and the previous one for two hours after its period ends; it may also retain a prepared next commitment, which cannot sign early. Historical roots require ancestry from an authorized checkpoint. Both refuse a hand-off that does not change the committee (`ERR_SELF_ROTATION`, 253), both check the Gloas fork slot, and both carry `_piForm`, `provenQueue` and the rotate decider. What this repo hands over is not a patch: `contracts/an/place.json` places our own `contracts/an/exchange/EthKeccak.sol` and `contracts/an/exchange/EthBeaconLightClient.sol` onto `contracts/exchange/` wholesale. `scripts/check_place_manifest.py` checks that manifest, not the contents of the files it places. |
 | `ZKHALO2VERIFYWITHVK` | tvm-sdk (node VM) | every Acki Nacki node | Verifies a SHPLONK proof against a caller-supplied VkBlob (dispatch `0xC7 0x4A`, see `AGENTS.md`). The rotate proof additionally needs the KZG accumulation decider of tvm-sdk PR #284, released in tvm-sdk tag `v3.1.0.an` (the tag `acki-nacki` `dev` pins). A node built against an older tvm-sdk accepts a rotate proof without checking the inner proofs it aggregates. |
 | `USDCBridge` | `contracts/an/exchange/eccBridge.sol` (this repo) | Acki Nacki | Consumer. The zerostate installs the light-client code (`setLightClientCode`), the owner deploys it from the bridge per source chain (`deployLightClient`), and the bridge derives each address from that code salted with the chain id (`getLightClient(l1ChainId)`). Writers besides the owner's `setAcceptedBlockHash`: `acceptBlockHashFromLightClient`, `forgetBlockHashFromLightClient` (sender must be that address; idempotent `delete`), and `acceptBlockHashFromL2Verifier` (`eccBridge.sol:943`) from the `ArbitrumBlockVerifier` deployed for an Arbitrum chain (`deployL2Verifier`), which admits a block only once its parent-chain block is accepted. `disableOwnerAnchorsOn(chainId)` refuses `setAcceptedBlockHash` for one chain that has a light client or an L2 verifier (`:801-809`); every other chain keeps the owner writer. |
 | `eth-lc-relayer` | `crates/eth-light-client-relayer/` | relayer host | `cargo build --release --features live-submit` for a binary that talks to Acki Nacki; without the feature it can only `--dry-run`. |
@@ -148,7 +148,7 @@ sequenceDiagram
   R->>P: FINALITY_UPDATE_PATH, COMMITTEE_JSON_PATH,<br/>BEACON_FORK_VERSION, BEACON_GENESIS_VALIDATORS_ROOT,<br/>BEACON_GLOAS_FORK_SLOT
   P-->>R: step_proof.bin + step_public_inputs.bin (in the background, --parallel-proofs at once)
   R->>LC: submitUpdate(proof, publicInputs), signed external message
-  LC->>LC: parse PI, participation >= 342 of 512, fork slot, slot advances, committee
+  LC->>LC: parse PI, participation >= 342 of 512, fork slot, finalized <= attested, slot advances, committee
   LC->>LC: tvm.accept(), then zkhalo2VerifyWithVK(VK_BLOB, publicInputs, proof)
   LC-->>UB: acceptBlockHashFromLightClient(chainId, _piForm(execHash)), only when usdcBridge is set
   LC-->>R: HeadUpdated event
@@ -162,11 +162,15 @@ sequenceDiagram
 What the contract checks, in order (`contracts/an/exchange/EthBeaconLightClient.sol`, the copy
 shellnet runs): the public inputs parse; at least 342 of 512 committee members signed (also
 enforced in-circuit); a committee is anchored at all; the Gloas fork slot is set (`ERR_FORK_SLOT_UNSET`,
-256) and the proof was made for it (`ERR_WRONG_FORK_SLOT`, 255); the finalized slot moves the head
-forward, or back-fills a skipped checkpoint; then the proof's
+256) and the proof was made for it (`ERR_WRONG_FORK_SLOT`, 255); the finalized slot is not after
+the attested one (`ERR_BAD_PUBLIC_INPUTS`, 240); the finalized slot moves the head
+forward (`ERR_STALE_UPDATE`, 244), and the attested slot is not in the future (261); then the proof's
 committee commitment equals one the contract holds for the attested slot's period or the next
-one (the last header of a period is signed in the next); then `tvm.accept()` and the opcode. The
-contract holds the committee in force and the six before it, `KEPT_COMMITTEES` (1.8.0). The slot test comes before
+one (the last header of a period is signed in the next); then that committee is the current one by Ethereum time, or its predecessor within the first
+two hours of the current period, read from the Acki Nacki block time and the network's beacon genesis time (`ERR_COMMITTEE_TOO_OLD`, 259; a network other than mainnet, Sepolia
+or Hoodi fails `ERR_UNKNOWN_L1`, 260); then `tvm.accept()` and the opcode. The
+contract retains at most three commitments (`KEPT_COMMITTEES`): previous, current and a
+prepared next committee. Storage retention does not authorize an expired or future signer. The slot test comes before
 the committee test, so a stale update from a wrong committee fails `ERR_STALE_UPDATE` (244), not
 `ERR_WRONG_COMMITTEE` (242).
 The contract pays for the verification itself, which is why it holds a balance and why a bad
@@ -213,7 +217,7 @@ flowchart TD
   B -->|"first finality_update of period P+1"| C{"how is the committee advanced?"}
   C -->|"production: submitRotate(proof)<br/>rotate circuit + tvm-sdk#284 decider on the nodes"| D["Period P+1, proven"]
   C -->|"shadow: daemon --owner-hop<br/>setCommitteeCommitment from the step of P+1"| E["Period P+1, owner-asserted (logged)"]
-  C -->|"after disableOwnerRotation, relayer lagged > 1 period:<br/>owner reAnchorCommittee (logged hatch)"| F["Period P+n, re-anchored"]
+  C -->|"signer expired after its period + 2h:<br/>owner reAnchorCheckpoint"| F["Period P+n, re-anchored"]
   D --> G["continue stepping"]
   E --> G
   F --> G
@@ -227,26 +231,26 @@ flowchart TD
   is the one the current committee signed for, so the chain of committees becomes trustless.
   The attested header's period is bound to `attestedSlot / 8192 + 1`; a beacon
   `/updates` best update (start of the old period) is a valid hand-off. The
-  replaced committees stay for seven periods and can still advance the head
-  for the periods they served, so an early rotate does not freeze the rest
-  of a period, and one sent by anyone while the relayer lags less than about
-  8 days does not strand its queue. The daemon
+  replaced committee stays until the next rotate and can still advance the head
+  for the period it served, so an early rotate does not freeze the rest
+  of a period. A rotate can land at the start of a period, so a relayer is
+  sure to keep a lagging checkpoint only while nobody rotates; one whose
+  committee was dropped is skipped and its blocks go to the span behind the next. The daemon
   starts the rotate of period P as soon as the contract holds P and the
   beacon serves `/updates?start_period=P`: it fetches that update and the
   one of P−1 (whose next committee is the current one), and runs the three
-  rotate stages in the background while steps of P keep going. The stages
-  write into `<work-dir>/rotate-<P>/`, so a restart re-runs only the stage
-  that had not finished. Before sending, the daemon checks the bundle
-  against the contract: a contract already past P drops it, a bundle whose
-  verification key is not the pinned one
-  (`eth-light-client-prover/fixtures/rotate_vkblob/rotate_vk_blob.bin.sha256`)
-  or whose current committee is not the contract's is refused and logged,
-  not sent. A bundle from P also waits while a queued checkpoint is signed before period
-  P−5: after the rotate the contract holds the committees of P−5 to P+1 only, so sending it
-  would leave that checkpoint without a committee for good. It needs the decider of tvm-sdk PR
-  #284 in the node VM; on a
-  network without it `submitRotate` proves less than it claims (§2), and
-  `--no-rotate` keeps it off.
+  rotate stages in the background while steps of P keep going. The stages write into
+  `<work-dir>/rotate-<P>/`, so restart resumes completed stages. The daemon checks the
+  current committee, period, fork slot and pinned rotate verification key before submission.
+  The signing committee may act only during its Ethereum period and the next two hours.
+  A prepared next committee cannot sign before its period begins (261). Expiry is measured
+  from genesis and period number, never from message arrival; historical rotations cannot
+  restart an expired client. The daemon reads `getTrustState` before work, stops proving and
+  retains the queue while trust is inactive, and resumes after owner recovery. Checkpoints
+  rejected with 259 or a dropped committee's 242 are removed with their blocks still owed;
+  a checkpoint behind the on-chain head (244) becomes ancestry work without excluding newer
+  steps signed by the same committee. After owner recovery the daemon adopts the trusted
+  on-chain head and owes the gap back to the oldest pending checkpoint.
 
   A stage that fails is started again after 10 minutes, then after 20, each time from the
   beacon node's answers fetched anew; the third failure in a period leaves that period's
@@ -264,9 +268,79 @@ flowchart TD
   daemon stops hopping and starts or resumes the rotate of P past the boundary instead. Take
   `--owner-hop` off before calling `disableOwnerRotation`. Without `--owner-hop` the daemon
   returns `RotateRequired` on every tick until the rotate lands.
-- **Re-anchor** (`reAnchorCommittee`, `EthBeaconLightClient.sol:496`) is the emergency hatch
-  after the flip: armed only when owner rotation is disabled, period cannot go backwards, never
-  writes execution hashes, counted in `getCommitteeState().reAnchorsApplied`.
+- **Recovery checkpoint:** `reAnchorCheckpoint(committeeCommitment, period, finalizedSlot,
+  finalizedBeaconRoot, executionBlockHash)` atomically installs an owner-verified finalized
+  Ethereum checkpoint and the current committee. Both hashes use Ethereum byte order;
+  `committeeCommitment` is the numeric Poseidon field element. The owner must independently
+  verify that the finalized header, execution hash and current committee belong to the same
+  canonical Ethereum chain; this call trusts that complete tuple and does not verify an SSZ
+  committee proof. The period must equal the wall-clock period, the checkpoint must be at most
+  two hours old and cannot move the finalized head backwards. Equal-slot recovery requires
+  identical roots. It emits `CheckpointReAnchored` (708) and increments `reAnchorsApplied`.
+  The operation is available before and after `disableOwnerRotation`; it does not re-enable
+  routine owner rotation. Committee-only `reAnchorCommittee` / `setCommitteeCommitment`
+  refuse an expired initialized client with 262: after an outage they cannot replace the
+  required complete checkpoint tuple. While trust is active, committee-only resets remain
+  available under their existing owner-rotation rules and clear ancestry authorization.
+
+### Recovery and historical block authentication
+
+Each signing committee expires at `genesis + (period + 1) * 98304 + 7200` (exclusive).
+During its own period it can authenticate new finalized heads; in the next period its
+remaining grace is exactly two hours. There is no future-signer authorization. Clock checks
+use Acki Nacki block time and the configured Ethereum genesis; an unsupported chain is 260.
+The step/rotate proof format and verification keys are unchanged.
+
+`submitUpdate` never registers a root behind the current finalized head. Historical blocks
+must be linked by `submitAncestry` to a root authorized by a valid new step, by
+`reAnchorCheckpoint`, or by an earlier successful ancestry walk from such a root. Every RLP
+parent link is checked with Keccak. A forged intermediate header reverts the whole call.
+At most 33 headers (32 new predecessors) fit in one call, and callers may chain those calls.
+An unproven endpoint is 249; a cached endpoint without this provenance is 262. When trust
+has expired, ancestry also refuses with 259 until recovery. Previously accepted blocks remain
+available for deposit proofs within the existing retention window; expiry does not erase them.
+
+Owner committee resets and upgrades clear ancestry authorization, while retaining the old
+accepted hashes for already proven deposits. After an upgrade install a fresh recovery
+checkpoint before starting a new ancestry walk. A valid advancing step also works if the
+committee retained by migration is eligible at the time of the upgrade. Migration from
+1.8.0 or the earlier 1.8.1 build with code hash `4b383b84…` carries only the latest installed
+committee, which may be the prepared next committee after an early rotation. In that case,
+prepare a verified checkpoint for the current period and install it as part of the upgrade.
+Upgrades from this release preserve the held committee set. Owner
+recovery replaces the ancestry authorization set; old cached endpoints do not acquire it
+merely because they remain in the 14-day window. Ancestry checks the fixed window relative
+to the finalized head, so deposits older than that window require a separate retention decision.
+
+Stop the daemon, independently verify the checkpoint tuple, and write a file containing:
+
+```json
+{
+  "committeeCommitment": "0x<verified Poseidon commitment>",
+  "period": 1500,
+  "finalizedSlot": 12288000,
+  "finalizedBeaconRoot": "0x<verified finalized beacon root>",
+  "executionBlockHash": "0x<verified execution block hash>"
+}
+```
+
+The numbers above illustrate the format; use the current period and a finalized slot no more
+than two hours old. Get the current committee from the same canonical chain; at a period
+boundary it may differ from the finalized header's committee. Check independent full-node
+sources before signing. The command does not discover or independently authenticate that tuple:
+
+```bash
+eth-lc-relayer re-anchor-checkpoint --checkpoint verified.json --state-dir /path/to/state \
+  --an-graphql-url <endpoint> --an-keys-path <owner-keys.json> \
+  --an-light-client <client> --an-sender <sender>
+```
+
+The command needs `live-submit`, refuses an active daemon's state lock, sends the checkpoint,
+and records its committee period without deleting pending work. Restart the daemon with the
+same state directory and an execution RPC that serves the headers of the gap. It adopts the
+new on-chain checkpoint and backfills from it. A request rejected with 262 is rebased to the
+current authorized head; an expired client keeps owed spans until recovery. If the command's
+confirmation is lost, inspect `getTrustState`/`getHead` and retry only after checking the tuple.
 
 ### 3.4 From a checkpoint to a deposit
 
@@ -292,8 +366,8 @@ between adjacent checkpoints, which admits every block of the followed chain.
 header cost **64.68 M** gas through it and costs **4,722** through the `KECCAK256` instruction
 (opcode `0xC7 0x4B`). Measured on a locally built node, compute and action phase both, with the
 client at exactly its `MIN_BALANCE` floor: **748,015** gas for a 5-header span and **1,976,017**
-for a full 33-header span, against the **10 M** per-transaction limit (p20/p21). Both include the
-two anchor hashes the call does before `tvm.accept()`. A span whose far end is not a proven anchor
+for a full 33-header span, against the **10 M** per-transaction limit (p20/p21). Those measurements predate the committee deadline and ancestry-provenance checks.
+The current call hashes its authorized endpoint before `tvm.accept()`; remeasure gas on the target node. A span whose far end is not a proven anchor
 is refused inside that pre-accept credit and costs the light client nothing; one whose *middle* is
 forged still costs it the walk (1,917,462 gas measured), the same exposure `submitUpdate` has
 carried since 1.4.1. The walk goes back from the proven end, so a forged header breaks at the
@@ -391,7 +465,7 @@ chain's recorded light client or L2 verifier, under the proof checks of its curr
 can also install different code with `setLightClientCode` and replace a flipped
 chain's client with `deployLightClient`; changing the stored code alone does not
 replace the writer. The light-client owner retains the logged weak-subjectivity
-recovery `reAnchorCommittee` and can replace its code with `updateCode`.
+recovery `reAnchorCheckpoint` / `reAnchorCommittee` and can replace its code with `updateCode`.
 `disableOwnerRotation` survives that client's normal migration. However, an
 owner who retains `updateCode` can install arbitrary replacement code, including
 code that changes or removes any of these checks. The current implementation
@@ -550,7 +624,7 @@ Production (`scripts/ursus/eth_lc_shellnet_e2e.md`, `scripts/ursus/flip_deposit_
    `setAcceptedBlockHash` only for the light client's L1.
 
 Shadow (`crates/eth-light-client-relayer/deploy/shellnet-shadow/README.md`): a private light
-client deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,
+client built from the exchange source and deployed with the kit scripts (`build.sh`, `install-srs.sh`, `compile-contract.sh`,
 `deploy-contract.sh`, `status.sh`) instead of step 3, then steps 4 and 5; no `USDCBridge`, unit
 started with `--no-rotate --no-flip-owner --owner-hop`. Nothing it does reaches the bridge.
 
@@ -582,14 +656,15 @@ Every name, with its type and labels, is in the table at the top of
 
 A round that ends as `proving` counts as a good one: a prover that hangs shows in the queue and
 the head, not in the time of the last good round. Suggested alert rules; the thresholds are
-recommendations, not tested values.
+recommendations, not tested values. Gate each condition except target health with
+`and on(job, instance) (up == 1)`, using the scrape target labels in your deployment.
 
 | Condition | Meaning |
 |---|---|
-| `up == 0` for the daemon's scrape target | the daemon is down or cannot be reached. Every rule below goes silent with it |
+| `up == 0` for the daemon's scrape target | the daemon is down or cannot be reached |
 | `changes(eth_lc_relayer_start_timestamp_seconds[30m]) > 2` | the daemon keeps restarting |
 | `time() - (eth_lc_relayer_last_successful_tick_timestamp_seconds or eth_lc_relayer_start_timestamp_seconds) > 900` | no round has ended well for 15 minutes: every one fails, or the loop hangs. The `or` covers a daemon that has had no good round since it started |
-| `changes(eth_lc_relayer_last_finalized_slot[30m]) == 0` | the light client's head has not moved for half an hour; a checkpoint comes every 6.4 minutes |
+| `changes(eth_lc_relayer_last_finalized_slot[30m]) == 0 and (eth_lc_relayer_last_finalized_slot == eth_lc_relayer_last_finalized_slot offset 30m)` | the light client's head has not moved for half an hour; a checkpoint comes every 6.4 minutes |
 | `eth_lc_relayer_queued_checkpoints > 5` for 15 minutes | checkpoints wait more than half an hour to get on chain |
 | `increase(eth_lc_relayer_beacon_polls_total{outcome="ok"}[10m]) == 0` | the beacon node does not answer; no checkpoint is taken meanwhile, and the rounds still end as `unchanged` |
 | `increase(eth_lc_relayer_ticks_total{outcome="rotate_required"}[15m]) > 0` | the head stands at a period boundary: the rotate did not make it and no owner hop is allowed |

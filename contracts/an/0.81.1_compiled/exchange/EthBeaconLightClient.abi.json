@@ -97,6 +97,18 @@
 			]
 		},
 		{
+			"name": "reAnchorCheckpoint",
+			"inputs": [
+				{"name":"committeeCommitment","type":"uint256"},
+				{"name":"period","type":"uint64"},
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"finalizedBeaconRoot","type":"uint256"},
+				{"name":"executionBlockHash","type":"uint256"}
+			],
+			"outputs": [
+			]
+		},
+		{
 			"name": "updateCode",
 			"inputs": [
 				{"name":"newcode","type":"cell"},
@@ -115,6 +127,40 @@
 				{"name":"executionBlockHash","type":"uint256"},
 				{"name":"committeeCommitment","type":"uint256"},
 				{"name":"updatesApplied","type":"uint64"}
+			]
+		},
+		{
+			"name": "getTrustState",
+			"inputs": [
+			],
+			"outputs": [
+				{"name":"ethereumSlot","type":"uint64"},
+				{"name":"ethereumPeriod","type":"uint64"},
+				{"name":"active","type":"bool"},
+				{"name":"checkpointReady","type":"bool"},
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"executionBlockHash","type":"uint256"},
+				{"name":"committeePeriod","type":"uint64"},
+				{"name":"reAnchorsApplied","type":"uint64"}
+			]
+		},
+		{
+			"name": "nextRecoveryHash",
+			"inputs": [
+				{"name":"afterGeneration","type":"uint64"}
+			],
+			"outputs": [
+				{"name":"generation","type":"uint64"},
+				{"name":"executionBlockHash","type":"uint256"}
+			]
+		},
+		{
+			"name": "isAncestryAnchor",
+			"inputs": [
+				{"name":"executionBlockHash","type":"uint256"}
+			],
+			"outputs": [
+				{"name":"value0","type":"bool"}
 			]
 		},
 		{
@@ -265,6 +311,18 @@
 			],
 			"outputs": [
 			]
+		},
+		{
+			"name": "CheckpointReAnchored",
+			"inputs": [
+				{"name":"period","type":"uint64"},
+				{"name":"finalizedSlot","type":"uint64"},
+				{"name":"finalizedBeaconRoot","type":"uint256"},
+				{"name":"executionBlockHash","type":"uint256"},
+				{"name":"committeeCommitment","type":"uint256"}
+			],
+			"outputs": [
+			]
 		}
 	],
 	"fields": [
@@ -279,6 +337,9 @@
 		{"init":false,"name":"_updatesApplied","type":"uint64"},
 		{"init":false,"name":"_currentCommittee","type":"uint256"},
 		{"init":false,"name":"_committees","type":"map(uint64,uint256)"},
+		{"init":false,"name":"_ancestryAnchors","type":"map(uint256,bool)"},
+		{"init":false,"name":"_recoveryHashes","type":"map(uint64,uint256)"},
+		{"init":false,"name":"_recoveryIndex","type":"map(uint256,uint64)"},
 		{"init":false,"name":"_prevCommitteeHeadSlot","type":"uint64"},
 		{"init":false,"name":"_committeePeriod","type":"uint64"},
 		{"init":false,"name":"_ownerRotationEnabled","type":"bool"},

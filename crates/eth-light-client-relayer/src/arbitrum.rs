@@ -242,6 +242,10 @@ pub struct ReadyProof {
     /// [`MAX_SPAN_SENDS`].
     #[serde(default)]
     pub spans_sent: u32,
+    #[serde(default)]
+    pub ancestry_cursor: Option<u64>,
+    #[serde(default)]
+    pub ancestry_generation: Option<u64>,
 }
 
 /// What `arbitrum-anchors` keeps between runs. The slot proofs cannot be
@@ -403,6 +407,12 @@ pub trait ArbitrumView: Send + Sync {
         tx_index: u32,
     ) -> Result<(B256, Bytes, Vec<Bytes>), RelayerError>;
     /// A parent-chain block's header; `None` past the head.
+    async fn parent_header_by_hash(
+        &self,
+        _hash: B256,
+    ) -> Result<Option<ParentHeader>, RelayerError> {
+        Ok(None)
+    }
     async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError>;
 }
 
@@ -462,6 +472,18 @@ pub trait AnchorTarget: Send + Sync {
     /// The beacon slot of the light client's head (`getHead`); `None` when
     /// the bridge has no light client for the parent chain.
     async fn light_client_head_slot(&self) -> Result<Option<u64>, RelayerError>;
+    async fn ancestry_anchor(&self, chain_id: u64, hash: B256) -> Result<bool, RelayerError> {
+        self.is_accepted(chain_id, hash).await
+    }
+    async fn retry_proven_parent_delivery(&self, _hash: B256) -> Result<bool, RelayerError> {
+        Ok(false)
+    }
+    async fn ancestry_generation(&self) -> Result<Option<u64>, RelayerError> {
+        Ok(None)
+    }
+    async fn ancestry_head(&self) -> Result<Option<B256>, RelayerError> {
+        Ok(None)
+    }
     /// `submitAncestry(headerRlps)` on the light client, oldest header first.
     async fn submit_ancestry(&self, headers: &[Bytes]) -> Result<(), RelayerError>;
 }
@@ -690,6 +712,8 @@ async fn round<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
                                 sent: BTreeMap::new(),
                                 span_tried: None,
                                 spans_sent: 0,
+                                ancestry_cursor: None,
+                                ancestry_generation: None,
                             });
                             report.assertions_matched += 1;
                         },
@@ -824,6 +848,16 @@ async fn cover_parent_block<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     proof: &mut ReadyProof,
     report: &mut TickReport,
 ) -> Result<(), RelayerError> {
+    if an.retry_proven_parent_delivery(proof.parent_hash).await? {
+        return Ok(());
+    }
+    if let Some(generation) = an.ancestry_generation().await? {
+        if proof.ancestry_generation != Some(generation) {
+            proof.ancestry_generation = Some(generation);
+            proof.ancestry_cursor = None;
+            proof.spans_sent = 0;
+        }
+    }
     if proof.spans_sent >= MAX_SPAN_SENDS {
         return Ok(());
     }
@@ -878,7 +912,7 @@ async fn cover_parent_block<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
     }
     let mut newer = None;
     for (i, h) in after.iter().enumerate().rev().take(ANCHOR_CANDIDATES) {
-        if an.is_accepted(chain.parent_chain_id, h.hash).await? {
+        if an.ancestry_anchor(chain.parent_chain_id, h.hash).await? {
             newer = Some(i);
             break;
         }
@@ -895,34 +929,74 @@ async fn cover_parent_block<V: ArbitrumView + ?Sized, T: AnchorTarget + ?Sized>(
             break;
         }
     }
-    let (Some(older), Some(newer)) = (older, newer) else {
-        info!(
-            parent_block = b,
-            newer_found = newer.is_some(),
-            older_found = older.is_some(),
-            "the bridge does not accept the checkpoints around the assertion's parent-chain block \
-             yet; waiting for the light client"
-        );
-        return Ok(());
+    let mut cursor = None;
+    let headers: Vec<Bytes> = if let (Some(older), Some(newer)) = (older, newer) {
+        before[..=older]
+            .iter()
+            .rev()
+            .chain(std::iter::once(&block))
+            .chain(&after[..=newer])
+            .map(|h| h.rlp.clone())
+            .collect()
+    } else {
+        let mut top = None;
+        if let Some(number) = proof.ancestry_cursor {
+            if let Some(h) = view.parent_header(number).await? {
+                if an.ancestry_anchor(chain.parent_chain_id, h.hash).await? {
+                    top = Some(h);
+                }
+            }
+        }
+        if top.is_none() {
+            let Some(hash) = an.ancestry_head().await? else {
+                return Ok(());
+            };
+            top = view.parent_header_by_hash(hash).await?;
+        }
+        let Some(top) = top.filter(|top| {
+            top.number > b
+                && top.timestamp.saturating_sub(block.timestamp) <= 100_800 * SECONDS_PER_SLOT
+        }) else {
+            return Ok(());
+        };
+        let first = b.max(top.number.saturating_sub(SLOTS_PER_EPOCH));
+        let mut headers = Vec::new();
+        for number in first..top.number {
+            let Some(h) = view.parent_header(number).await? else {
+                return Ok(());
+            };
+            headers.push(h.rlp);
+        }
+        headers.push(top.rlp);
+        if first > b {
+            cursor = Some(first);
+        }
+        headers
     };
-    let headers: Vec<Bytes> = before[..=older]
-        .iter()
-        .rev()
-        .chain(std::iter::once(&block))
-        .chain(&after[..=newer])
-        .map(|h| h.rlp.clone())
-        .collect();
     let rlps: Vec<Vec<u8>> = headers.iter().map(|h| h.to_vec()).collect();
     link_headers(&rlps)?;
     match an.submit_ancestry(&headers).await {
         Ok(()) => {
             info!(
                 parent_block = b,
-                from = before[older].number,
-                to = after[newer].number,
+                next_ancestor = ?cursor,
                 "submitAncestry sent for the assertion's parent-chain block"
             );
             report.spans_sent += 1;
+            proof.ancestry_cursor = cursor;
+            if cursor.is_some() {
+                proof.spans_sent = 0;
+                return Ok(());
+            }
+        },
+        Err(e)
+            if matches!(
+                crate::submitter::parsed_exit_code(&e.to_string()),
+                Some(259 | 262)
+            ) =>
+        {
+            proof.ancestry_cursor = None;
+            return Ok(());
         },
         Err(e) => {
             warn!(
@@ -1386,6 +1460,26 @@ impl<P: Provider, A: Provider> ArbitrumView for RpcArbitrumView<P, A> {
         Ok((header.hash, encode_header_rlp(&header)?, proof))
     }
 
+    async fn parent_header_by_hash(
+        &self,
+        hash: B256,
+    ) -> Result<Option<ParentHeader>, RelayerError> {
+        let Some(block) = self
+            .parent
+            .get_block_by_hash(hash)
+            .await
+            .map_err(eth("parent eth_getBlockByHash"))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ParentHeader {
+            number: block.header.inner.number,
+            hash: block.header.hash,
+            rlp: encode_header_rlp(&block.header)?,
+            timestamp: block.header.inner.timestamp,
+        }))
+    }
+
     async fn parent_header(&self, number: u64) -> Result<Option<ParentHeader>, RelayerError> {
         let Some(block) = self
             .parent
@@ -1624,6 +1718,90 @@ impl AnchorTarget for TvmAnchorTarget {
             .and_then(|s| u64::try_from(s).ok())
             .ok_or_else(|| RelayerError::AckiNacki(format!("getHead answered {out}")))?;
         Ok(Some(slot))
+    }
+
+    async fn ancestry_anchor(&self, _: u64, hash: B256) -> Result<bool, RelayerError> {
+        let Some(address) = self.light_client_address().await? else {
+            return Ok(false);
+        };
+        let output = self
+            .light_client
+            .run_getter(
+                &address.to_string(),
+                "isAncestryAnchor",
+                serde_json::json!({ "executionBlockHash": hash.to_string() }),
+            )
+            .await?;
+        Ok(
+            matches!(output.get("value0"), Some(serde_json::Value::Bool(true)))
+                || output.get("value0").and_then(serde_json::Value::as_str) == Some("true"),
+        )
+    }
+
+    async fn retry_proven_parent_delivery(&self, hash: B256) -> Result<bool, RelayerError> {
+        let Some(address) = self.light_client_address().await? else {
+            return Ok(false);
+        };
+        let key = crate::submitter::anchor_key_hex(&hash.0);
+        let out = self
+            .light_client
+            .run_getter(
+                &address.to_string(),
+                "isProvenExecutionBlockHash",
+                serde_json::json!({ "blockHash": key }),
+            )
+            .await?;
+        let proven = matches!(out.get("value0"), Some(serde_json::Value::Bool(true)))
+            || out.get("value0").and_then(serde_json::Value::as_str) == Some("true");
+        if proven {
+            self.light_client
+                .call_contract(ContractCallRequest {
+                    from: address.clone(),
+                    to: address,
+                    function: "rePushAnchor".into(),
+                    params: serde_json::json!({ "blockHash": key }),
+                })
+                .await?;
+        }
+        Ok(proven)
+    }
+
+    async fn ancestry_generation(&self) -> Result<Option<u64>, RelayerError> {
+        let Some(address) = self.light_client_address().await? else {
+            return Ok(None);
+        };
+        let output = self
+            .light_client
+            .run_getter(&address.to_string(), "getTrustState", serde_json::json!({}))
+            .await?;
+        output
+            .get("reAnchorsApplied")
+            .and_then(abi_uint)
+            .and_then(|n| u64::try_from(n).ok())
+            .map(Some)
+            .ok_or_else(|| RelayerError::other("getTrustState: missing trust generation"))
+    }
+
+    async fn ancestry_head(&self) -> Result<Option<B256>, RelayerError> {
+        let Some(address) = self.light_client_address().await? else {
+            return Ok(None);
+        };
+        let output = self
+            .light_client
+            .run_getter(&address.to_string(), "getTrustState", serde_json::json!({}))
+            .await?;
+        let ready = output.get("checkpointReady");
+        if !matches!(ready, Some(serde_json::Value::Bool(true)))
+            && ready.and_then(serde_json::Value::as_str) != Some("true")
+        {
+            return Ok(None);
+        }
+        let hash: U256 = output
+            .get("executionBlockHash")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| RelayerError::other("getTrustState: missing execution hash"))?;
+        Ok(Some(B256::from(hash.to_be_bytes::<32>())))
     }
 
     async fn submit_ancestry(&self, headers: &[Bytes]) -> Result<(), RelayerError> {

@@ -344,6 +344,8 @@ pub struct CommitteeState {
     /// rotate public inputs.
     pub current_committee: [u8; 32],
     pub period: u64,
+    /// Whether the committee of `period - 1` is still held (`prevCommittee`).
+    pub holds_previous: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

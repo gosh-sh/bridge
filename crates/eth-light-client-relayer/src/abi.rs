@@ -64,6 +64,8 @@ mod tests {
             "setGloasForkSlot",
             "getGloasForkSlot",
             "getCommitteeState",
+            "getTrustState",
+            "reAnchorCheckpoint",
             "getConfig",
         ] {
             assert!(lc.iter().any(|n| n == f), "light client ABI lacks {f}");

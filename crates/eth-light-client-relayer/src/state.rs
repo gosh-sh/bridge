@@ -56,6 +56,14 @@ impl OwedSpan {
 pub struct RelayerState {
     pub last_finalized_slot: Option<u64>,
     pub last_committee_period: Option<u64>,
+    #[serde(default)]
+    pub reanchors_applied: Option<u64>,
+    #[serde(default)]
+    pub pending_checkpoint_pushes: Vec<[u8; 32]>,
+    #[serde(default)]
+    pub ancestry_delivery_checks: Vec<([u8; 32], u64)>,
+    #[serde(default)]
+    pub recovery_delivery_cursor: u64,
     pub last_execution_block_hash: Option<[u8; 32]>,
     pub last_attested_slot: Option<u64>,
     #[serde(default)]
@@ -86,6 +94,25 @@ pub struct RelayerState {
     /// mainnet state file is never advanced from a Sepolia node or vice versa.
     #[serde(default)]
     pub genesis_validators_root: Option<String>,
+    /// The oldest signing period the light client may still take a step
+    /// from: a checkpoint signed earlier was refused for its committee.
+    #[serde(default)]
+    pub signed_from: Option<u64>,
+    #[serde(default)]
+    pub skipped_through: Option<u64>,
+    /// The oldest checkpoint refused for its committee before any was
+    /// accepted: the first accepted one owes the blocks back to it.
+    #[serde(default)]
+    pub dropped_unanchored: Option<DroppedCheckpoint>,
+    /// The oldest checkpoint the blocks after it are proven or owed from.
+    #[serde(default)]
+    pub earliest_anchor: Option<DroppedCheckpoint>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DroppedCheckpoint {
+    pub hash: [u8; 32],
+    pub slot: u64,
 }
 
 impl RelayerState {

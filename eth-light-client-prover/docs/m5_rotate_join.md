@@ -22,7 +22,8 @@ Trust reduces to a single weak-subjectivity checkpoint: bootstrap
 proven the legitimate successor of the previous one. After
 `disableOwnerRotation()` the *routine* owner path is gone; `submitRotate` is the
 only permissionless writer. The owner retains `reAnchorCommittee` as an
-exceptional WS recovery hop (logged; does not write exec hashes).
+committee-only recovery hop; `reAnchorCheckpoint` installs the owner-verified finalized
+checkpoint and current committee atomically. See `docs/eth-light-client.md` for recovery.
 
 ## Trust model (R2 — self-contained rotate, chosen)
 
@@ -93,10 +94,9 @@ function getCommitteeState() external view returns (uint256, uint256, uint64, bo
 6. record the head in `_prevCommitteeHeadSlot`, advance
    `_currentCommittee = next`, store `_committeePeriod = period` and
    `_committees[period] = next`, and drop the committees older than the
-   last seven periods; emit `CommitteeRotated` with that period.
+   last three periods (retention only; signer authorization is current period plus a two-hour grace); emit `CommitteeRotated` with that period.
 
-The replaced committees may still advance the head for the periods they
-served: a step is accepted from the committee held for its attested slot's
+The previous committee may advance the head only until two hours after its Ethereum period ends: a step is accepted from the committee held for its attested slot's
 period or the next one.
 
 The **trust-reduction switch** mirrors `USDCBridge`'s
@@ -104,7 +104,7 @@ per-chain `_ownerAnchorsDisabled` / `disableOwnerAnchors`: while `_ownerRotation
 owner may `setCommitteeCommitment` directly (checkpoint bootstrap / syncing before
 the VkBlob exists); `disableOwnerRotation()` clears it with no direct re-enable
 function, leaving `submitRotate` the only permissionless writer;
-`reAnchorCommittee` is the exceptional WS hatch (logged, no exec-hash write).
+`reAnchorCommittee` is the committee-only hatch; `reAnchorCheckpoint` installs a fresh owner-verified finalized checkpoint and its current committee.
 The light client's normal migration preserves the disabled flag, but its owner
 retains arbitrary code upgrades. The bridge's current migration resets its
 owner-anchor flags, and its owner can replace a recorded client. Neither switch

@@ -157,6 +157,19 @@ assigns it when the release is tagged.
 - `eth-lc-relayer arbitrum-anchors` `--arbitrum-proof-rpc-url` (`ARBITRUM_PROOF_RPC_URL`) takes
   `eth_getProof` alone, and logs are read only when `depositCounter` moves: point it at the Alchemy
   node and `ARBITRUM_RPC_URL` at a public one.
+- `eth-lc-relayer arbitrum-anchors --metrics-addr` (`ARBITRUM_ANCHORS_METRICS_ADDR`) serves
+  `GET /metrics` with `arbitrum_anchors_*`: a counter per `TickReport` field (`waiting_for_parent`
+  is a gauge), the rounds by outcome, the time of the last good one, what the state holds and every
+  JSON-RPC request by endpoint and method
+  (`crates/eth-light-client-relayer/src/arbitrum_metrics.rs`). `docker/compose.yaml` publishes it
+  on `ARBITRUM_ANCHORS_METRICS_PORT` (default 9469): add it to the scrape config.
+- `eth-lc-relayer daemon` `GET /metrics` adds the rounds by outcome
+  (`eth_lc_relayer_ticks_total{outcome}`), `eth_lc_relayer_last_successful_tick_timestamp_seconds`,
+  the queue, the head, the beacon node's answers, the messages to Acki Nacki and the proof times
+  (`crates/eth-light-client-relayer/src/metrics.rs`); alert rules in `docs/eth-light-client.md`
+  §4.7 and the deposit relayer's runbook §9.
+- `docker/compose.yaml`: `eth-lc-relayer` and `arbitrum-anchors` have a healthcheck that reads their
+  `/metrics`; with an image older than this, `arbitrum-anchors` shows `unhealthy`.
 - `relayer daemon-withdraw-live` (service `withdraw-live`) pays every burn on the Acki Nacki bridge
   `AN_TOKEN_BRIDGE` to this bridge with `withdrawByProof` from its own `WITHDRAW_PRIVATE_KEY`, recording
   each in `withdraw-claims.json`.
@@ -176,6 +189,10 @@ assigns it when the release is tagged.
   instead of resending it for ever.
 - Acki Nacki call errors carry the contract's `exit_code=N`: `deposit-relayer` waits out
   `ERR_PAUSED`, `ERR_TVL_CAP` and the token gates instead of counting them as failed attempts.
+- `eth-lc-relayer arbitrum-anchors` finds a deposit block again after a round that failed while
+  placing it (Acki Nacki did not answer `isAcceptedBlockHash`). The count of deposits seen moved
+  before the block was pending, so the next round read no logs and passed the block: its deposits
+  waited for the owner's `setAcceptedBlockHash`.
 
 ## [0.9.0]
 

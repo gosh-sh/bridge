@@ -335,6 +335,7 @@ bridge operator.
 | `--bridge-address`, `--from-block` | `AckiNackiBridge` on the Arbitrum chain and its deploy block | Its `Deposit` logs are the blocks to anchor. Without a state file the relayer refuses to start without `--from-block`. |
 | `AN_GRAPHQL_URL`, `AN_KEYS_PATH`, `AN_TOKEN_BRIDGE` | as for `daemon` | Any key signs: `proveBlock` is permissionless. The bridge and verifier ABIs are built in; the verifier's address comes from the bridge (`getL2Verifier`), and the relayer refuses to start before `deployL2Verifier` or when the verifier's `getConfig()` names another chain, parent chain or rollup. |
 | `ARBITRUM_ANCHORS_STATE_DIR`, `ARBITRUM_ANCHORS_WORK_DIR`, `ARBITRUM_ANCHORS_LOG_DIR` | three absolute directories on persistent disk (`--state-dir`, `--work-dir`, `--log-dir`) | The state directory holds `arbitrum-anchors-state.json`, backed up like the deposit relayer's: it keeps the proofs taken at batch time until their assertion lands, 30–60 min later, and they cannot be fetched again. The work directory stays empty (the command starts no prover); the log directory holds its own log. |
+| `ARBITRUM_ANCHORS_METRICS_ADDR` | loopback or a monitoring-only interface (`--metrics-addr`); 9469 in `docker/compose.yaml` | Prometheus `GET /metrics`; unset, no metrics. The names are listed below. |
 
 The proofs wait in the state file until the bridge accepts the parent-chain block
 that holds the assertion. That is the parent chain's light client: run
@@ -350,6 +351,43 @@ batch's reach: the relayer logs it as an error and stops trying. Only the
 owner's `setAcceptedBlockHash` can anchor it then, and only while owner anchors
 are on. A fresh state file starts from the current
 parent-chain block.
+
+### Monitoring `arbitrum-anchors`
+
+The metrics are `arbitrum_anchors_*`; every name, with its type and labels, is in the table
+at the top of `crates/eth-light-client-relayer/src/arbitrum_metrics.rs`. What each round did
+is counted under the name of its `TickReport` field (`new_deposit_blocks`, `batches_taken`,
+`assertions_matched`, `assertions_missed`, `proofs_sent`, `proofs_failed`, `accepted`,
+`spans_sent`, `spans_failed`, each with `_total`), a failed round's part included;
+`arbitrum_anchors_waiting_for_parent` is a gauge. `arbitrum_anchors_rpc_requests_total`
+counts every JSON-RPC request by endpoint (`rpc`), `method` and `outcome`: it shows what a
+paid endpoint is asked for. Suggested alert rules; the thresholds are recommendations, not
+tested values.
+
+| Condition | Meaning |
+|---|---|
+| `up == 0` for the relayer's scrape target | the relayer is down or cannot be reached. Every rule below goes silent with it |
+| `changes(arbitrum_anchors_start_timestamp_seconds[30m]) > 2` | the relayer keeps restarting |
+| `time() - (arbitrum_anchors_last_successful_tick_timestamp_seconds or arbitrum_anchors_start_timestamp_seconds) > 600` | no round has ended without an error for 10 minutes (a round takes seconds, every 12): `--parent-rpc-url`, `--arbitrum-rpc-url` or Acki Nacki does not answer, or the relayer hangs. The `or` covers a relayer that has had no good round since it started |
+| `sum(increase(arbitrum_anchors_rpc_requests_total{rpc="proof",outcome!="ok"}[30m])) > 3` | the proof endpoint fails `eth_getProof`: throttled, down, or no longer keeping the state of a block a minute old. The rounds still end `ok`; every batch is missed meanwhile and the deposit blocks wait |
+| `arbitrum_anchors_oldest_pending_deposit_block > 0` and `arbitrum_anchors_arbitrum_head_block - arbitrum_anchors_oldest_pending_deposit_block > 43200` | the oldest waiting deposit block is about three hours old (four blocks a second): longer than a batch, an assertion and the light client take together. Its deposits wait too (`deposit_relayer_waiting_for_anchor`) |
+| `arbitrum_anchors_oldest_pending_deposit_block > 0` and `arbitrum_anchors_arbitrum_head_block - arbitrum_anchors_oldest_pending_deposit_block > 300000` | that block is three quarters through the 393 168 blocks after which it can no longer be proven; past them only the owner's `setAcceptedBlockHash` anchors it |
+| `increase(arbitrum_anchors_expired_deposit_blocks_total[1h]) > 0` | a deposit block was given up as too old: it needs the owner now |
+| `increase(arbitrum_anchors_proofs_failed_total[1h]) > 3` or `increase(arbitrum_anchors_spans_failed_total[1h]) > 0` | Acki Nacki keeps refusing `proveBlock` or `submitAncestry` |
+
+When a deposit block waits too long, the gauges say where: `arbitrum_anchors_held_batch_ends`
+and `arbitrum_anchors_ready_proofs` both at 0 mean no batch was taken (the proof endpoint),
+`arbitrum_anchors_waiting_for_parent` above 0 that the proofs wait for the parent chain's
+light client to accept the assertion's block (`eth-lc-relayer daemon`).
+`arbitrum_anchors_assertions_missed_total` grows with every
+assertion while no deposit block waits, which is the normal idle state. In
+`arbitrum_anchors_rpc_requests_total`, `rpc_error` is any JSON-RPC error the node answered
+with, a rate limit sent as one (HTTP 429 with an error object) included, and a reverted
+`eth_call` is how the Arbitrum node says a block is in no batch yet; `transport_error` is a
+request with no JSON-RPC answer. A series of it starts with its first request, which
+`increase()` therefore does not see: the rule on the proof endpoint fires one failure later
+after a start. An event counted before the first scrape after a start (a block given up by the
+first batch seen) is in its counter when it is first read, and is no increase either.
 
 `eth-lc-relayer arbitrum-vector --out <file>` writes one `proveBlock` vector from
 the live chains, built the way `arbitrum-anchors` builds its calls, and sends

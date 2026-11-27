@@ -224,6 +224,12 @@ services:
       # The LAN address is required: without one Docker publishes the port on
       # every interface, past the host firewall.
       - "${METRICS_LISTEN_ADDR:?}:${ETH_LC_RELAYER_METRICS_PORT:-9468}:9468"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9468/metrics"]
+      interval: 60s
+      timeout: 10s
+      start_period: 2m
+      retries: 5
     # A tick may be inside a step proof (up to --prove-timeout-secs). A rotate
     # stage is not waited for: it is killed, and the stages it finished stay
     # in /data/work/rotate-<P>/.
@@ -242,6 +248,7 @@ services:
         required: true
     environment:
       AN_KEYS_PATH: /run/keys/deposit-sender.keys.json
+      ARBITRUM_ANCHORS_METRICS_ADDR: 0.0.0.0:9469
     volumes:
       - type: bind
         source: ${BRIDGE_OPT}/keys/deposit-sender.keys.json
@@ -260,6 +267,14 @@ services:
         source: ${BRIDGE_DATA}/arbitrum-anchors/logs
         target: /data/logs
         bind: { create_host_path: false }
+    ports:
+      - "${METRICS_LISTEN_ADDR:?}:${ARBITRUM_ANCHORS_METRICS_PORT:-9469}:9469"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9469/metrics"]
+      interval: 60s
+      timeout: 10s
+      start_period: 2m
+      retries: 5
     stop_grace_period: 2m
 
   # ---- one-shot commands, `docker compose run --rm <name> ...` ----------

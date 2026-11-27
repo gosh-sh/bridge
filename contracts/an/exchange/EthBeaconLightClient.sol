@@ -855,7 +855,7 @@ contract EthBeaconLightClient {
     }
 
     function _encodeMigrationExtension(TvmCell userCell) private view returns (TvmCell) {
-        return abi.encode(uint32(0x4c433031), userCell, _recoveryHashes, _recoveryIndex);
+        return abi.encode(uint32(0x4c433032), userCell, _recoveryHashes, _recoveryIndex, _committees);
     }
 
     function onCodeUpgrade(TvmCell cell) private {
@@ -889,12 +889,6 @@ contract EthBeaconLightClient {
         _finalizedBeaconRoot = finalizedBeaconRoot;
         _finalizedExecutionBlockHash = finalizedExecutionBlockHash;
         _updatesApplied = updatesApplied;
-        // The older committees are not in the migration cell: the cell is
-        // built by the code being replaced, and a 1.7.0 client sends no such
-        // field. Reading one here would take bits from where the period and
-        // the flags sit and corrupt the trust root. An upgraded client starts
-        // with the committee in force only, which only means no catch-up
-        // across the rotations already behind it.
         _prevCommitteeHeadSlot = 0;
         _setOnlyCommittee(currentCommittee, committeePeriod);
         _ownerRotationEnabled = ownerRotationEnabled;
@@ -905,11 +899,18 @@ contract EthBeaconLightClient {
         _provenQueueTail = provenQueueTail;
         TvmSlice extension = userCell.toSlice();
         if (extension.bits() != 64 && !extension.empty()) {
-            uint32 format;
-            (format, userCell, _recoveryHashes, _recoveryIndex) = abi.decode(userCell, (
-                uint32, TvmCell, mapping(uint64 => uint256), mapping(uint256 => uint64)
-            ));
-            require(format == 0x4c433031, ERR_BAD_PUBLIC_INPUTS);
+            uint32 format = uint32(extension.loadUint(32));
+            if (format == 0x4c433031) {
+                (, userCell, _recoveryHashes, _recoveryIndex) = abi.decode(userCell, (
+                    uint32, TvmCell, mapping(uint64 => uint256), mapping(uint256 => uint64)
+                ));
+            } else {
+                require(format == 0x4c433032, ERR_BAD_PUBLIC_INPUTS);
+                (, userCell, _recoveryHashes, _recoveryIndex, _committees) = abi.decode(userCell, (
+                    uint32, TvmCell, mapping(uint64 => uint256), mapping(uint256 => uint64),
+                    mapping(uint64 => uint256)
+                ));
+            }
         }
         TvmSlice user = userCell.toSlice();
         if (!user.empty()) {
@@ -1009,8 +1010,8 @@ contract EthBeaconLightClient {
     /// @notice The committee-chain trust state. `ownerRotationEnabled` is the one
     ///         that matters: while true the effective trust root for the committee
     ///         is the owner key regardless of the rotate proof. `reAnchorsApplied`
-    ///         should stay 0 under a live relayer SLA — each increment is a
-    ///         logged weak-subjectivity hop.
+    ///         counts owner resets, including bootstrap, committee-only updates and
+    ///         checkpoint recovery. Proof-based rotations leave it unchanged.
     function getCommitteeState() external view returns (
         uint256 currentCommittee,
         uint256 prevCommittee,

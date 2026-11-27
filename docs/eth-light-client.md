@@ -123,8 +123,8 @@ hash is proven as on chain. The exit code of a refused message comes from the no
 (`node_error.extensions.details.exit_code` in the SDK's error).
 Each failed try adds one to the counter `eth_lc_relayer_checkpoint_failures_total`, with
 `stage="prove"`, `stage="submit"`, or `stage="rotate"` while the checkpoint waits at a period
-boundary for the committee rotate, served at `GET /metrics` when `--metrics-addr` is set. The daemon
-exits with an ERROR if its watcher stops, so that its supervisor starts it again.
+boundary for the committee rotate, served at `GET /metrics` when `--metrics-addr` is set (§4.7). The
+daemon exits with an ERROR if its watcher stops, so that its supervisor starts it again.
 Checkpoints the daemon never saw, because it or the beacon node was down, are logged as an ERROR
 and their blocks are closed with `submitAncestry` (§3.4).
 
@@ -303,9 +303,11 @@ available for deposit proofs within the existing retention window; expiry does n
 Owner committee resets and upgrades clear ancestry authorization, while retaining the old
 accepted hashes for already proven deposits. After an upgrade install a fresh recovery
 checkpoint before starting a new ancestry walk. A valid advancing step also works if the
-committee retained by migration is eligible at the time of the upgrade. An early rotation
-can leave only the prepared next committee in migration storage. In that case, prepare a
-verified checkpoint for the current period and install it as part of the upgrade. Owner
+committee retained by migration is eligible at the time of the upgrade. Migration from
+1.8.0 or the earlier 1.8.1 build with code hash `4b383b84…` carries only the latest installed
+committee, which may be the prepared next committee after an early rotation. In that case,
+prepare a verified checkpoint for the current period and install it as part of the upgrade.
+Upgrades from this release preserve the held committee set. Owner
 recovery replaces the ancestry authorization set; old cached endpoints do not acquire it
 merely because they remain in the 14-day window. Ancestry checks the fixed window relative
 to the finalized head, so deposits older than that window require a separate retention decision.
@@ -419,7 +421,7 @@ that commit rather than the older tree cited at the top of this document.
 Two switches disable routine owner anchor writes and routine owner committee updates.
 They do not revoke either contract's owner key or upgrade authority. The daemon issues
 them after its first accepted `submitUpdate` only when started with `--flip-owner`
-(`src/relayer.rs:335`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
+(`src/relayer.rs:1629`); `eth-lc-relayer flip-owner` does the same in one shot. Both first check
 that `getLightClient(l1ChainId)` on the bridge is `AN_LIGHT_CLIENT`, for the chain the light client reports, and refuse otherwise.
 The relayer key must be the owner key of both contracts.
 
@@ -536,7 +538,7 @@ flowchart LR
 | relayer → Acki Nacki | HTTPS 443 | `/graphql` on the network gateway (`AN_GRAPHQL_URL`); tvm_client sends signed external messages and reads accounts | every submit | `src/an_config.rs:15` |
 | operator → Acki Nacki | HTTPS 443 | `tvm-cli --url <gateway host>` (REST) for deploy, funding, getters | deploy kit | `deploy/shellnet-shadow/lib.sh` |
 | self-hosted Acki Nacki node | TCP 8600 Block Keeper API (`api_addr`), UDP 10000 gossip, UDP 8500 node QUIC, gql-server TCP 3000 (`--listen`) | | | `acki-nacki` repo: `node/src/config/network_config.rs`, `gql-server/src/defaults.rs:4` |
-| relayer host inbound | the address in `ETH_LC_RELAYER_METRICS_ADDR` (`--metrics-addr`), none when unset; 9468 in `docker/compose.yaml` | `GET /metrics`, Prometheus text | each scrape | `src/bin/eth-lc-relayer.rs` |
+| relayer host inbound | the address in `ETH_LC_RELAYER_METRICS_ADDR` for `daemon` and in `ARBITRUM_ANCHORS_METRICS_ADDR` for `arbitrum-anchors` (`--metrics-addr`), none when unset; 9468 and 9469 in `docker/compose.yaml` | `GET /metrics`, Prometheus text (§4.7) | each scrape | `src/bin/eth-lc-relayer.rs` |
 
 Beacon client REST defaults are the clients' documented defaults (Lighthouse and Nimbus 5052,
 Lodestar 9596, Teku 5051, Prysm gateway 3500). Light-client data serving must be enabled on a
@@ -573,7 +575,7 @@ All settings are environment variables read by the `daemon` subcommand (each has
 | `STEP_SRS_PATH` | `kzg_bn254_19.srs` | required | required |
 | `STEP_KEY_DIR` | where the step prover keeps its proving key, `step-key/` next to the SRS when unset. The first proof of a build generates it there and every later one reads it; a key another build generated is replaced | `/data/params/step-key` in the image | |
 | `LIGHT_CLIENT_PARALLEL_PROOFS` | step proofs at once (`--parallel-proofs`, 1 to 16) | 2 | 2 |
-| `ETH_LC_RELAYER_METRICS_ADDR` | where `GET /metrics` is served (`--metrics-addr`), with `eth_lc_relayer_checkpoint_failures_total`; no metrics when unset | `0.0.0.0:9468` in `docker/compose.yaml` | unset |
+| `ETH_LC_RELAYER_METRICS_ADDR` | where `GET /metrics` is served (`--metrics-addr`), with the `eth_lc_relayer_*` metrics of §4.7; no metrics when unset | `0.0.0.0:9468` in `docker/compose.yaml` | unset |
 | `AN_GRAPHQL_URL` | Acki Nacki GraphQL endpoint (HTTPS unless `--allow-insecure-graphql`) | network gateway | shellnet gateway |
 | `AN_KEYS_PATH` | key file; must be the owner key of the light client (and of `USDCBridge` for the flip) | owner key | owner key |
 | `AN_LIGHT_CLIENT`, `AN_SENDER` | light client address as `dapp_id::account_id` (self-rooted deploy: both halves equal) | | |
@@ -637,6 +639,49 @@ started with `--no-rotate --no-flip-owner --owner-hop`. Nothing it does reaches 
 | Needs tvm-sdk #284 on nodes | yes | no |
 | Purpose | trustless canonicality for deposits | prove the pipeline beacon → proof → opcode → head on a live network |
 
+### 4.7 Metrics
+
+`eth-lc-relayer daemon --metrics-addr <addr>` serves the Prometheus text format at `GET /metrics`.
+Every name, with its type and labels, is in the table at the top of
+`crates/eth-light-client-relayer/src/metrics.rs`; dashboards and alert rules may key on them.
+
+| Question | Metrics |
+|---|---|
+| Does the loop run, and how do its rounds end? | `eth_lc_relayer_ticks_total{outcome}`, `eth_lc_relayer_last_tick_timestamp_seconds`, `eth_lc_relayer_last_successful_tick_timestamp_seconds` |
+| Does the light client keep up with the beacon chain? | `eth_lc_relayer_beacon_finalized_slot`, `eth_lc_relayer_last_finalized_slot`, `eth_lc_relayer_queued_checkpoints`, `eth_lc_relayer_last_committee_period` |
+| Does the beacon node answer? | `eth_lc_relayer_beacon_polls_total{outcome}`, `eth_lc_relayer_missed_checkpoints_total` |
+| What fails, and where? | `eth_lc_relayer_checkpoint_failures_total{stage}`, `eth_lc_relayer_an_calls_total{function,outcome}` |
+| How long do the provers take? | `eth_lc_relayer_step_proof_duration_seconds{outcome}`, `eth_lc_relayer_step_proofs_running`, `eth_lc_relayer_rotate_proof_duration_seconds{outcome}`, `eth_lc_relayer_rotate_running` |
+| Are blocks left without an anchor? | `eth_lc_relayer_owed_spans`, `eth_lc_relayer_ancestry_spans_total{outcome}` |
+
+A round that ends as `proving` counts as a good one: a prover that hangs shows in the queue and
+the head, not in the time of the last good round. Suggested alert rules; the thresholds are
+recommendations, not tested values. Gate each condition except target health with
+`and on(job, instance) (up == 1)`, using the scrape target labels in your deployment.
+
+| Condition | Meaning |
+|---|---|
+| `up == 0` for the daemon's scrape target | the daemon is down or cannot be reached |
+| `changes(eth_lc_relayer_start_timestamp_seconds[30m]) > 2` | the daemon keeps restarting |
+| `time() - (eth_lc_relayer_last_successful_tick_timestamp_seconds or eth_lc_relayer_start_timestamp_seconds) > 900` | no round has ended well for 15 minutes: every one fails, or the loop hangs. The `or` covers a daemon that has had no good round since it started |
+| `changes(eth_lc_relayer_last_finalized_slot[30m]) == 0 and (eth_lc_relayer_last_finalized_slot == eth_lc_relayer_last_finalized_slot offset 30m)` | the light client's head has not moved for half an hour; a checkpoint comes every 6.4 minutes |
+| `eth_lc_relayer_queued_checkpoints > 5` for 15 minutes | checkpoints wait more than half an hour to get on chain |
+| `increase(eth_lc_relayer_beacon_polls_total{outcome="ok"}[10m]) == 0` | the beacon node does not answer; no checkpoint is taken meanwhile, and the rounds still end as `unchanged` |
+| `increase(eth_lc_relayer_ticks_total{outcome="rotate_required"}[15m]) > 0` | the head stands at a period boundary: the rotate did not make it and no owner hop is allowed |
+| `increase(eth_lc_relayer_ancestry_spans_total{outcome="given_up"}[1h]) > 0` | a span was given up: its blocks need the owner's `setAcceptedBlockHash` (§3.4) |
+| `increase(eth_lc_relayer_missed_checkpoints_total[1h]) > 0` | the watcher missed a checkpoint while the daemon ran, or over a stop shorter than the hour; a span closes its blocks |
+| `increase(eth_lc_relayer_step_proof_duration_seconds_count{outcome="failed"}[1h]) > 2` | the step prover keeps failing |
+
+Every counter is there at zero from the start, so `increase()` sees the first event of a kind.
+The exception is an event counted before the first scrape after a start: the checkpoints missed
+over a long stop are in `eth_lc_relayer_missed_checkpoints_total` when it is first read, and are
+no increase.
+
+`eth-lc-relayer arbitrum-anchors` has its own `--metrics-addr` (`ARBITRUM_ANCHORS_METRICS_ADDR`)
+and its own names, `arbitrum_anchors_*`, in `src/arbitrum_metrics.rs` next to the daemon's; its
+alert rules are in the deposit relayer's runbook
+([§9](../crates/deposit-relayer-daemon/docs/operator_runbook.md#9-deposits-from-an-arbitrum-chain-arbitrum-anchors)).
+
 ## 5. Operating numbers
 
 Measured on a 48-thread host with the shadow deployment against Sepolia (September 2026):
@@ -679,7 +724,7 @@ Measured on a 48-thread host with the shadow deployment against Sepolia (Septemb
   up` (ERROR) names blocks that need the owner. From `arbitrum-anchors`: `submitAncestry sent
   for the assertion's parent-chain block`.
 - The state file is pinned to the first `genesis_validators_root` it sees
-  (`src/watcher.rs:64`); pointing a daemon at another network fails instead of mixing heads.
+  (`src/watcher.rs:65`); pointing a daemon at another network fails instead of mixing heads.
 
 ## 7. Known limits
 

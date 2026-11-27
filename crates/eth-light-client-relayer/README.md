@@ -15,14 +15,18 @@ sends them oldest first. A checkpoint that fails is tried again until it is
 on chain, and one the contract already has (its send ran, the answer was
 lost) is recorded from `getHead` and `isProvenExecutionBlockHash`; each failed try adds one to
 `eth_lc_relayer_checkpoint_failures_total{stage="prove"|"submit"|"rotate"}` at
-`GET /metrics` (`--metrics-addr`, `ETH_LC_RELAYER_METRICS_ADDR`). Ancestry
+`GET /metrics` (`--metrics-addr`, `ETH_LC_RELAYER_METRICS_ADDR`), which also carries the
+rounds by outcome, the time of the last good one, the queue, the head and the proof times
+(`src/metrics.rs`, `docs/eth-light-client.md` §4.7). Ancestry
 admits the blocks behind a proven one, headers oldest first, up to 32 per
 call. Across checkpoints the daemon missed (it or the beacon node was down)
 it sends them back from the next checkpoint, from the headers of
 `ETH_RPC_URL`, which it needs to start;
 between adjacent checkpoints only with `--submit-ancestry` (default off).
 `arbitrum-anchors` sends the span for the epoch each Arbitrum assertion
-landed in, which is all the Arbitrum path needs. The light client keeps a
+landed in, which is all the Arbitrum path needs; its own `--metrics-addr`
+(`ARBITRUM_ANCHORS_METRICS_ADDR`) serves `arbitrum_anchors_*`
+(`src/arbitrum_metrics.rs`). The light client keeps a
 proven hash 14 days. One-shot:
 `eth-lc-relayer submit-ancestry --checkpoint-hash <newer> --older-anchor-hash
 <older>`. `ancestry-one` only reports whether a block sits on a checkpoint's

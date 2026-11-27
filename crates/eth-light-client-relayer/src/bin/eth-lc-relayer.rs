@@ -35,6 +35,7 @@ use acki_nacki_interface::{TvmAckiNacki, TvmClientConfig};
 use alloy::{
     primitives::Address,
     providers::{Provider, ProviderBuilder},
+    rpc::client::ClientBuilder,
 };
 use clap::{Parser, Subcommand};
 #[cfg(feature = "live-submit")]
@@ -47,12 +48,13 @@ use eth_light_client_relayer::{
     RotateProofBundle, StepProofBundle,
 };
 use eth_light_client_relayer::{
-    arbitrum, prepare_dir, refuse_unrecognised_state, rotate::pinned_rotate_vk_sha256, AnConfig,
-    AnSubmitter, BackoffConfig, BeaconSource, EthExecutionRpc, HttpBeaconSource, MockAnSubmitter,
-    MockProofGenerator, MockRotateRunner, ProofGenerator, Relayer, RelayerConfig, RelayerMetrics,
-    RotateStageRunner, ServiceDirs, StateLock, SubprocessProofGenerator, SubprocessProverConfig,
-    SubprocessRotateConfig, SubprocessRotateRunner, ANCHORS_LOG_FILE_PREFIX,
-    ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX, STATE_FILE_NAME,
+    arbitrum, arbitrum_metrics, metrics as relayer_metrics, prepare_dir, refuse_unrecognised_state,
+    rotate::pinned_rotate_vk_sha256, AnConfig, AnSubmitter, BackoffConfig, BeaconSource,
+    EthExecutionRpc, HttpBeaconSource, MockAnSubmitter, MockProofGenerator, MockRotateRunner,
+    ProofGenerator, Relayer, RelayerConfig, RelayerMetrics, RotateStageRunner, ServiceDirs,
+    StateLock, SubprocessProofGenerator, SubprocessProverConfig, SubprocessRotateConfig,
+    SubprocessRotateRunner, ANCHORS_LOG_FILE_PREFIX, ANCHORS_STATE_FILE_NAME, LOG_FILE_PREFIX,
+    STATE_FILE_NAME,
 };
 use tracing::{error, info, warn};
 #[cfg(feature = "live-submit")]
@@ -393,8 +395,8 @@ enum Cmd {
             value_parser = clap::value_parser!(u16).range(1..=16)
         )]
         parallel_proofs: u16,
-        /// Serve Prometheus metrics at `http://<addr>/metrics`, among them
-        /// `eth_lc_relayer_checkpoint_failures_total`. Off without it.
+        /// Serve Prometheus metrics at `http://<addr>/metrics`
+        /// (`eth_lc_relayer_*`, listed in `src/metrics.rs`). Off without it.
         #[arg(long, env = "ETH_LC_RELAYER_METRICS_ADDR")]
         metrics_addr: Option<std::net::SocketAddr>,
         /// On a period jump the contract has no rotate for, prove a step of
@@ -488,6 +490,11 @@ enum Cmd {
         /// Blocks per `eth_getLogs` on the Arbitrum chain.
         #[arg(long, env = "ARBITRUM_LOG_SPAN", default_value_t = 10_000)]
         arbitrum_log_span: u64,
+        /// Serve Prometheus metrics at `http://<addr>/metrics`
+        /// (`arbitrum_anchors_*`, listed in `src/arbitrum_metrics.rs`). Off
+        /// without it.
+        #[arg(long, env = "ARBITRUM_ANCHORS_METRICS_ADDR")]
+        metrics_addr: Option<std::net::SocketAddr>,
         /// Allow non-HTTPS GraphQL endpoints (local dev only).
         #[arg(long)]
         allow_insecure_graphql: bool,
@@ -770,7 +777,18 @@ async fn real_main() -> anyhow::Result<()> {
                 an.usdc_bridge = v;
             }
             if let Some(addr) = metrics_addr {
-                install_metrics_exporter(addr)?;
+                install_metrics_exporter(addr, &[
+                    (
+                        relayer_metrics::STEP_PROOF_DURATION_SECONDS,
+                        relayer_metrics::STEP_PROOF_BUCKETS,
+                    ),
+                    (
+                        relayer_metrics::ROTATE_PROOF_DURATION_SECONDS,
+                        relayer_metrics::ROTATE_PROOF_BUCKETS,
+                    ),
+                ])?;
+                relayer_metrics::describe();
+                relayer_metrics::init();
             }
             run_daemon(
                 beacon_url,
@@ -818,6 +836,7 @@ async fn real_main() -> anyhow::Result<()> {
             poll_secs,
             parent_log_span,
             arbitrum_log_span,
+            metrics_addr,
             allow_insecure_graphql,
         } => {
             AnConfig {
@@ -834,6 +853,11 @@ async fn real_main() -> anyhow::Result<()> {
                 log_dir = %dirs.log.display(),
                 "service directories",
             );
+            if let Some(addr) = metrics_addr {
+                install_metrics_exporter(addr, &[]).map_err(log_err("arbitrum-anchors"))?;
+                arbitrum_metrics::describe();
+                arbitrum_metrics::init();
+            }
             arbitrum_anchors(
                 &parent_rpc_url,
                 &arbitrum_rpc_url,
@@ -1963,12 +1987,20 @@ async fn arbitrum_view(
     let http = reqwest::Client::builder()
         .timeout(ARBITRUM_RPC_TIMEOUT)
         .build()?;
-    let parent = ProviderBuilder::new().connect_reqwest(http.clone(), parent_rpc_url.parse()?);
-    let arb = ProviderBuilder::new().connect_reqwest(http.clone(), arbitrum_rpc_url.parse()?);
-    let arbitrum_proofs = ProviderBuilder::new().connect_reqwest(
-        http,
-        arbitrum_proof_rpc_url.unwrap_or(arbitrum_rpc_url).parse()?,
-    );
+    // Every request to each of the three endpoints is counted
+    // (`arbitrum_anchors_rpc_requests_total`).
+    let counted = |rpc: &'static str, url: &str| -> anyhow::Result<_> {
+        let client = ClientBuilder::default()
+            .layer(arbitrum_metrics::CountRpcRequests::new(rpc))
+            .http_with_client(http.clone(), url.parse()?);
+        Ok(ProviderBuilder::new().connect_client(client))
+    };
+    let parent = counted(arbitrum_metrics::RPC_PARENT, parent_rpc_url)?;
+    let arb = counted(arbitrum_metrics::RPC_ARBITRUM, arbitrum_rpc_url)?;
+    let arbitrum_proofs = counted(
+        arbitrum_metrics::RPC_PROOF,
+        arbitrum_proof_rpc_url.unwrap_or(arbitrum_rpc_url),
+    )?;
     let id = arb.get_chain_id().await?;
     let proofs_id = arbitrum_proofs.get_chain_id().await?;
     anyhow::ensure!(
@@ -2222,13 +2254,23 @@ async fn arbitrum_vector(
 }
 
 /// Serve the Prometheus text format at `http://<addr>/metrics` for the
-/// lifetime of the process.
-fn install_metrics_exporter(addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    metrics_exporter_prometheus::PrometheusBuilder::new()
-        .with_http_listener(addr)
+/// lifetime of the process, each histogram in `buckets` with its own bucket
+/// bounds.
+fn install_metrics_exporter(
+    addr: std::net::SocketAddr,
+    buckets: &[(&str, &[f64])],
+) -> anyhow::Result<()> {
+    use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+
+    let mut builder = PrometheusBuilder::new().with_http_listener(addr);
+    for (name, bounds) in buckets {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full((*name).to_string()), bounds)
+            .map_err(|e| anyhow::anyhow!("metrics exporter buckets of {name}: {e}"))?;
+    }
+    builder
         .install()
         .map_err(|e| anyhow::anyhow!("metrics exporter on {addr}: {e}"))?;
-    eth_light_client_relayer::describe_metrics();
     info!(%addr, "metrics exporter listening (GET /metrics)");
     Ok(())
 }
@@ -2244,10 +2286,20 @@ where
         "starting light-client daemon"
     );
     let metrics = RelayerMetrics::new();
-    relayer
-        .run_until_shutdown(backoff, metrics, shutdown_signal())
-        .await
-        .map_err(Into::into)
+    let run = relayer
+        .run_until_shutdown(backoff, metrics.clone(), shutdown_signal())
+        .await;
+    let count = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed);
+    info!(
+        ticks = count(&metrics.ticks_total),
+        submitted = count(&metrics.submitted_total),
+        unchanged = count(&metrics.unchanged_total),
+        rotate_required = count(&metrics.rotate_required_total),
+        proof_failed = count(&metrics.proof_failed_total),
+        an_rejected = count(&metrics.an_rejected_total),
+        "light-client daemon stopped"
+    );
+    run.map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -2484,7 +2536,7 @@ mod tests {
     /// three directories (`--anchor-state` stays hidden, for the migration
     /// hint), built the ABIs in and gave `--bridge-address` and the anchors'
     /// log spans environment variables, so a service can be configured from
-    /// an env file alone.
+    /// an env file alone; bridge-audit#133 added `--metrics-addr`.
     #[test]
     fn the_arbitrum_subcommands_keep_the_deposit_relayer_flags() {
         assert_eq!(
@@ -2506,6 +2558,7 @@ mod tests {
                 ("poll-secs", None, &["12"]),
                 ("parent-log-span", Some("PARENT_LOG_SPAN"), &["1000"]),
                 ("arbitrum-log-span", Some("ARBITRUM_LOG_SPAN"), &["10000"]),
+                ("metrics-addr", Some("ARBITRUM_ANCHORS_METRICS_ADDR"), &[]),
                 ("allow-insecure-graphql", None, &["false"]),
             ])
         );

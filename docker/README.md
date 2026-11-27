@@ -118,7 +118,7 @@ sourced by its entrypoint; the other services get theirs as container environmen
 
 | File | Template | Holds |
 |---|---|---|
-| `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the three metrics ports |
+| `docker/.env` (next to the compose file) | `.env.example` | `BRIDGE_NET`, registry and image tag, `BRIDGE_OPT`, `BRIDGE_DATA`, `BRIDGE_UID`/`GID`, `METRICS_LISTEN_ADDR` and the four metrics ports |
 | `$BRIDGE_OPT/env/daemon-live.env` | `env/daemon-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address, EOA and **private key**, every `EXPECTED_*` pin, `PARAMS_MANIFEST_SHA256`, the deployed BK-set commitment |
 | `$BRIDGE_OPT/env/withdraw-live.env` | `env/withdraw-live.env.example` | `EXPECTED_BRIDGE_COMMIT`, RPC and GraphQL endpoints, bridge address, its own EOA and **private key** (`WITHDRAW_ADDRESS`, `WITHDRAW_PRIVATE_KEY`), the withdrawal `EXPECTED_*` pins, `PARAMS_MANIFEST_SHA256` |
 | `$BRIDGE_OPT/env/deposit-relayer.env` | `env/deposit-relayer.env.example` | RPC, bridge address and deploy block, `AN_GRAPHQL_URL`, `AN_TOKEN_BRIDGE`, `AN_SENDER` |
@@ -128,8 +128,12 @@ sourced by its entrypoint; the other services get theirs as container environmen
 
 `METRICS_LISTEN_ADDR` is required and is the host's address on the monitoring network: a
 `ports:` entry without an address publishes the port on every interface, past the host
-firewall. `/metrics` is served by `daemon-live` (9464), `deposit-relayer` (9467) and
-`eth-lc-relayer` (9468); the compose healthchecks read the first two.
+firewall. `/metrics` is served by `daemon-live` (9464), `deposit-relayer` (9467),
+`eth-lc-relayer` (9468) and `arbitrum-anchors` (9469); the compose healthcheck of each reads it.
+The metric names are listed where they are declared: `eth_lc_relayer_*` in
+`crates/eth-light-client-relayer/src/metrics.rs`, `arbitrum_anchors_*` in
+`src/arbitrum_metrics.rs` next to it, `deposit_relayer_*` in
+`crates/deposit-relayer-daemon/src/metrics.rs`.
 
 Flags without an environment variable (`eth-lc-relayer daemon --owner-hop --rotate-timeout-secs …`)
 are the service's `command:` in the compose file; override it in a `compose.override.yaml`

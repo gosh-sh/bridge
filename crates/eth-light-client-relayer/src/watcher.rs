@@ -16,6 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     error::RelayerError,
+    metrics as prom,
     source::BeaconSource,
     step_queue::{missed_between, StepQueue},
     types::FinalityUpdate,
@@ -141,8 +142,9 @@ impl Taken {
             }
             return Ok(());
         }
+        let mut missed = 0;
         if let Some(newest) = newest {
-            let missed = missed_between(newest, latest.finalized_slot);
+            missed = missed_between(newest, latest.finalized_slot);
             if missed > 0 {
                 error!(
                     after_slot = newest,
@@ -154,6 +156,10 @@ impl Taken {
             }
         }
         self.queue.push(latest.clone())?;
+        // Counted once the checkpoint is in the queue: one a failed write
+        // left out is seen again on the next poll, with the same gap.
+        prom::count_missed_checkpoints(missed);
+        prom::set_queued_checkpoints(self.queue.len());
         info!(
             slot = latest.finalized_slot,
             queued = self.queue.len(),
@@ -189,10 +195,21 @@ impl<S: BeaconSource> Watcher<S> {
 
     /// Ask the beacon node once and take its checkpoint if it is new.
     pub async fn poll(&self) -> Result<FinalityUpdate, RelayerError> {
-        let latest = self.source.fetch_finality().await?;
+        let latest = match self.source.fetch_finality().await {
+            Ok(latest) => latest,
+            Err(e) => {
+                prom::count_beacon_poll(false);
+                return Err(e);
+            },
+        };
         let mut taken = lock(&self.taken);
-        taken.guard_network(&latest)?;
+        let known = taken.guard_network(&latest);
+        // What the beacon node answered, whatever becomes of the checkpoint
+        // in the queue below.
+        prom::count_beacon_poll(known.is_ok());
+        known?;
         taken.latest = Some(latest.clone());
+        prom::set_beacon_finalized_slot(latest.finalized_slot);
         taken.capture(&latest)?;
         Ok(latest)
     }

@@ -430,6 +430,17 @@ class LightClientCommittees(unittest.TestCase):
         self.checkpoint(headers, slot=slot_in(FIRST, 400), expect=261)
         self.checkpoint(headers, slot=slot_in(FIRST - 1), expect=ERR_COMMITTEE_TOO_OLD)
 
+    def test_upgrade_preserves_current_and_prepared_committees_after_rotation(self):
+        self.rotate_to(FIRST + 1)
+        held = self.held()
+        self.assertIn(FIRST, held)
+        self.assertIn(FIRST + 1, held)
+        self.call("testUpgrade", {"keepRecovery": True})
+        self.set_clock(NOW)
+        self.assertEqual(self.held(), held)
+        trust = self.call("getTrustState")["response"]
+        self.assertIn(trust["active"], (True, "true"))
+
     def test_upgrade_closes_cached_endpoints_until_a_new_checkpoint(self):
         headers = self.headers()
         self.checkpoint(headers)

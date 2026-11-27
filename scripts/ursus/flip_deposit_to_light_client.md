@@ -77,6 +77,7 @@ deposit in a block no span covers — one whose bracketing anchors are further
 apart than a span — needs the owner's `setAcceptedBlockHash`, which the flip
 turns off for that L1. L2 deposits keep the owner writer.
 
-Period jumps: the daemon rotates by default. After `disableOwnerRotation()`, a
-lag past one sync-committee period (~27 h) is `reAnchorCommittee`, not
-`setCommitteeCommitment`.
+The daemon rotates committees by default. If the installed trust has expired, stop the daemon,
+verify a fresh checkpoint and the current committee, then install them with
+[`re-anchor-checkpoint`](../../docs/eth-light-client.md#recovery-and-historical-block-authentication).
+Restart the daemon with the same state directory to resume backfill.

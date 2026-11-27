@@ -18,10 +18,13 @@ tracing-appender = "0.2"
 hex = "0.4"
 # sha256 of the rotate VK blob, checked against the pin before `submitRotate`.
 sha2 = "0.10"
-# Prometheus counters of the daemon; `daemon --metrics-addr` installs the
-# text exporter (`GET /metrics`), as `deposit-relayer` does.
+# Prometheus metrics of `daemon` and `arbitrum-anchors`; `--metrics-addr`
+# installs the text exporter (`GET /metrics`), as `deposit-relayer` does.
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
+# The transport layer that counts the JSON-RPC requests of `arbitrum-anchors`
+# (`src/arbitrum_metrics.rs`); alloy's transports are tower services.
+tower = { version = "0.5", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 fs2 = "0.4"
@@ -40,6 +43,7 @@ alloy = { version = "2.0", features = [
     "rpc-types-eth",
     "network",
     "sol-types",
+    "json-rpc",
     "transport-http",
     "consensus",
     "eips",
